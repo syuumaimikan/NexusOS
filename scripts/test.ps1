@@ -81,7 +81,7 @@ Invoke-Step 'host unit tests' {
 
 Invoke-Step 'boot test' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'build.ps1')) 'build'
-    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'run.ps1'), '-Headless', '-Timeout', '25') 'boot'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'run.ps1'), '-Headless', '-Timeout', '40') 'boot'
 
     $log = Join-Path $BuildDir 'serial.log'
     if (-not (Test-Path $log)) { throw 'no serial output' }
@@ -100,6 +100,8 @@ Invoke-Step 'boot test' {
         'timer is live',
         'frame allocator:',
         'frame allocator verified',
+        'identity map torn down',
+        'heap verified',
         'early initialisation complete',
         '[idle] uptime'
     )

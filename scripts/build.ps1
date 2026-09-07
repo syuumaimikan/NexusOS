@@ -73,15 +73,32 @@ New-Item -ItemType Directory -Force -Path (Join-Path $EspDir 'EFI\BOOT') | Out-N
 New-Item -ItemType Directory -Force -Path (Join-Path $EspDir 'nexus') | Out-Null
 
 Copy-Item $BootEfi (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI') -Force
-Copy-Item $KernelElf (Join-Path $EspDir 'nexus\kernel.elf') -Force
+
+# Deploy a stripped kernel. Debug info is the overwhelming majority of the
+# linked image and none of it is loadable, but the bootloader still has to read
+# every byte off the ESP before it can parse the program headers -- which on a
+# debug build means reading megabytes to load a hundred kilobytes. The
+# unstripped image stays in target/ for debuggers and symbolisation.
+$StagedKernel = Join-Path $EspDir 'nexus\kernel.elf'
+$Sysroot = (& rustc +nightly --print sysroot).Trim()
+$ObjCopy = Join-Path $Sysroot 'lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objcopy.exe'
+
+if (Test-Path $ObjCopy) {
+    & $ObjCopy --strip-debug $KernelElf $StagedKernel
+    if ($LASTEXITCODE -ne 0) { throw "llvm-objcopy failed (exit $LASTEXITCODE)" }
+} else {
+    Write-Host "    llvm-objcopy not found; deploying an unstripped kernel" -ForegroundColor Yellow
+    Copy-Item $KernelElf $StagedKernel -Force
+}
 
 $bootSize = [math]::Round((Get-Item $BootEfi).Length / 1KB, 1)
-$kernelSize = [math]::Round((Get-Item $KernelElf).Length / 1KB, 1)
+$kernelSize = [math]::Round((Get-Item $StagedKernel).Length / 1KB, 1)
+$unstrippedSize = [math]::Round((Get-Item $KernelElf).Length / 1KB, 1)
 
 Write-Host ''
 Write-Host 'NexusOS build complete' -ForegroundColor Green
 Write-Host "  bootloader : $bootSize KiB  -> EFI\BOOT\BOOTX64.EFI"
-Write-Host "  kernel     : $kernelSize KiB  -> nexus\kernel.elf"
+Write-Host "  kernel     : $kernelSize KiB  -> nexus\kernel.elf  (from $unstrippedSize KiB with symbols)"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''
 Write-Host 'Run it with: .\scripts\run.ps1'

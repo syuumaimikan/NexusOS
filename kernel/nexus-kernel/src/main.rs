@@ -16,6 +16,8 @@
 #![feature(abi_x86_interrupt)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate alloc;
+
 mod arch;
 mod framebuffer;
 mod memory;
@@ -124,6 +126,24 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         arch::halt_forever();
     }
 
+    // The kernel heap, which is what makes `alloc` usable above this point.
+    // SAFETY: called once, with the physical allocator running.
+    if let Err(error) = unsafe { memory::heap::init() } {
+        kprintln!("FATAL: could not initialise the kernel heap: {error}");
+        arch::halt_forever();
+    }
+
+    // The bootloader's identity map has done its job. Dropping it turns a null
+    // or small-integer pointer dereference into a fault instead of a silent
+    // success, and takes physical memory out of reach of low addresses.
+    //
+    // SAFETY: the kernel runs at its higher-half address on the higher-half
+    // boot stack, `boot_info` was copied out of identity-mapped memory in
+    // `_start`, and every remaining physical access goes through the direct
+    // map.
+    unsafe { memory::paging::tear_down_identity_map() };
+    kprintln!("[mem ] identity map torn down; low addresses now fault");
+
     self_test();
     inject_fault_if_requested();
 
@@ -173,6 +193,117 @@ fn self_test() {
     }
 
     memory_self_test();
+    heap_self_test();
+}
+
+/// Exercise the kernel heap and cross-check the page tables that back it.
+///
+/// The heap allocator's own logic is covered by host tests in `nexus-mm`. What
+/// only the machine can answer is whether the mappings the kernel built
+/// actually point where it thinks: so this allocates through `alloc`, then
+/// translates a heap address back to a physical one and reads the same bytes
+/// through the direct map. Agreement between those two paths is the real proof
+/// that `map_range` did what it claimed.
+fn heap_self_test() {
+    use alloc::boxed::Box;
+    use alloc::collections::BTreeMap;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use core::fmt::Write;
+
+    let before = memory::heap::stats();
+
+    // A Vec large enough to force several reallocations, so growth and freeing
+    // of the old buffers both happen.
+    let mut values: Vec<u64> = Vec::new();
+    for index in 0..50_000u64 {
+        values.push(index * 3);
+    }
+    let sum: u64 = values.iter().sum();
+    let expected: u64 = (0..50_000u64).map(|index| index * 3).sum();
+    if sum != expected {
+        kprintln!("[test] FAILED: Vec held {sum}, expected {expected}");
+        return;
+    }
+
+    // The cross-check. Read the first element through the heap's virtual
+    // address, then again through the direct map at whatever physical address
+    // the page tables say that virtual address resolves to.
+    let probe_virt = values.as_ptr() as u64;
+    match memory::paging::translate(probe_virt) {
+        Some(phys) => {
+            // SAFETY: `phys` is what the page tables say backs `probe_virt`,
+            // and the direct map covers all of physical memory.
+            let through_direct_map = unsafe { (layout::phys_to_virt(phys) as *const u64).read() };
+            if through_direct_map != values[0] {
+                kprintln!(
+                    "[test] FAILED: heap address {probe_virt:#018x} maps to {phys:#018x}, \
+                     which holds {through_direct_map:#x} rather than {:#x}",
+                    values[0]
+                );
+                return;
+            }
+        }
+        None => {
+            kprintln!("[test] FAILED: heap address {probe_virt:#018x} is not mapped");
+            return;
+        }
+    }
+
+    let boxed = Box::new([0xA5u8; 4096]);
+    if boxed.iter().any(|&byte| byte != 0xA5) {
+        kprintln!("[test] FAILED: a boxed array did not hold its contents");
+        return;
+    }
+
+    let mut map = BTreeMap::new();
+    for index in 0..1000u32 {
+        map.insert(index, index * index);
+    }
+    if map.get(&999) != Some(&(999 * 999)) {
+        kprintln!("[test] FAILED: BTreeMap lookup returned the wrong value");
+        return;
+    }
+
+    let mut text = String::new();
+    let _ = write!(text, "NexusOS heap {} entries", map.len());
+    if text != "NexusOS heap 1000 entries" {
+        kprintln!("[test] FAILED: string formatting produced {text:?}");
+        return;
+    }
+
+    drop(values);
+    drop(boxed);
+    drop(map);
+    drop(text);
+
+    let after = memory::heap::stats();
+    if after.used != before.used {
+        kprintln!(
+            "[test] FAILED: {} bytes leaked from the heap",
+            after.used - before.used
+        );
+        return;
+    }
+
+    // The identity map should be gone by now, so a low address must no longer
+    // translate. This is checked through the page tables rather than by
+    // dereferencing, which would halt the machine.
+    if memory::paging::translate(0x1000).is_some() {
+        kprintln!("[test] FAILED: the identity map is still present");
+        return;
+    }
+
+    kprintln!(
+        "[test] heap verified: 50k-element Vec, 4 KiB Box, 1000-entry map, \
+         translation cross-checked, nothing leaked"
+    );
+    kprintln!(
+        "[heap] {} KiB used of {} KiB, {} free blocks",
+        after.used / 1024,
+        after.total / 1024,
+        after.free_blocks
+    );
 }
 
 /// Exercise the frame allocator against real memory.
