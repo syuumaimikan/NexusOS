@@ -1,0 +1,32 @@
+# NexusOS cargo configuration.
+#
+# No default `target` is set on purpose: the bootloader and the kernel are built
+# for two different targets and the build scripts always pass `--target`
+# explicitly. Setting a default here would silently break host-side `cargo test`.
+#
+# `build-std` is likewise NOT set here. Only the kernel's custom target needs
+# core rebuilt from source; `x86_64-unknown-uefi` ships a prebuilt one, and
+# applying `build-std` globally makes host test builds link two different
+# `core`s and fail with a duplicate-lang-item error. The `kernel` alias below
+# and scripts/build.ps1 pass the flags where they belong.
+
+[unstable]
+# The kernel is built for `targets/x86_64-nexus.json`, a custom target spec.
+json-target-spec = true
+
+[target.x86_64-nexus]
+rustflags = [
+    "-C", "link-arg=--script=kernel/nexus-kernel/link.ld",
+    "-C", "force-frame-pointers=yes",
+]
+
+[alias]
+# Build the kernel with core rebuilt for the custom bare-metal target.
+kernel = [
+    "build", "-p", "nexus-kernel",
+    "--target", "targets/x86_64-nexus.json",
+    "-Zbuild-std=core,compiler_builtins,alloc",
+    "-Zbuild-std-features=compiler-builtins-mem",
+]
+# Build the UEFI bootloader against the prebuilt `x86_64-unknown-uefi` core.
+bootloader = ["build", "-p", "nexus-boot", "--target", "x86_64-unknown-uefi"]

@@ -1,0 +1,14 @@
+[package]
+name = "nexus-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The Nexus Kernel: the NexusOS microkernel-inspired hybrid kernel."
+
+[[bin]]
+name = "nexus-kernel"
+path = "src/main.rs"
+
+[dependencies]
+nexus-abi = { path = "../../shared/nexus-abi" }

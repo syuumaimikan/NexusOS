@@ -1,0 +1,24 @@
+[package]
+name = "nexus-boot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The Nexus Bootloader: a dependency-free UEFI loader for the Nexus kernel."
+
+[lib]
+name = "nexus_boot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nexus-boot"
+path = "src/main.rs"
+# The binary is a `no_main` UEFI application with its own panic handler; it
+# cannot be linked into a host test harness. The logic it drives is tested
+# through the library target instead.
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+nexus-abi = { path = "../../shared/nexus-abi" }
