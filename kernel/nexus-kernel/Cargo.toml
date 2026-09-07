@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 nexus-abi = { path = "../../shared/nexus-abi" }
+nexus-mm = { path = "../nexus-mm" }
 
 [features]
 # Fault-injection builds, used by scripts/test-faults.ps1 to verify that the

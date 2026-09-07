@@ -18,4 +18,12 @@ name = "nexus-kernel"
 version = "0.1.0"
 dependencies = [
  "nexus-abi",
+ "nexus-mm",
+]
+
+[[package]]
+name = "nexus-mm"
+version = "0.1.0"
+dependencies = [
+ "nexus-abi",
 ]

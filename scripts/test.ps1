@@ -68,14 +68,14 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '--lib', '--', '-D', 'warnings') 'clippy'
     } finally { Pop-Location }
 }
 
 Invoke-Step 'host unit tests' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '--lib') 'unit tests'
+        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '--lib') 'unit tests'
     } finally { Pop-Location }
 }
 
@@ -98,6 +98,8 @@ Invoke-Step 'boot test' {
         'PIT running at 1000 Hz',
         'breakpoint at',
         'timer is live',
+        'frame allocator:',
+        'frame allocator verified',
         'early initialisation complete',
         '[idle] uptime'
     )

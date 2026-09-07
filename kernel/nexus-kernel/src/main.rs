@@ -18,6 +18,7 @@
 
 mod arch;
 mod framebuffer;
+mod memory;
 mod panic;
 mod serial;
 mod sync;
@@ -115,6 +116,14 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // not been told to enable them since reset.
     unsafe { arch::interrupts::init(TIMER_FREQUENCY_HZ) };
 
+    // Physical memory. Everything above this point runs on statically
+    // allocated storage; everything after it can allocate.
+    // SAFETY: called once, and `boot_info` was validated in `_start`.
+    if let Err(error) = unsafe { memory::init(boot_info) } {
+        kprintln!("FATAL: could not initialise physical memory: {error}");
+        arch::halt_forever();
+    }
+
     self_test();
     inject_fault_if_requested();
 
@@ -162,6 +171,124 @@ fn self_test() {
     } else {
         kprintln!("[test] timer is live: {ticks} ticks in the first few milliseconds");
     }
+
+    memory_self_test();
+}
+
+/// Exercise the frame allocator against real memory.
+///
+/// The allocator's logic is covered by host tests in `nexus-mm`. What those
+/// cannot check is the part that only exists on the machine: that the direct
+/// map really does give every frame its own writable storage, and that the free
+/// lists the allocator threads through those frames survive being written to
+/// physical RAM. So this allocates, writes a distinct pattern into every frame,
+/// reads it all back, and only then frees.
+///
+/// A frame handed out twice shows up here as a pattern that does not match.
+fn memory_self_test() {
+    const FRAMES: usize = 64;
+    /// A recognisable, non-zero base for the per-frame stamp, so a mismatch is
+    /// obviously a bad frame rather than uninitialised memory that happens to
+    /// look plausible.
+    const PATTERN: u64 = 0x4E45_5855_5300_0000;
+
+    let Some(before) = memory::stats() else {
+        kprintln!("[test] FAILED: the frame allocator did not start");
+        return;
+    };
+
+    let mut frames = [0u64; FRAMES];
+    let mut allocated = 0usize;
+
+    for slot in frames.iter_mut() {
+        let Some(frame) = memory::allocate_frame() else {
+            break;
+        };
+        if frame == 0 {
+            kprintln!("[test] FAILED: the allocator handed out physical frame 0");
+            return;
+        }
+        if !frame.is_multiple_of(4096) {
+            kprintln!("[test] FAILED: frame {frame:#x} is not page aligned");
+            return;
+        }
+        *slot = frame;
+        allocated += 1;
+    }
+
+    if allocated != FRAMES {
+        kprintln!("[test] FAILED: only {allocated} of {FRAMES} frames were available");
+        return;
+    }
+
+    // Stamp each frame with a value derived from its index, then verify every
+    // one. If two allocations aliased, the second write clobbers the first and
+    // the mismatch is caught here.
+    for (index, &frame) in frames.iter().enumerate() {
+        let pointer = layout::phys_to_virt(frame) as *mut u64;
+        // SAFETY: the allocator owns this frame, it is mapped writable through
+        // the direct map, and nothing else holds it.
+        unsafe {
+            pointer.write(PATTERN ^ index as u64);
+        }
+    }
+
+    for (index, &frame) in frames.iter().enumerate() {
+        let pointer = layout::phys_to_virt(frame) as *const u64;
+        // SAFETY: as above; the frame is still allocated.
+        let value = unsafe { pointer.read() };
+        let expected = PATTERN ^ index as u64;
+        if value != expected {
+            kprintln!(
+                "[test] FAILED: frame {frame:#x} held {value:#x}, expected {expected:#x}; \
+                 two allocations overlap"
+            );
+            return;
+        }
+    }
+
+    // A large block, which exercises splitting and the alignment guarantee that
+    // page tables and DMA buffers depend on.
+    const LARGE_ORDER: usize = 8; // 1 MiB
+    let large = memory::allocate_block(LARGE_ORDER);
+    if let Some(block) = large {
+        if !block.is_multiple_of(4096u64 << LARGE_ORDER) {
+            kprintln!("[test] FAILED: 1 MiB block {block:#x} is not 1 MiB aligned");
+            return;
+        }
+        // SAFETY: the block came from `allocate_block` at this order and has
+        // not been freed.
+        unsafe { memory::free_block(block, LARGE_ORDER) };
+    } else {
+        kprintln!("[test] FAILED: could not allocate a 1 MiB block");
+        return;
+    }
+
+    for &frame in frames.iter() {
+        // SAFETY: each frame came from `allocate_frame` and is freed once.
+        unsafe { memory::free_frame(frame) };
+    }
+
+    let Some(after) = memory::stats() else {
+        kprintln!("[test] FAILED: the frame allocator disappeared");
+        return;
+    };
+
+    if after.free_frames != before.free_frames {
+        kprintln!(
+            "[test] FAILED: {} frames leaked ({} free before, {} after)",
+            before.free_frames as i64 - after.free_frames as i64,
+            before.free_frames,
+            after.free_frames
+        );
+        return;
+    }
+
+    kprintln!(
+        "[test] frame allocator verified: {FRAMES} frames written and read back, \
+         1 MiB block aligned, nothing leaked"
+    );
+    kprintln!("[mem ] {after}");
 }
 
 /// Take a deliberate fault, when the kernel was built to.

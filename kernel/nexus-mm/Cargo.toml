@@ -1,0 +1,14 @@
+[package]
+name = "nexus-mm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Nexus memory management: the physical frame allocator."
+
+[lib]
+name = "nexus_mm"
+path = "src/lib.rs"
+
+[dependencies]
+nexus-abi = { path = "../../shared/nexus-abi" }
