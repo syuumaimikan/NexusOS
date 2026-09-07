@@ -14,8 +14,10 @@ pub mod gdt;
 pub mod idt;
 pub mod interrupts;
 pub mod io;
+pub mod percpu;
 pub mod pic;
 pub mod pit;
+pub mod smp;
 pub mod time;
 
 /// Stop this processor permanently with interrupts masked.

@@ -150,6 +150,7 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         Ok(info) => {
             acpi::report(&info);
             adopt_local_apic(&info);
+            start_other_processors(&info);
         }
         Err(error) => {
             // Not fatal. The PIT keeps the system ticking on one processor;
@@ -259,6 +260,12 @@ fn monitor_thread(_argument: usize) {
                 heap.total / 1024
             );
         }
+        if arch::smp::processor_count() > 1 {
+            let (online, fewest) = arch::smp::summary();
+            kprintln!(
+                "[mon ] {online} processors online, least busy has taken {fewest} interrupts"
+            );
+        }
     }
 }
 
@@ -291,8 +298,46 @@ fn adopt_local_apic(info: &acpi::AcpiInfo) {
                 arch::apic::disconnect_legacy_pic();
             }
             kprintln!("[apic] legacy PIC masked, PIT stopped, LINT0 disconnected");
+
+            // The boot processor's own per-processor state. It could not be
+            // installed earlier because its APIC identifier was not known, and
+            // nothing before this point reads it.
+            // SAFETY: called once, on the boot processor, with index 0 which
+            // no other processor uses.
+            unsafe {
+                arch::percpu::install(
+                    0,
+                    arch::apic::local_id(),
+                    nexus_abi::layout::KERNEL_BOOT_STACK_BASE
+                        + nexus_abi::layout::KERNEL_BOOT_STACK_SIZE,
+                );
+            }
         }
         Err(error) => kprintln!("[apic] {error}; staying on the legacy timer"),
+    }
+}
+
+/// Start the processors ACPI reported, other than this one.
+///
+/// Reported and tolerated on failure: a system running on fewer cores than it
+/// has is far better than one that refuses to boot.
+fn start_other_processors(info: &acpi::AcpiInfo) {
+    if info.enabled_processor_count() <= 1 {
+        kprintln!("[smp ] single processor; nothing to start");
+        return;
+    }
+
+    // SAFETY: called once, from the boot processor, with the local APIC running
+    // and the memory manager available.
+    match unsafe { arch::smp::start_processors(&info.processors) } {
+        Ok(started) => {
+            kprintln!(
+                "[smp ] {started} of {} additional processors started",
+                info.enabled_processor_count() - 1
+            );
+            arch::smp::report();
+        }
+        Err(error) => kprintln!("[smp ] {error}; continuing on one processor"),
     }
 }
 

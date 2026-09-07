@@ -153,6 +153,15 @@ pub unsafe fn init(boot_info: &BootInfo) -> Result<(), InitError> {
         // stays unambiguously invalid and a null-pointer bug in code that
         // works with physical addresses is caught rather than working by luck.
         (0, PAGE_SIZE),
+        // The page application processors start executing at. A startup
+        // inter-processor interrupt carries a page number below 1 MiB, not an
+        // address, so this cannot be allocated wherever there happens to be
+        // room -- it has to be this exact page, and nothing else may ever get
+        // it.
+        (
+            crate::arch::smp::trampoline::TRAMPOLINE_ADDRESS,
+            crate::arch::smp::trampoline::TRAMPOLINE_ADDRESS + PAGE_SIZE,
+        ),
         (
             bitmap_phys,
             bitmap_phys + (bitmap_bytes as u64).div_ceil(PAGE_SIZE) * PAGE_SIZE,

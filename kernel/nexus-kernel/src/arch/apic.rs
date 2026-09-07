@@ -59,7 +59,20 @@ mod register {
     pub const TIMER_CURRENT_COUNT: usize = 0x390;
     /// Timer clock divisor.
     pub const TIMER_DIVIDE: usize = 0x3E0;
+    /// Interrupt command, low half. Writing this sends the interrupt.
+    pub const INTERRUPT_COMMAND_LOW: usize = 0x300;
+    /// Interrupt command, high half: the destination APIC identifier.
+    pub const INTERRUPT_COMMAND_HIGH: usize = 0x310;
 }
+
+/// Interrupt command delivery mode: INIT, which resets the target.
+const ICR_DELIVERY_INIT: u32 = 0b101 << 8;
+/// Interrupt command delivery mode: startup, which begins execution.
+const ICR_DELIVERY_STARTUP: u32 = 0b110 << 8;
+/// Interrupt command: assert the signal rather than deassert it.
+const ICR_ASSERT: u32 = 1 << 14;
+/// Interrupt command: the request has not yet been accepted.
+const ICR_PENDING: u32 = 1 << 12;
 
 /// `SPURIOUS` bit 8: the APIC is enabled.
 const SPURIOUS_ENABLE: u32 = 1 << 8;
@@ -444,6 +457,108 @@ pub unsafe fn init(apic_address: u64, tick_hz: u64, timer_vector: u8) -> Result<
     );
 
     Ok(())
+}
+
+/// Send an inter-processor interrupt and wait for it to be accepted.
+///
+/// # Safety
+///
+/// The window must be mapped and `apic_id` must name a real processor.
+unsafe fn send_ipi(apic_id: u32, command: u32) {
+    // SAFETY: upheld by the caller.
+    unsafe {
+        // The destination goes in the high half first: writing the low half is
+        // what actually sends, so the order is not interchangeable.
+        write(register::INTERRUPT_COMMAND_HIGH, apic_id << 24);
+        write(register::INTERRUPT_COMMAND_LOW, command);
+
+        // Wait for delivery. Bounded, because a target that never accepts would
+        // otherwise hang the processor doing the starting.
+        let mut spins = 0u32;
+        while read(register::INTERRUPT_COMMAND_LOW) & ICR_PENDING != 0 && spins < 1_000_000 {
+            spins += 1;
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Send an INIT inter-processor interrupt, resetting the target processor.
+///
+/// # Safety
+///
+/// See [`send_ipi`]. Resetting a processor that is running kernel code would
+/// lose whatever it was doing.
+pub unsafe fn send_init(apic_id: u32) {
+    // SAFETY: upheld by the caller.
+    unsafe { send_ipi(apic_id, ICR_DELIVERY_INIT | ICR_ASSERT) };
+}
+
+/// Send a startup inter-processor interrupt.
+///
+/// The target begins executing in real mode at `vector << 12`.
+///
+/// # Safety
+///
+/// See [`send_ipi`]. That address must hold valid startup code.
+pub unsafe fn send_startup(apic_id: u32, vector: u8) {
+    // SAFETY: upheld by the caller.
+    unsafe {
+        send_ipi(
+            apic_id,
+            ICR_DELIVERY_STARTUP | ICR_ASSERT | u32::from(vector),
+        )
+    };
+}
+
+/// Bring up the local APIC on a processor other than the boot processor.
+///
+/// The register window is already mapped — it is the same physical address on
+/// every processor, and each one's own APIC answers there — and the timer
+/// frequency is already known, so nothing is measured again.
+///
+/// # Safety
+///
+/// Call once, on the processor being started, after [`init`] has run on the
+/// boot processor.
+pub unsafe fn init_processor(timer_vector: u8, tick_hz: u64) {
+    let frequency = TIMER_FREQUENCY_HZ.load(Ordering::Relaxed);
+    let count = if frequency == 0 || tick_hz == 0 {
+        0
+    } else {
+        (frequency / DIVISOR / tick_hz).max(1)
+    };
+
+    // SAFETY: the window is mapped by the boot processor and is valid on every
+    // processor; the caller guarantees this runs once per core.
+    unsafe {
+        let base = read_apic_base();
+        if base & APIC_BASE_ENABLE == 0 {
+            write_apic_base(base | APIC_BASE_ENABLE);
+        }
+
+        write(register::TASK_PRIORITY, 0);
+        write(register::LVT_THERMAL, LVT_MASKED);
+        write(register::LVT_PERFORMANCE, LVT_MASKED);
+        write(register::LVT_ERROR, LVT_MASKED);
+        // Only the boot processor's LINT0 is wired to the 8259, and the 8259 is
+        // masked by now anyway.
+        write(register::LVT_LINT0, LVT_MASKED);
+        write(register::LVT_LINT1, LVT_DELIVERY_NMI);
+
+        write(
+            register::SPURIOUS,
+            SPURIOUS_ENABLE | u32::from(super::interrupts::SPURIOUS_VECTOR),
+        );
+
+        if count > 0 {
+            write(register::TIMER_DIVIDE, DIVIDE_BY_16);
+            write(
+                register::LVT_TIMER,
+                u32::from(timer_vector) | LVT_TIMER_PERIODIC,
+            );
+            write(register::TIMER_INITIAL_COUNT, count as u32);
+        }
+    }
 }
 
 /// Stop passing legacy 8259 interrupts through LINT0.

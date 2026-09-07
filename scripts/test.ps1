@@ -107,6 +107,8 @@ Invoke-Step 'boot test' {
         'local APIC 0 version',
         'ticking at 1000 Hz on vector 48',
         'legacy PIC masked, PIT stopped, LINT0 disconnected',
+        '3 of 3 additional processors started',
+        '4 processors online',
         'scheduler started',
         'threads ran to completion',
         'preemption verified',
