@@ -16,16 +16,20 @@
 #![feature(abi_x86_interrupt)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate alloc;
+
+mod acpi;
 mod arch;
+mod display;
 mod framebuffer;
+mod i18n;
 mod memory;
 mod panic;
+mod sched;
 mod serial;
 mod sync;
 
 use nexus_abi::{layout, BootInfo, MemoryKind, MemoryRegion};
-
-use framebuffer::{Color, Framebuffer};
 
 /// Print a line to the kernel serial console.
 #[macro_export]
@@ -100,21 +104,17 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     report_handoff(boot_info);
     let usable = report_memory_map(boot_info);
 
-    // SAFETY: the bootloader mapped the framebuffer through the direct map, and
-    // this is the only `Framebuffer` the kernel constructs.
-    match unsafe { Framebuffer::new(&boot_info.framebuffer) } {
-        Some(mut fb) => {
-            kprintln!("[fb  ] painting boot background");
-            draw_boot_screen(&mut fb);
-        }
-        None => kprintln!("[fb  ] no usable framebuffer; running headless"),
-    }
-
     // Descriptor tables, exception handlers and the timer. Until this runs, any
     // fault is a triple fault, so it happens as early as anything can.
     // SAFETY: single-threaded, and interrupts are still disabled — the CPU has
     // not been told to enable them since reset.
     unsafe { arch::interrupts::init(TIMER_FREQUENCY_HZ) };
+
+    // Interrupts come on here, as soon as there is somewhere for them to go.
+    // Everything after this point may depend on the clock advancing -- APIC
+    // calibration does, and it hangs silently without it.
+    arch::interrupts::enable();
+    kprintln!("[intr] interrupts enabled");
 
     // Physical memory. Everything above this point runs on statically
     // allocated storage; everything after it can allocate.
@@ -124,16 +124,185 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         arch::halt_forever();
     }
 
+    // The kernel heap, which is what makes `alloc` usable above this point.
+    // SAFETY: called once, with the physical allocator running.
+    if let Err(error) = unsafe { memory::heap::init() } {
+        kprintln!("FATAL: could not initialise the kernel heap: {error}");
+        arch::halt_forever();
+    }
+
+    // The bootloader's identity map has done its job. Dropping it turns a null
+    // or small-integer pointer dereference into a fault instead of a silent
+    // success, and takes physical memory out of reach of low addresses.
+    //
+    // SAFETY: the kernel runs at its higher-half address on the higher-half
+    // boot stack, `boot_info` was copied out of identity-mapped memory in
+    // `_start`, and every remaining physical access goes through the direct
+    // map.
+    unsafe { memory::paging::tear_down_identity_map() };
+    kprintln!("[mem ] identity map torn down; low addresses now fault");
+
+    // ACPI and the local APIC. Both wait until here: the APIC's registers sit
+    // far above RAM, so reaching them needs the virtual memory manager, and
+    // calibrating its timer needs the PIT still ticking with interrupts on.
+    // SAFETY: called once, with the direct map covering the firmware tables.
+    match unsafe { acpi::init(boot_info.acpi_rsdp) } {
+        Ok(info) => {
+            acpi::report(&info);
+            adopt_local_apic(&info);
+        }
+        Err(error) => {
+            // Not fatal. The PIT keeps the system ticking on one processor;
+            // what is lost is SMP, MSI and per-core timers.
+            kprintln!("[acpi] {error}; continuing on the legacy timer");
+        }
+    }
+
+    // The display comes up only now, after the heap: translated strings are
+    // built at runtime by substituting into templates, so drawing anything
+    // localised allocates. Bringing the display up earlier cost a boot to an
+    // allocation failure, which is exactly the kind of ordering mistake that
+    // only shows up when the code is actually run.
+    //
+    // Pick the interface language before anything is drawn. A real system would
+    // take this from stored settings; there is no storage yet, so it is a build
+    // constant, and an unrecognised one falls back rather than leaving the
+    // system with no strings.
+    if !i18n::set_locale(DEFAULT_LANGUAGE) {
+        kprintln!(
+            "[i18n] no locale {DEFAULT_LANGUAGE}; using {}",
+            i18n::current().tag
+        );
+    }
+    kprintln!(
+        "[i18n] interface language {}, {} available",
+        i18n::current().tag,
+        i18n::locale_count()
+    );
+
+    // SAFETY: the bootloader mapped the framebuffer through the direct map, and
+    // this is the only place the kernel adopts it.
+    unsafe { display::init(&boot_info.framebuffer) };
+
+    // The scheduler. The context that got us here becomes thread #0 and keeps
+    // running; from this point on it is preemptible like any other thread.
+    // SAFETY: called once, from the boot context, with the heap available.
+    if let Err(error) = unsafe { sched::init() } {
+        kprintln!("FATAL: could not start the scheduler: {error}");
+        arch::halt_forever();
+    }
+
     self_test();
     inject_fault_if_requested();
 
     kprintln!();
     kprintln!("[boot] early initialisation complete");
     kprintln!("[boot] {} MiB of usable RAM", usable / (1024 * 1024));
-    kprintln!("[boot] idling: memory management and scheduling are next");
 
-    idle_loop()
+    start_system_threads();
+
+    // The boot thread has finished its work. Retiring it hands the processor to
+    // the scheduler for good; the idle thread covers the moments when nothing
+    // else is runnable.
+    kprintln!("[boot] boot thread retiring; the system is now scheduler-driven");
+    sched::exit()
 }
+
+/// Spawn the long-lived threads and hand the processor over to them.
+fn start_system_threads() {
+    display::start_thread();
+    match sched::spawn(
+        "monitor",
+        sched::thread::Priority::Interactive,
+        monitor_thread,
+        0,
+    ) {
+        Ok(id) => kprintln!("[boot] started monitor thread {id}"),
+        Err(error) => kprintln!("[boot] could not start the monitor thread: {error}"),
+    }
+    kprintln!("[boot] handing the processor to the scheduler");
+}
+
+/// Reports system state periodically, and reclaims finished threads.
+///
+/// Reaping belongs in a thread other than the one that finished: a thread
+/// cannot free the stack it is standing on, so a finished thread's storage is
+/// released here, once it is certain nothing is running on it.
+fn monitor_thread(_argument: usize) {
+    let mut reported = 0u64;
+    loop {
+        sched::sleep_ms(5000);
+
+        let reaped = sched::reap_finished();
+        let stats = sched::stats();
+        let memory = memory::stats();
+        let heap = memory::heap::stats();
+        reported += 5;
+
+        kprintln!(
+            "[mon ] {reported}s uptime {}.{:03}s | threads {} ({} ready, {} sleeping) | \
+             {} switches, {} awaiting reaping{}",
+            arch::time::uptime_ms() / 1000,
+            arch::time::uptime_ms() % 1000,
+            stats.threads,
+            stats.ready,
+            stats.sleeping,
+            stats.context_switches,
+            stats.finished,
+            if reaped > 0 { " | reaped threads" } else { "" }
+        );
+        if let Some(memory) = memory {
+            kprintln!(
+                "[mon ] memory {} MiB free | heap {} KiB used of {} KiB",
+                memory.free_frames * 4096 / (1024 * 1024),
+                heap.used / 1024,
+                heap.total / 1024
+            );
+        }
+    }
+}
+
+/// Move the system tick from the PIT to the local APIC timer.
+///
+/// Failure is reported and tolerated: the PIT is still ticking, so the system
+/// keeps running on one processor rather than not at all.
+fn adopt_local_apic(info: &acpi::AcpiInfo) {
+    // SAFETY: the virtual memory manager is up, the PIT is running and
+    // interrupts are enabled, which is what calibration requires.
+    let result = unsafe {
+        arch::apic::init(
+            info.local_apic_address,
+            u64::from(TIMER_FREQUENCY_HZ),
+            arch::interrupts::APIC_TIMER_VECTOR,
+        )
+    };
+
+    match result {
+        Ok(()) => {
+            // The APIC drives the clock now. Silence the 8259 rather than
+            // leaving it to deliver interrupts nothing is expecting, and stop
+            // the PIT so it is not counting down for no one.
+            // SAFETY: nothing depends on legacy interrupt delivery any more.
+            unsafe {
+                arch::pic::mask_all();
+                arch::pit::stop();
+                // Only now: until the PIC is quiet, LINT0 is how its interrupts
+                // reach this processor at all.
+                arch::apic::disconnect_legacy_pic();
+            }
+            kprintln!("[apic] legacy PIC masked, PIT stopped, LINT0 disconnected");
+        }
+        Err(error) => kprintln!("[apic] {error}; staying on the legacy timer"),
+    }
+}
+
+/// Interface language selected at boot.
+///
+/// A build constant only because there is nowhere to persist a setting yet.
+/// Both available languages are exercised at runtime regardless: the display
+/// cycles between them, which is how the switch is shown to work rather than
+/// merely compiled.
+const DEFAULT_LANGUAGE: &str = "en-US";
 
 /// Tick rate of the early timer.
 ///
@@ -155,17 +324,16 @@ fn self_test() {
         core::arch::asm!("int3", options(nomem, nostack));
     }
 
-    kprintln!("[test] enabling interrupts and waiting for timer ticks");
-    arch::interrupts::enable();
+    kprintln!("[test] waiting for timer ticks");
 
     // Spin until the timer proves itself, but not forever: if ticks never
     // arrive, say so instead of hanging with no explanation.
     let deadline = arch::read_tsc() + 10_000_000_000;
-    while arch::pit::ticks() < 10 && arch::read_tsc() < deadline {
+    while arch::time::ticks() < 10 && arch::read_tsc() < deadline {
         core::hint::spin_loop();
     }
 
-    let ticks = arch::pit::ticks();
+    let ticks = arch::time::ticks();
     if ticks == 0 {
         kprintln!("[test] FAILED: no timer interrupts were delivered");
     } else {
@@ -173,6 +341,272 @@ fn self_test() {
     }
 
     memory_self_test();
+    heap_self_test();
+    scheduler_self_test();
+}
+
+/// Work counters for the scheduler self-test.
+mod sched_test {
+    use core::sync::atomic::AtomicU64;
+
+    /// Total iterations completed by all worker threads.
+    pub static WORK_DONE: AtomicU64 = AtomicU64::new(0);
+    /// Number of workers that have run to completion.
+    pub static WORKERS_FINISHED: AtomicU64 = AtomicU64::new(0);
+    /// Iterations completed by the thread that never yields.
+    pub static HOG_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+    /// Wake-ups completed by the thread competing with the hog.
+    pub static TICKER_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+    /// Set to stop the hog once the preemption test has its answer.
+    pub static STOP_HOG: AtomicU64 = AtomicU64::new(0);
+}
+
+/// Iterations each self-test worker performs.
+const WORKER_ITERATIONS: u64 = 500;
+/// Number of workers the self-test spawns.
+const WORKER_COUNT: u64 = 4;
+
+/// A worker that does a fixed amount of work and exits.
+///
+/// Half of them yield between iterations and half do not, so the test covers
+/// both cooperative hand-off and timer preemption.
+fn self_test_worker(argument: usize) {
+    use core::sync::atomic::Ordering;
+
+    for _ in 0..WORKER_ITERATIONS {
+        sched_test::WORK_DONE.fetch_add(1, Ordering::Relaxed);
+        if argument % 2 == 0 {
+            sched::yield_now();
+        }
+    }
+    sched_test::WORKERS_FINISHED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A thread that never yields and never sleeps.
+///
+/// The point of the preemption test: if the timer cannot take the processor
+/// away from this, nothing else in the system will ever run again.
+fn self_test_hog(_argument: usize) {
+    use core::sync::atomic::Ordering;
+
+    while sched_test::STOP_HOG.load(Ordering::Relaxed) == 0 {
+        sched_test::HOG_ITERATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A thread that sleeps in a loop while the hog spins.
+fn self_test_ticker(_argument: usize) {
+    use core::sync::atomic::Ordering;
+
+    for _ in 0..5 {
+        sched::sleep_ms(20);
+        sched_test::TICKER_WAKEUPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Verify that threads actually run, finish, and can be preempted.
+///
+/// Two things are checked, and the second is the one that matters. Cooperative
+/// scheduling is easy to get right and easy to test. Preemption is neither: it
+/// is only real if a thread that never yields can still be taken off the
+/// processor, and the only way to know is to run one and see whether anything
+/// else makes progress.
+fn scheduler_self_test() {
+    use core::sync::atomic::Ordering;
+
+    kprintln!("[test] spawning {WORKER_COUNT} worker threads");
+    for index in 0..WORKER_COUNT {
+        let priority = if index < 2 {
+            sched::thread::Priority::Normal
+        } else {
+            sched::thread::Priority::Background
+        };
+        if let Err(error) = sched::spawn("worker", priority, self_test_worker, index as usize) {
+            kprintln!("[test] FAILED: could not spawn worker {index}: {error}");
+            return;
+        }
+    }
+
+    // Wait for them, but not forever: a scheduler that never runs them must
+    // report that rather than hang the boot.
+    let deadline = arch::time::ticks() + 5000;
+    while sched_test::WORKERS_FINISHED.load(Ordering::Relaxed) < WORKER_COUNT
+        && arch::time::ticks() < deadline
+    {
+        sched::sleep_ms(10);
+    }
+
+    let finished = sched_test::WORKERS_FINISHED.load(Ordering::Relaxed);
+    let work = sched_test::WORK_DONE.load(Ordering::Relaxed);
+    if finished != WORKER_COUNT {
+        kprintln!("[test] FAILED: only {finished} of {WORKER_COUNT} workers finished");
+        return;
+    }
+    if work != WORKER_COUNT * WORKER_ITERATIONS {
+        kprintln!(
+            "[test] FAILED: workers completed {work} iterations, expected {}",
+            WORKER_COUNT * WORKER_ITERATIONS
+        );
+        return;
+    }
+    kprintln!("[test] {finished} threads ran to completion, {work} iterations total");
+
+    // Now the real question: can a thread that never yields be preempted?
+    kprintln!("[test] starting a thread that never yields, at equal priority");
+    let spawned = sched::spawn("cpu-hog", sched::thread::Priority::Normal, self_test_hog, 0)
+        .and_then(|_| {
+            sched::spawn(
+                "ticker",
+                sched::thread::Priority::Normal,
+                self_test_ticker,
+                0,
+            )
+        });
+    if let Err(error) = spawned {
+        kprintln!("[test] FAILED: could not spawn the preemption test threads: {error}");
+        return;
+    }
+
+    let deadline = arch::time::ticks() + 3000;
+    while sched_test::TICKER_WAKEUPS.load(Ordering::Relaxed) < 5 && arch::time::ticks() < deadline {
+        sched::sleep_ms(10);
+    }
+    sched_test::STOP_HOG.store(1, Ordering::Relaxed);
+
+    let wakeups = sched_test::TICKER_WAKEUPS.load(Ordering::Relaxed);
+    let hog = sched_test::HOG_ITERATIONS.load(Ordering::Relaxed);
+    if wakeups < 5 {
+        kprintln!(
+            "[test] FAILED: preemption is not working. The ticker woke {wakeups} of 5 times \
+             while a thread that never yields held the processor"
+        );
+        return;
+    }
+    if hog == 0 {
+        kprintln!("[test] FAILED: the non-yielding thread never ran at all");
+        return;
+    }
+
+    kprintln!(
+        "[test] preemption verified: the ticker woke {wakeups} times while a non-yielding \
+         thread completed {hog} iterations"
+    );
+
+    // Let the hog observe the stop flag and retire, then reclaim everything.
+    sched::sleep_ms(50);
+    let reaped = sched::reap_finished();
+    kprintln!("[test] reclaimed {reaped} finished threads");
+    sched::dump_threads();
+}
+
+/// Exercise the kernel heap and cross-check the page tables that back it.
+///
+/// The heap allocator's own logic is covered by host tests in `nexus-mm`. What
+/// only the machine can answer is whether the mappings the kernel built
+/// actually point where it thinks: so this allocates through `alloc`, then
+/// translates a heap address back to a physical one and reads the same bytes
+/// through the direct map. Agreement between those two paths is the real proof
+/// that `map_range` did what it claimed.
+fn heap_self_test() {
+    use alloc::boxed::Box;
+    use alloc::collections::BTreeMap;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use core::fmt::Write;
+
+    let before = memory::heap::stats();
+
+    // A Vec large enough to force several reallocations, so growth and freeing
+    // of the old buffers both happen.
+    let mut values: Vec<u64> = Vec::new();
+    for index in 0..50_000u64 {
+        values.push(index * 3);
+    }
+    let sum: u64 = values.iter().sum();
+    let expected: u64 = (0..50_000u64).map(|index| index * 3).sum();
+    if sum != expected {
+        kprintln!("[test] FAILED: Vec held {sum}, expected {expected}");
+        return;
+    }
+
+    // The cross-check. Read the first element through the heap's virtual
+    // address, then again through the direct map at whatever physical address
+    // the page tables say that virtual address resolves to.
+    let probe_virt = values.as_ptr() as u64;
+    match memory::paging::translate(probe_virt) {
+        Some(phys) => {
+            // SAFETY: `phys` is what the page tables say backs `probe_virt`,
+            // and the direct map covers all of physical memory.
+            let through_direct_map = unsafe { (layout::phys_to_virt(phys) as *const u64).read() };
+            if through_direct_map != values[0] {
+                kprintln!(
+                    "[test] FAILED: heap address {probe_virt:#018x} maps to {phys:#018x}, \
+                     which holds {through_direct_map:#x} rather than {:#x}",
+                    values[0]
+                );
+                return;
+            }
+        }
+        None => {
+            kprintln!("[test] FAILED: heap address {probe_virt:#018x} is not mapped");
+            return;
+        }
+    }
+
+    let boxed = Box::new([0xA5u8; 4096]);
+    if boxed.iter().any(|&byte| byte != 0xA5) {
+        kprintln!("[test] FAILED: a boxed array did not hold its contents");
+        return;
+    }
+
+    let mut map = BTreeMap::new();
+    for index in 0..1000u32 {
+        map.insert(index, index * index);
+    }
+    if map.get(&999) != Some(&(999 * 999)) {
+        kprintln!("[test] FAILED: BTreeMap lookup returned the wrong value");
+        return;
+    }
+
+    let mut text = String::new();
+    let _ = write!(text, "NexusOS heap {} entries", map.len());
+    if text != "NexusOS heap 1000 entries" {
+        kprintln!("[test] FAILED: string formatting produced {text:?}");
+        return;
+    }
+
+    drop(values);
+    drop(boxed);
+    drop(map);
+    drop(text);
+
+    let after = memory::heap::stats();
+    if after.used != before.used {
+        kprintln!(
+            "[test] FAILED: {} bytes leaked from the heap",
+            after.used - before.used
+        );
+        return;
+    }
+
+    // The identity map should be gone by now, so a low address must no longer
+    // translate. This is checked through the page tables rather than by
+    // dereferencing, which would halt the machine.
+    if memory::paging::translate(0x1000).is_some() {
+        kprintln!("[test] FAILED: the identity map is still present");
+        return;
+    }
+
+    kprintln!(
+        "[test] heap verified: 50k-element Vec, 4 KiB Box, 1000-entry map, \
+         translation cross-checked, nothing leaked"
+    );
+    kprintln!(
+        "[heap] {} KiB used of {} KiB, {} free blocks",
+        after.used / 1024,
+        after.total / 1024,
+        after.free_blocks
+    );
 }
 
 /// Exercise the frame allocator against real memory.
@@ -334,7 +768,7 @@ fn inject_fault_if_requested() {
         // SAFETY: a volatile access to a local; the volatility is what stops
         // the optimiser from folding the division away.
         let divisor = unsafe { core::ptr::read_volatile(&mut zero) };
-        let dividend = arch::pit::ticks() | 1;
+        let dividend = arch::time::ticks() | 1;
         // SAFETY: `div` by zero raises vector 0, which is the point.
         unsafe {
             core::arch::asm!(
@@ -363,31 +797,6 @@ fn overflow_stack(depth: u64) -> u64 {
         core::ptr::write_volatile(frame.as_mut_ptr(), depth);
         let deeper = overflow_stack(depth + 1);
         core::ptr::read_volatile(frame.as_ptr()).wrapping_add(deeper)
-    }
-}
-
-/// Park the processor until there is work for it.
-///
-/// This becomes the idle thread once the scheduler exists. `hlt` rather than a
-/// spin so the host CPU is not burned while the guest has nothing to do.
-fn idle_loop() -> ! {
-    let mut last_report = 0u64;
-    loop {
-        arch::wait_for_interrupt();
-
-        // A heartbeat every five seconds, which is how a boot test tells a
-        // healthy idle apart from a hang.
-        let uptime = arch::pit::uptime_ms();
-        if uptime >= last_report + 5000 {
-            last_report = uptime - (uptime % 5000);
-            kprintln!(
-                "[idle] uptime {}.{:03}s, {} ticks, {} spurious interrupts",
-                uptime / 1000,
-                uptime % 1000,
-                arch::pit::ticks(),
-                arch::interrupts::spurious_count()
-            );
-        }
     }
 }
 
@@ -474,42 +883,4 @@ fn report_memory_map(boot_info: &BootInfo) -> u64 {
         reserved / (1024 * 1024)
     );
     usable
-}
-
-/// Paint the boot background.
-///
-/// This is deliberately simple: it exists to prove end to end that the
-/// bootloader's mode selection, the framebuffer handoff and the direct map all
-/// agree. The Nexus Compositor takes over this surface later.
-fn draw_boot_screen(fb: &mut Framebuffer) {
-    fb.vertical_gradient(Color::NEXUS_DEEP, Color(0x0014_2A4A));
-
-    let width = fb.width();
-    let height = fb.height();
-
-    // A centred accent bar, sized as a fraction of the surface so it looks
-    // right at any resolution the firmware gave us.
-    let bar_width = (width / 3).max(64);
-    let bar_height = (height / 90).max(4);
-    let bar_x = (width - bar_width) / 2;
-    let bar_y = height / 2;
-
-    fb.fill_rect(bar_x, bar_y, bar_width, bar_height, Color::NEXUS_BLUE);
-
-    // Three progress ticks below it, marking the boot stages reached so far:
-    // bootloader, handoff, kernel entry.
-    let tick = bar_height * 2;
-    let gap = tick;
-    let ticks_width = tick * 3 + gap * 2;
-    let ticks_x = (width - ticks_width) / 2;
-    let ticks_y = bar_y + bar_height * 4;
-    for index in 0..3 {
-        fb.fill_rect(
-            ticks_x + index * (tick + gap),
-            ticks_y,
-            tick,
-            tick,
-            Color::WHITE,
-        );
-    }
 }

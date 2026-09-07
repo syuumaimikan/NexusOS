@@ -124,7 +124,7 @@ foreach ($case in $Cases) {
         continue
     }
 
-    $output = (Get-Content $Log -Raw) -replace "`0", ''
+    $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
     $caseFailed = $false
 
     foreach ($expected in $case.Expect) {

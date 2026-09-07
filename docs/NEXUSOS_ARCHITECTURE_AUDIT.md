@@ -1,6 +1,6 @@
 # NexusOS Architecture Audit
 
-**Date:** 2026-09-07
+**Date:** 2026-09-08 (updated after the local APIC)
 **Scope:** full repository
 **Verified by:** building both components and booting them in QEMU with edk2 firmware
 
@@ -35,7 +35,7 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Memory map handoff | **DONE** | Normalized, sorted, coalesced |
 | ACPI RSDP discovery | **DONE** | ACPI 2.0 preferred, 1.0 fallback |
 | `ExitBootServices` | **DONE** | With map-key retry loop |
-| ACPI table parsing | **MISSING** | RSDP address is passed but nothing parses it yet |
+| ACPI table parsing | **DONE** | RSDP, XSDT/RSDT and MADT, with checksums verified |
 | Secure Boot / measured boot | **MISSING** | Deferred to Phase 19 |
 | A/B update, recovery | **MISSING** | Deferred to Phase 19 |
 
@@ -46,15 +46,22 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Kernel entry, higher half | **DONE** | Non-PIE at `0xFFFFFFFF80000000`, kernel code model |
 | Serial console | **DONE** | 16550 at COM1, survives `ExitBootServices` |
 | Panic handler | **DONE** | Lock-free output, re-entry guard |
-| Spinlock | **DONE** | Not yet interrupt-safe; see §4 |
-| Framebuffer drawing | **PARTIAL** | Rectangles and gradients; no text, no compositor |
-| GDT / TSS | **MISSING** | Still on the firmware's descriptors |
-| IDT / exceptions | **MISSING** | **Any fault is currently a triple fault** |
-| APIC, timer, SMP | **MISSING** | |
-| Physical memory allocator | **MISSING** | Map is reported but no allocator consumes it |
-| Virtual memory manager | **MISSING** | Kernel runs on the loader's tables |
-| Kernel heap | **MISSING** | No `alloc` in the kernel yet |
-| Processes, threads, scheduler | **MISSING** | |
+| Spinlock | **DONE** | Plain and interrupt-masking variants |
+| GDT / TSS | **DONE** | `syscall`/`sysret` ordering; IST stacks |
+| IDT / exceptions | **DONE** | All 256 vectors; decoded fault reports |
+| Legacy PIC / PIT timer | **DONE** | Remapped above the exception vectors; 1000 Hz |
+| Physical memory allocator | **DONE** | Buddy allocator; 1017 MiB over 260513 frames |
+| Virtual memory manager | **DONE** | map/unmap/translate; identity map torn down |
+| Kernel heap | **DONE** | 16 MiB, `GlobalAlloc`, `alloc` available |
+| Kernel threads, scheduler | **DONE** | Preemptive, priority + round-robin, sleep/wake, reaping |
+| Framebuffer drawing | **PARTIAL** | Text, rectangles, gradients; no compositor, no windows |
+| Localisation | **DONE** | English and Japanese, switchable at runtime |
+| Text rendering | **PARTIAL** | UTF-8, half and full width, integer scaling; no shaping |
+| Input, IME | **MISSING** | No keyboard driver, so nothing to type into |
+| Local APIC, APIC timer | **DONE** | Calibrated against the PIT; drives the tick |
+| SMP | **MISSING** | The processors are enumerated but none are started |
+| I/O APIC, MSI | **MISSING** | Enumerated, not programmed; no device interrupts yet |
+| User mode, processes | **MISSING** | Threads are kernel-only; no ring 3 yet |
 | Handles, IPC, syscalls | **MISSING** | |
 
 ### Everything above the kernel
@@ -70,44 +77,105 @@ kernel core exists.
 Not asserted — observed, on every boot:
 
 - Firmware hands control to the bootloader; the loader logs over serial.
-- A 1920×1200 BGRX framebuffer is selected and reported at `0x80000000`.
+- A 1920x1200 BGRX framebuffer is selected and reported at `0x80000000`.
 - The ACPI RSDP is found in the configuration table.
-- The 4 MiB kernel ELF is read from the ESP and its three `PT_LOAD` segments
-  are loaded into physical memory.
+- The kernel ELF is read from the ESP and its three `PT_LOAD` segments are
+  loaded into physical memory.
 - Page tables are built in 15 pages and `cr3` is switched; the kernel reads back
   the same root the loader installed, which proves the switch took effect.
 - The kernel runs at its linked higher-half address, on the guarded boot stack.
 - 1017 MiB of usable RAM is classified across 22 regions.
 - The framebuffer is painted through the direct map, confirmed by screenshot.
+- The GDT, TSS and a 256-vector IDT are installed; a deliberate `int3` is
+  dispatched and *resumed from*, which exercises the whole `iretq` path.
+- The PIT ticks at exactly 1000 Hz, with no spurious interrupts over 30 seconds.
+- The frame allocator hands out 64 frames, each of which is stamped with a
+  distinct pattern through the direct map and read back correctly, plus a 1 MiB
+  block that is 1 MiB aligned; nothing leaks.
+- The heap serves a 50000-element `Vec`, a boxed 4 KiB array, a 1000-entry
+  `BTreeMap` and a formatted `String`; a heap address is translated back to
+  physical and the same bytes are read through the direct map, which is what
+  proves the mappings are correct rather than merely plausible.
+- After teardown, a low address no longer translates.
+- ACPI 2.0 tables are located and validated: the XSDT and the MADT, reporting
+  four processors, one I/O APIC and the presence of a legacy 8259.
+- The local APIC timer is calibrated against the PIT at around 1.2 GHz, takes
+  over the tick at 1000 Hz, and the 8259 and PIT are shut down behind it.
+  Uptime then tracks wall clock to within a millisecond per five seconds, which
+  is what says the handover preserved the clock rather than merely survived it.
+- Four worker threads run to completion with exactly the expected iteration
+  count, and their stacks are unmapped and returned when they are reaped.
+- A thread that never yields, at equal priority, is preempted: a sleeping
+  ticker wakes on schedule five times while the non-yielding thread completes
+  around twelve million iterations. Cooperative scheduling would hang here, so
+  this is the check that distinguishes real preemption from the appearance of
+  it.
+- A 1920x1200 status screen renders live uptime, memory, heap, thread and
+  context-switch figures, repainted twice a second by its own thread and
+  captured by `scripts/screenshot.ps1`.
+- That screen renders correctly in both English and Japanese, with the memory
+  line reordered by the translation rather than by the code, and the panel
+  resized to the text it actually holds. Both are captured as screenshots.
 
-16 host-side unit tests cover UEFI structure offsets, the ELF parser and
-memory-map normalization. The build produces zero warnings.
+50 host unit tests cover the UEFI structure offsets, the ELF parser, memory-map
+normalization, the buddy allocator and the heap — the last two including
+20000-step randomised workloads that check after every operation that no memory
+is covered by two live allocations.
+
+Three fault-injection builds take real CPU faults and confirm each is reported
+rather than resetting the machine, including a stack overflow that runs guard
+page to page fault to double fault to IST stack.
+
+The build produces zero warnings and passes `clippy -D warnings`.
 
 ## 4. Known deficiencies
 
 These are real and are tracked, not hidden:
 
-1. **No IDT.** The most serious gap. Until Phase 2 lands, any page fault,
-   divide error or invalid opcode escalates to a triple fault and resets the
-   machine with no diagnostic. This is the next thing to fix.
-2. **`SpinLock` is not interrupt-safe.** Harmless today because interrupts are
-   never enabled, but it must gain an interrupt-disabling variant before the
-   first handler is registered. Documented at the type.
-3. **Bootloader allocations are over-conservative.** Page tables, the handoff
+1. **No SMP.** ACPI reports four processors and the local APIC can address
+   them, but none are started: there is no trampoline, no per-CPU state and no
+   TLB shootdown. Everything runs on the boot processor.
+2. **The framebuffer is mapped write-back, not write-combining.** Correct in
+   QEMU, slow on real hardware. Needs PAT configuration.
+3. **No TLB shootdown.** `invlpg` handles the running core; a second core would
+   keep a stale translation. Cannot be written or tested before SMP exists.
+4. **Bootloader allocations are over-conservative.** Page tables, the handoff
    block and the kernel image are allocated as `RuntimeServicesData`, which the
-   kernel must treat as permanently reserved. This wastes on the order of
-   100 KiB. A custom UEFI memory type would let the kernel reclaim the page
-   tables after it builds its own; deferred until the VMM exists to reclaim them.
-4. **The framebuffer is mapped write-back, not write-combining.** Correct in
-   QEMU, slow on real hardware. Needs PAT configuration in the kernel.
-5. **The kernel binary carries debug info into the ESP** — 4 MiB of which ~32 KiB
-   is loadable. Harmless but wasteful of boot time; a stripped image plus a
-   separate symbol file is the fix.
-6. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
-   directory. Excellent for iteration, but it means NexusOS has never been
-   booted from a genuine partition table. A real GPT + FAT32 image builder is
-   needed before any hardware test.
-7. **No CI.** Building and testing is manual.
+   kernel treats as permanently reserved. This wastes on the order of 100 KiB.
+5. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
+   directory. Excellent for iteration, but it means NexusOS has never booted
+   from a genuine partition table. A real GPT + FAT32 image builder is needed
+   before any hardware test.
+6. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
+   automatically.
+7. **The heap never shrinks.** It grows on demand and keeps what it takes.
+   Acceptable for a kernel of this size; worth revisiting when there are
+   long-running workloads.
+8. **The kernel binary has no host test harness.** It is `no_main` with its own
+   panic handler, so tests written inside it would compile and never run. What
+   can be checked statically is checked with const assertions; the rest is
+   covered by boot-marker checks, fault injection and screenshots. Logic worth
+   unit testing is moved into a library crate instead, which is why the
+   allocators live in `nexus-mm`.
+9. **Threads are kernel-only.** There is no ring 3, no address-space separation
+   and no system-call boundary yet, so "thread" currently means a kernel thread
+   and nothing is isolated from anything else.
+10. **No ageing in the scheduler.** Strict priority means a busy high-priority
+    thread starves everything below it. Deliberate for now, and it needs real
+    workloads before it can be tuned honestly.
+11. **CJK glyphs depend on the build machine.** They are rasterised at build
+    time from an installed font, because bundling one would redistribute it.
+    A machine without a suitable font still builds, but non-Latin text renders
+    as placeholder boxes. See [i18n.md](i18n.md).
+12. **No input method.** Without a keyboard driver there is nothing to type
+    into and no IME, so the language cycles on a timer instead of being chosen.
+13. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
+    no bidirectional text, no ligatures or combining marks.
+
+Resolved since the first audit: the missing IDT (Phase 2), the
+non-interrupt-safe spinlock (`IrqSpinLock`, Phase 2), and the unstripped kernel
+image on the ESP, which was costing megabytes of boot-time reads for a
+hundred-kilobyte load.
 
 ## 5. Architectural decisions and why
 
@@ -142,13 +210,14 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **GDT, TSS, IDT and exception handlers** — so failures are diagnosable
-   instead of silent resets.
-2. **Physical frame allocator** — the memory map is already there, nothing
-   consumes it.
-3. **Virtual memory manager and kernel heap** — required by every subsystem
-   above it.
-4. **APIC and timer** — the precondition for preemption.
-5. **Threads and the scheduler.**
+1. **SMP bring-up**: start the processors the MADT reports, give each one its
+   own per-CPU state and run queue, and add TLB shootdown — which cannot be
+   written or tested until there is a second core to shoot down.
+2. **The I/O APIC**, so devices other than the timer can raise interrupts. This
+   is the precondition for a keyboard, and therefore for input of any kind.
+3. **Ring 3 and the system-call entry path**, which is what turns a kernel
+   thread into a process and makes isolation mean anything.
+4. **Handles and IPC**, where the capability model starts.
+5. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

@@ -1,0 +1,38 @@
+# NexusOS — 日本語 (日本)
+#
+# 1 行につき `key = value` を 1 組。空行と `#` で始まる行は無視されます。
+# 値は UTF-8 で、`{name}` 形式のプレースホルダを含められます。実行時に
+# カーネルが置換します。
+#
+# プレースホルダは語順の違いを吸収するために存在します。value.memory は
+# 英語では空き容量を先に、日本語では総容量を先に置いています。位置指定の
+# 書式文字列ではこの違いを表現できません。
+#
+# シリアルログは意図的に翻訳していません。開発者向けの情報であり、grep
+# できることが重要で、不具合報告のログはどの環境でも同じ文面である方が
+# 役に立つためです。
+
+locale.name = 日本語
+locale.tag = ja-JP
+
+os.name = NexusOS
+os.subtitle = Nexus カーネル v{version}
+os.tagline = 高性能・AI ネイティブ・安全なデスクトップ OS
+
+bar.status = カーネル起動中
+
+status.uptime = 稼働時間
+status.memory = メモリ
+status.heap = ヒープ
+status.threads = スレッド
+status.switches = 切り替え
+status.timer = タイマー
+status.language = 言語
+
+value.uptime = {seconds}.{millis} 秒
+value.memory = 全 {total} MiB 中 {free} MiB 空き
+value.heap = 全 {total} KiB 中 {used} KiB 使用
+value.threads = {total} 個 (実行可能 {ready}、待機 {sleeping})
+value.switches = {count} 回
+value.timer = {source} により {hz} Hz、{ticks} 回
+value.unavailable = 取得できません

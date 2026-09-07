@@ -8,6 +8,8 @@
 //! only some of it, and the panic screen and compositor use the rest.
 #![allow(dead_code)]
 
+pub mod font;
+
 use nexus_abi::{layout, FramebufferInfo, PixelFormat};
 
 /// A 24-bit colour in `0x00RRGGBB` form.
@@ -171,6 +173,100 @@ impl Framebuffer {
     /// Fill the whole surface with one colour.
     pub fn clear(&mut self, color: Color) {
         self.fill_rect(0, 0, self.width, self.height, color);
+    }
+
+    /// Draw one glyph at `(x, y)`, magnified `scale` times.
+    ///
+    /// Only set bits are painted, so glyphs compose over whatever is already
+    /// there instead of stamping a background box over it. Returns the advance
+    /// in pixels, which varies: Latin is half-width and CJK full-width.
+    pub fn draw_glyph(&mut self, x: u32, y: u32, character: char, color: Color, scale: u32) -> u32 {
+        let glyph = font::glyph(character);
+        let scale = scale.max(1);
+
+        for (row_index, row) in glyph.rows.iter().enumerate() {
+            if *row == 0 {
+                continue;
+            }
+            for column in 0..glyph.advance {
+                // Bit 15 is the leftmost pixel of the cell.
+                if row & (0x8000 >> column) == 0 {
+                    continue;
+                }
+                let pixel_x = x + column * scale;
+                let pixel_y = y + row_index as u32 * scale;
+                if scale == 1 {
+                    self.put_pixel(pixel_x, pixel_y, color);
+                } else {
+                    self.fill_rect(pixel_x, pixel_y, scale, scale, color);
+                }
+            }
+        }
+
+        glyph.advance * scale
+    }
+
+    /// Draw `text` starting at `(x, y)`, returning the x coordinate just past
+    /// the last glyph.
+    ///
+    /// Iterates by `char`, so UTF-8 is handled by construction: a Japanese
+    /// label and an English one are drawn by exactly the same code.
+    ///
+    /// There is no wrapping. A caller that cares about the surface edge should
+    /// measure with [`Framebuffer::text_width`] first; wrapping is a layout
+    /// decision, and this is a drawing primitive.
+    pub fn draw_text(&mut self, x: u32, y: u32, text: &str, color: Color, scale: u32) -> u32 {
+        let mut cursor = x;
+        for character in text.chars() {
+            cursor += self.draw_glyph(cursor, y, character, color, scale);
+        }
+        cursor
+    }
+
+    /// Width in pixels that `text` would occupy at `scale`.
+    ///
+    /// Must be used rather than counting characters: a string of eight kanji is
+    /// twice as wide as eight Latin letters, and a layout that assumes
+    /// otherwise draws outside whatever region it cleared.
+    #[must_use]
+    pub fn text_width(text: &str, scale: u32) -> u32 {
+        font::measure(text) * scale.max(1)
+    }
+
+    /// Height in pixels of one line at `scale`.
+    #[must_use]
+    pub fn line_height(scale: u32) -> u32 {
+        font::CELL_HEIGHT * scale.max(1)
+    }
+
+    /// Draw `text` horizontally centred on the surface at `y`.
+    pub fn draw_text_centered(&mut self, y: u32, text: &str, color: Color, scale: u32) {
+        let width = Self::text_width(text, scale);
+        let x = self.width.saturating_sub(width) / 2;
+        self.draw_text(x, y, text, color, scale);
+    }
+
+    /// Paint a vertical gradient over rows `[start_y, end_y)`.
+    ///
+    /// The gradient is computed against the *whole surface* height, not the
+    /// region, so repainting part of the screen produces exactly the colours
+    /// that a full repaint would have put there. A region-relative gradient
+    /// would leave a visible seam at the boundary.
+    pub fn vertical_gradient_region(
+        &mut self,
+        start_y: u32,
+        end_y: u32,
+        surface_height: u32,
+        top: Color,
+        bottom: Color,
+    ) {
+        let height = surface_height.max(1);
+        let end_y = end_y.min(self.height);
+        for row in start_y..end_y {
+            let amount = (row as u64 * 255 / height as u64).min(255) as u8;
+            let color = top.blend(bottom, amount);
+            self.fill_rect(0, row, self.width, 1, color);
+        }
     }
 
     /// Paint a vertical gradient from `top` to `bottom` across the surface.

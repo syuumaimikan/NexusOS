@@ -81,11 +81,11 @@ Invoke-Step 'host unit tests' {
 
 Invoke-Step 'boot test' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'build.ps1')) 'build'
-    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'run.ps1'), '-Headless', '-Timeout', '25') 'boot'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'run.ps1'), '-Headless', '-Timeout', '40') 'boot'
 
     $log = Join-Path $BuildDir 'serial.log'
     if (-not (Test-Path $log)) { throw 'no serial output' }
-    $output = (Get-Content $log -Raw) -replace "`0", ''
+    $output = (Get-Content $log -Raw -Encoding UTF8) -replace "`0", ''
 
     # Every marker a healthy boot must produce, in the order it produces them.
     $markers = @(
@@ -100,8 +100,25 @@ Invoke-Step 'boot test' {
         'timer is live',
         'frame allocator:',
         'frame allocator verified',
+        'identity map torn down',
+        'heap verified',
+        'ACPI 2.0, root table XSDT',
+        '4 processors (4 enabled)',
+        'local APIC 0 version',
+        'ticking at 1000 Hz on vector 48',
+        'legacy PIC masked, PIT stopped, LINT0 disconnected',
+        'scheduler started',
+        'threads ran to completion',
+        'preemption verified',
         'early initialisation complete',
-        '[idle] uptime'
+        'boot thread retiring',
+        'display adopted',
+        'display thread',
+        'glyphs available, including CJK',
+        'interface language en-US, 2 available',
+        'interface language is now ja-JP',
+        'interface language is now en-US',
+        '[mon ]'
     )
     $missing = @($markers | Where-Object { -not $output.Contains($_) })
     if ($missing.Count -gt 0) {

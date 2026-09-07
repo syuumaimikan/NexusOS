@@ -13,11 +13,15 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod buddy;
+pub mod heap;
 
+#[cfg(test)]
+mod heap_tests;
 #[cfg(test)]
 mod tests;
 
 pub use buddy::{BlockLinks, BuddyAllocator, Links, Stats, MAX_ORDER, PAGE_SIZE};
+pub use heap::{Heap, HeapStats};
 
 /// The smallest order that holds at least `frames` frames.
 ///

@@ -24,6 +24,19 @@ pub const KERNEL_HEAP_INITIAL_SIZE: u64 = 16 * 1024 * 1024;
 /// Base of the region used for dynamic kernel mappings (MMIO, framebuffer...).
 pub const KERNEL_MMIO_BASE: u64 = 0xFFFF_C800_0000_0000;
 
+/// Base of the region kernel thread stacks are carved from.
+///
+/// Each thread gets one [`KERNEL_STACK_STRIDE`] slot, of which only the upper
+/// [`KERNEL_STACK_SIZE`] is mapped. Stacks grow downward, so the unmapped lower
+/// half of every slot is a guard region: overflowing a thread stack faults on
+/// the very first byte past the end instead of quietly writing into whatever
+/// was mapped below it.
+pub const KERNEL_STACK_AREA_BASE: u64 = 0xFFFF_C400_0000_0000;
+/// Address space reserved per thread stack, mapped part plus guard.
+pub const KERNEL_STACK_STRIDE: u64 = 128 * 1024;
+/// Mapped size of a kernel thread stack.
+pub const KERNEL_STACK_SIZE: u64 = 64 * 1024;
+
 /// Base of the stack the kernel starts on.
 ///
 /// It sits in its own hole rather than in the direct map so that the unmapped

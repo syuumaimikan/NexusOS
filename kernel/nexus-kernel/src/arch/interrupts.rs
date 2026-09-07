@@ -3,8 +3,21 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::idt::{InterruptDescriptorTable, InterruptStackFrame};
-use super::{exceptions, gdt, pic, pit};
+use super::time::{self, TimerSource};
+use super::{apic, exceptions, gdt, pic, pit};
 use crate::kprintln;
+
+/// Vector the local APIC timer is delivered on.
+///
+/// Above the sixteen the 8259 was remapped onto, so both controllers can be
+/// live during the handover without either landing on the other's handler.
+pub const APIC_TIMER_VECTOR: u8 = super::idt::IRQ_BASE + 16;
+
+/// Vector the local APIC reports spurious interrupts on.
+///
+/// The architecture requires the low four bits to be set on some older
+/// processors, and 0xFF satisfies that on every one.
+pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
 /// The kernel's interrupt descriptor table.
 ///
@@ -69,15 +82,64 @@ where
     result
 }
 
-/// The periodic timer.
+/// The legacy PIT tick.
 ///
-/// Deliberately does almost nothing: this is the highest-frequency code in the
-/// kernel, and it runs with interrupts masked. Once the scheduler exists, this
-/// is where preemption is triggered.
-extern "x86-interrupt" fn timer_interrupt(_frame: InterruptStackFrame) {
-    pit::on_tick();
+/// Once the local APIC timer takes over, this stops advancing the clock rather
+/// than being unhooked. Unhooking would leave a window in which an interrupt
+/// already in flight lands on a vector with no handler; falling silent means a
+/// straggler is acknowledged and ignored, and the clock is never advanced twice
+/// for the same instant.
+extern "x86-interrupt" fn pit_interrupt(_frame: InterruptStackFrame) {
+    let driving = time::is_source(TimerSource::Pit);
+    if driving {
+        time::on_tick();
+        crate::sched::tick();
+    }
+
+    // Acknowledge before any possible context switch. If the switch happened
+    // first, the controller would still be holding this interrupt in service
+    // and would deliver nothing further until this thread ran again -- which,
+    // for a thread that never becomes runnable, is never.
     // SAFETY: called exactly once, from the handler for this vector.
     unsafe { pic::end_of_interrupt(pic::TIMER_VECTOR) };
+
+    if driving && crate::sched::needs_reschedule() {
+        preempt();
+    }
+}
+
+/// The local APIC timer tick, which is the scheduling tick once it is running.
+extern "x86-interrupt" fn apic_timer_interrupt(_frame: InterruptStackFrame) {
+    time::on_tick();
+    crate::sched::tick();
+
+    // SAFETY: called exactly once, from the handler for this vector.
+    unsafe { apic::end_of_interrupt() };
+
+    if crate::sched::needs_reschedule() {
+        preempt();
+    }
+}
+
+/// Hand the processor to another thread from inside a timer handler.
+///
+/// Safe to do here because the handler runs on the interrupted thread's own
+/// kernel stack: the `iretq` frame stays there with the saved registers, so
+/// resuming the thread later returns to this point and then returns from the
+/// interrupt exactly where it left off. It is also why neither timer vector may
+/// use an Interrupt Stack Table slot.
+#[inline]
+fn preempt() {
+    crate::sched::schedule();
+}
+
+/// The local APIC's spurious interrupt.
+///
+/// Counted, never acknowledged: the APIC raises no in-service bit for it, so an
+/// end-of-interrupt here would clear a different interrupt that is genuinely
+/// pending.
+extern "x86-interrupt" fn apic_spurious_interrupt(_frame: InterruptStackFrame) {
+    apic::on_spurious();
 }
 
 /// The PIC's spurious interrupt, raised when a line drops before it is
@@ -117,12 +179,16 @@ pub unsafe fn init(timer_hz: u32) {
 
         let idt = &mut *core::ptr::addr_of_mut!(IDT);
         exceptions::install(idt);
-        idt.set_handler(pic::TIMER_VECTOR, timer_interrupt as *const ());
+        idt.set_handler(pic::TIMER_VECTOR, pit_interrupt as *const ());
         // Vector 7 of the primary PIC is where a dropped line surfaces.
         idt.set_handler(
             pic::PRIMARY_VECTOR_BASE + 7,
             spurious_interrupt as *const (),
         );
+        // Registered now, before the APIC exists, so that the vectors are never
+        // reachable-but-unhandled during the handover.
+        idt.set_handler(APIC_TIMER_VECTOR, apic_timer_interrupt as *const ());
+        idt.set_handler(SPURIOUS_VECTOR, apic_spurious_interrupt as *const ());
 
         // `load` needs a `&'static` table; `IDT` is a static, and it is never
         // mutated again after this point.
@@ -130,6 +196,7 @@ pub unsafe fn init(timer_hz: u32) {
 
         pic::init();
         let actual_hz = pit::init(timer_hz);
+        time::set_source(TimerSource::Pit, u64::from(actual_hz));
         pic::unmask(0);
 
         kprintln!("[intr] GDT, TSS and IDT installed ({} vectors)", 256);
