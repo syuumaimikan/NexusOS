@@ -1,6 +1,6 @@
 # NexusOS Architecture Audit
 
-**Date:** 2026-09-07 (updated after Phase 4)
+**Date:** 2026-09-07 (updated after Phase 5)
 **Scope:** full repository
 **Verified by:** building both components and booting them in QEMU with edk2 firmware
 
@@ -53,9 +53,10 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Physical memory allocator | **DONE** | Buddy allocator; 1017 MiB over 260513 frames |
 | Virtual memory manager | **DONE** | map/unmap/translate; identity map torn down |
 | Kernel heap | **DONE** | 16 MiB, `GlobalAlloc`, `alloc` available |
-| Framebuffer drawing | **PARTIAL** | Rectangles and gradients; no text, no compositor |
+| Kernel threads, scheduler | **DONE** | Preemptive, priority + round-robin, sleep/wake, reaping |
+| Framebuffer drawing | **PARTIAL** | Text, rectangles, gradients; no compositor, no windows |
 | Local APIC, SMP | **MISSING** | Unblocked now that MMIO can be mapped |
-| Processes, threads, scheduler | **MISSING** | Next |
+| User mode, processes | **MISSING** | Threads are kernel-only; no ring 3 yet |
 | Handles, IPC, syscalls | **MISSING** | |
 
 ### Everything above the kernel
@@ -91,6 +92,16 @@ Not asserted — observed, on every boot:
   physical and the same bytes are read through the direct map, which is what
   proves the mappings are correct rather than merely plausible.
 - After teardown, a low address no longer translates.
+- Four worker threads run to completion with exactly the expected iteration
+  count, and their stacks are unmapped and returned when they are reaped.
+- A thread that never yields, at equal priority, is preempted: a sleeping
+  ticker wakes on schedule five times while the non-yielding thread completes
+  around twelve million iterations. Cooperative scheduling would hang here, so
+  this is the check that distinguishes real preemption from the appearance of
+  it.
+- A 1920x1200 status screen renders live uptime, memory, heap, thread and
+  context-switch figures, repainted twice a second by its own thread and
+  captured by `scripts/screenshot.ps1`.
 
 50 host unit tests cover the UEFI structure offsets, the ELF parser, memory-map
 normalization, the buddy allocator and the heap — the last two including
@@ -126,6 +137,18 @@ These are real and are tracked, not hidden:
 7. **The heap never shrinks.** It grows on demand and keeps what it takes.
    Acceptable for a kernel of this size; worth revisiting when there are
    long-running workloads.
+8. **The kernel binary has no host test harness.** It is `no_main` with its own
+   panic handler, so tests written inside it would compile and never run. What
+   can be checked statically is checked with const assertions; the rest is
+   covered by boot-marker checks, fault injection and screenshots. Logic worth
+   unit testing is moved into a library crate instead, which is why the
+   allocators live in `nexus-mm`.
+9. **Threads are kernel-only.** There is no ring 3, no address-space separation
+   and no system-call boundary yet, so "thread" currently means a kernel thread
+   and nothing is isolated from anything else.
+10. **No ageing in the scheduler.** Strict priority means a busy high-priority
+    thread starves everything below it. Deliberate for now, and it needs real
+    workloads before it can be tuned honestly.
 
 Resolved since the first audit: the missing IDT (Phase 2), the
 non-interrupt-safe spinlock (`IrqSpinLock`, Phase 2), and the unstripped kernel
@@ -165,11 +188,12 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **Threads, context switching and a preemptive scheduler** — the last piece
-   of kernel core that everything above it assumes.
-2. **Local APIC and its timer**, replacing the PIT as the scheduling tick, then
-   SMP bring-up from the ACPI MADT.
-3. **Ring 3 and the system-call entry path.**
-4. **Handles and IPC**, which is where the capability model starts.
+1. **Local APIC and its timer**, replacing the PIT as the scheduling tick, then
+   SMP bring-up from the ACPI MADT. This is the first thing that needs ACPI
+   table parsing, which the RSDP has been waiting for since Phase 1.
+2. **Ring 3 and the system-call entry path**, which is what turns a kernel
+   thread into a process and makes isolation mean anything.
+3. **Handles and IPC**, where the capability model starts.
+4. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

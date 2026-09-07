@@ -91,6 +91,17 @@ core to shoot down.
 - SMP bring-up via the MADT, per-CPU data
 - Ring 3 transition, `syscall`/`sysret`
 
+Delivered: kernel threads with their own guarded stacks, context switching,
+preemption from the timer, strict priority with round-robin inside each level,
+sleep and wake, thread exit and reaping, and a dedicated idle thread.
+
+**Done when:** a thread that never yields can still be taken off the processor.
+Verified: a sleeping ticker woke on schedule five times while a non-yielding
+thread at equal priority completed twelve million iterations.
+
+Still outstanding: user mode, address-space separation, per-CPU run queues and
+SMP. "Thread" currently means a kernel thread; nothing is isolated yet.
+
 ## Phase 6 — Handles, IPC, system calls ⬜
 
 - Handle table with per-handle rights, the root of the capability model
@@ -111,6 +122,11 @@ core to shoot down.
 - `init`, service manager, libc, runtime, shell
 
 ## Phase 9 — Graphics and the compositor ⬜
+
+Partially anticipated: the kernel already has a bitmap font, text rendering and
+a live status screen redrawn by its own thread. That is a boot display, not a
+compositor — no surfaces, no damage tracking, no windows — and it exists to be
+replaced by the real one.
 
 - Nexus Graphics abstraction over the framebuffer, later a GPU
 - Nexus Compositor: surfaces, damage tracking, frame scheduling, multi-monitor
