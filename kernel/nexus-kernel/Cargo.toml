@@ -12,3 +12,15 @@ path = "src/main.rs"
 
 [dependencies]
 nexus-abi = { path = "../../shared/nexus-abi" }
+
+[features]
+# Fault-injection builds, used by scripts/test-faults.ps1 to verify that the
+# exception path actually works. They are features rather than test code
+# because the only way to prove a fault handler is to take a real fault, and
+# the only way to observe the result is a separate boot.
+#
+# A machine that resets instead of printing a diagnostic is the failure these
+# guard against, and it is invisible without deliberately provoking it.
+inject-page-fault = []
+inject-stack-overflow = []
+inject-divide-error = []

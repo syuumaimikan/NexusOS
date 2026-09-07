@@ -251,8 +251,8 @@ pub extern "efiapi" fn efi_main(image_handle: Handle, system_table: *mut SystemT
 
     // Reserve the handoff block and the memory-region array. Both must outlive
     // boot services, so they are runtime-services data too.
-    let handoff_pages = 1 + (memory::MAX_REGIONS * core::mem::size_of::<MemoryRegion>())
-        .div_ceil(4096);
+    let handoff_pages =
+        1 + (memory::MAX_REGIONS * core::mem::size_of::<MemoryRegion>()).div_ceil(4096);
     let Some(handoff_phys) =
         // SAFETY: live boot services.
         (unsafe { allocate_zeroed_pages(services, handoff_pages, MemoryType::RuntimeServicesData) })
@@ -480,13 +480,8 @@ unsafe fn exit_boot_services(
     const MAP_BUFFER_BYTES: usize = 32 * 1024;
     let mut buffer: *mut c_void = core::ptr::null_mut();
     // SAFETY: upheld by the caller; `buffer` is a valid out pointer.
-    let status = unsafe {
-        (services.allocate_pool)(
-            MemoryType::LoaderData,
-            MAP_BUFFER_BYTES,
-            &mut buffer,
-        )
-    };
+    let status =
+        unsafe { (services.allocate_pool)(MemoryType::LoaderData, MAP_BUFFER_BYTES, &mut buffer) };
     if uefi::is_error(status) {
         fail("could not allocate a buffer for the final memory map")
     }

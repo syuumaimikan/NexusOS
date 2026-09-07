@@ -105,3 +105,89 @@ impl<T> Drop for SpinLockGuard<'_, T> {
         self.lock.locked.store(false, Ordering::Release);
     }
 }
+
+/// A spinlock that also masks interrupts while it is held.
+///
+/// This is the primitive for any data an interrupt handler touches. A plain
+/// [`SpinLock`] deadlocks in that situation: the handler interrupts a thread
+/// that already holds the lock, spins waiting for it, and the thread can never
+/// run to release it. Masking interrupts for the duration removes the only way
+/// the reentrant case can arise on this core.
+///
+/// The previous interrupt state is saved and restored rather than
+/// unconditionally re-enabled, so nesting these — or taking one inside an
+/// interrupt handler, where interrupts are already masked — behaves correctly.
+///
+/// Hold times must be short: interrupts are delayed for the whole critical
+/// section.
+pub struct IrqSpinLock<T> {
+    inner: SpinLock<T>,
+}
+
+// SAFETY: delegated to the inner lock, which serialises all access.
+unsafe impl<T: Send> Sync for IrqSpinLock<T> {}
+// SAFETY: moving the lock moves the value it guards.
+unsafe impl<T: Send> Send for IrqSpinLock<T> {}
+
+impl<T> IrqSpinLock<T> {
+    /// Create an unlocked `IrqSpinLock` holding `value`.
+    #[must_use]
+    pub const fn new(value: T) -> Self {
+        Self {
+            inner: SpinLock::new(value),
+        }
+    }
+
+    /// Mask interrupts and acquire the lock.
+    pub fn lock(&self) -> IrqSpinLockGuard<'_, T> {
+        // Interrupts are masked *before* the lock is taken. The other order
+        // leaves a window in which this core holds the lock and can still be
+        // interrupted into code that wants it.
+        let were_enabled = crate::arch::interrupts::are_enabled();
+        if were_enabled {
+            crate::arch::interrupts::disable();
+        }
+        IrqSpinLockGuard {
+            guard: Some(self.inner.lock()),
+            restore_interrupts: were_enabled,
+        }
+    }
+}
+
+/// Proof of ownership of an [`IrqSpinLock`].
+///
+/// Releases the lock and then restores the previous interrupt state, in that
+/// order.
+pub struct IrqSpinLockGuard<'a, T> {
+    /// Always `Some` until `drop` takes it, which is how the release is
+    /// sequenced before interrupts come back.
+    guard: Option<SpinLockGuard<'a, T>>,
+    restore_interrupts: bool,
+}
+
+impl<T> Deref for IrqSpinLockGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // `guard` is only taken in `drop`, after which this is unreachable.
+        self.guard.as_ref().expect("guard held").deref()
+    }
+}
+
+impl<T> DerefMut for IrqSpinLockGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.guard.as_mut().expect("guard held").deref_mut()
+    }
+}
+
+impl<T> Drop for IrqSpinLockGuard<'_, T> {
+    fn drop(&mut self) {
+        // Drop the inner guard first: releasing the lock before re-enabling
+        // interrupts means an interrupt that fires the instant they come back
+        // finds the lock free.
+        drop(self.guard.take());
+        if self.restore_interrupts {
+            crate::arch::interrupts::enable();
+        }
+    }
+}

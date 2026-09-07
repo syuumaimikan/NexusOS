@@ -8,7 +8,13 @@
 //! timer and the memory manager consume the rest of it directly.
 #![allow(dead_code)]
 
+pub mod exceptions;
+pub mod gdt;
+pub mod idt;
+pub mod interrupts;
 pub mod io;
+pub mod pic;
+pub mod pit;
 
 /// Stop this processor permanently with interrupts masked.
 ///

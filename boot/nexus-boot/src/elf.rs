@@ -309,11 +309,7 @@ where
         // allocated and zeroed above, because `vaddr + memsz <= max_vaddr_end`
         // and `filesz <= memsz`.
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                source.as_ptr(),
-                destination as *mut u8,
-                source.len(),
-            );
+            core::ptr::copy_nonoverlapping(source.as_ptr(), destination as *mut u8, source.len());
         }
 
         if segment_count < MAX_SEGMENTS {
@@ -413,7 +409,10 @@ mod tests {
     fn loads_a_single_segment_and_reports_where_it_landed() {
         const VADDR: u64 = 0xFFFF_FFFF_8000_0000;
         let payload = b"nexus kernel text";
-        let image = synthetic_elf(VADDR, &[(VADDR, PF_R | PF_X, payload, payload.len() as u64)]);
+        let image = synthetic_elf(
+            VADDR,
+            &[(VADDR, PF_R | PF_X, payload, payload.len() as u64)],
+        );
 
         let destination = Destination::new(4);
         let base = destination.base;
@@ -486,11 +485,17 @@ mod tests {
         truncated.truncate(32);
         // SAFETY: the loader rejects these before touching the destination.
         unsafe {
-            assert_eq!(load(&truncated, |_| Some(base)).err(), Some(ElfError::TooSmall));
+            assert_eq!(
+                load(&truncated, |_| Some(base)).err(),
+                Some(ElfError::TooSmall)
+            );
 
             let mut bad_magic = good.clone();
             bad_magic[1] = b'X';
-            assert_eq!(load(&bad_magic, |_| Some(base)).err(), Some(ElfError::BadMagic));
+            assert_eq!(
+                load(&bad_magic, |_| Some(base)).err(),
+                Some(ElfError::BadMagic)
+            );
 
             let mut bit32 = good.clone();
             bit32[4] = 1; // ELFCLASS32
@@ -498,7 +503,10 @@ mod tests {
 
             let mut wrong_machine = good.clone();
             wrong_machine[18..20].copy_from_slice(&0x00F3u16.to_le_bytes()); // EM_RISCV
-            assert_eq!(load(&wrong_machine, |_| Some(base)).err(), Some(ElfError::WrongType));
+            assert_eq!(
+                load(&wrong_machine, |_| Some(base)).err(),
+                Some(ElfError::WrongType)
+            );
         }
     }
 

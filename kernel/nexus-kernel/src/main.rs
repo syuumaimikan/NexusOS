@@ -10,6 +10,10 @@
 
 #![no_std]
 #![no_main]
+// Exception and IRQ handlers must use the `x86-interrupt` calling convention:
+// the compiler has to emit `iretq` and preserve every register the interrupted
+// code was using, which no stable ABI expresses.
+#![feature(abi_x86_interrupt)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod arch;
@@ -105,15 +109,158 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         None => kprintln!("[fb  ] no usable framebuffer; running headless"),
     }
 
+    // Descriptor tables, exception handlers and the timer. Until this runs, any
+    // fault is a triple fault, so it happens as early as anything can.
+    // SAFETY: single-threaded, and interrupts are still disabled — the CPU has
+    // not been told to enable them since reset.
+    unsafe { arch::interrupts::init(TIMER_FREQUENCY_HZ) };
+
+    self_test();
+    inject_fault_if_requested();
+
     kprintln!();
     kprintln!("[boot] early initialisation complete");
     kprintln!("[boot] {} MiB of usable RAM", usable / (1024 * 1024));
-    kprintln!("[boot] idling: interrupts, memory management and scheduling are next");
+    kprintln!("[boot] idling: memory management and scheduling are next");
 
-    // Nothing schedules work yet, so park the core in a low-power idle rather
-    // than spinning. Once interrupts are enabled this becomes the idle thread.
+    idle_loop()
+}
+
+/// Tick rate of the early timer.
+///
+/// 1000 Hz gives millisecond resolution, which is fine-grained enough for boot
+/// timing and for calibrating the APIC timer later, and cheap enough that the
+/// handler's cost does not matter before there is real work to preempt.
+const TIMER_FREQUENCY_HZ: u32 = 1000;
+
+/// Prove that interrupt dispatch works, rather than assuming it.
+///
+/// Both checks are cheap and both fail loudly. Discovering that the IDT is
+/// wrong here, in three lines of output, is worth a great deal more than
+/// discovering it later from a machine that reboots without saying why.
+fn self_test() {
+    kprintln!("[test] raising a breakpoint to verify exception dispatch");
+    // SAFETY: vector 3 has a handler installed that reports and returns, so
+    // execution resumes at the following instruction.
+    unsafe {
+        core::arch::asm!("int3", options(nomem, nostack));
+    }
+
+    kprintln!("[test] enabling interrupts and waiting for timer ticks");
+    arch::interrupts::enable();
+
+    // Spin until the timer proves itself, but not forever: if ticks never
+    // arrive, say so instead of hanging with no explanation.
+    let deadline = arch::read_tsc() + 10_000_000_000;
+    while arch::pit::ticks() < 10 && arch::read_tsc() < deadline {
+        core::hint::spin_loop();
+    }
+
+    let ticks = arch::pit::ticks();
+    if ticks == 0 {
+        kprintln!("[test] FAILED: no timer interrupts were delivered");
+    } else {
+        kprintln!("[test] timer is live: {ticks} ticks in the first few milliseconds");
+    }
+}
+
+/// Take a deliberate fault, when the kernel was built to.
+///
+/// Enabled by the `inject-*` features and driven by `scripts/test-faults.ps1`.
+/// Each one provokes a different path through the exception machinery, and each
+/// build takes exactly one fault because a fault report ends in a halt.
+///
+/// In an ordinary build every branch below compiles away to nothing.
+fn inject_fault_if_requested() {
+    #[cfg(feature = "inject-page-fault")]
+    {
+        // A canonical higher-half address the bootloader never mapped: far
+        // above the direct map's coverage and outside the kernel image.
+        const UNMAPPED: u64 = 0xFFFF_A000_0000_0000;
+        kprintln!("[test] fault injection: writing to unmapped {UNMAPPED:#018x}");
+        // SAFETY: intentionally unsound. The whole point is to fault, and this
+        // build exists only to verify that the fault is reported.
+        unsafe {
+            core::ptr::write_volatile(UNMAPPED as *mut u64, 0);
+        }
+        kprintln!("[test] FAILED: the write to unmapped memory did not fault");
+    }
+
+    #[cfg(feature = "inject-stack-overflow")]
+    {
+        kprintln!("[test] fault injection: overflowing the kernel stack");
+        // Recursing past the bottom of the boot stack hits its guard page. The
+        // page-fault handler then cannot push its own frame — the stack is
+        // exactly what is broken — so the CPU escalates to a double fault,
+        // which is why that handler runs on its own IST stack. This checks the
+        // guard page and the IST together.
+        overflow_stack(0);
+        kprintln!("[test] FAILED: the stack overflow did not fault");
+    }
+
+    #[cfg(feature = "inject-divide-error")]
+    {
+        kprintln!("[test] fault injection: dividing by zero");
+        // Built through volatile reads so the divisor is not a compile-time
+        // zero, which the compiler would reject outright.
+        let mut zero = 0u64;
+        // SAFETY: a volatile access to a local; the volatility is what stops
+        // the optimiser from folding the division away.
+        let divisor = unsafe { core::ptr::read_volatile(&mut zero) };
+        let dividend = arch::pit::ticks() | 1;
+        // SAFETY: `div` by zero raises vector 0, which is the point.
+        unsafe {
+            core::arch::asm!(
+                "div {divisor}",
+                divisor = in(reg) divisor,
+                inout("rax") dividend => _,
+                inout("rdx") 0u64 => _,
+                options(nomem, nostack),
+            );
+        }
+        kprintln!("[test] FAILED: the division by zero did not fault");
+    }
+}
+
+/// Recurse until the kernel stack runs into its guard page.
+///
+/// The volatile access after the recursive call is load-bearing: without it the
+/// compiler turns this into a loop and the stack never grows.
+#[cfg(feature = "inject-stack-overflow")]
+// Recursing forever is exactly the intent: the guard page is what stops it.
+#[allow(unconditional_recursion)]
+fn overflow_stack(depth: u64) -> u64 {
+    let mut frame = [depth; 32];
+    // SAFETY: a volatile access to a local array, purely to consume stack.
+    unsafe {
+        core::ptr::write_volatile(frame.as_mut_ptr(), depth);
+        let deeper = overflow_stack(depth + 1);
+        core::ptr::read_volatile(frame.as_ptr()).wrapping_add(deeper)
+    }
+}
+
+/// Park the processor until there is work for it.
+///
+/// This becomes the idle thread once the scheduler exists. `hlt` rather than a
+/// spin so the host CPU is not burned while the guest has nothing to do.
+fn idle_loop() -> ! {
+    let mut last_report = 0u64;
     loop {
         arch::wait_for_interrupt();
+
+        // A heartbeat every five seconds, which is how a boot test tells a
+        // healthy idle apart from a hang.
+        let uptime = arch::pit::uptime_ms();
+        if uptime >= last_report + 5000 {
+            last_report = uptime - (uptime % 5000);
+            kprintln!(
+                "[idle] uptime {}.{:03}s, {} ticks, {} spurious interrupts",
+                uptime / 1000,
+                uptime % 1000,
+                arch::pit::ticks(),
+                arch::interrupts::spurious_count()
+            );
+        }
     }
 }
 

@@ -8,7 +8,7 @@
 use core::fmt::{self, Write};
 
 use crate::arch::io::{inb, outb};
-use crate::sync::SpinLock;
+use crate::sync::IrqSpinLock;
 
 /// I/O port base of COM1 on a PC-compatible machine.
 const COM1_BASE: u16 = 0x3F8;
@@ -79,7 +79,12 @@ impl Write for SerialPort {
 }
 
 /// The kernel's COM1 instance.
-static COM1: SpinLock<SerialPort> = SpinLock::new(SerialPort::new(COM1_BASE));
+///
+/// Guarded by an interrupt-masking lock because interrupt handlers log through
+/// it. With a plain spinlock, a timer interrupt landing in the middle of a
+/// `kprintln!` would spin forever waiting for a lock the interrupted code can
+/// no longer release.
+static COM1: IrqSpinLock<SerialPort> = IrqSpinLock::new(SerialPort::new(COM1_BASE));
 
 /// Bring up the serial console. Called once, first thing in `_start`.
 pub fn init() {

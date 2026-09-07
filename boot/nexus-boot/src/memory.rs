@@ -55,13 +55,15 @@ impl<'a> UefiMemoryMap<'a> {
     }
 
     /// Number of descriptors in the map.
+    ///
+    /// A zero descriptor size means the firmware never filled the value in, so
+    /// the map is treated as empty rather than dividing by it.
     #[must_use]
     pub fn len(&self) -> usize {
-        if self.descriptor_size == 0 {
-            0
-        } else {
-            self.buffer.len() / self.descriptor_size
-        }
+        self.buffer
+            .len()
+            .checked_div(self.descriptor_size)
+            .unwrap_or(0)
     }
 
     /// Whether the map is empty.

@@ -210,8 +210,8 @@ impl AddressSpace {
         phys: u64,
         flags: u64,
     ) -> Result<(), MapError> {
-        debug_assert!(virt % LARGE_PAGE_SIZE == 0);
-        debug_assert!(phys % LARGE_PAGE_SIZE == 0);
+        debug_assert!(virt.is_multiple_of(LARGE_PAGE_SIZE));
+        debug_assert!(phys.is_multiple_of(LARGE_PAGE_SIZE));
 
         let pml4_index = ((virt >> 39) & 0x1FF) as usize;
         let pdpt_index = ((virt >> 30) & 0x1FF) as usize;
@@ -221,11 +221,7 @@ impl AddressSpace {
         unsafe {
             let pdpt = self.next_table(self.root, pml4_index)?;
             let pd = self.next_table(pdpt, pdpt_index)?;
-            Self::set_entry(
-                pd,
-                pd_index,
-                (phys & ADDRESS_MASK) | flags | PRESENT | HUGE,
-            );
+            Self::set_entry(pd, pd_index, (phys & ADDRESS_MASK) | flags | PRESENT | HUGE);
         }
         Ok(())
     }
@@ -340,12 +336,7 @@ pub unsafe fn enable_no_execute() {
 /// must map the code at `entry` executable, the stack at `stack_top` writable,
 /// and the currently executing instructions must remain mapped across the
 /// `cr3` load. Boot services must already have been exited.
-pub unsafe fn enter_kernel(
-    page_table_root: u64,
-    stack_top: u64,
-    entry: u64,
-    boot_info: u64,
-) -> ! {
+pub unsafe fn enter_kernel(page_table_root: u64, stack_top: u64, entry: u64, boot_info: u64) -> ! {
     // SAFETY: upheld by the caller. The identity map built above keeps this
     // very instruction stream valid after `cr3` changes; `rsp` is replaced
     // before anything touches the old firmware stack.

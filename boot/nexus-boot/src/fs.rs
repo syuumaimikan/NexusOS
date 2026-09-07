@@ -177,9 +177,7 @@ pub unsafe fn load_kernel_image(
     let mut read_size = file_size as usize;
     // SAFETY: the buffer holds `pages * 4096 >= file_size` bytes, and UEFI
     // memory is identity mapped, so `buffer_phys` is a usable pointer.
-    let status = unsafe {
-        ((*file).read)(file, &mut read_size, buffer_phys as *mut c_void)
-    };
+    let status = unsafe { ((*file).read)(file, &mut read_size, buffer_phys as *mut c_void) };
     if uefi::is_error(status) || read_size != file_size as usize {
         return Err(FileError::Read(status));
     }

@@ -112,7 +112,9 @@ impl Framebuffer {
         match self.format {
             // Byte order R, G, B, X in memory; little-endian words put red low.
             PixelFormat::Rgbx8888 => {
-                u32::from(color.red()) | u32::from(color.green()) << 8 | u32::from(color.blue()) << 16
+                u32::from(color.red())
+                    | u32::from(color.green()) << 8
+                    | u32::from(color.blue()) << 16
             }
             // Byte order B, G, R, X, which matches `0x00RRGGBB` directly.
             PixelFormat::Bgrx8888 => color.0,

@@ -10,8 +10,7 @@ use core::ffi::c_void;
 use nexus_abi::{FramebufferInfo, PixelFormat};
 
 use crate::uefi::{
-    self, BootServices, GraphicsOutputProtocol, GraphicsOutputModeInformation,
-    GraphicsPixelFormat,
+    self, BootServices, GraphicsOutputModeInformation, GraphicsOutputProtocol, GraphicsPixelFormat,
 };
 
 /// Widest mode the bootloader will select.
@@ -97,8 +96,7 @@ pub unsafe fn init(boot_services: *mut BootServices) -> FramebufferInfo {
         let mut info: *mut GraphicsOutputModeInformation = core::ptr::null_mut();
         let mut info_size: usize = 0;
         // SAFETY: `gop` is live; `mode_number` is below `max_mode`.
-        let status =
-            unsafe { ((*gop).query_mode)(gop, mode_number, &mut info_size, &mut info) };
+        let status = unsafe { ((*gop).query_mode)(gop, mode_number, &mut info_size, &mut info) };
         if uefi::is_error(status) || info.is_null() {
             continue;
         }
