@@ -99,8 +99,13 @@ sleep and wake, thread exit and reaping, and a dedicated idle thread.
 Verified: a sleeping ticker woke on schedule five times while a non-yielding
 thread at equal priority completed twelve million iterations.
 
+Also delivered since: ACPI table parsing (RSDP, XSDT, MADT) and the local APIC
+timer, calibrated against the PIT and now driving the scheduling tick with the
+8259 and PIT shut down behind it.
+
 Still outstanding: user mode, address-space separation, per-CPU run queues and
-SMP. "Thread" currently means a kernel thread; nothing is isolated yet.
+SMP. The processors are enumerated but none are started; "thread" currently
+means a kernel thread, and nothing is isolated yet.
 
 ## Phase 6 — Handles, IPC, system calls ⬜
 

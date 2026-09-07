@@ -1,6 +1,6 @@
 # NexusOS Architecture Audit
 
-**Date:** 2026-09-07 (updated after Phase 5 and localisation)
+**Date:** 2026-09-08 (updated after the local APIC)
 **Scope:** full repository
 **Verified by:** building both components and booting them in QEMU with edk2 firmware
 
@@ -35,7 +35,7 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Memory map handoff | **DONE** | Normalized, sorted, coalesced |
 | ACPI RSDP discovery | **DONE** | ACPI 2.0 preferred, 1.0 fallback |
 | `ExitBootServices` | **DONE** | With map-key retry loop |
-| ACPI table parsing | **MISSING** | RSDP address is passed but nothing parses it yet |
+| ACPI table parsing | **DONE** | RSDP, XSDT/RSDT and MADT, with checksums verified |
 | Secure Boot / measured boot | **MISSING** | Deferred to Phase 19 |
 | A/B update, recovery | **MISSING** | Deferred to Phase 19 |
 
@@ -58,7 +58,9 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Localisation | **DONE** | English and Japanese, switchable at runtime |
 | Text rendering | **PARTIAL** | UTF-8, half and full width, integer scaling; no shaping |
 | Input, IME | **MISSING** | No keyboard driver, so nothing to type into |
-| Local APIC, SMP | **MISSING** | Unblocked now that MMIO can be mapped |
+| Local APIC, APIC timer | **DONE** | Calibrated against the PIT; drives the tick |
+| SMP | **MISSING** | The processors are enumerated but none are started |
+| I/O APIC, MSI | **MISSING** | Enumerated, not programmed; no device interrupts yet |
 | User mode, processes | **MISSING** | Threads are kernel-only; no ring 3 yet |
 | Handles, IPC, syscalls | **MISSING** | |
 
@@ -95,6 +97,12 @@ Not asserted — observed, on every boot:
   physical and the same bytes are read through the direct map, which is what
   proves the mappings are correct rather than merely plausible.
 - After teardown, a low address no longer translates.
+- ACPI 2.0 tables are located and validated: the XSDT and the MADT, reporting
+  four processors, one I/O APIC and the presence of a legacy 8259.
+- The local APIC timer is calibrated against the PIT at around 1.2 GHz, takes
+  over the tick at 1000 Hz, and the 8259 and PIT are shut down behind it.
+  Uptime then tracks wall clock to within a millisecond per five seconds, which
+  is what says the handover preserved the clock rather than merely survived it.
 - Four worker threads run to completion with exactly the expected iteration
   count, and their stacks are unmapped and returned when they are reaped.
 - A thread that never yields, at equal priority, is preempted: a sleeping
@@ -124,9 +132,9 @@ The build produces zero warnings and passes `clippy -D warnings`.
 
 These are real and are tracked, not hidden:
 
-1. **No local APIC, and therefore no SMP.** The PIT drives a single core. This
-   was blocked on the virtual memory manager, since the APIC's registers sit
-   above RAM and could not be mapped; that block is now gone.
+1. **No SMP.** ACPI reports four processors and the local APIC can address
+   them, but none are started: there is no trampoline, no per-CPU state and no
+   TLB shootdown. Everything runs on the boot processor.
 2. **The framebuffer is mapped write-back, not write-combining.** Correct in
    QEMU, slow on real hardware. Needs PAT configuration.
 3. **No TLB shootdown.** `invlpg` handles the running core; a second core would
@@ -202,12 +210,14 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **Local APIC and its timer**, replacing the PIT as the scheduling tick, then
-   SMP bring-up from the ACPI MADT. This is the first thing that needs ACPI
-   table parsing, which the RSDP has been waiting for since Phase 1.
-2. **Ring 3 and the system-call entry path**, which is what turns a kernel
+1. **SMP bring-up**: start the processors the MADT reports, give each one its
+   own per-CPU state and run queue, and add TLB shootdown — which cannot be
+   written or tested until there is a second core to shoot down.
+2. **The I/O APIC**, so devices other than the timer can raise interrupts. This
+   is the precondition for a keyboard, and therefore for input of any kind.
+3. **Ring 3 and the system-call entry path**, which is what turns a kernel
    thread into a process and makes isolation mean anything.
-3. **Handles and IPC**, where the capability model starts.
-4. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
+4. **Handles and IPC**, where the capability model starts.
+5. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.
