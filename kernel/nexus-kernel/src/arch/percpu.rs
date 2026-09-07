@@ -48,12 +48,30 @@ pub struct PerCpu {
     pub idle_thread: u64,
     /// Top of the stack this processor entered the kernel on.
     pub kernel_stack_top: u64,
+    /// The thread this processor switched away from and has not yet released.
+    ///
+    /// [`NO_THREAD`] when there is none. A thread cannot complete its own
+    /// departure: between announcing where it is going and the stack switch
+    /// that takes it there it is still executing, so another processor acting
+    /// on the announcement would be acting on a thread that has not stopped.
+    /// The *next* thread to run here finishes the job, by which point the
+    /// outgoing one has provably left.
+    pub previous: u64,
     /// Interrupts handled here, for diagnostics.
     pub interrupt_count: u64,
     /// Whether this processor has finished starting.
     pub online: bool,
-    _padding: [u8; 7],
+    /// Set when the thread running here should be preempted at the first
+    /// opportunity. Per-processor because the answer differs per processor.
+    pub needs_reschedule: bool,
+    _padding: [u8; 6],
 }
+
+/// The thread fields' "nothing here" value.
+///
+/// Not zero: thread zero is the context the kernel booted on, and it is a real
+/// thread that can be switched away from like any other.
+pub const NO_THREAD: u64 = u64::MAX;
 
 impl PerCpu {
     const fn new() -> Self {
@@ -61,12 +79,14 @@ impl PerCpu {
             self_pointer: 0,
             cpu_index: 0,
             apic_id: 0,
-            current_thread: 0,
-            idle_thread: 0,
+            current_thread: NO_THREAD,
+            idle_thread: NO_THREAD,
             kernel_stack_top: 0,
+            previous: NO_THREAD,
             interrupt_count: 0,
             online: false,
-            _padding: [0; 7],
+            needs_reschedule: false,
+            _padding: [0; 6],
         }
     }
 }
@@ -76,6 +96,113 @@ impl PerCpu {
 /// Aligned to a cache line by `PerCpu` itself, so two processors updating their
 /// own state never contend for the same line.
 static mut PER_CPU: [PerCpu; MAX_PROCESSORS] = [const { PerCpu::new() }; MAX_PROCESSORS];
+
+/// Where the accessors below point before `GS` is set, and if it never is.
+///
+/// Per-processor state is installed only once the local APIC is up, because a
+/// processor's identifier is not known before then, and the APIC can fail to
+/// come up at all. Everything between kernel entry and that point — and the
+/// whole of a uniprocessor fallback — still needs somewhere to keep a current
+/// thread. One extra slot is cheaper than making every caller handle the
+/// possibility of there being nowhere to write.
+static mut FALLBACK: PerCpu = PerCpu::new();
+
+/// This processor's state, or the fallback slot before `GS` is set.
+#[inline]
+fn this() -> *mut PerCpu {
+    if is_installed() {
+        // SAFETY: `is_installed` confirmed the base is set, and `current`
+        // resolves it through this processor's own `GS`.
+        unsafe { core::ptr::from_mut(current()) }
+    } else {
+        core::ptr::addr_of_mut!(FALLBACK)
+    }
+}
+
+/// The thread running on this processor.
+#[inline]
+#[must_use]
+pub fn current_thread() -> u64 {
+    // SAFETY: `this` returns a live slot, and only this processor writes it.
+    unsafe { (*this()).current_thread }
+}
+
+/// Record the thread now running on this processor.
+pub fn set_current_thread(id: u64) {
+    // SAFETY: as above.
+    unsafe { (*this()).current_thread = id };
+}
+
+/// The thread this processor falls back to when nothing is ready.
+#[inline]
+#[must_use]
+pub fn idle_thread() -> u64 {
+    // SAFETY: as above.
+    unsafe { (*this()).idle_thread }
+}
+
+/// Record this processor's idle thread.
+pub fn set_idle_thread(id: u64) {
+    // SAFETY: as above.
+    unsafe { (*this()).idle_thread = id };
+}
+
+/// Take the thread this processor switched away from, leaving nothing behind.
+pub fn take_previous() -> Option<u64> {
+    // SAFETY: as above.
+    unsafe {
+        let slot = this();
+        let id = (*slot).previous;
+        (*slot).previous = NO_THREAD;
+        (id != NO_THREAD).then_some(id)
+    }
+}
+
+/// Note that `id` is leaving this processor and still has to be released.
+pub fn set_previous(id: u64) {
+    // SAFETY: as above.
+    unsafe { (*this()).previous = id };
+}
+
+/// Whether the thread running here should be preempted.
+#[inline]
+#[must_use]
+pub fn needs_reschedule() -> bool {
+    // SAFETY: as above.
+    unsafe { (*this()).needs_reschedule }
+}
+
+/// Set or clear this processor's preemption request.
+pub fn set_needs_reschedule(value: bool) {
+    // SAFETY: as above.
+    unsafe { (*this()).needs_reschedule = value };
+}
+
+/// Ask every online processor to reschedule at its next opportunity.
+///
+/// Used when a thread becomes runnable: whichever processor is idling should
+/// pick it up, and the one that woke it has no way of knowing which that is.
+///
+/// A plain store into another processor's slot rather than an inter-processor
+/// interrupt. The target notices at its next timer tick, so the latency is one
+/// millisecond, and the failure modes of a racing store are an extra trip
+/// through the scheduler or a request that arrives a tick late — neither of
+/// which is a correctness problem. An IPI would cost a delivery and an
+/// acknowledgement on every wake to save that millisecond, which is not a
+/// trade worth making until something is measured that cares.
+pub fn request_reschedule_everywhere() {
+    for index in 0..MAX_PROCESSORS {
+        // SAFETY: the slot exists for the life of the kernel. Writing another
+        // processor's flag races with that processor's own writes, and a
+        // single-byte store cannot tear; the value is a hint either way.
+        unsafe {
+            let slot = core::ptr::addr_of_mut!(PER_CPU[index]);
+            if (*slot).online {
+                (*slot).needs_reschedule = true;
+            }
+        }
+    }
+}
 
 /// Number of processors that have come online.
 static ONLINE_COUNT: AtomicUsize = AtomicUsize::new(0);

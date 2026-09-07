@@ -62,6 +62,14 @@ pub enum ThreadState {
     Running,
     /// Waiting until the tick counter reaches this value.
     Sleeping { until_tick: u64 },
+    /// Done running, but still standing on its own stack.
+    ///
+    /// The gap between the two matters: a thread that has decided to exit is
+    /// still executing until the stack switch completes, so anything that
+    /// freed its stack on seeing it finished would pull the ground out from
+    /// under it. The processor it left marks it [`Finished`](Self::Finished)
+    /// once it has switched away.
+    Exiting,
     /// Finished. Its stack is reclaimed and it will never run again.
     Finished,
 }
@@ -170,6 +178,19 @@ pub struct Thread {
     pub ticks_run: u64,
     /// How many times it has been switched to.
     pub switches: u64,
+    /// Set while this thread has left the scheduler's hands but is still
+    /// executing on its own stack.
+    ///
+    /// A thread announces where it is going -- ready, asleep, or done -- before
+    /// the stack switch that takes it there, and it keeps running for the few
+    /// instructions in between. Anything acting on that announcement in the gap
+    /// would be acting on a thread that is still on a processor: waking it
+    /// would let a second processor switch to a stack pointer that has not been
+    /// saved yet, and reclaiming it would free the stack it is standing on.
+    ///
+    /// The processor it leaves clears this from the incoming thread, once the
+    /// outgoing one has provably stopped executing.
+    pub switching_out: bool,
 }
 
 /// Ticks a thread runs before the scheduler considers preempting it.
@@ -180,22 +201,25 @@ pub struct Thread {
 pub const TIME_SLICE_TICKS: u32 = 10;
 
 impl Thread {
-    /// Create the thread representing the context the kernel booted on.
+    /// Adopt the context already executing as a thread.
     ///
-    /// It owns no stack: it is already running on the bootloader's, and that
+    /// It owns no stack: it is already running on one the kernel did not
+    /// allocate -- the bootloader's, for the boot processor, or the one the
+    /// boot processor handed an application processor to start on -- and that
     /// stack must outlive everything.
-    pub fn boot_thread(id: ThreadId, name: &str) -> Box<Self> {
+    pub fn boot_thread(id: ThreadId, name: &str, priority: Priority) -> Box<Self> {
         Box::new(Self {
             id,
             name: String::from(name),
             state: ThreadState::Running,
-            priority: Priority::Normal,
+            priority,
             stack_pointer: 0,
             stack: None,
             entry: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
             switches: 0,
+            switching_out: false,
         })
     }
 
@@ -224,6 +248,7 @@ impl Thread {
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
             switches: 0,
+            switching_out: false,
         }))
     }
 
@@ -274,6 +299,7 @@ impl Thread {
     /// Whether this thread is waiting for a deadline that has now passed.
     #[must_use]
     pub fn is_wakeable(&self, now: u64) -> bool {
-        matches!(self.state, ThreadState::Sleeping { until_tick } if now >= until_tick)
+        !self.switching_out
+            && matches!(self.state, ThreadState::Sleeping { until_tick } if now >= until_tick)
     }
 }

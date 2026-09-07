@@ -97,7 +97,7 @@ core to shoot down.
 
 Delivered: kernel threads with their own guarded stacks, context switching,
 preemption from the timer, strict priority with round-robin inside each level,
-sleep and wake, thread exit and reaping, and a dedicated idle thread.
+sleep and wake, thread exit and reaping, and an idle thread per processor.
 
 **Done when:** a thread that never yields can still be taken off the processor.
 Verified: a sleeping ticker woke on schedule five times while a non-yielding
@@ -110,9 +110,17 @@ timer, calibrated against the PIT and now driving the scheduling tick with the
 SMP bring-up is also done: every processor the MADT reports is started, through
 a real-mode trampoline and INIT/SIPI, and each runs on its own local APIC timer.
 
-Still outstanding: per-processor scheduling (only the boot processor schedules
-today), TLB shootdown, user mode and address-space separation. "Thread" still
-means a kernel thread, and nothing is isolated yet.
+And every one of them now schedules. Which thread is running, which to fall back
+to, and whether a preemption is due are per-processor, held in the `GS`-based
+per-CPU area and readable without a lock; the thread table and the run queues
+stay shared behind one lock. A thread completes its departure from a processor
+only once the *next* thread there has run, which is what keeps a second core
+from switching onto a stack whose pointer has not been saved. The boot self-test
+records which processors ran its workers and fails if the answer is only one.
+
+Still outstanding: TLB shootdown, per-processor run queues, thread affinity,
+user mode and address-space separation. "Thread" still means a kernel thread,
+and nothing is isolated yet.
 
 ## Input 🚧
 

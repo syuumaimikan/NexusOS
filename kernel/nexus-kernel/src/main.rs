@@ -245,11 +245,15 @@ fn monitor_thread(_argument: usize) {
         reported += 5;
 
         kprintln!(
-            "[mon ] {reported}s uptime {}.{:03}s | threads {} ({} ready, {} sleeping) | \
+            "[mon ] {reported}s uptime {}.{:03}s | threads {} ({} running, {} ready, {} sleeping) | \
              {} switches, {} awaiting reaping{}",
             arch::time::uptime_ms() / 1000,
             arch::time::uptime_ms() % 1000,
             stats.threads,
+            // Now worth reporting: with every processor scheduling, more than
+            // one thread is running at a time, and a count stuck at one would
+            // say the other cores had stopped taking work.
+            stats.running,
             stats.ready,
             stats.sleeping,
             stats.context_switches,
@@ -474,6 +478,14 @@ mod sched_test {
     pub static TICKER_WAKEUPS: AtomicU64 = AtomicU64::new(0);
     /// Set to stop the hog once the preemption test has its answer.
     pub static STOP_HOG: AtomicU64 = AtomicU64::new(0);
+    /// Bitmap of the processors that ran a worker, one bit per index.
+    ///
+    /// The point of scheduling on every processor is that work lands on more
+    /// than one of them. Nothing else in the log proves that: switch counts and
+    /// interrupt counts are consistent with three cores idling politely. Having
+    /// the workers record where they ran turns it into something the boot test
+    /// can read.
+    pub static WORKER_PROCESSORS: AtomicU64 = AtomicU64::new(0);
 }
 
 /// Iterations each self-test worker performs.
@@ -490,6 +502,9 @@ fn self_test_worker(argument: usize) {
 
     for _ in 0..WORKER_ITERATIONS {
         sched_test::WORK_DONE.fetch_add(1, Ordering::Relaxed);
+        // Sampled every iteration, not once: a thread can be preempted and
+        // resumed on a different processor, and both are worth recording.
+        sched_test::WORKER_PROCESSORS.fetch_or(1 << arch::percpu::cpu_index(), Ordering::Relaxed);
         if argument % 2 == 0 {
             sched::yield_now();
         }
@@ -565,6 +580,17 @@ fn scheduler_self_test() {
         return;
     }
     kprintln!("[test] {finished} threads ran to completion, {work} iterations total");
+
+    let processors = sched_test::WORKER_PROCESSORS.load(Ordering::Relaxed);
+    let used = processors.count_ones();
+    let online = arch::smp::processor_count();
+    if online > 1 && used < 2 {
+        kprintln!(
+            "[test] FAILED: {online} processors are online but every worker ran on one of them"
+        );
+        return;
+    }
+    kprintln!("[test] work was spread across {used} of {online} processors (mask {processors:#x})");
 
     // Now the real question: can a thread that never yields be preempted?
     kprintln!("[test] starting a thread that never yields, at equal priority");

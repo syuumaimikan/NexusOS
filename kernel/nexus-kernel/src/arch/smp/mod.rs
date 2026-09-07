@@ -168,12 +168,10 @@ extern "sysv64" fn application_processor_entry(cpu_index: u64) -> ! {
     STARTED.fetch_add(1, Ordering::Release);
     LAST_STARTED_INDEX.store(cpu_index, Ordering::Release);
 
-    // Interrupts on, then idle. The scheduler does not yet hand work to other
-    // processors; this core takes its timer interrupts and waits.
+    // Interrupts on, then into the scheduler, which this core enters as its own
+    // idle thread and never leaves.
     super::interrupts::enable();
-    loop {
-        super::wait_for_interrupt();
-    }
+    crate::sched::run_idle_on_this_processor(index)
 }
 
 /// Start every processor the firmware reported, other than this one.

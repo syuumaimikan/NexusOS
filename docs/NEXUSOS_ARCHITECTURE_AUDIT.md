@@ -62,7 +62,7 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | IME | **MISSING** | Latin only; nothing to compose Japanese with |
 | Local APIC, APIC timer | **DONE** | Calibrated against the PIT; drives the tick |
 | SMP bring-up | **DONE** | All processors started, each on its own APIC timer |
-| SMP scheduling | **MISSING** | Only the boot processor schedules; see §4 |
+| SMP scheduling | **DONE** | Every processor schedules; shared run queues, per-CPU current thread |
 | I/O APIC | **DONE** | Redirection entries programmed, source overrides honoured |
 | MSI, MSI-X | **MISSING** | No PCI enumeration yet, so nothing to target |
 | User mode, processes | **MISSING** | Threads are kernel-only; no ring 3 yet |
@@ -146,58 +146,63 @@ The build produces zero warnings and passes `clippy -D warnings`.
 
 These are real and are tracked, not hidden:
 
-1. **The scheduler is still single-processor.** Every processor starts, takes
-   its own timer interrupt and idles, but only the boot processor runs the
-   scheduler. The scheduler keeps one global notion of the running thread, so a
-   second processor entering it picks a thread the first is already running and
-   context-switches onto its stack — which is what happened, and page-faulted
-   within milliseconds. Lifting this needs a per-processor current thread and
-   run queue.
-2. **No TLB shootdown.** `invlpg` handles the running core; with four cores now
-   running, a mapping change leaves the others with a stale translation. This
-   was theoretical before and is not any more.
-2. **The framebuffer is mapped write-back, not write-combining.** Correct in
+1. **No TLB shootdown.** `invlpg` handles the running core; with four cores now
+   running threads, a mapping change leaves the others with a stale translation.
+   This was theoretical while only the boot processor scheduled. It is not any
+   more, and it is the most urgent item on this list.
+2. **The run queues are shared, not per-processor.** One lock covers the thread
+   table and all four queues. That is correct and it is what makes every
+   processor able to take work, but it is a point of contention that will matter
+   once there are more processors or more threads than a desktop has today.
+   Per-processor queues with balancing between them is the next step, and it
+   wants contention to measure rather than to be guessed at.
+3. **No thread affinity.** A thread can be resumed on any processor, which is
+   right for fairness and wrong for cache locality. There is nothing to measure
+   it with yet.
+4. **The framebuffer is mapped write-back, not write-combining.** Correct in
    QEMU, slow on real hardware. Needs PAT configuration.
-4. **Bootloader allocations are over-conservative.** Page tables, the handoff
+5. **Bootloader allocations are over-conservative.** Page tables, the handoff
    block and the kernel image are allocated as `RuntimeServicesData`, which the
    kernel treats as permanently reserved. This wastes on the order of 100 KiB.
-5. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
+6. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
    directory. Excellent for iteration, but it means NexusOS has never booted
    from a genuine partition table. A real GPT + FAT32 image builder is needed
    before any hardware test.
-6. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
+7. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
    automatically.
-7. **The heap never shrinks.** It grows on demand and keeps what it takes.
+8. **The heap never shrinks.** It grows on demand and keeps what it takes.
    Acceptable for a kernel of this size; worth revisiting when there are
    long-running workloads.
-8. **The kernel binary has no host test harness.** It is `no_main` with its own
+9. **The kernel binary has no host test harness.** It is `no_main` with its own
    panic handler, so tests written inside it would compile and never run. What
    can be checked statically is checked with const assertions; the rest is
    covered by boot-marker checks, fault injection and screenshots. Logic worth
    unit testing is moved into a library crate instead, which is why the
    allocators live in `nexus-mm`.
-9. **Threads are kernel-only.** There is no ring 3, no address-space separation
-   and no system-call boundary yet, so "thread" currently means a kernel thread
-   and nothing is isolated from anything else.
-10. **No ageing in the scheduler.** Strict priority means a busy high-priority
+10. **Threads are kernel-only.** There is no ring 3, no address-space separation
+    and no system-call boundary yet, so "thread" currently means a kernel thread
+    and nothing is isolated from anything else.
+11. **No ageing in the scheduler.** Strict priority means a busy high-priority
     thread starves everything below it. Deliberate for now, and it needs real
     workloads before it can be tuned honestly.
-11. **CJK glyphs depend on the build machine.** They are rasterised at build
+12. **CJK glyphs depend on the build machine.** They are rasterised at build
     time from an installed font, because bundling one would redistribute it.
     A machine without a suitable font still builds, but non-Latin text renders
     as placeholder boxes. See [i18n.md](i18n.md).
-12. **Input goes nowhere but the kernel.** Keys are decoded and acted on
+13. **Input goes nowhere but the kernel.** Keys are decoded and acted on
     inside the kernel because there is no focus, no window and no process to
     deliver them to. There is no IME either, so Japanese can be displayed but
     not typed.
-13. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
+14. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
     no bidirectional text, no ligatures or combining marks.
 
 Resolved since the first audit: the missing IDT (Phase 2), the
 non-interrupt-safe spinlock (`IrqSpinLock`, Phase 2), the unstripped kernel
 image on the ESP, which was costing megabytes of boot-time reads for a
-hundred-kilobyte load, and the two scripts that staged that ESP differently, so
-whichever ran last decided what the next boot would load.
+hundred-kilobyte load, the two scripts that staged that ESP differently, so
+whichever ran last decided what the next boot would load, and the
+single-processor scheduler: every processor now runs threads, and the boot test
+fails if the workers all land on one of them.
 
 ## 5. Architectural decisions and why
 
@@ -232,9 +237,8 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **Per-processor scheduling**: a current thread and run queue per core, so
-   the processors that are already running can be given work, plus the TLB
-   shootdown that four running cores now make necessary.
+1. **TLB shootdown**, which four cores now running threads make necessary: a
+   mapping change on one leaves stale translations on the others.
 2. **Ring 3 and the system-call entry path**, which is what turns a kernel
    thread into a process and makes isolation mean anything.
 3. **Handles and IPC**, where the capability model starts. Input needs it too:

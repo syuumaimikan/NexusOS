@@ -1,6 +1,7 @@
 //! The Nexus Scheduler.
 //!
-//! Preemptive, priority-ordered, round-robin within each priority.
+//! Preemptive, priority-ordered, round-robin within each priority, across every
+//! processor.
 //!
 //! # Scheduling policy
 //!
@@ -11,6 +12,21 @@
 //! starve everything below it. Ageing and deadline scheduling belong here later;
 //! neither can be tuned honestly before there are real workloads to measure.
 //!
+//! # What is shared and what is not
+//!
+//! The thread table and the run queues are shared, behind one lock. Which
+//! thread is *running*, which thread to fall back to, and whether a preemption
+//! is due are per-processor, held in [`percpu`] and reachable without a lock —
+//! an interrupt handler cannot afford to take one to find out what it
+//! interrupted.
+//!
+//! Shared run queues rather than per-processor ones is a deliberate first step.
+//! It is what makes every processor able to run work at all, which is the
+//! correctness question; per-processor queues with balancing between them is a
+//! scalability question, and answering it before there is contention to measure
+//! would be guessing. One lock on a four-core desktop taking a thousand
+//! decisions a second is not where the time goes.
+//!
 //! # Locking
 //!
 //! The scheduler is behind one lock, and the actual stack switch happens
@@ -18,37 +34,48 @@
 //! across the switch would deadlock: the incoming thread would try to release a
 //! lock the outgoing thread still owns. Masking interrupts across the gap is
 //! what keeps the released-but-not-yet-switched window from being re-entered.
+//!
+//! # Handing over
+//!
+//! A thread cannot finish leaving a processor by itself. Between announcing
+//! where it is going — ready, asleep, or done — and the stack switch that takes
+//! it there, it is still executing. In that window another processor must not
+//! be able to act on the announcement: switching to a thread whose stack
+//! pointer has not been saved yet puts two cores on one stack, and freeing a
+//! finished thread's stack pulls the ground from under it.
+//!
+//! So the departure is completed by the *incoming* thread, in
+//! [`finish_switch`], which runs on the same processor immediately after the
+//! switch — at which point the outgoing thread has provably stopped. Until then
+//! the outgoing thread is flagged [`Thread::switching_out`] and is invisible to
+//! waking and reaping.
 
 pub mod context;
 pub mod thread;
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::format;
 
-use crate::arch::{self, interrupts, time};
+use crate::arch::{self, interrupts, percpu, time};
 use crate::kprintln;
 use crate::sync::IrqSpinLock;
 
 use context::context_switch;
 use thread::{Priority, Thread, ThreadEntry, ThreadId, ThreadState, TIME_SLICE_TICKS};
 
-/// Scheduler state.
+/// Scheduler state shared by every processor.
 struct Scheduler {
     threads: BTreeMap<ThreadId, Box<Thread>>,
     /// One run queue per priority level, highest index checked first.
-    ready: [VecDeque<ThreadId>; Priority::COUNT],
-    current: ThreadId,
-    /// The thread to run when no run queue has anything.
     ///
-    /// It is deliberately kept *out* of the run queues: it must never compete
-    /// with real work, and it must never be unavailable. Without it, a moment
-    /// where every thread is asleep leaves the scheduler with nowhere to go.
-    idle: ThreadId,
+    /// The idle threads are deliberately kept *out* of these: an idle thread
+    /// must never compete with real work, and must never be unavailable. Each
+    /// processor reaches its own through [`percpu::idle_thread`].
+    ready: [VecDeque<ThreadId>; Priority::COUNT],
     next_id: u64,
     /// Next free slot in the kernel stack area.
     next_stack_index: u64,
-    /// Set by the timer when the running thread has used up its slice.
-    needs_reschedule: bool,
     context_switches: u64,
 }
 
@@ -62,11 +89,8 @@ impl Scheduler {
                 VecDeque::new(),
                 VecDeque::new(),
             ],
-            current: ThreadId(0),
-            idle: ThreadId(0),
             next_id: 1,
             next_stack_index: 0,
-            needs_reschedule: false,
             context_switches: 0,
         }
     }
@@ -89,23 +113,48 @@ impl Scheduler {
             self.ready[level].push_back(id);
         }
     }
+
+    /// Create a thread and add it to the table, without making it runnable.
+    fn create(
+        &mut self,
+        name: &str,
+        priority: Priority,
+        entry: ThreadEntry,
+        argument: usize,
+    ) -> Result<ThreadId, SpawnError> {
+        let id = ThreadId(self.next_id);
+        let stack_index = self.next_stack_index;
+
+        let thread = Thread::new(id, name, priority, entry, argument, stack_index)
+            .ok_or(SpawnError::OutOfMemory)?;
+
+        // Only after the allocation succeeded, so a failure does not burn an
+        // identifier or a stack slot.
+        self.next_id += 1;
+        self.next_stack_index += 1;
+        self.threads.insert(id, thread);
+        Ok(id)
+    }
+
+    /// Adopt the context calling this as a thread, on whatever stack it is
+    /// already using.
+    fn adopt(&mut self, name: &str, priority: Priority) -> ThreadId {
+        let id = ThreadId(self.next_id);
+        self.next_id += 1;
+        self.threads
+            .insert(id, Thread::boot_thread(id, name, priority));
+        id
+    }
 }
 
 static SCHEDULER: IrqSpinLock<Scheduler> = IrqSpinLock::new(Scheduler::new());
 
 /// Whether the scheduler has been started.
 ///
-/// Read from the timer interrupt on every tick, so it is a plain atomic rather
-/// than something that would need the scheduler lock.
+/// Read from the timer interrupt on every tick, and by application processors
+/// waiting to join, so it is a plain atomic rather than something that would
+/// need the scheduler lock.
 static RUNNING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
-/// The running thread's identifier, mirrored outside the lock.
-///
-/// The panic handler needs to name the thread that failed, and it cannot take
-/// the scheduler lock to find out: the panic may well have happened while that
-/// lock was held, and blocking there would cost the message entirely. An atomic
-/// updated on every switch is readable from anywhere, at any time.
-static CURRENT_THREAD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Bring up the scheduler, adopting the current context as the first thread.
 ///
@@ -114,44 +163,57 @@ static CURRENT_THREAD: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomi
 /// Call once, after the heap is available, from the context that booted the
 /// kernel. That context keeps running; it simply becomes a scheduled thread.
 pub unsafe fn init() -> Result<(), SpawnError> {
-    {
-        let mut scheduler = SCHEDULER.lock();
-        let boot = Thread::boot_thread(ThreadId(0), "kernel-main");
-        scheduler.threads.insert(ThreadId(0), boot);
-        scheduler.current = ThreadId(0);
-    }
-
-    // The idle thread is created before anything else can block, because the
-    // first moment every other thread is asleep is the moment it is needed.
     let idle_id = {
         let mut scheduler = SCHEDULER.lock();
-        let id = ThreadId(scheduler.next_id);
-        let stack_index = scheduler.next_stack_index;
-        scheduler.next_id += 1;
-        scheduler.next_stack_index += 1;
 
-        let thread = Thread::new(
-            id,
-            "idle",
-            thread::Priority::Background,
-            idle_entry,
-            0,
-            stack_index,
-        )
-        .ok_or(SpawnError::OutOfMemory)?;
+        // Thread zero is fixed rather than allocated: the boot context is
+        // reported as `#0` everywhere from the first line of the log onwards.
+        let boot = Thread::boot_thread(ThreadId(0), "kernel-main", Priority::Normal);
+        scheduler.threads.insert(ThreadId(0), boot);
 
-        scheduler.threads.insert(id, thread);
-        // Deliberately not enqueued: `take_next_ready` never returns it, and
-        // the scheduler falls back to it only when every queue is empty.
-        scheduler.idle = id;
-        id
+        // The idle thread is created before anything else can block, because
+        // the first moment every other thread is asleep is the moment it is
+        // needed.
+        scheduler.create("idle-cpu0", Priority::Background, idle_entry, 0)?
     };
+
+    percpu::set_current_thread(0);
+    percpu::set_idle_thread(idle_id.0);
 
     RUNNING.store(true, core::sync::atomic::Ordering::Release);
     kprintln!(
         "[sched] scheduler started; boot context is thread #0 (kernel-main), idle is {idle_id}"
     );
     Ok(())
+}
+
+/// Join the scheduler from an application processor. Never returns.
+///
+/// The context that calls this *becomes* the processor's idle thread rather
+/// than getting a freshly allocated one. It is already sitting in exactly the
+/// loop an idle thread runs, on a stack the boot processor allocated for it, so
+/// a second stack would be waste.
+pub fn run_idle_on_this_processor(cpu_index: usize) -> ! {
+    // Application processors are started before the scheduler exists, because
+    // bringing them up needs only the APIC and the heap while the scheduler
+    // wants the display and the rest of early init behind it. Waiting here
+    // costs this core nothing -- it has no work until there is a scheduler to
+    // give it any -- and is far less delicate than reordering bring-up.
+    while !RUNNING.load(core::sync::atomic::Ordering::Acquire) {
+        arch::wait_for_interrupt();
+    }
+
+    let id = {
+        let mut scheduler = SCHEDULER.lock();
+        scheduler.adopt(&format!("idle-cpu{cpu_index}"), Priority::Background)
+    };
+
+    percpu::set_current_thread(id.0);
+    percpu::set_idle_thread(id.0);
+    kprintln!("[sched] processor {cpu_index} joined the scheduler as thread {id}");
+
+    idle_entry(0);
+    unreachable!("the idle thread returned")
 }
 
 /// The idle thread's body.
@@ -188,28 +250,29 @@ pub fn spawn(
     entry: ThreadEntry,
     argument: usize,
 ) -> Result<ThreadId, SpawnError> {
-    let mut scheduler = SCHEDULER.lock();
+    let id = {
+        let mut scheduler = SCHEDULER.lock();
+        let id = scheduler.create(name, priority, entry, argument)?;
+        scheduler.enqueue(id);
+        id
+    };
 
-    let id = ThreadId(scheduler.next_id);
-    let stack_index = scheduler.next_stack_index;
-    scheduler.next_id += 1;
-    scheduler.next_stack_index += 1;
-
-    let thread = Thread::new(id, name, priority, entry, argument, stack_index)
-        .ok_or(SpawnError::OutOfMemory)?;
-
-    scheduler.threads.insert(id, thread);
-    scheduler.enqueue(id);
+    // An idle processor should pick this up now rather than at the end of a
+    // slice it is not using.
+    percpu::request_reschedule_everywhere();
     Ok(id)
 }
 
-/// The identifier of the thread running on this processor.
+/// The thread running on this processor, if it has joined the scheduler.
 ///
-/// Reads a mirror of the scheduler's state rather than the scheduler itself, so
-/// it is safe to call from a panic handler or an interrupt.
+/// Reads per-processor state rather than the scheduler itself, so it is safe to
+/// call from a panic handler or an interrupt.
 #[must_use]
-pub fn current_id() -> ThreadId {
-    ThreadId(CURRENT_THREAD.load(core::sync::atomic::Ordering::Relaxed))
+pub fn current_id() -> Option<ThreadId> {
+    match percpu::current_thread() {
+        percpu::NO_THREAD => None,
+        id => Some(ThreadId(id)),
+    }
 }
 
 /// Entry point of every newly created thread.
@@ -219,9 +282,13 @@ pub fn current_id() -> ThreadId {
 /// reads what the thread is supposed to run, runs it, and retires the thread
 /// when it comes back.
 extern "sysv64" fn thread_trampoline() -> ! {
+    // A first run arrives here instead of returning from `context_switch`, so
+    // this is where the thread it displaced gets released.
+    finish_switch();
+
     let (entry, argument) = {
         let scheduler = SCHEDULER.lock();
-        let current = scheduler.current;
+        let current = ThreadId(percpu::current_thread());
         scheduler
             .threads
             .get(&current)
@@ -233,13 +300,54 @@ extern "sysv64" fn thread_trampoline() -> ! {
     exit()
 }
 
+/// Release the thread this processor switched away from.
+///
+/// Runs on the incoming thread, immediately after the stack switch and with
+/// interrupts still masked. By this point the outgoing thread has stopped
+/// executing, so what it announced before the switch can finally be acted on.
+fn finish_switch() {
+    let Some(previous) = percpu::take_previous() else {
+        return;
+    };
+    let previous = ThreadId(previous);
+    let idle = percpu::idle_thread();
+
+    let mut scheduler = SCHEDULER.lock();
+    let Some(thread) = scheduler.threads.get_mut(&previous) else {
+        return;
+    };
+    thread.switching_out = false;
+
+    match thread.state {
+        // Only now is the stack it was standing on out of use, which is what
+        // makes reaping it safe.
+        ThreadState::Exiting => thread.state = ThreadState::Finished,
+        // Runnable again, and off every queue until this moment. An idle
+        // thread stays off them: it is reached only through the fallback in
+        // `schedule`, and queueing it would let it be picked as ordinary work.
+        ThreadState::Ready if previous.0 != idle => {
+            let level = thread.priority.index();
+            scheduler.ready[level].push_back(previous);
+        }
+        // Sleeping, or an idle thread standing down: nothing to do beyond the
+        // flag, which is what makes it wakeable again.
+        _ => {}
+    }
+}
+
 /// Retire the running thread. Never returns.
 pub fn exit() -> ! {
     {
         let mut scheduler = SCHEDULER.lock();
-        let current = scheduler.current;
+        let current = ThreadId(percpu::current_thread());
         if let Some(thread) = scheduler.threads.get_mut(&current) {
-            thread.state = ThreadState::Finished;
+            // Not `Finished`: this thread is still standing on its own stack.
+            // The next thread to run here marks it finished, once it has left.
+            thread.state = ThreadState::Exiting;
+            // Set with the state, not later in `schedule`: the two must become
+            // true together, or another processor can act on the announcement
+            // in the gap.
+            thread.switching_out = true;
         }
     }
 
@@ -263,68 +371,90 @@ pub fn sleep_ms(milliseconds: u64) {
 
     {
         let mut scheduler = SCHEDULER.lock();
-        let current = scheduler.current;
+        let current = ThreadId(percpu::current_thread());
         if let Some(thread) = scheduler.threads.get_mut(&current) {
             thread.state = ThreadState::Sleeping {
                 until_tick: deadline,
             };
+            // Set here rather than in `schedule`, and this one is load-bearing:
+            // a deadline that has already passed makes the thread wakeable the
+            // instant the state is visible, and a processor that woke it would
+            // queue a thread still running here, whose saved stack pointer is
+            // from its previous switch. Announcing the departure and the fact
+            // that it is not complete has to be one step.
+            thread.switching_out = true;
         }
     }
 
     schedule();
 }
 
-/// Account for one timer tick, waking sleepers and marking the running thread
-/// for preemption when its slice runs out.
+/// Wake every thread whose sleep deadline has passed.
 ///
-/// Called from the timer interrupt, so it does the minimum: it takes the
-/// scheduler lock briefly and never switches. The switch happens after the
-/// handler has acknowledged the interrupt.
-pub fn tick() {
+/// Called by the processor that owns the clock. Any processor could do it, but
+/// having all of them scan the thread table every millisecond would be four
+/// times the lock traffic for the same answer.
+pub fn wake_sleepers() {
     if !RUNNING.load(core::sync::atomic::Ordering::Acquire) {
         return;
     }
 
     let now = time::ticks();
-    let mut scheduler = SCHEDULER.lock();
+    let woke_something = {
+        let mut scheduler = SCHEDULER.lock();
+        let woken: alloc::vec::Vec<ThreadId> = scheduler
+            .threads
+            .values()
+            .filter(|thread| thread.is_wakeable(now))
+            .map(|thread| thread.id)
+            .collect();
+        let any = !woken.is_empty();
+        for id in woken {
+            scheduler.enqueue(id);
+        }
+        any
+    };
 
-    // Wake anything whose deadline has passed.
-    let woken: alloc::vec::Vec<ThreadId> = scheduler
-        .threads
-        .values()
-        .filter(|thread| thread.is_wakeable(now))
-        .map(|thread| thread.id)
-        .collect();
-    let woke_something = !woken.is_empty();
-    for id in woken {
-        scheduler.enqueue(id);
-    }
-    // A thread that just became runnable should not wait for the current
-    // slice to expire, least of all when the processor is sitting in idle.
+    // A thread that just became runnable should not wait for a slice to expire,
+    // least of all when some processor is sitting in idle. Which processor that
+    // is, is not knowable from here.
     if woke_something {
-        scheduler.needs_reschedule = true;
+        percpu::request_reschedule_everywhere();
     }
+}
 
-    let current = scheduler.current;
+/// Account for one timer tick on this processor.
+///
+/// Called from the timer interrupt on every processor, so it does the minimum:
+/// it takes the scheduler lock briefly and never switches. The switch happens
+/// after the handler has acknowledged the interrupt.
+pub fn tick() {
+    if !RUNNING.load(core::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let Some(current) = current_id() else {
+        // A processor that has not joined the scheduler yet. It still takes
+        // timer interrupts; it simply has no thread to charge them to.
+        return;
+    };
+
+    let mut scheduler = SCHEDULER.lock();
     if let Some(thread) = scheduler.threads.get_mut(&current) {
         thread.ticks_run += 1;
         thread.slice_remaining = thread.slice_remaining.saturating_sub(1);
         if thread.slice_remaining == 0 {
-            scheduler.needs_reschedule = true;
+            percpu::set_needs_reschedule(true);
         }
     }
 }
 
-/// Whether the running thread should be preempted at the first opportunity.
+/// Whether the thread running on this processor should be preempted.
 #[must_use]
 pub fn needs_reschedule() -> bool {
-    if !RUNNING.load(core::sync::atomic::Ordering::Acquire) {
-        return false;
-    }
-    SCHEDULER.lock().needs_reschedule
+    RUNNING.load(core::sync::atomic::Ordering::Acquire) && percpu::needs_reschedule()
 }
 
-/// Pick the next thread and switch to it.
+/// Pick the next thread for this processor and switch to it.
 ///
 /// Returns once this thread is scheduled again — or never, for a thread that
 /// has finished.
@@ -337,11 +467,16 @@ pub fn schedule() {
     // lock is released before the switch, and the gap between the two must not
     // be re-entered by a timer interrupt that would try to schedule again.
     interrupts::without_interrupts(|| {
+        percpu::set_needs_reschedule(false);
+
+        let Some(current) = current_id() else {
+            return;
+        };
+        let idle = ThreadId(percpu::idle_thread());
+
         let switch = {
             let mut scheduler = SCHEDULER.lock();
-            scheduler.needs_reschedule = false;
 
-            let current = scheduler.current;
             let current_state = scheduler
                 .threads
                 .get(&current)
@@ -362,32 +497,33 @@ pub fn schedule() {
                     }
                     // The running thread has blocked or finished, so the
                     // processor goes to idle until something wakes.
-                    scheduler.idle
+                    idle
                 }
             };
 
             if next == current {
                 if let Some(thread) = scheduler.threads.get_mut(&current) {
+                    thread.state = ThreadState::Running;
                     thread.slice_remaining = TIME_SLICE_TICKS;
                 }
                 return;
             }
 
-            // Requeue the outgoing thread unless it is sleeping or finished.
-            //
-            // The idle thread is excluded: it is reached only through the
-            // fallback above, and putting it on a run queue would let it be
-            // selected as ordinary work. It is marked ready so its state stays
-            // truthful for diagnostics.
-            if matches!(current_state, ThreadState::Running | ThreadState::Ready) {
-                if current == scheduler.idle {
-                    if let Some(thread) = scheduler.threads.get_mut(&current) {
-                        thread.state = ThreadState::Ready;
-                    }
-                } else {
-                    scheduler.enqueue(current);
+            // The outgoing thread announces where it is going, and is flagged
+            // as not yet gone. It is deliberately *not* put on a run queue
+            // here: it is still executing on this stack, and a queued thread
+            // can be taken by another processor at any moment.
+            {
+                let thread = scheduler
+                    .threads
+                    .get_mut(&current)
+                    .expect("the running thread must exist");
+                if matches!(thread.state, ThreadState::Running) {
+                    thread.state = ThreadState::Ready;
                 }
+                thread.switching_out = true;
             }
+            percpu::set_previous(current.0);
 
             let outgoing_stack_slot = {
                 let thread = scheduler
@@ -408,8 +544,7 @@ pub fn schedule() {
                 thread.stack_pointer
             };
 
-            scheduler.current = next;
-            CURRENT_THREAD.store(next.0, core::sync::atomic::Ordering::Relaxed);
+            percpu::set_current_thread(next.0);
             scheduler.context_switches += 1;
 
             Some((outgoing_stack_slot, incoming_stack))
@@ -422,6 +557,11 @@ pub fn schedule() {
             // previous switch or one fabricated by `Thread::prepare_stack`.
             // Interrupts are masked, as this function requires.
             unsafe { context_switch(save_to, load) };
+
+            // Execution resumes here when something switches back to this
+            // thread, on whatever processor picked it up. Whatever *that*
+            // processor displaced is this thread's to release.
+            finish_switch();
         }
     });
 }
@@ -429,16 +569,16 @@ pub fn schedule() {
 /// Reclaim finished threads.
 ///
 /// Deliberately not done inside [`exit`]: a thread cannot free the stack it is
-/// standing on. Reaping happens later, from another thread, once the finished
-/// thread is no longer running anywhere.
+/// standing on. A thread only reaches [`ThreadState::Finished`] from
+/// [`finish_switch`], which runs after it has stopped executing, so anything
+/// found here is safe to drop without asking which processor it was last on.
 pub fn reap_finished() -> usize {
     let mut scheduler = SCHEDULER.lock();
-    let current = scheduler.current;
 
     let finished: alloc::vec::Vec<ThreadId> = scheduler
         .threads
         .values()
-        .filter(|thread| thread.state == ThreadState::Finished && thread.id != current)
+        .filter(|thread| thread.state == ThreadState::Finished)
         .map(|thread| thread.id)
         .collect();
 
@@ -458,6 +598,7 @@ pub struct SchedulerStats {
     pub ready: usize,
     pub sleeping: usize,
     pub finished: usize,
+    pub running: usize,
     pub context_switches: u64,
 }
 
@@ -468,12 +609,15 @@ pub fn stats() -> SchedulerStats {
     let mut ready = 0;
     let mut sleeping = 0;
     let mut finished = 0;
+    let mut running = 0;
     for thread in scheduler.threads.values() {
         match thread.state {
             ThreadState::Ready => ready += 1,
             ThreadState::Sleeping { .. } => sleeping += 1,
-            ThreadState::Finished => finished += 1,
-            ThreadState::Running => {}
+            // Counted with the finished: it is done, and the only thing left is
+            // the processor it is leaving noticing.
+            ThreadState::Finished | ThreadState::Exiting => finished += 1,
+            ThreadState::Running => running += 1,
         }
     }
 
@@ -482,12 +626,14 @@ pub fn stats() -> SchedulerStats {
         ready,
         sleeping,
         finished,
+        running,
         context_switches: scheduler.context_switches,
     }
 }
 
 /// Print a line per thread, for diagnostics.
 pub fn dump_threads() {
+    let here = percpu::current_thread();
     let scheduler = SCHEDULER.lock();
     kprintln!(
         "[sched] {} threads, {} context switches",
@@ -495,11 +641,9 @@ pub fn dump_threads() {
         scheduler.context_switches
     );
     for thread in scheduler.threads.values() {
-        let marker = if thread.id == scheduler.current {
-            '*'
-        } else {
-            ' '
-        };
+        // Marks the thread running on *this* processor. The others are running
+        // on their own, and are shown as `Running` without a marker.
+        let marker = if thread.id.0 == here { '*' } else { ' ' };
         kprintln!(
             "[sched] {marker}{} {:<16} {:?} {:?}, {} ticks, {} switches",
             thread.id,

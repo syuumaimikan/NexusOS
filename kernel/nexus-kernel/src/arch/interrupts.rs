@@ -99,6 +99,7 @@ extern "x86-interrupt" fn pit_interrupt(_frame: InterruptStackFrame) {
     let driving = time::is_source(TimerSource::Pit);
     if driving {
         time::on_tick();
+        crate::sched::wake_sleepers();
         crate::sched::tick();
     }
 
@@ -117,23 +118,15 @@ extern "x86-interrupt" fn pit_interrupt(_frame: InterruptStackFrame) {
 /// The local APIC timer tick, which is the scheduling tick once it is running.
 ///
 /// Every processor has its own APIC timer and every one of them arrives here,
-/// but only the boot processor advances the clock and drives the scheduler.
+/// and every one of them schedules. What only the boot processor does is
+/// advance the clock: four processors advancing one counter would make time run
+/// four times too fast, and there is one clock because there is one system.
 ///
-/// That restriction is deliberate and temporary. The scheduler still keeps a
-/// single global notion of the running thread, so a second processor entering
-/// it would pick a thread the first is already running and context-switch into
-/// it — two cores on one stack, which is exactly what happened the first time
-/// the application processors were allowed through: a page fault within
-/// milliseconds. Four processors advancing one clock would also make time run
-/// four times too fast.
-///
-/// Lifting this needs a per-processor current thread and run queue, which is
-/// its own piece of work. Until then the other processors keep their timers
-/// running, count their interrupts, and idle — which at least proves they are
-/// alive and taking interrupts.
+/// Waking sleepers is tied to the clock for the same reason — the processor
+/// that moved time forward is the one that can know a deadline has passed —
+/// while charging the tick to a thread and deciding to preempt it are per
+/// processor, because the thread being charged is.
 extern "x86-interrupt" fn apic_timer_interrupt(_frame: InterruptStackFrame) {
-    let is_boot_processor = super::percpu::cpu_index() == 0;
-
     // Counted on every processor, including the boot one: the count is how a
     // wedged core is spotted, and a core that is excluded from the count cannot
     // be seen to have stopped.
@@ -143,15 +136,16 @@ extern "x86-interrupt" fn apic_timer_interrupt(_frame: InterruptStackFrame) {
         unsafe { super::percpu::current().interrupt_count += 1 };
     }
 
-    if is_boot_processor {
+    if super::percpu::cpu_index() == 0 {
         time::on_tick();
-        crate::sched::tick();
+        crate::sched::wake_sleepers();
     }
+    crate::sched::tick();
 
     // SAFETY: called exactly once, from the handler for this vector.
     unsafe { apic::end_of_interrupt() };
 
-    if is_boot_processor && crate::sched::needs_reschedule() {
+    if crate::sched::needs_reschedule() {
         preempt();
     }
 }

@@ -112,7 +112,9 @@ Invoke-Step 'boot test' {
         '3 of 3 additional processors started',
         '4 processors online',
         'scheduler started',
+        'joined the scheduler as thread',
         'threads ran to completion',
+        'work was spread across',
         'preemption verified',
         'early initialisation complete',
         'boot thread retiring',
@@ -133,6 +135,20 @@ Invoke-Step 'boot test' {
     # A boot must not produce an exception report or a second bootloader banner.
     if ($output.Contains('EXCEPTION')) { throw 'an unexpected exception was reported' }
     if ($output.Contains('KERNEL PANIC')) { throw 'the kernel panicked' }
+    # Any self-test that judged itself says so; a marker being present only
+    # means the line was printed, not that what it reported was right.
+    if ($output.Contains('[test] FAILED')) {
+        $failed = ([regex]::Matches($output, '\[test\] FAILED[^
+]*') | ForEach-Object { $_.Value }) -join '; '
+        throw "a kernel self-test failed: $failed"
+    }
+    # Every processor the firmware reported must be scheduling, not just alive.
+    if (-not ($output -match 'work was spread across (\d+) of (\d+) processors')) {
+        throw 'the workers never reported which processors they ran on'
+    }
+    if ([int]$Matches[2] -gt 1 -and [int]$Matches[1] -lt 2) {
+        throw "work ran on only $($Matches[1]) of $($Matches[2]) processors"
+    }
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }
 

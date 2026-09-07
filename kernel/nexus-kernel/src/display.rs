@@ -245,7 +245,7 @@ static PAINTED_HEIGHT: IrqSpinLock<u32> = IrqSpinLock::new(0);
 static PAINTED_LOCALE: IrqSpinLock<usize> = IrqSpinLock::new(usize::MAX);
 
 /// Gather the current system state as translated label and value pairs.
-fn status_rows() -> [StatusRow; 8] {
+fn status_rows() -> [StatusRow; 9] {
     let uptime_ms = arch::time::uptime_ms();
     let scheduler = sched::stats();
     let heap = memory::heap::stats();
@@ -293,9 +293,19 @@ fn status_rows() -> [StatusRow; 8] {
                 "value.threads",
                 &[
                     ("total", &scheduler.threads),
+                    ("running", &scheduler.running),
                     ("ready", &scheduler.ready),
                     ("sleeping", &scheduler.sleeping),
                 ],
+            ),
+        },
+        // On screen because it is the visible difference between a system that
+        // brought its processors up and one that is scheduling on all of them.
+        StatusRow {
+            label: String::from(i18n::text("status.processors")),
+            value: i18n::format(
+                "value.processors",
+                &[("online", &arch::smp::processor_count())],
             ),
         },
         StatusRow {
