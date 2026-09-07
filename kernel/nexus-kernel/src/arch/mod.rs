@@ -20,6 +20,7 @@ pub mod pic;
 pub mod pit;
 pub mod smp;
 pub mod time;
+pub mod tlb;
 
 /// Stop this processor permanently with interrupts masked.
 ///

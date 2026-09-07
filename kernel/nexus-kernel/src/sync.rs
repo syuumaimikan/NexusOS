@@ -56,6 +56,13 @@ impl<T> SpinLock<T> {
             // until the lock looks free, which keeps a contended lock from
             // saturating the interconnect.
             while self.locked.load(Ordering::Relaxed) {
+                // Answer TLB shootdowns while waiting. This is what stops a
+                // deadlock that is otherwise unavoidable: an `IrqSpinLock`
+                // spins with interrupts masked, so the shootdown interrupt
+                // cannot arrive, and a processor holding this lock while
+                // waiting for this one to acknowledge would wait forever. The
+                // check is one load of an almost-always-clean cache line.
+                crate::arch::tlb::service_pending();
                 core::hint::spin_loop();
             }
         }

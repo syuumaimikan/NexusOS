@@ -63,6 +63,7 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Local APIC, APIC timer | **DONE** | Calibrated against the PIT; drives the tick |
 | SMP bring-up | **DONE** | All processors started, each on its own APIC timer |
 | SMP scheduling | **DONE** | Every processor schedules; shared run queues, per-CPU current thread |
+| TLB shootdown | **DONE** | Mailbox per processor, interrupted and polled; verified by injection |
 | I/O APIC | **DONE** | Redirection entries programmed, source overrides honoured |
 | MSI, MSI-X | **MISSING** | No PCI enumeration yet, so nothing to target |
 | User mode, processes | **MISSING** | Threads are kernel-only; no ring 3 yet |
@@ -146,19 +147,20 @@ The build produces zero warnings and passes `clippy -D warnings`.
 
 These are real and are tracked, not hidden:
 
-1. **No TLB shootdown.** `invlpg` handles the running core; with four cores now
-   running threads, a mapping change leaves the others with a stale translation.
-   This was theoretical while only the boot processor scheduled. It is not any
-   more, and it is the most urgent item on this list.
-2. **The run queues are shared, not per-processor.** One lock covers the thread
+1. **The run queues are shared, not per-processor.** One lock covers the thread
    table and all four queues. That is correct and it is what makes every
    processor able to take work, but it is a point of contention that will matter
    once there are more processors or more threads than a desktop has today.
    Per-processor queues with balancing between them is the next step, and it
    wants contention to measure rather than to be guessed at.
-3. **No thread affinity.** A thread can be resumed on any processor, which is
+2. **No thread affinity.** A thread can be resumed on any processor, which is
    right for fairness and wrong for cache locality. There is nothing to measure
    it with yet.
+3. **Shootdowns are broadcast to every processor.** A processor that never
+   touched the address is interrupted anyway, because nothing tracks which
+   address spaces are live where. There is one address space, so today the
+   broadcast is also the correct set; tracking becomes worth it when there are
+   processes.
 4. **The framebuffer is mapped write-back, not write-combining.** Correct in
    QEMU, slow on real hardware. Needs PAT configuration.
 5. **Bootloader allocations are over-conservative.** Page tables, the handoff
@@ -202,7 +204,10 @@ image on the ESP, which was costing megabytes of boot-time reads for a
 hundred-kilobyte load, the two scripts that staged that ESP differently, so
 whichever ran last decided what the next boot would load, and the
 single-processor scheduler: every processor now runs threads, and the boot test
-fails if the workers all land on one of them.
+fails if the workers all land on one of them. Stale translations on the other
+cores went with it: mapping changes are shot down across every processor, and a
+build that deliberately keeps the shootdown local is one of the injection tests,
+so the check that looks for staleness has been seen to fail when there is some.
 
 ## 5. Architectural decisions and why
 
@@ -237,14 +242,12 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **TLB shootdown**, which four cores now running threads make necessary: a
-   mapping change on one leaves stale translations on the others.
-2. **Ring 3 and the system-call entry path**, which is what turns a kernel
+1. **Ring 3 and the system-call entry path**, which is what turns a kernel
    thread into a process and makes isolation mean anything.
-3. **Handles and IPC**, where the capability model starts. Input needs it too:
+2. **Handles and IPC**, where the capability model starts. Input needs it too:
    a wait queue is what lets the input thread sleep until a key arrives instead
    of polling fifty times a second.
-4. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
-5. **CI**, so the five test layers run on every change rather than on request.
+3. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
+4. **CI**, so the five test layers run on every change rather than on request.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

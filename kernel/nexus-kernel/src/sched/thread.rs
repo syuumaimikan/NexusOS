@@ -143,12 +143,13 @@ impl Drop for KernelStack {
         // mapped would let the next owner of those frames be written through
         // this stack's stale mapping.
         let pages = layout::KERNEL_STACK_SIZE / 4096;
-        for page in 0..pages {
-            // SAFETY: this stack is being destroyed, so nothing is running on
-            // it — a thread never drops its own stack while using it.
-            unsafe {
-                let _ = paging::unmap_page(self.bottom + page * 4096);
-            }
+        // As a range, so the other processors are interrupted once rather than
+        // once per page.
+        //
+        // SAFETY: this stack is being destroyed, so nothing is running on it —
+        // a thread never drops its own stack while using it.
+        unsafe {
+            let _ = paging::unmap_range(self.bottom, pages);
         }
         // SAFETY: the block came from `allocate_block` at this order and the
         // mappings that referred to it are gone.

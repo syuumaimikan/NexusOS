@@ -92,6 +92,7 @@ core to shoot down.
 - Process and thread objects, address spaces, TLS
 - Context switching, preemption from the APIC timer
 - Priorities, sleep/wake, per-CPU run queues
+- TLB shootdown across processors
 - SMP bring-up via the MADT, per-CPU data
 - Ring 3 transition, `syscall`/`sysret`
 
@@ -118,7 +119,16 @@ only once the *next* thread there has run, which is what keeps a second core
 from switching onto a stack whose pointer has not been saved. The boot self-test
 records which processors ran its workers and fails if the answer is only one.
 
-Still outstanding: TLB shootdown, per-processor run queues, thread affinity,
+TLB shootdown came with it, because it had to. `invlpg` invalidates on the
+processor that runs it and nowhere else, so unmapping a page while other cores
+hold the translation is a silent read or write to memory that has been handed to
+someone else. Each processor now has a shootdown mailbox that is both
+interrupted and polled: the interrupt reaches a core running normally, and the
+polling — from every spin loop — reaches one spinning for a lock with interrupts
+masked, which is the case that otherwise deadlocks, since reaping a thread
+unmaps its stack while holding the scheduler lock.
+
+Still outstanding: per-processor run queues, thread affinity,
 user mode and address-space separation. "Thread" still means a kernel thread,
 and nothing is isolated yet.
 

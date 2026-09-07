@@ -86,10 +86,12 @@ unsafe fn write_entry(table: u64, index: usize, value: u64) {
     unsafe { pointer.add(index).write_volatile(value) }
 }
 
-/// Invalidate the TLB entry for one page.
+/// Invalidate the TLB entry for one page **on this processor only**.
 ///
-/// Single-processor only: once other cores are running, a mapping change also
-/// needs a shootdown, which arrives with SMP.
+/// Almost never what a caller wants directly. A mapping change has to reach
+/// every processor, which is [`crate::arch::tlb::shoot_down`]'s job; this is
+/// the piece it is built from, and is correct on its own only where no other
+/// processor can hold the translation.
 #[inline]
 pub fn flush(virt: u64) {
     // SAFETY: `invlpg` only discards a cached translation; it can never make
@@ -249,9 +251,84 @@ pub unsafe fn unmap_page(virt: u64) -> Result<u64, MapError> {
     }
     // SAFETY: as above.
     unsafe { write_entry(table, index, 0) };
-    flush(virt);
+
+    // Every processor, not just this one. The frame is about to go back to the
+    // allocator and be handed to something else, and a core still holding the
+    // translation would read or write it with no fault to say so.
+    //
+    // SAFETY: the entry is already cleared, so nothing can re-cache it.
+    unsafe { crate::arch::tlb::shoot_down(virt, 1) };
 
     Ok(entry & ADDRESS_MASK)
+}
+
+/// Point an already-mapped page at a different frame.
+///
+/// Distinct from unmapping and mapping again, and not merely as a convenience:
+/// between the two the address is absent, and anything touching it in that
+/// window takes a page fault. Rewriting the entry in place leaves no window.
+///
+/// # Safety
+///
+/// See [`map_page`]. The previous frame becomes the caller's to dispose of.
+pub unsafe fn remap_page(virt: u64, phys: u64, flags: u64) -> Result<u64, MapError> {
+    let root = active_root();
+    // SAFETY: `root` is the live root table; the direct map covers it.
+    let table = unsafe { walk_to_page_table(root, virt, false)? };
+    let index = index_for(virt, 3);
+
+    // SAFETY: `table` is a live page table.
+    let previous = unsafe { read_entry(table, index) };
+    if previous & PRESENT == 0 {
+        return Err(MapError::NotMapped);
+    }
+    // SAFETY: as above.
+    unsafe { write_entry(table, index, (phys & ADDRESS_MASK) | flags | PRESENT) };
+
+    // The old translation is now wrong everywhere, not merely here.
+    //
+    // SAFETY: the entry already holds the new mapping, so a processor that
+    // re-walks during the shootdown caches the new translation, not the old.
+    unsafe { crate::arch::tlb::shoot_down(virt, 1) };
+
+    Ok(previous & ADDRESS_MASK)
+}
+
+/// Unmap `pages` consecutive pages, with a single shootdown for the range.
+///
+/// Unmapping a sixteen-page stack one page at a time means sixteen rounds of
+/// interrupting every other processor and waiting for it. The mapping changes
+/// are independent, so they can all be made first and announced once.
+///
+/// # Safety
+///
+/// See [`unmap_page`]. Returns the number of pages that were mapped and are
+/// now not; an already-absent page is skipped rather than being an error.
+pub unsafe fn unmap_range(virt: u64, pages: u64) -> u64 {
+    let mut removed = 0;
+
+    for page in 0..pages {
+        let address = virt + page * 4096;
+        let root = active_root();
+        // SAFETY: `root` is the live root table.
+        let Ok(table) = (unsafe { walk_to_page_table(root, address, false) }) else {
+            continue;
+        };
+        let index = index_for(address, 3);
+
+        // SAFETY: `table` is a live page table.
+        unsafe {
+            if read_entry(table, index) & PRESENT == 0 {
+                continue;
+            }
+            write_entry(table, index, 0);
+        }
+        removed += 1;
+    }
+
+    // SAFETY: every entry in the range is cleared, so nothing can re-cache one.
+    unsafe { crate::arch::tlb::shoot_down(virt, pages) };
+    removed
 }
 
 /// Look up the physical address `virt` translates to, if any.
@@ -306,8 +383,11 @@ pub unsafe fn tear_down_identity_map() {
     // the caller guarantees nothing depends on it.
     unsafe {
         write_entry(root, 0, 0);
-        // Clearing a top-level entry invalidates an enormous range, so flush
-        // the whole non-global TLB rather than one page at a time.
-        flush_all();
+        // Clearing a top-level entry invalidates an enormous range, so discard
+        // everything rather than walking it a page at a time. Broadcast even
+        // though this runs before the other processors start: it costs nothing
+        // when this is the only one, and it stops the correctness of this call
+        // from depending on where it sits in the bring-up order.
+        crate::arch::tlb::shoot_down_all();
     }
 }

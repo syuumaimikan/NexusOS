@@ -1,17 +1,20 @@
 <#
 .SYNOPSIS
-    Verifies that the Nexus Kernel reports CPU exceptions instead of resetting.
+    Breaks the kernel on purpose, one way per build, and checks it notices.
 
 .DESCRIPTION
-    Builds the kernel once per fault-injection feature, boots each build in
-    QEMU, and checks the serial log for the expected diagnostic.
+    Builds the kernel once per injection feature, boots each build in QEMU, and
+    checks the serial log for the diagnostic that build should produce.
 
-    This is the only way to test an exception handler honestly: the failure it
-    guards against — a triple fault that silently reboots the machine — is
-    invisible unless a real fault is provoked and the output inspected.
+    This is the only honest way to test the things that only matter when
+    something has gone wrong. An exception handler guards against a triple fault
+    that silently reboots the machine, which is invisible unless a real fault is
+    provoked. A self-test that looks for stale translations is worth no more
+    than a comment unless it has been seen to fail when there are some.
 
-    Each case asserts both that the right report appeared and that the machine
-    did not restart, which a reboot loop would reveal as a repeated banner.
+    Each case asserts both that the expected output appeared and that the
+    machine did not restart, which a reboot loop would reveal as a repeated
+    banner.
 #>
 [CmdletBinding()]
 param(
@@ -58,6 +61,20 @@ $Cases = @(
             'EXCEPTION 0: divide error',
             'the system has been halted'
         )
+    },
+    # Not a fault: this one checks that a *test* can fail. With the shootdown
+    # reduced to a local invalidation, the other processors keep translations
+    # the kernel has replaced, and the self-test that looks for exactly that
+    # has to notice. If this case ever passes silently, the shootdown check in
+    # the ordinary boot is decoration.
+    @{
+        Name = 'a shootdown that never leaves the processor'
+        Feature = 'inject-no-shootdown'
+        Processors = 4
+        Expect = @(
+            '[test] FAILED: processors',
+            'kept a stale translation after the shootdown'
+        )
     }
 )
 
@@ -100,7 +117,7 @@ foreach ($case in $Cases) {
     $QemuArgs = @(
         '-machine', 'q35',
         '-cpu', 'qemu64',
-        '-smp', '1',
+        '-smp', "$(if ($case.ContainsKey('Processors')) { $case.Processors } else { 1 })",
         '-m', '1G',
         '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$FirmwareCode",
         '-drive', "if=pflash,format=raw,unit=1,file=$Vars",
@@ -162,9 +179,9 @@ Publish-EspKernel -KernelElf (Join-Path $RepoRoot 'target\x86_64-nexus\debug\nex
 
 Write-Host ''
 if ($failures -eq 0) {
-    Write-Host "All $($Cases.Count) fault-handling tests passed." -ForegroundColor Green
+    Write-Host "All $($Cases.Count) injection tests passed." -ForegroundColor Green
     exit 0
 } else {
-    Write-Host "$failures of $($Cases.Count) fault-handling tests failed." -ForegroundColor Red
+    Write-Host "$failures of $($Cases.Count) injection tests failed." -ForegroundColor Red
     exit 1
 }

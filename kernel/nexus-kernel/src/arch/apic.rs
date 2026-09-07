@@ -482,6 +482,19 @@ unsafe fn send_ipi(apic_id: u32, command: u32) {
     }
 }
 
+/// Send an ordinary interrupt to another processor.
+///
+/// Fixed delivery: the target takes `vector` through its IDT exactly as it
+/// would a device interrupt, so the handler is an ordinary one.
+///
+/// # Safety
+///
+/// See [`send_ipi`], and `vector` must have a handler installed on the target.
+pub unsafe fn send_fixed(apic_id: u32, vector: u8) {
+    // SAFETY: upheld by the caller.
+    unsafe { send_ipi(apic_id, ICR_ASSERT | u32::from(vector)) };
+}
+
 /// Send an INIT inter-processor interrupt, resetting the target processor.
 ///
 /// # Safety

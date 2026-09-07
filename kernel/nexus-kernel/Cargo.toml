@@ -25,3 +25,12 @@ nexus-mm = { path = "../nexus-mm" }
 inject-page-fault = []
 inject-stack-overflow = []
 inject-divide-error = []
+
+# Breaks TLB shootdown so that it invalidates only the processor that made the
+# change, which is what the kernel did before shootdown existed.
+#
+# This one proves a *test* rather than a handler. A shootdown that silently does
+# not happen looks exactly like one that does, so the self-test that checks for
+# stale translations has to be shown to fail when there is something to catch;
+# otherwise it is a line of output that would print either way.
+inject-no-shootdown = []

@@ -25,6 +25,14 @@ pub const KEYBOARD_VECTOR: u8 = super::idt::IRQ_BASE + 17;
 /// processors, and 0xFF satisfies that on every one.
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
+/// The TLB shootdown inter-processor interrupt.
+///
+/// Above the device vectors and below the spurious one. Priority matters here:
+/// on x86 a higher vector number is higher priority, and a processor that is
+/// slow to answer a shootdown holds up the one that sent it, so this sits above
+/// the timer and the keyboard rather than queueing behind them.
+pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFE;
+
 /// The kernel's interrupt descriptor table.
 ///
 /// A single table shared by every processor. Per-CPU tables buy nothing while
@@ -150,6 +158,22 @@ extern "x86-interrupt" fn apic_timer_interrupt(_frame: InterruptStackFrame) {
     }
 }
 
+/// Another processor changed a mapping and needs this one's TLB brought up to
+/// date before it can consider the change complete.
+///
+/// The handler is only half of how a request arrives: a processor spinning for
+/// a lock has interrupts masked and would never take this, so the same mailbox
+/// is polled from every spin loop. See [`super::tlb`].
+extern "x86-interrupt" fn tlb_shootdown_interrupt(_frame: InterruptStackFrame) {
+    super::tlb::on_interrupt();
+
+    // Acknowledged after the invalidation, not before: the sender is waiting on
+    // the mailbox rather than on this, but an early acknowledgement would let a
+    // second request arrive mid-flush for no benefit.
+    // SAFETY: called exactly once, from the handler for this vector.
+    unsafe { apic::end_of_interrupt() };
+}
+
 /// Hand the processor to another thread from inside a timer handler.
 ///
 /// Safe to do here because the handler runs on the interrupted thread's own
@@ -247,6 +271,7 @@ pub unsafe fn init(timer_hz: u32) {
         idt.set_handler(APIC_TIMER_VECTOR, apic_timer_interrupt as *const ());
         idt.set_handler(KEYBOARD_VECTOR, keyboard_interrupt as *const ());
         idt.set_handler(SPURIOUS_VECTOR, apic_spurious_interrupt as *const ());
+        idt.set_handler(TLB_SHOOTDOWN_VECTOR, tlb_shootdown_interrupt as *const ());
 
         // `load` needs a `&'static` table; `IDT` is a static, and it is never
         // mutated again after this point.

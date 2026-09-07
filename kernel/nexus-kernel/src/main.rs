@@ -286,6 +286,14 @@ fn monitor_thread(_argument: usize) {
             kprintln!(
                 "[mon ] {online} processors online, least busy has taken {fewest} interrupts"
             );
+
+            // Reported because a shootdown that is silently not happening looks
+            // exactly like one that is: the symptom of a missing one is a stale
+            // translation nobody notices. A count that moves when threads are
+            // reaped is the evidence that it runs at all, and a timeout count
+            // above zero says a processor stopped answering.
+            let (shootdowns, timeouts) = arch::tlb::statistics();
+            kprintln!("[mon ] {shootdowns} TLB shootdowns broadcast, {timeouts} unacknowledged");
         }
     }
 }
@@ -462,6 +470,238 @@ fn self_test() {
     memory_self_test();
     heap_self_test();
     scheduler_self_test();
+    tlb_self_test();
+}
+
+/// State for the TLB shootdown self-test.
+mod tlb_test {
+    use core::sync::atomic::{AtomicBool, AtomicU64};
+
+    /// Where the test page lives.
+    ///
+    /// Inside the region reserved for kernel MMIO windows, a megabyte past the
+    /// two that are actually used, so nothing else can claim it. The test needs
+    /// an address it can repoint at will, which rules out the direct map, the
+    /// heap and the stack area.
+    pub const PAGE: u64 = nexus_abi::layout::KERNEL_MMIO_BASE + 0x10_0000;
+
+    /// What the first frame holds, and what a stale translation reads back.
+    pub const OLD_MARK: u64 = 0x0101_0101_0101_0101;
+    /// What the second frame holds.
+    pub const NEW_MARK: u64 = 0x0202_0202_0202_0202;
+
+    /// Processors that have read the page while it pointed at the first frame.
+    pub static SEEN_OLD: AtomicU64 = AtomicU64::new(0);
+    /// Processors that have read the page since it was repointed.
+    pub static SEEN_NEW: AtomicU64 = AtomicU64::new(0);
+    /// Processors that read the *old* contents after the repoint completed.
+    ///
+    /// Any bit set here is a shootdown that did not arrive.
+    pub static STALE: AtomicU64 = AtomicU64::new(0);
+    /// Processors that read something that was neither mark.
+    pub static GARBAGE: AtomicU64 = AtomicU64::new(0);
+
+    /// Set once the page points at the second frame.
+    pub static REMAPPED: AtomicBool = AtomicBool::new(false);
+    /// Tells the readers to finish.
+    pub static STOP: AtomicBool = AtomicBool::new(false);
+    /// Readers still running.
+    pub static RUNNING: AtomicU64 = AtomicU64::new(0);
+}
+
+/// A thread that reads the test page and records what it saw, and where.
+fn tlb_test_reader(_argument: usize) {
+    use core::sync::atomic::Ordering;
+
+    tlb_test::RUNNING.fetch_add(1, Ordering::Relaxed);
+
+    while !tlb_test::STOP.load(Ordering::Relaxed) {
+        // Sampled *before* the read, and this order is the whole argument. If
+        // the repoint had already completed when this was loaded, then a read
+        // that still returns the old contents can only be a translation this
+        // processor kept — which is precisely what a shootdown is for.
+        let remapped = tlb_test::REMAPPED.load(Ordering::Acquire);
+
+        // SAFETY: the page is mapped for the whole life of the test, and
+        // `remap_page` never leaves it absent.
+        let value = unsafe { core::ptr::read_volatile(tlb_test::PAGE as *const u64) };
+        let bit = 1u64 << arch::percpu::cpu_index();
+
+        match value {
+            tlb_test::OLD_MARK => {
+                tlb_test::SEEN_OLD.fetch_or(bit, Ordering::Relaxed);
+                if remapped {
+                    tlb_test::STALE.fetch_or(bit, Ordering::Relaxed);
+                }
+            }
+            tlb_test::NEW_MARK => {
+                tlb_test::SEEN_NEW.fetch_or(bit, Ordering::Relaxed);
+            }
+            _ => {
+                tlb_test::GARBAGE.fetch_or(bit, Ordering::Relaxed);
+            }
+        }
+
+        sched::yield_now();
+    }
+
+    tlb_test::RUNNING.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Prove that a mapping change on one processor reaches the others.
+///
+/// A shootdown that quietly does not happen looks exactly like one that does:
+/// the symptom is a processor reading through a translation that should be
+/// gone, and nothing faults. Counting broadcasts says the code ran; only
+/// reading through the old address on every processor says it worked.
+///
+/// The test points one page at a frame holding one marker, gets every processor
+/// to read it — which is what makes each of them cache the translation —
+/// repoints it at a frame holding a different marker, and then fails if any
+/// processor ever reads the first marker again.
+fn tlb_self_test() {
+    use core::sync::atomic::Ordering;
+
+    let online = arch::smp::processor_count();
+    if online < 2 {
+        kprintln!("[test] only one processor; nothing to shoot down");
+        return;
+    }
+
+    let (Some(first), Some(second)) = (memory::allocate_frame(), memory::allocate_frame()) else {
+        kprintln!("[test] FAILED: could not allocate the TLB test frames");
+        return;
+    };
+
+    // Written through the direct map, which is a different virtual address, so
+    // filling them cannot itself put the test's translation into any TLB.
+    // SAFETY: both frames were just allocated and nothing else refers to them.
+    unsafe {
+        core::ptr::write_volatile(layout::phys_to_virt(first) as *mut u64, tlb_test::OLD_MARK);
+        core::ptr::write_volatile(layout::phys_to_virt(second) as *mut u64, tlb_test::NEW_MARK);
+    }
+
+    // SAFETY: the frames are owned here and the address is reserved.
+    if let Err(error) = unsafe {
+        memory::paging::map_page(
+            tlb_test::PAGE,
+            first,
+            memory::paging::WRITABLE | memory::paging::NO_EXECUTE,
+        )
+    } {
+        kprintln!("[test] FAILED: could not map the TLB test page: {error:?}");
+        return;
+    }
+
+    // More readers than processors, because there is no affinity: the only way
+    // to get one onto every processor is to give the scheduler more threads
+    // than it has processors to put them on.
+    let mut spawned = 0;
+    for index in 0..online * 3 {
+        if sched::spawn(
+            "tlb-reader",
+            sched::thread::Priority::Normal,
+            tlb_test_reader,
+            index,
+        )
+        .is_ok()
+        {
+            spawned += 1;
+        }
+    }
+    if spawned == 0 {
+        kprintln!("[test] FAILED: could not start any TLB readers");
+        return;
+    }
+
+    let expected = (1u64 << online) - 1;
+
+    // Wait until every processor has read through the old translation. Until
+    // one has, it has nothing cached and the test would pass vacuously.
+    let mut deadline = arch::time::ticks() + 2000;
+    while tlb_test::SEEN_OLD.load(Ordering::Relaxed) & expected != expected
+        && arch::time::ticks() < deadline
+    {
+        sched::sleep_ms(1);
+    }
+    let primed = tlb_test::SEEN_OLD.load(Ordering::Relaxed);
+    if primed & expected != expected {
+        kprintln!(
+            "[test] FAILED: only processors {primed:#x} of {expected:#x} cached the test mapping"
+        );
+        tlb_test::STOP.store(true, Ordering::Relaxed);
+        return;
+    }
+
+    // The change under test. `remap_page` shoots down before it returns, so by
+    // the time the flag below is set, every processor has been told.
+    // SAFETY: the page is mapped, and the old frame comes back for disposal.
+    let repointed = unsafe {
+        memory::paging::remap_page(
+            tlb_test::PAGE,
+            second,
+            memory::paging::WRITABLE | memory::paging::NO_EXECUTE,
+        )
+    };
+    if let Err(error) = repointed {
+        kprintln!("[test] FAILED: could not repoint the TLB test page: {error:?}");
+        tlb_test::STOP.store(true, Ordering::Relaxed);
+        return;
+    }
+    // Release, to pair with the readers' acquire: a reader that sees this flag
+    // must also see everything the remap did.
+    tlb_test::REMAPPED.store(true, Ordering::Release);
+
+    // Let every processor read again, now through the new mapping.
+    deadline = arch::time::ticks() + 2000;
+    while tlb_test::SEEN_NEW.load(Ordering::Relaxed) & expected != expected
+        && arch::time::ticks() < deadline
+    {
+        sched::sleep_ms(1);
+    }
+
+    tlb_test::STOP.store(true, Ordering::Relaxed);
+    deadline = arch::time::ticks() + 2000;
+    while tlb_test::RUNNING.load(Ordering::Relaxed) > 0 && arch::time::ticks() < deadline {
+        sched::sleep_ms(1);
+    }
+
+    let stale = tlb_test::STALE.load(Ordering::Relaxed);
+    let fresh = tlb_test::SEEN_NEW.load(Ordering::Relaxed);
+    let garbage = tlb_test::GARBAGE.load(Ordering::Relaxed);
+
+    // SAFETY: nothing refers to the test page any more; the readers have all
+    // stopped, which is what the wait above established.
+    unsafe {
+        let _ = memory::paging::unmap_range(tlb_test::PAGE, 1);
+        memory::free_frame(first);
+        memory::free_frame(second);
+    }
+
+    if garbage != 0 {
+        kprintln!("[test] FAILED: processors {garbage:#x} read neither marker from the test page");
+        return;
+    }
+    if stale != 0 {
+        kprintln!(
+            "[test] FAILED: processors {stale:#x} kept a stale translation after the shootdown"
+        );
+        return;
+    }
+    if fresh & expected != expected {
+        kprintln!("[test] FAILED: only processors {fresh:#x} of {expected:#x} saw the new mapping");
+        return;
+    }
+
+    let (broadcasts, timeouts) = arch::tlb::statistics();
+    if timeouts != 0 {
+        kprintln!("[test] FAILED: {timeouts} shootdowns went unacknowledged");
+        return;
+    }
+    kprintln!(
+        "[test] TLB shootdown verified: all {online} processors cached the old mapping and none \
+         read through it afterwards ({broadcasts} broadcasts, 0 unacknowledged)"
+    );
 }
 
 /// Work counters for the scheduler self-test.

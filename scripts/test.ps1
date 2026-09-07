@@ -12,7 +12,8 @@
          every marker a healthy boot produces
       4. an input test, which sends real keystrokes through QEMU's monitor and
          checks what the kernel made of them
-      5. fault-handling tests, which provoke real CPU exceptions and check that
+      5. injection tests, which break the kernel one way per build -- a real
+         CPU exception, a broken TLB shootdown -- and check that
          each is reported rather than resetting the machine
 
 .PARAMETER SkipFaults
@@ -116,6 +117,8 @@ Invoke-Step 'boot test' {
         'threads ran to completion',
         'work was spread across',
         'preemption verified',
+        'TLB shootdown verified',
+        'TLB shootdowns broadcast',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -160,8 +163,8 @@ Invoke-Step 'input' {
 }
 
 if (-not $SkipFaults) {
-    Invoke-Step 'fault handling' {
-        Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-faults.ps1')) 'fault-handling tests'
+    Invoke-Step 'injection' {
+        Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-faults.ps1')) 'injection tests'
     }
 }
 
