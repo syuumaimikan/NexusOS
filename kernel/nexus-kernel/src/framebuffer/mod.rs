@@ -8,6 +8,8 @@
 //! only some of it, and the panic screen and compositor use the rest.
 #![allow(dead_code)]
 
+pub mod font;
+
 use nexus_abi::{layout, FramebufferInfo, PixelFormat};
 
 /// A 24-bit colour in `0x00RRGGBB` form.
@@ -171,6 +173,71 @@ impl Framebuffer {
     /// Fill the whole surface with one colour.
     pub fn clear(&mut self, color: Color) {
         self.fill_rect(0, 0, self.width, self.height, color);
+    }
+
+    /// Draw one glyph at `(x, y)`, magnified `scale` times.
+    ///
+    /// Only set bits are painted, so glyphs compose over whatever is already
+    /// there instead of stamping a background box over it.
+    pub fn draw_char(&mut self, x: u32, y: u32, character: u8, color: Color, scale: u32) {
+        let glyph = font::glyph(character);
+        let scale = scale.max(1);
+
+        for (row_index, row) in glyph.iter().enumerate() {
+            if *row == 0 {
+                continue;
+            }
+            for column in 0..font::GLYPH_WIDTH {
+                // Bit 7 is the leftmost pixel.
+                if row & (0x80 >> column) == 0 {
+                    continue;
+                }
+                let pixel_x = x + column * scale;
+                let pixel_y = y + row_index as u32 * scale;
+                if scale == 1 {
+                    self.put_pixel(pixel_x, pixel_y, color);
+                } else {
+                    self.fill_rect(pixel_x, pixel_y, scale, scale, color);
+                }
+            }
+        }
+    }
+
+    /// Draw `text` starting at `(x, y)`, returning the x coordinate just past
+    /// the last glyph.
+    ///
+    /// There is no wrapping: a caller that cares about the surface edge should
+    /// use [`Framebuffer::text_width`] to lay out first. Wrapping is a layout
+    /// decision, and this is a drawing primitive.
+    pub fn draw_text(&mut self, x: u32, y: u32, text: &str, color: Color, scale: u32) -> u32 {
+        let scale = scale.max(1);
+        let advance = font::GLYPH_WIDTH * scale;
+        let mut cursor = x;
+
+        for byte in text.bytes() {
+            self.draw_char(cursor, y, byte, color, scale);
+            cursor += advance;
+        }
+        cursor
+    }
+
+    /// Width in pixels that `text` would occupy at `scale`.
+    #[must_use]
+    pub fn text_width(text: &str, scale: u32) -> u32 {
+        text.len() as u32 * font::GLYPH_WIDTH * scale.max(1)
+    }
+
+    /// Height in pixels of one line at `scale`.
+    #[must_use]
+    pub fn line_height(scale: u32) -> u32 {
+        font::GLYPH_HEIGHT * scale.max(1)
+    }
+
+    /// Draw `text` horizontally centred on the surface at `y`.
+    pub fn draw_text_centered(&mut self, y: u32, text: &str, color: Color, scale: u32) {
+        let width = Self::text_width(text, scale);
+        let x = self.width.saturating_sub(width) / 2;
+        self.draw_text(x, y, text, color, scale);
     }
 
     /// Paint a vertical gradient from `top` to `bottom` across the surface.

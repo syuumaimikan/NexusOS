@@ -107,6 +107,8 @@ Invoke-Step 'boot test' {
         'preemption verified',
         'early initialisation complete',
         'boot thread retiring',
+        'display adopted',
+        'display thread',
         '[mon ]'
     )
     $missing = @($markers | Where-Object { -not $output.Contains($_) })

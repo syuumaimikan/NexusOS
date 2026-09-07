@@ -19,6 +19,7 @@
 extern crate alloc;
 
 mod arch;
+mod display;
 mod framebuffer;
 mod memory;
 mod panic;
@@ -27,8 +28,6 @@ mod serial;
 mod sync;
 
 use nexus_abi::{layout, BootInfo, MemoryKind, MemoryRegion};
-
-use framebuffer::{Color, Framebuffer};
 
 /// Print a line to the kernel serial console.
 #[macro_export]
@@ -104,14 +103,8 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     let usable = report_memory_map(boot_info);
 
     // SAFETY: the bootloader mapped the framebuffer through the direct map, and
-    // this is the only `Framebuffer` the kernel constructs.
-    match unsafe { Framebuffer::new(&boot_info.framebuffer) } {
-        Some(mut fb) => {
-            kprintln!("[fb  ] painting boot background");
-            draw_boot_screen(&mut fb);
-        }
-        None => kprintln!("[fb  ] no usable framebuffer; running headless"),
-    }
+    // this is the only place the kernel adopts it.
+    unsafe { display::init(&boot_info.framebuffer) };
 
     // Descriptor tables, exception handlers and the timer. Until this runs, any
     // fault is a triple fault, so it happens as early as anything can.
@@ -171,6 +164,7 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
 
 /// Spawn the long-lived threads and hand the processor over to them.
 fn start_system_threads() {
+    display::start_thread();
     match sched::spawn(
         "monitor",
         sched::thread::Priority::Interactive,
@@ -802,42 +796,4 @@ fn report_memory_map(boot_info: &BootInfo) -> u64 {
         reserved / (1024 * 1024)
     );
     usable
-}
-
-/// Paint the boot background.
-///
-/// This is deliberately simple: it exists to prove end to end that the
-/// bootloader's mode selection, the framebuffer handoff and the direct map all
-/// agree. The Nexus Compositor takes over this surface later.
-fn draw_boot_screen(fb: &mut Framebuffer) {
-    fb.vertical_gradient(Color::NEXUS_DEEP, Color(0x0014_2A4A));
-
-    let width = fb.width();
-    let height = fb.height();
-
-    // A centred accent bar, sized as a fraction of the surface so it looks
-    // right at any resolution the firmware gave us.
-    let bar_width = (width / 3).max(64);
-    let bar_height = (height / 90).max(4);
-    let bar_x = (width - bar_width) / 2;
-    let bar_y = height / 2;
-
-    fb.fill_rect(bar_x, bar_y, bar_width, bar_height, Color::NEXUS_BLUE);
-
-    // Three progress ticks below it, marking the boot stages reached so far:
-    // bootloader, handoff, kernel entry.
-    let tick = bar_height * 2;
-    let gap = tick;
-    let ticks_width = tick * 3 + gap * 2;
-    let ticks_x = (width - ticks_width) / 2;
-    let ticks_y = bar_y + bar_height * 4;
-    for index in 0..3 {
-        fb.fill_rect(
-            ticks_x + index * (tick + gap),
-            ticks_y,
-            tick,
-            tick,
-            Color::WHITE,
-        );
-    }
 }
