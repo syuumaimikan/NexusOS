@@ -34,5 +34,5 @@ value.memory = {free} MiB free of {total} MiB
 value.heap = {used} KiB used of {total} KiB
 value.threads = {total} ({ready} ready, {sleeping} sleeping)
 value.switches = {count}
-value.timer = {hz} Hz, {ticks} ticks
+value.timer = {hz} Hz via {source}, {ticks} ticks
 value.unavailable = unavailable

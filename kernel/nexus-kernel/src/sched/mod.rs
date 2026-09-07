@@ -25,7 +25,7 @@ pub mod thread;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 
-use crate::arch::{self, interrupts, pit};
+use crate::arch::{self, interrupts, time};
 use crate::kprintln;
 use crate::sync::IrqSpinLock;
 
@@ -259,9 +259,7 @@ pub fn yield_now() {
 /// The thread leaves the run queues entirely and is put back when the tick
 /// counter passes its deadline, so a sleeping thread costs nothing.
 pub fn sleep_ms(milliseconds: u64) {
-    let frequency = pit::frequency_hz().max(1);
-    let ticks = (milliseconds * frequency).div_ceil(1000);
-    let deadline = pit::ticks() + ticks;
+    let deadline = time::ticks() + time::ms_to_ticks(milliseconds);
 
     {
         let mut scheduler = SCHEDULER.lock();
@@ -287,7 +285,7 @@ pub fn tick() {
         return;
     }
 
-    let now = pit::ticks();
+    let now = time::ticks();
     let mut scheduler = SCHEDULER.lock();
 
     // Wake anything whose deadline has passed.

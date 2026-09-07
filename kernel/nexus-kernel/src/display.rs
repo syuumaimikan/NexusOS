@@ -248,7 +248,7 @@ static PAINTED_LOCALE: IrqSpinLock<usize> = IrqSpinLock::new(usize::MAX);
 
 /// Gather the current system state as translated label and value pairs.
 fn status_rows() -> [StatusRow; 7] {
-    let uptime_ms = arch::pit::uptime_ms();
+    let uptime_ms = arch::time::uptime_ms();
     let scheduler = sched::stats();
     let heap = memory::heap::stats();
     let frames = memory::stats();
@@ -309,8 +309,16 @@ fn status_rows() -> [StatusRow; 7] {
             value: i18n::format(
                 "value.timer",
                 &[
-                    ("hz", &arch::pit::frequency_hz()),
-                    ("ticks", &arch::pit::ticks()),
+                    ("hz", &arch::time::frequency_hz()),
+                    ("ticks", &arch::time::ticks()),
+                    (
+                        "source",
+                        &match arch::time::source() {
+                            arch::time::TimerSource::LocalApic => "APIC",
+                            arch::time::TimerSource::Pit => "PIT",
+                            arch::time::TimerSource::None => "-",
+                        },
+                    ),
                 ],
             ),
         },

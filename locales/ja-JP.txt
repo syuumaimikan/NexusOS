@@ -34,5 +34,5 @@ value.memory = 全 {total} MiB 中 {free} MiB 空き
 value.heap = 全 {total} KiB 中 {used} KiB 使用
 value.threads = {total} 個 (実行可能 {ready}、待機 {sleeping})
 value.switches = {count} 回
-value.timer = {hz} Hz、{ticks} 回
+value.timer = {source} により {hz} Hz、{ticks} 回
 value.unavailable = 取得できません

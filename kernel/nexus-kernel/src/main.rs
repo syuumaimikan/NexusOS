@@ -18,6 +18,7 @@
 
 extern crate alloc;
 
+mod acpi;
 mod arch;
 mod display;
 mod framebuffer;
@@ -109,6 +110,12 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // not been told to enable them since reset.
     unsafe { arch::interrupts::init(TIMER_FREQUENCY_HZ) };
 
+    // Interrupts come on here, as soon as there is somewhere for them to go.
+    // Everything after this point may depend on the clock advancing -- APIC
+    // calibration does, and it hangs silently without it.
+    arch::interrupts::enable();
+    kprintln!("[intr] interrupts enabled");
+
     // Physical memory. Everything above this point runs on statically
     // allocated storage; everything after it can allocate.
     // SAFETY: called once, and `boot_info` was validated in `_start`.
@@ -134,6 +141,22 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // map.
     unsafe { memory::paging::tear_down_identity_map() };
     kprintln!("[mem ] identity map torn down; low addresses now fault");
+
+    // ACPI and the local APIC. Both wait until here: the APIC's registers sit
+    // far above RAM, so reaching them needs the virtual memory manager, and
+    // calibrating its timer needs the PIT still ticking with interrupts on.
+    // SAFETY: called once, with the direct map covering the firmware tables.
+    match unsafe { acpi::init(boot_info.acpi_rsdp) } {
+        Ok(info) => {
+            acpi::report(&info);
+            adopt_local_apic(&info);
+        }
+        Err(error) => {
+            // Not fatal. The PIT keeps the system ticking on one processor;
+            // what is lost is SMP, MSI and per-core timers.
+            kprintln!("[acpi] {error}; continuing on the legacy timer");
+        }
+    }
 
     // The display comes up only now, after the heap: translated strings are
     // built at runtime by substituting into templates, so drawing anything
@@ -219,8 +242,8 @@ fn monitor_thread(_argument: usize) {
         kprintln!(
             "[mon ] {reported}s uptime {}.{:03}s | threads {} ({} ready, {} sleeping) | \
              {} switches, {} awaiting reaping{}",
-            arch::pit::uptime_ms() / 1000,
-            arch::pit::uptime_ms() % 1000,
+            arch::time::uptime_ms() / 1000,
+            arch::time::uptime_ms() % 1000,
             stats.threads,
             stats.ready,
             stats.sleeping,
@@ -236,6 +259,40 @@ fn monitor_thread(_argument: usize) {
                 heap.total / 1024
             );
         }
+    }
+}
+
+/// Move the system tick from the PIT to the local APIC timer.
+///
+/// Failure is reported and tolerated: the PIT is still ticking, so the system
+/// keeps running on one processor rather than not at all.
+fn adopt_local_apic(info: &acpi::AcpiInfo) {
+    // SAFETY: the virtual memory manager is up, the PIT is running and
+    // interrupts are enabled, which is what calibration requires.
+    let result = unsafe {
+        arch::apic::init(
+            info.local_apic_address,
+            u64::from(TIMER_FREQUENCY_HZ),
+            arch::interrupts::APIC_TIMER_VECTOR,
+        )
+    };
+
+    match result {
+        Ok(()) => {
+            // The APIC drives the clock now. Silence the 8259 rather than
+            // leaving it to deliver interrupts nothing is expecting, and stop
+            // the PIT so it is not counting down for no one.
+            // SAFETY: nothing depends on legacy interrupt delivery any more.
+            unsafe {
+                arch::pic::mask_all();
+                arch::pit::stop();
+                // Only now: until the PIC is quiet, LINT0 is how its interrupts
+                // reach this processor at all.
+                arch::apic::disconnect_legacy_pic();
+            }
+            kprintln!("[apic] legacy PIC masked, PIT stopped, LINT0 disconnected");
+        }
+        Err(error) => kprintln!("[apic] {error}; staying on the legacy timer"),
     }
 }
 
@@ -267,17 +324,16 @@ fn self_test() {
         core::arch::asm!("int3", options(nomem, nostack));
     }
 
-    kprintln!("[test] enabling interrupts and waiting for timer ticks");
-    arch::interrupts::enable();
+    kprintln!("[test] waiting for timer ticks");
 
     // Spin until the timer proves itself, but not forever: if ticks never
     // arrive, say so instead of hanging with no explanation.
     let deadline = arch::read_tsc() + 10_000_000_000;
-    while arch::pit::ticks() < 10 && arch::read_tsc() < deadline {
+    while arch::time::ticks() < 10 && arch::read_tsc() < deadline {
         core::hint::spin_loop();
     }
 
-    let ticks = arch::pit::ticks();
+    let ticks = arch::time::ticks();
     if ticks == 0 {
         kprintln!("[test] FAILED: no timer interrupts were delivered");
     } else {
@@ -373,9 +429,9 @@ fn scheduler_self_test() {
 
     // Wait for them, but not forever: a scheduler that never runs them must
     // report that rather than hang the boot.
-    let deadline = arch::pit::ticks() + 5000;
+    let deadline = arch::time::ticks() + 5000;
     while sched_test::WORKERS_FINISHED.load(Ordering::Relaxed) < WORKER_COUNT
-        && arch::pit::ticks() < deadline
+        && arch::time::ticks() < deadline
     {
         sched::sleep_ms(10);
     }
@@ -411,8 +467,8 @@ fn scheduler_self_test() {
         return;
     }
 
-    let deadline = arch::pit::ticks() + 3000;
-    while sched_test::TICKER_WAKEUPS.load(Ordering::Relaxed) < 5 && arch::pit::ticks() < deadline {
+    let deadline = arch::time::ticks() + 3000;
+    while sched_test::TICKER_WAKEUPS.load(Ordering::Relaxed) < 5 && arch::time::ticks() < deadline {
         sched::sleep_ms(10);
     }
     sched_test::STOP_HOG.store(1, Ordering::Relaxed);
@@ -712,7 +768,7 @@ fn inject_fault_if_requested() {
         // SAFETY: a volatile access to a local; the volatility is what stops
         // the optimiser from folding the division away.
         let divisor = unsafe { core::ptr::read_volatile(&mut zero) };
-        let dividend = arch::pit::ticks() | 1;
+        let dividend = arch::time::ticks() | 1;
         // SAFETY: `div` by zero raises vector 0, which is the point.
         unsafe {
             core::arch::asm!(
