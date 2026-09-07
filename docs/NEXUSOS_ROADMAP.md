@@ -183,6 +183,20 @@ diagnostics, performance work, security audit.
 
 ---
 
+## Internationalisation 🚧
+
+Not a phase of its own: the specification asks for Japanese and English from the
+start, so it was built alongside the display rather than retrofitted.
+
+Delivered: translations in `locales/*.txt` with named placeholders so languages
+can reorder their arguments, a build that fails on a missing translation, UTF-8
+text rendering with half- and full-width advances, build-time glyph
+rasterisation for CJK, and runtime language switching. See
+[i18n.md](i18n.md).
+
+Outstanding: input methods (blocked on a keyboard driver), text shaping,
+vertical writing, and further languages.
+
 ## Cross-cutting work
 
 Carried alongside the phases rather than scheduled as one:

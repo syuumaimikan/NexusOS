@@ -1,0 +1,38 @@
+# NexusOS — English (United States)
+#
+# One `key = value` per line. Blank lines and lines beginning with `#` are
+# ignored. Values are UTF-8 and may contain `{name}` placeholders, which the
+# kernel substitutes at runtime.
+#
+# Placeholders exist so that translations can reorder them. `value.memory` puts
+# the free figure first in English and the total first in Japanese; a
+# positional format string could not express that.
+#
+# Serial-log messages are deliberately NOT translated. They are a developer
+# interface, they need to stay greppable, and a bug report is far more useful
+# when its log reads the same everywhere.
+
+locale.name = English
+locale.tag = en-US
+
+os.name = NexusOS
+os.subtitle = Nexus Kernel v{version}
+os.tagline = a high-performance, AI-native, secure desktop operating system
+
+bar.status = kernel bring-up
+
+status.uptime = uptime
+status.memory = memory
+status.heap = heap
+status.threads = threads
+status.switches = switches
+status.timer = timer
+status.language = language
+
+value.uptime = {seconds}.{millis} s
+value.memory = {free} MiB free of {total} MiB
+value.heap = {used} KiB used of {total} KiB
+value.threads = {total} ({ready} ready, {sleeping} sleeping)
+value.switches = {count}
+value.timer = {hz} Hz, {ticks} ticks
+value.unavailable = unavailable

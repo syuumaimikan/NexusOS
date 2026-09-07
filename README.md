@@ -10,17 +10,26 @@ a modified upstream kernel.
 
 ## Status
 
-Phase 1 of 19 is complete: the system boots from UEFI firmware through its own
-bootloader into a higher-half kernel, on its own page tables, with a working
-serial console and framebuffer.
+Phases 0 to 5 of 19 are complete: the system boots from UEFI firmware through
+its own bootloader into a higher-half kernel, brings up interrupts, physical and
+virtual memory, a heap and a preemptive scheduler, and paints a live status
+screen.
 
 ```
 UEFI firmware
   └─ Nexus Bootloader        GOP mode selection, ACPI discovery, ELF loading,
      │                       page tables, ExitBootServices
-     └─ Nexus Kernel         higher half at 0xFFFFFFFF80000000, serial console,
-                             memory map, framebuffer
+     └─ Nexus Kernel         higher half at 0xFFFFFFFF80000000
+        ├─ interrupts        GDT, TSS with IST stacks, 256-vector IDT, PIT
+        ├─ memory            buddy frame allocator, VMM, kernel heap
+        ├─ scheduler         preemptive kernel threads, priorities, sleep/wake
+        └─ display           bitmap font, live status screen, two languages
 ```
+
+The interface speaks **English and Japanese**, switchable at runtime. Strings
+live in `locales/*.txt`, never in the code, and the CJK glyphs are rasterised at
+build time from a font on the build machine — see
+[the localisation notes](docs/i18n.md).
 
 What runs today, verified on every boot:
 
@@ -28,9 +37,12 @@ What runs today, verified on every boot:
 - 1017 MiB of usable RAM classified across 22 physical memory regions
 - Kernel `.text` mapped read-only and executable; everything else non-executable
 - A guarded boot stack, so an overflow faults rather than corrupting memory
+- Preemptive kernel threads, verified against a thread that never yields
+- A live status screen in English or Japanese, redrawn by its own thread
 
-Not yet present: interrupts, a physical allocator, a scheduler, drivers,
-filesystems, or the desktop. See the
+Not yet present: user mode, the local APIC and SMP, drivers, filesystems,
+networking, the compositor, or the desktop. "Thread" still means a kernel
+thread, and nothing is isolated from anything else yet. See the
 [architecture audit](docs/NEXUSOS_ARCHITECTURE_AUDIT.md) for an honest
 subsystem-by-subsystem status and the [roadmap](docs/NEXUSOS_ROADMAP.md) for
 what comes next.
@@ -65,9 +77,11 @@ cargo +nightly test -p nexus-boot --lib
 ```
 shared/nexus-abi/     Layout-stable types shared across the boot boundary
 boot/nexus-boot/      The Nexus Bootloader (UEFI application + testable library)
+kernel/nexus-mm/      Physical and heap allocators, host-testable
 kernel/nexus-kernel/  The Nexus Kernel
+locales/              Interface translations, one file per language
 targets/              Custom target specification for the kernel
-scripts/              Build, run and screenshot harness
+scripts/              Build, run, screenshot and font-generation harness
 docs/                 Architecture audit, roadmap, subsystem design notes
 ```
 
@@ -86,6 +100,11 @@ handle table before there are handles to protect.
 
 **The AI subsystem gets capabilities, never ambient authority.** Nexus Agent
 will act only through explicit, revocable, audited permissions.
+
+**Japanese is a first-class language, not an afterthought.** It is one of the
+two the system ships with, the layout is measured in pixels so full-width text
+is not squeezed into a Latin grid, and translations can reorder their arguments
+because the build refuses a locale that is missing a key.
 
 ## Licence
 

@@ -85,7 +85,7 @@ Invoke-Step 'boot test' {
 
     $log = Join-Path $BuildDir 'serial.log'
     if (-not (Test-Path $log)) { throw 'no serial output' }
-    $output = (Get-Content $log -Raw) -replace "`0", ''
+    $output = (Get-Content $log -Raw -Encoding UTF8) -replace "`0", ''
 
     # Every marker a healthy boot must produce, in the order it produces them.
     $markers = @(
@@ -109,6 +109,10 @@ Invoke-Step 'boot test' {
         'boot thread retiring',
         'display adopted',
         'display thread',
+        'glyphs available, including CJK',
+        'interface language en-US, 2 available',
+        'interface language is now ja-JP',
+        'interface language is now en-US',
         '[mon ]'
     )
     $missing = @($markers | Where-Object { -not $output.Contains($_) })

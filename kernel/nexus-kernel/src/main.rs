@@ -21,6 +21,7 @@ extern crate alloc;
 mod arch;
 mod display;
 mod framebuffer;
+mod i18n;
 mod memory;
 mod panic;
 mod sched;
@@ -102,10 +103,6 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     report_handoff(boot_info);
     let usable = report_memory_map(boot_info);
 
-    // SAFETY: the bootloader mapped the framebuffer through the direct map, and
-    // this is the only place the kernel adopts it.
-    unsafe { display::init(&boot_info.framebuffer) };
-
     // Descriptor tables, exception handlers and the timer. Until this runs, any
     // fault is a triple fault, so it happens as early as anything can.
     // SAFETY: single-threaded, and interrupts are still disabled — the CPU has
@@ -137,6 +134,32 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // map.
     unsafe { memory::paging::tear_down_identity_map() };
     kprintln!("[mem ] identity map torn down; low addresses now fault");
+
+    // The display comes up only now, after the heap: translated strings are
+    // built at runtime by substituting into templates, so drawing anything
+    // localised allocates. Bringing the display up earlier cost a boot to an
+    // allocation failure, which is exactly the kind of ordering mistake that
+    // only shows up when the code is actually run.
+    //
+    // Pick the interface language before anything is drawn. A real system would
+    // take this from stored settings; there is no storage yet, so it is a build
+    // constant, and an unrecognised one falls back rather than leaving the
+    // system with no strings.
+    if !i18n::set_locale(DEFAULT_LANGUAGE) {
+        kprintln!(
+            "[i18n] no locale {DEFAULT_LANGUAGE}; using {}",
+            i18n::current().tag
+        );
+    }
+    kprintln!(
+        "[i18n] interface language {}, {} available",
+        i18n::current().tag,
+        i18n::locale_count()
+    );
+
+    // SAFETY: the bootloader mapped the framebuffer through the direct map, and
+    // this is the only place the kernel adopts it.
+    unsafe { display::init(&boot_info.framebuffer) };
 
     // The scheduler. The context that got us here becomes thread #0 and keeps
     // running; from this point on it is preemptible like any other thread.
@@ -215,6 +238,14 @@ fn monitor_thread(_argument: usize) {
         }
     }
 }
+
+/// Interface language selected at boot.
+///
+/// A build constant only because there is nowhere to persist a setting yet.
+/// Both available languages are exercised at runtime regardless: the display
+/// cycles between them, which is how the switch is shown to work rather than
+/// merely compiled.
+const DEFAULT_LANGUAGE: &str = "en-US";
 
 /// Tick rate of the early timer.
 ///

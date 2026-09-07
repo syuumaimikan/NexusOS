@@ -1,6 +1,6 @@
 # NexusOS Architecture Audit
 
-**Date:** 2026-09-07 (updated after Phase 5)
+**Date:** 2026-09-07 (updated after Phase 5 and localisation)
 **Scope:** full repository
 **Verified by:** building both components and booting them in QEMU with edk2 firmware
 
@@ -55,6 +55,9 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Kernel heap | **DONE** | 16 MiB, `GlobalAlloc`, `alloc` available |
 | Kernel threads, scheduler | **DONE** | Preemptive, priority + round-robin, sleep/wake, reaping |
 | Framebuffer drawing | **PARTIAL** | Text, rectangles, gradients; no compositor, no windows |
+| Localisation | **DONE** | English and Japanese, switchable at runtime |
+| Text rendering | **PARTIAL** | UTF-8, half and full width, integer scaling; no shaping |
+| Input, IME | **MISSING** | No keyboard driver, so nothing to type into |
 | Local APIC, SMP | **MISSING** | Unblocked now that MMIO can be mapped |
 | User mode, processes | **MISSING** | Threads are kernel-only; no ring 3 yet |
 | Handles, IPC, syscalls | **MISSING** | |
@@ -102,6 +105,9 @@ Not asserted — observed, on every boot:
 - A 1920x1200 status screen renders live uptime, memory, heap, thread and
   context-switch figures, repainted twice a second by its own thread and
   captured by `scripts/screenshot.ps1`.
+- That screen renders correctly in both English and Japanese, with the memory
+  line reordered by the translation rather than by the code, and the panel
+  resized to the text it actually holds. Both are captured as screenshots.
 
 50 host unit tests cover the UEFI structure offsets, the ELF parser, memory-map
 normalization, the buddy allocator and the heap — the last two including
@@ -149,6 +155,14 @@ These are real and are tracked, not hidden:
 10. **No ageing in the scheduler.** Strict priority means a busy high-priority
     thread starves everything below it. Deliberate for now, and it needs real
     workloads before it can be tuned honestly.
+11. **CJK glyphs depend on the build machine.** They are rasterised at build
+    time from an installed font, because bundling one would redistribute it.
+    A machine without a suitable font still builds, but non-Latin text renders
+    as placeholder boxes. See [i18n.md](i18n.md).
+12. **No input method.** Without a keyboard driver there is nothing to type
+    into and no IME, so the language cycles on a timer instead of being chosen.
+13. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
+    no bidirectional text, no ligatures or combining marks.
 
 Resolved since the first audit: the missing IDT (Phase 2), the
 non-interrupt-safe spinlock (`IrqSpinLock`, Phase 2), and the unstripped kernel

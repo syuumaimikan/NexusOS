@@ -2,7 +2,7 @@
 //!
 //! Owns the framebuffer and paints the screen NexusOS shows while it is coming
 //! up. This is not the compositor — there are no surfaces, no damage tracking
-//! and no windows, and every repaint redraws the whole panel. It exists to make
+//! and no windows, and every repaint redraws whole regions. It exists to make
 //! the running system visible, and to be the thing the Nexus Compositor
 //! replaces rather than the thing it is built on.
 //!
@@ -10,15 +10,17 @@
 //! which is the point: a screen that keeps updating is direct evidence that the
 //! scheduler, the timer, the heap and the framebuffer are all working together
 //! long after boot has finished.
+//!
+//! Every user-visible string here comes from [`crate::i18n`]. Nothing a person
+//! reads is written literally in this file.
 
-use alloc::format;
 use alloc::string::String;
 
 use nexus_abi::FramebufferInfo;
 
 use crate::framebuffer::{font, Color, Framebuffer};
 use crate::sync::IrqSpinLock;
-use crate::{arch, kprintln, memory, sched};
+use crate::{arch, i18n, kprintln, memory, sched};
 
 /// The framebuffer, once the kernel has adopted it.
 static DISPLAY: IrqSpinLock<Option<Framebuffer>> = IrqSpinLock::new(None);
@@ -38,6 +40,9 @@ const MUTED: Color = Color(0x0084_9AB8);
 /// The bar along the bottom.
 const BAR: Color = Color(0x0008_0E18);
 
+/// How long each language is shown for by the demonstration thread.
+const LOCALE_CYCLE_MS: u64 = 6000;
+
 /// Adopt the framebuffer and paint the initial screen.
 ///
 /// # Safety
@@ -56,9 +61,20 @@ pub unsafe fn init(info: &FramebufferInfo) -> bool {
         framebuffer.width(),
         framebuffer.height()
     );
-    *DISPLAY.lock() = Some(framebuffer);
+    if font::has_generated_face() {
+        kprintln!(
+            "[disp] {} glyphs available, including CJK",
+            font::generated_glyph_count()
+        );
+    } else {
+        // Worth saying plainly: if this line appears, Japanese labels will be
+        // placeholder boxes, and the cause is the build rather than the
+        // renderer.
+        kprintln!("[disp] no generated glyphs; falling back to the built-in ASCII face");
+    }
 
-    paint_background();
+    *DISPLAY.lock() = Some(framebuffer);
+    paint_chrome();
     true
 }
 
@@ -74,58 +90,66 @@ fn with<R>(f: impl FnOnce(&mut Framebuffer) -> R) -> Option<R> {
     guard.as_mut().map(f)
 }
 
-/// Paint the parts of the screen that never change.
-fn paint_background() {
+/// Paint the title block and the bar along the bottom.
+///
+/// Repainted whenever the language changes, not only at boot: these strings are
+/// translated too, and a locale switch has to redraw them or the screen ends up
+/// half in each language.
+fn paint_chrome() {
+    let title = i18n::text("os.name");
+    let subtitle = i18n::format("os.subtitle", &[("version", &env!("CARGO_PKG_VERSION"))]);
+    let tagline = i18n::text("os.tagline");
+    let status = i18n::text("bar.status");
+
     with(|fb| {
         let width = fb.width();
         let height = fb.height();
+        let bar_height = (height / 22).max(28);
 
-        fb.vertical_gradient(BACKGROUND_TOP, BACKGROUND_BOTTOM);
+        // Clear the whole chrome area before redrawing. A translation is a
+        // different length from the one it replaces, so anything left over from
+        // the previous language would still be on screen underneath.
+        fb.vertical_gradient_region(
+            0,
+            height - bar_height,
+            height,
+            BACKGROUND_TOP,
+            BACKGROUND_BOTTOM,
+        );
 
-        // Title block, sized as a fraction of the surface so it is proportionate
-        // at whatever mode the firmware gave us.
+        // Sized as a fraction of the surface, so the layout is proportionate at
+        // whatever mode the firmware gave us.
         let title_scale = (width / 240).clamp(3, 10);
         let subtitle_scale = (title_scale / 2).max(2);
 
-        let title_y = height / 6;
-        fb.draw_text_centered(title_y, "NexusOS", TEXT, title_scale);
+        let title_y = height / 7;
+        fb.draw_text_centered(title_y, title, TEXT, title_scale);
 
         let subtitle_y = title_y + Framebuffer::line_height(title_scale) + 12;
-        fb.draw_text_centered(
-            subtitle_y,
-            concat!("Nexus Kernel v", env!("CARGO_PKG_VERSION")),
-            ACCENT,
-            subtitle_scale,
-        );
+        fb.draw_text_centered(subtitle_y, &subtitle, ACCENT, subtitle_scale);
 
         let tagline_y = subtitle_y + Framebuffer::line_height(subtitle_scale) + 8;
-        fb.draw_text_centered(
-            tagline_y,
-            "a high-performance, AI-native, secure desktop operating system",
-            MUTED,
-            (subtitle_scale / 2).max(1),
-        );
+        fb.draw_text_centered(tagline_y, tagline, MUTED, (subtitle_scale / 2).max(1));
 
-        // A bar along the bottom, where the Nexus Desktop's dock will go.
-        let bar_height = (height / 22).max(28);
+        // The bar along the bottom, where the Nexus Desktop's dock will go.
         let bar_y = height - bar_height;
         fb.fill_rect(0, bar_y, width, bar_height, BAR);
         fb.fill_rect(0, bar_y, width, 2, ACCENT);
 
-        let label_scale = (bar_height / 14).clamp(1, 3);
+        let label_scale = (bar_height / 22).clamp(1, 2);
         let label_y = bar_y + (bar_height - Framebuffer::line_height(label_scale)) / 2;
-        fb.draw_text(24, label_y, "Nexus", ACCENT, label_scale);
+        let cursor = fb.draw_text(24, label_y, "Nexus", ACCENT, label_scale);
         fb.draw_text(
-            24 + Framebuffer::text_width("Nexus  ", label_scale),
+            cursor + Framebuffer::text_width("  ", label_scale),
             label_y,
-            "kernel bring-up",
+            status,
             MUTED,
             label_scale,
         );
     });
 }
 
-/// Geometry of the status panel.
+/// Geometry of the status panel, in pixels.
 struct PanelLayout {
     x: u32,
     y: u32,
@@ -137,112 +161,186 @@ struct PanelLayout {
     line_spacing: u32,
 }
 
+/// One labelled row of the status panel.
+struct StatusRow {
+    label: String,
+    value: String,
+}
+
 /// Lay the panel out around the text it actually has to hold.
 ///
-/// Sizing the panel from its content is not cosmetic. Each refresh clears the
-/// panel and redraws it, so anything drawn *outside* the cleared rectangle is
-/// never erased: a value one character wider than the panel leaves the previous
-/// frame's glyphs behind it, and the two overlap into gibberish. The panel
-/// therefore has to be at least as wide as its widest line, and the text scale
-/// drops rather than letting a line escape the surface.
+/// Everything is measured in pixels rather than characters. That is not a
+/// refinement, it is required: a Japanese label is full-width and an English one
+/// half-width, so the same character count is a different number of pixels.
+/// Sizing by character count would draw Japanese values outside the rectangle
+/// the next refresh clears, and consecutive frames would overlap into
+/// unreadable text.
 fn panel_layout(surface_width: u32, surface_height: u32, rows: &[StatusRow]) -> PanelLayout {
-    // The widest label and the widest value, in characters.
-    let label_characters = rows.iter().map(|row| row.label.len()).max().unwrap_or(0) as u32;
-    let value_characters = rows.iter().map(|row| row.value.len()).max().unwrap_or(0) as u32;
-    // Two spaces between the columns.
-    let content_characters = label_characters + 2 + value_characters;
+    let label_units = rows
+        .iter()
+        .map(|row| font::measure(&row.label))
+        .max()
+        .unwrap_or(0);
+    let value_units = rows
+        .iter()
+        .map(|row| font::measure(&row.value))
+        .max()
+        .unwrap_or(0);
+    let gap_units = font::measure("  ");
+    let content_units = label_units + gap_units + value_units;
 
-    // Start from a comfortable scale and step down until the widest line fits
-    // inside the surface with room for the panel's padding and margins.
-    let margin = surface_width / 10;
-    let mut text_scale = (surface_width / 480).clamp(2, 4);
-    while text_scale > 1 {
-        let padding = 12 * text_scale;
-        let needed = content_characters * font::GLYPH_WIDTH * text_scale + padding * 2;
-        if needed + margin <= surface_width {
+    // The band the panel has to live in: below the title block and above the
+    // bar along the bottom.
+    let bar_height = (surface_height / 22).max(28);
+    let band_top = surface_height * 2 / 5;
+    let band_bottom = surface_height - bar_height - 16;
+    let band_height = band_bottom.saturating_sub(band_top);
+
+    // Step the scale down until the panel fits the band in *both* directions.
+    //
+    // Both constraints matter and neither is hypothetical. Japanese lines are
+    // wider than their English equivalents, so the horizontal limit binds in
+    // one language and not the other; and seven rows at the largest scale is
+    // taller than the band, which is how an earlier version ran its panel off
+    // the bottom of the screen.
+    let margin = surface_width / 12;
+    let mut text_scale = (surface_width / 480).clamp(1, 4);
+    let (mut padding, mut line_spacing, mut width, mut height);
+    loop {
+        padding = 12 * text_scale;
+        line_spacing = Framebuffer::line_height(text_scale) + text_scale * 3;
+        width = content_units * text_scale + padding * 2;
+        height = rows.len() as u32 * line_spacing + padding * 2;
+
+        let fits = width + margin <= surface_width && height <= band_height;
+        if fits || text_scale == 1 {
             break;
         }
         text_scale -= 1;
     }
 
-    let padding = 12 * text_scale;
-    let content_width = content_characters * font::GLYPH_WIDTH * text_scale;
-    let width = (content_width + padding * 2).min(surface_width);
-    let line_spacing = Framebuffer::line_height(text_scale) + text_scale * 4;
-    let height = rows.len() as u32 * line_spacing + padding * 2;
+    let width = width.min(surface_width);
+    // Centre the panel in the band, and never start it above the band.
+    let y = band_top + band_height.saturating_sub(height) / 2;
 
     PanelLayout {
         x: (surface_width - width) / 2,
-        y: surface_height / 2,
+        y,
         width,
         height,
         padding,
-        value_offset: (label_characters + 2) * font::GLYPH_WIDTH * text_scale,
+        value_offset: (label_units + gap_units) * text_scale,
         text_scale,
         line_spacing,
     }
 }
 
-/// One labelled row of the status panel.
-struct StatusRow {
-    label: &'static str,
-    value: String,
-}
+/// The tallest panel painted so far, so the cleared band never shrinks below
+/// what a previous frame drew.
+///
+/// A locale switch changes every string at once, and the layout with them.
+/// Without this, switching to a language that needs a shorter panel would clear
+/// less than the last frame painted and leave the old panel's lower edge behind.
+static PAINTED_HEIGHT: IrqSpinLock<u32> = IrqSpinLock::new(0);
 
-/// Redraw the status panel with current system state.
-pub fn refresh_status() {
+/// The language last painted, so a switch can be noticed.
+static PAINTED_LOCALE: IrqSpinLock<usize> = IrqSpinLock::new(usize::MAX);
+
+/// Gather the current system state as translated label and value pairs.
+fn status_rows() -> [StatusRow; 7] {
     let uptime_ms = arch::pit::uptime_ms();
     let scheduler = sched::stats();
     let heap = memory::heap::stats();
     let frames = memory::stats();
 
-    let rows = [
+    let memory_value = match frames {
+        Some(frames) => i18n::format(
+            "value.memory",
+            &[
+                ("free", &(frames.free_frames * 4096 / (1024 * 1024))),
+                ("total", &(frames.managed_frames * 4096 / (1024 * 1024))),
+            ],
+        ),
+        None => String::from(i18n::text("value.unavailable")),
+    };
+
+    [
         StatusRow {
-            label: "uptime",
-            value: format!("{}.{:03} s", uptime_ms / 1000, uptime_ms % 1000),
-        },
-        StatusRow {
-            label: "memory",
-            value: match frames {
-                Some(frames) => format!(
-                    "{} MiB free of {} MiB",
-                    frames.free_frames * 4096 / (1024 * 1024),
-                    frames.managed_frames * 4096 / (1024 * 1024)
-                ),
-                None => String::from("unavailable"),
-            },
-        },
-        StatusRow {
-            label: "heap",
-            value: format!("{} KiB used of {} KiB", heap.used / 1024, heap.total / 1024),
-        },
-        StatusRow {
-            label: "threads",
-            value: format!(
-                "{} ({} ready, {} sleeping)",
-                scheduler.threads, scheduler.ready, scheduler.sleeping
+            label: String::from(i18n::text("status.uptime")),
+            value: i18n::format(
+                "value.uptime",
+                &[
+                    ("seconds", &(uptime_ms / 1000)),
+                    ("millis", &format_args!("{:03}", uptime_ms % 1000)),
+                ],
             ),
         },
         StatusRow {
-            label: "switches",
-            value: format!("{}", scheduler.context_switches),
+            label: String::from(i18n::text("status.memory")),
+            value: memory_value,
         },
         StatusRow {
-            label: "timer",
-            value: format!(
-                "{} Hz, {} ticks",
-                arch::pit::frequency_hz(),
-                arch::pit::ticks()
+            label: String::from(i18n::text("status.heap")),
+            value: i18n::format(
+                "value.heap",
+                &[
+                    ("used", &(heap.used / 1024)),
+                    ("total", &(heap.total / 1024)),
+                ],
             ),
         },
-    ];
+        StatusRow {
+            label: String::from(i18n::text("status.threads")),
+            value: i18n::format(
+                "value.threads",
+                &[
+                    ("total", &scheduler.threads),
+                    ("ready", &scheduler.ready),
+                    ("sleeping", &scheduler.sleeping),
+                ],
+            ),
+        },
+        StatusRow {
+            label: String::from(i18n::text("status.switches")),
+            value: i18n::format("value.switches", &[("count", &scheduler.context_switches)]),
+        },
+        StatusRow {
+            label: String::from(i18n::text("status.timer")),
+            value: i18n::format(
+                "value.timer",
+                &[
+                    ("hz", &arch::pit::frequency_hz()),
+                    ("ticks", &arch::pit::ticks()),
+                ],
+            ),
+        },
+        StatusRow {
+            label: String::from(i18n::text("status.language")),
+            value: String::from(i18n::current().name),
+        },
+    ]
+}
+
+/// Redraw the status panel with current system state.
+pub fn refresh_status() {
+    let rows = status_rows();
 
     with(|fb| {
         let layout = panel_layout(fb.width(), fb.height(), &rows);
 
-        // Repaint the whole panel each time. Damage tracking is the
-        // compositor's job; here it would only be an optimisation of something
-        // that already costs a fraction of a frame.
+        let clear_height = {
+            let mut painted = PAINTED_HEIGHT.lock();
+            *painted = (*painted).max(layout.height);
+            *painted
+        };
+        fb.vertical_gradient_region(
+            layout.y,
+            layout.y + clear_height,
+            fb.height(),
+            BACKGROUND_TOP,
+            BACKGROUND_BOTTOM,
+        );
+
         fb.fill_rect(layout.x, layout.y, layout.width, layout.height, PANEL);
         fb.fill_rect(layout.x, layout.y, layout.width, 2, ACCENT);
         fb.fill_rect(
@@ -266,7 +364,7 @@ pub fn refresh_status() {
 
         for (index, row) in rows.iter().enumerate() {
             let y = layout.y + layout.padding + index as u32 * layout.line_spacing;
-            fb.draw_text(label_x, y, row.label, MUTED, layout.text_scale);
+            fb.draw_text(label_x, y, &row.label, MUTED, layout.text_scale);
             fb.draw_text(value_x, y, &row.value, TEXT, layout.text_scale);
         }
     });
@@ -278,16 +376,47 @@ pub fn refresh_status() {
 /// enough to cost nothing measurable.
 fn display_thread(_argument: usize) {
     loop {
+        let locale = i18n::current_index();
+        let changed = {
+            let mut painted = PAINTED_LOCALE.lock();
+            let changed = *painted != locale;
+            *painted = locale;
+            changed
+        };
+        if changed {
+            paint_chrome();
+        }
+
         refresh_status();
         sched::sleep_ms(500);
     }
 }
 
-/// Start the display thread. Does nothing when there is no framebuffer.
+/// Cycles the interface language, to demonstrate that switching works at
+/// runtime.
+///
+/// A real system changes language from settings, and only when asked. There is
+/// no settings UI yet, and a language selectable only at build time has not
+/// really been shown to work — the point of this thread is that every string,
+/// and the layout derived from it, is recomputed live.
+fn locale_demo_thread(_argument: usize) {
+    loop {
+        sched::sleep_ms(LOCALE_CYCLE_MS);
+        let locale = i18n::next_locale();
+        // The tag, not the name. The name is in its own language, and putting
+        // UTF-8 on the serial line turns the log into mojibake for anyone whose
+        // terminal is not set to it -- which is the whole reason logs here stay
+        // ASCII. The tag is also what a developer would grep for.
+        kprintln!("[i18n] interface language is now {}", locale.tag);
+    }
+}
+
+/// Start the display threads. Does nothing when there is no framebuffer.
 pub fn start_thread() {
     if !is_available() {
         return;
     }
+
     match sched::spawn(
         "display",
         sched::thread::Priority::Interactive,
@@ -296,5 +425,21 @@ pub fn start_thread() {
     ) {
         Ok(id) => kprintln!("[disp] display thread {id} started"),
         Err(error) => kprintln!("[disp] could not start the display thread: {error}"),
+    }
+
+    if i18n::locale_count() > 1 {
+        match sched::spawn(
+            "locale-demo",
+            sched::thread::Priority::Background,
+            locale_demo_thread,
+            0,
+        ) {
+            Ok(id) => kprintln!(
+                "[i18n] thread {id} cycles {} languages every {} ms",
+                i18n::locale_count(),
+                LOCALE_CYCLE_MS
+            ),
+            Err(error) => kprintln!("[i18n] could not start the language demonstration: {error}"),
+        }
     }
 }
