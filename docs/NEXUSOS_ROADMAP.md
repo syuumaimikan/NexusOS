@@ -103,8 +103,11 @@ Also delivered since: ACPI table parsing (RSDP, XSDT, MADT) and the local APIC
 timer, calibrated against the PIT and now driving the scheduling tick with the
 8259 and PIT shut down behind it.
 
-Still outstanding: user mode, address-space separation, per-CPU run queues and
-SMP. The processors are enumerated but none are started; "thread" currently
+SMP bring-up is also done: every processor the MADT reports is started, through
+a real-mode trampoline and INIT/SIPI, and each runs on its own local APIC timer.
+
+Still outstanding: per-processor scheduling (only the boot processor schedules
+today), TLB shootdown, user mode and address-space separation. "Thread" still
 means a kernel thread, and nothing is isolated yet.
 
 ## Phase 6 — Handles, IPC, system calls ⬜

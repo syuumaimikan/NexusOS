@@ -1,6 +1,6 @@
 # NexusOS Architecture Audit
 
-**Date:** 2026-09-08 (updated after the local APIC)
+**Date:** 2026-09-08 (updated after SMP bring-up)
 **Scope:** full repository
 **Verified by:** building both components and booting them in QEMU with edk2 firmware
 
@@ -59,7 +59,8 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Text rendering | **PARTIAL** | UTF-8, half and full width, integer scaling; no shaping |
 | Input, IME | **MISSING** | No keyboard driver, so nothing to type into |
 | Local APIC, APIC timer | **DONE** | Calibrated against the PIT; drives the tick |
-| SMP | **MISSING** | The processors are enumerated but none are started |
+| SMP bring-up | **DONE** | All processors started, each on its own APIC timer |
+| SMP scheduling | **MISSING** | Only the boot processor schedules; see §4 |
 | I/O APIC, MSI | **MISSING** | Enumerated, not programmed; no device interrupts yet |
 | User mode, processes | **MISSING** | Threads are kernel-only; no ring 3 yet |
 | Handles, IPC, syscalls | **MISSING** | |
@@ -99,6 +100,9 @@ Not asserted — observed, on every boot:
 - After teardown, a low address no longer translates.
 - ACPI 2.0 tables are located and validated: the XSDT and the MADT, reporting
   four processors, one I/O APIC and the presence of a legacy 8259.
+- All four processors ACPI reports are started, and each takes within a few
+  interrupts of the same count over 25 seconds — about 1000 Hz apiece, which is
+  what says each has its own working timer rather than sharing one.
 - The local APIC timer is calibrated against the PIT at around 1.2 GHz, takes
   over the tick at 1000 Hz, and the 8259 and PIT are shut down behind it.
   Uptime then tracks wall clock to within a millisecond per five seconds, which
@@ -132,13 +136,18 @@ The build produces zero warnings and passes `clippy -D warnings`.
 
 These are real and are tracked, not hidden:
 
-1. **No SMP.** ACPI reports four processors and the local APIC can address
-   them, but none are started: there is no trampoline, no per-CPU state and no
-   TLB shootdown. Everything runs on the boot processor.
+1. **The scheduler is still single-processor.** Every processor starts, takes
+   its own timer interrupt and idles, but only the boot processor runs the
+   scheduler. The scheduler keeps one global notion of the running thread, so a
+   second processor entering it picks a thread the first is already running and
+   context-switches onto its stack — which is what happened, and page-faulted
+   within milliseconds. Lifting this needs a per-processor current thread and
+   run queue.
+2. **No TLB shootdown.** `invlpg` handles the running core; with four cores now
+   running, a mapping change leaves the others with a stale translation. This
+   was theoretical before and is not any more.
 2. **The framebuffer is mapped write-back, not write-combining.** Correct in
    QEMU, slow on real hardware. Needs PAT configuration.
-3. **No TLB shootdown.** `invlpg` handles the running core; a second core would
-   keep a stale translation. Cannot be written or tested before SMP exists.
 4. **Bootloader allocations are over-conservative.** Page tables, the handoff
    block and the kernel image are allocated as `RuntimeServicesData`, which the
    kernel treats as permanently reserved. This wastes on the order of 100 KiB.
@@ -210,9 +219,9 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **SMP bring-up**: start the processors the MADT reports, give each one its
-   own per-CPU state and run queue, and add TLB shootdown — which cannot be
-   written or tested until there is a second core to shoot down.
+1. **Per-processor scheduling**: a current thread and run queue per core, so
+   the processors that are already running can be given work, plus the TLB
+   shootdown that four running cores now make necessary.
 2. **The I/O APIC**, so devices other than the timer can raise interrupts. This
    is the precondition for a keyboard, and therefore for input of any kind.
 3. **Ring 3 and the system-call entry path**, which is what turns a kernel
