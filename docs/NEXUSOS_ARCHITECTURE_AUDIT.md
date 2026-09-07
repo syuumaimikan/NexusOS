@@ -1,6 +1,6 @@
 # NexusOS Architecture Audit
 
-**Date:** 2026-09-07
+**Date:** 2026-09-07 (updated after Phase 4)
 **Scope:** full repository
 **Verified by:** building both components and booting them in QEMU with edk2 firmware
 
@@ -46,15 +46,16 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Kernel entry, higher half | **DONE** | Non-PIE at `0xFFFFFFFF80000000`, kernel code model |
 | Serial console | **DONE** | 16550 at COM1, survives `ExitBootServices` |
 | Panic handler | **DONE** | Lock-free output, re-entry guard |
-| Spinlock | **DONE** | Not yet interrupt-safe; see §4 |
+| Spinlock | **DONE** | Plain and interrupt-masking variants |
+| GDT / TSS | **DONE** | `syscall`/`sysret` ordering; IST stacks |
+| IDT / exceptions | **DONE** | All 256 vectors; decoded fault reports |
+| Legacy PIC / PIT timer | **DONE** | Remapped above the exception vectors; 1000 Hz |
+| Physical memory allocator | **DONE** | Buddy allocator; 1017 MiB over 260513 frames |
+| Virtual memory manager | **DONE** | map/unmap/translate; identity map torn down |
+| Kernel heap | **DONE** | 16 MiB, `GlobalAlloc`, `alloc` available |
 | Framebuffer drawing | **PARTIAL** | Rectangles and gradients; no text, no compositor |
-| GDT / TSS | **MISSING** | Still on the firmware's descriptors |
-| IDT / exceptions | **MISSING** | **Any fault is currently a triple fault** |
-| APIC, timer, SMP | **MISSING** | |
-| Physical memory allocator | **MISSING** | Map is reported but no allocator consumes it |
-| Virtual memory manager | **MISSING** | Kernel runs on the loader's tables |
-| Kernel heap | **MISSING** | No `alloc` in the kernel yet |
-| Processes, threads, scheduler | **MISSING** | |
+| Local APIC, SMP | **MISSING** | Unblocked now that MMIO can be mapped |
+| Processes, threads, scheduler | **MISSING** | Next |
 | Handles, IPC, syscalls | **MISSING** | |
 
 ### Everything above the kernel
@@ -70,44 +71,66 @@ kernel core exists.
 Not asserted — observed, on every boot:
 
 - Firmware hands control to the bootloader; the loader logs over serial.
-- A 1920×1200 BGRX framebuffer is selected and reported at `0x80000000`.
+- A 1920x1200 BGRX framebuffer is selected and reported at `0x80000000`.
 - The ACPI RSDP is found in the configuration table.
-- The 4 MiB kernel ELF is read from the ESP and its three `PT_LOAD` segments
-  are loaded into physical memory.
+- The kernel ELF is read from the ESP and its three `PT_LOAD` segments are
+  loaded into physical memory.
 - Page tables are built in 15 pages and `cr3` is switched; the kernel reads back
   the same root the loader installed, which proves the switch took effect.
 - The kernel runs at its linked higher-half address, on the guarded boot stack.
 - 1017 MiB of usable RAM is classified across 22 regions.
 - The framebuffer is painted through the direct map, confirmed by screenshot.
+- The GDT, TSS and a 256-vector IDT are installed; a deliberate `int3` is
+  dispatched and *resumed from*, which exercises the whole `iretq` path.
+- The PIT ticks at exactly 1000 Hz, with no spurious interrupts over 30 seconds.
+- The frame allocator hands out 64 frames, each of which is stamped with a
+  distinct pattern through the direct map and read back correctly, plus a 1 MiB
+  block that is 1 MiB aligned; nothing leaks.
+- The heap serves a 50000-element `Vec`, a boxed 4 KiB array, a 1000-entry
+  `BTreeMap` and a formatted `String`; a heap address is translated back to
+  physical and the same bytes are read through the direct map, which is what
+  proves the mappings are correct rather than merely plausible.
+- After teardown, a low address no longer translates.
 
-16 host-side unit tests cover UEFI structure offsets, the ELF parser and
-memory-map normalization. The build produces zero warnings.
+50 host unit tests cover the UEFI structure offsets, the ELF parser, memory-map
+normalization, the buddy allocator and the heap — the last two including
+20000-step randomised workloads that check after every operation that no memory
+is covered by two live allocations.
+
+Three fault-injection builds take real CPU faults and confirm each is reported
+rather than resetting the machine, including a stack overflow that runs guard
+page to page fault to double fault to IST stack.
+
+The build produces zero warnings and passes `clippy -D warnings`.
 
 ## 4. Known deficiencies
 
 These are real and are tracked, not hidden:
 
-1. **No IDT.** The most serious gap. Until Phase 2 lands, any page fault,
-   divide error or invalid opcode escalates to a triple fault and resets the
-   machine with no diagnostic. This is the next thing to fix.
-2. **`SpinLock` is not interrupt-safe.** Harmless today because interrupts are
-   never enabled, but it must gain an interrupt-disabling variant before the
-   first handler is registered. Documented at the type.
-3. **Bootloader allocations are over-conservative.** Page tables, the handoff
+1. **No local APIC, and therefore no SMP.** The PIT drives a single core. This
+   was blocked on the virtual memory manager, since the APIC's registers sit
+   above RAM and could not be mapped; that block is now gone.
+2. **The framebuffer is mapped write-back, not write-combining.** Correct in
+   QEMU, slow on real hardware. Needs PAT configuration.
+3. **No TLB shootdown.** `invlpg` handles the running core; a second core would
+   keep a stale translation. Cannot be written or tested before SMP exists.
+4. **Bootloader allocations are over-conservative.** Page tables, the handoff
    block and the kernel image are allocated as `RuntimeServicesData`, which the
-   kernel must treat as permanently reserved. This wastes on the order of
-   100 KiB. A custom UEFI memory type would let the kernel reclaim the page
-   tables after it builds its own; deferred until the VMM exists to reclaim them.
-4. **The framebuffer is mapped write-back, not write-combining.** Correct in
-   QEMU, slow on real hardware. Needs PAT configuration in the kernel.
-5. **The kernel binary carries debug info into the ESP** — 4 MiB of which ~32 KiB
-   is loadable. Harmless but wasteful of boot time; a stripped image plus a
-   separate symbol file is the fix.
-6. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
-   directory. Excellent for iteration, but it means NexusOS has never been
-   booted from a genuine partition table. A real GPT + FAT32 image builder is
-   needed before any hardware test.
-7. **No CI.** Building and testing is manual.
+   kernel treats as permanently reserved. This wastes on the order of 100 KiB.
+5. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
+   directory. Excellent for iteration, but it means NexusOS has never booted
+   from a genuine partition table. A real GPT + FAT32 image builder is needed
+   before any hardware test.
+6. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
+   automatically.
+7. **The heap never shrinks.** It grows on demand and keeps what it takes.
+   Acceptable for a kernel of this size; worth revisiting when there are
+   long-running workloads.
+
+Resolved since the first audit: the missing IDT (Phase 2), the
+non-interrupt-safe spinlock (`IrqSpinLock`, Phase 2), and the unstripped kernel
+image on the ESP, which was costing megabytes of boot-time reads for a
+hundred-kilobyte load.
 
 ## 5. Architectural decisions and why
 
@@ -142,13 +165,11 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **GDT, TSS, IDT and exception handlers** — so failures are diagnosable
-   instead of silent resets.
-2. **Physical frame allocator** — the memory map is already there, nothing
-   consumes it.
-3. **Virtual memory manager and kernel heap** — required by every subsystem
-   above it.
-4. **APIC and timer** — the precondition for preemption.
-5. **Threads and the scheduler.**
+1. **Threads, context switching and a preemptive scheduler** — the last piece
+   of kernel core that everything above it assumes.
+2. **Local APIC and its timer**, replacing the PIT as the scheduling tick, then
+   SMP bring-up from the ACPI MADT.
+3. **Ring 3 and the system-call entry path.**
+4. **Handles and IPC**, which is where the capability model starts.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

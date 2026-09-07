@@ -23,7 +23,7 @@ ELF64 loader, 4-level page tables (identity, direct, per-segment kernel, guarded
 stack), memory-map normalization, `ExitBootServices`, higher-half kernel entry,
 serial console, panic handler, QEMU build/run/screenshot harness, 16 unit tests.
 
-## Phase 2 — CPU and interrupts 🚧
+## Phase 2 — CPU and interrupts ✅
 
 Without this, every fault is a silent triple fault. Highest priority.
 
@@ -39,7 +39,17 @@ Without this, every fault is a silent triple fault. Highest priority.
 **Done when:** a deliberate fault prints a decoded diagnostic instead of
 resetting, and a periodic timer interrupt ticks.
 
-## Phase 3 — Physical memory ⬜
+Delivered: GDT with descriptors ordered for `syscall`/`sysret`; TSS with IST
+stacks for double fault, NMI and machine check; all 256 IDT vectors populated,
+with decoded page-fault and selector-error reports; the 8259 remapped above the
+exception vectors and masked; a 1000 Hz PIT tick; `IrqSpinLock`. Three
+fault-injection builds prove the exception path by taking real faults.
+
+The local APIC is deferred to after Phase 4: its registers sit above RAM, so
+mapping them needs a virtual memory manager. The PIT reaches the same place
+through port I/O alone.
+
+## Phase 3 — Physical memory ✅
 
 - Frame allocator over the handoff memory map (buddy allocator)
 - Frame accounting and statistics
@@ -48,7 +58,12 @@ resetting, and a periodic timer interrupt ticks.
 **Done when:** the kernel allocates and frees frames under a stress test that
 verifies no frame is ever handed out twice.
 
-## Phase 4 — Virtual memory ⬜
+Delivered: a buddy allocator in the `nexus-mm` crate, with free-list links
+stored inside the free blocks and coalescing driven by one parity bit per buddy
+pair. 21 tests including a 20000-step randomised workload. On hardware: 1017 MiB
+across 260513 frames from a 33 KiB bitmap.
+
+## Phase 4 — Virtual memory ✅
 
 - Kernel-owned page tables replacing the loader's, and teardown of the identity
   map
@@ -58,7 +73,17 @@ verifies no frame is ever handed out twice.
 
 **Done when:** the kernel runs on its own tables with `Vec` and `Box` available.
 
-## Phase 5 — Processes, threads, scheduling ⬜
+Delivered: `map`/`unmap`/`translate` over the bootloader's tables, teardown of
+the identity map, and a 16 MiB kernel heap behind a `GlobalAlloc`. The heap
+allocator lives in `nexus-mm` with 13 tests. The on-hardware test cross-checks a
+heap address against the direct map through `translate`, which is what actually
+proves the mappings are right.
+
+Still outstanding from this phase: PAT setup for write-combining framebuffer
+access, and TLB shootdown, which cannot be written before there is a second
+core to shoot down.
+
+## Phase 5 — Processes, threads, scheduling 🚧
 
 - Process and thread objects, address spaces, TLS
 - Context switching, preemption from the APIC timer
