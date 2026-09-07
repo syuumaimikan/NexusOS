@@ -102,8 +102,12 @@ Invoke-Step 'boot test' {
         'frame allocator verified',
         'identity map torn down',
         'heap verified',
+        'scheduler started',
+        'threads ran to completion',
+        'preemption verified',
         'early initialisation complete',
-        '[idle] uptime'
+        'boot thread retiring',
+        '[mon ]'
     )
     $missing = @($markers | Where-Object { -not $output.Contains($_) })
     if ($missing.Count -gt 0) {

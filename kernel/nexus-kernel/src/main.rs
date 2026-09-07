@@ -22,6 +22,7 @@ mod arch;
 mod framebuffer;
 mod memory;
 mod panic;
+mod sched;
 mod serial;
 mod sync;
 
@@ -144,15 +145,81 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     unsafe { memory::paging::tear_down_identity_map() };
     kprintln!("[mem ] identity map torn down; low addresses now fault");
 
+    // The scheduler. The context that got us here becomes thread #0 and keeps
+    // running; from this point on it is preemptible like any other thread.
+    // SAFETY: called once, from the boot context, with the heap available.
+    if let Err(error) = unsafe { sched::init() } {
+        kprintln!("FATAL: could not start the scheduler: {error}");
+        arch::halt_forever();
+    }
+
     self_test();
     inject_fault_if_requested();
 
     kprintln!();
     kprintln!("[boot] early initialisation complete");
     kprintln!("[boot] {} MiB of usable RAM", usable / (1024 * 1024));
-    kprintln!("[boot] idling: memory management and scheduling are next");
 
-    idle_loop()
+    start_system_threads();
+
+    // The boot thread has finished its work. Retiring it hands the processor to
+    // the scheduler for good; the idle thread covers the moments when nothing
+    // else is runnable.
+    kprintln!("[boot] boot thread retiring; the system is now scheduler-driven");
+    sched::exit()
+}
+
+/// Spawn the long-lived threads and hand the processor over to them.
+fn start_system_threads() {
+    match sched::spawn(
+        "monitor",
+        sched::thread::Priority::Interactive,
+        monitor_thread,
+        0,
+    ) {
+        Ok(id) => kprintln!("[boot] started monitor thread {id}"),
+        Err(error) => kprintln!("[boot] could not start the monitor thread: {error}"),
+    }
+    kprintln!("[boot] handing the processor to the scheduler");
+}
+
+/// Reports system state periodically, and reclaims finished threads.
+///
+/// Reaping belongs in a thread other than the one that finished: a thread
+/// cannot free the stack it is standing on, so a finished thread's storage is
+/// released here, once it is certain nothing is running on it.
+fn monitor_thread(_argument: usize) {
+    let mut reported = 0u64;
+    loop {
+        sched::sleep_ms(5000);
+
+        let reaped = sched::reap_finished();
+        let stats = sched::stats();
+        let memory = memory::stats();
+        let heap = memory::heap::stats();
+        reported += 5;
+
+        kprintln!(
+            "[mon ] {reported}s uptime {}.{:03}s | threads {} ({} ready, {} sleeping) | \
+             {} switches, {} awaiting reaping{}",
+            arch::pit::uptime_ms() / 1000,
+            arch::pit::uptime_ms() % 1000,
+            stats.threads,
+            stats.ready,
+            stats.sleeping,
+            stats.context_switches,
+            stats.finished,
+            if reaped > 0 { " | reaped threads" } else { "" }
+        );
+        if let Some(memory) = memory {
+            kprintln!(
+                "[mon ] memory {} MiB free | heap {} KiB used of {} KiB",
+                memory.free_frames * 4096 / (1024 * 1024),
+                heap.used / 1024,
+                heap.total / 1024
+            );
+        }
+    }
 }
 
 /// Tick rate of the early timer.
@@ -194,6 +261,161 @@ fn self_test() {
 
     memory_self_test();
     heap_self_test();
+    scheduler_self_test();
+}
+
+/// Work counters for the scheduler self-test.
+mod sched_test {
+    use core::sync::atomic::AtomicU64;
+
+    /// Total iterations completed by all worker threads.
+    pub static WORK_DONE: AtomicU64 = AtomicU64::new(0);
+    /// Number of workers that have run to completion.
+    pub static WORKERS_FINISHED: AtomicU64 = AtomicU64::new(0);
+    /// Iterations completed by the thread that never yields.
+    pub static HOG_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+    /// Wake-ups completed by the thread competing with the hog.
+    pub static TICKER_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+    /// Set to stop the hog once the preemption test has its answer.
+    pub static STOP_HOG: AtomicU64 = AtomicU64::new(0);
+}
+
+/// Iterations each self-test worker performs.
+const WORKER_ITERATIONS: u64 = 500;
+/// Number of workers the self-test spawns.
+const WORKER_COUNT: u64 = 4;
+
+/// A worker that does a fixed amount of work and exits.
+///
+/// Half of them yield between iterations and half do not, so the test covers
+/// both cooperative hand-off and timer preemption.
+fn self_test_worker(argument: usize) {
+    use core::sync::atomic::Ordering;
+
+    for _ in 0..WORKER_ITERATIONS {
+        sched_test::WORK_DONE.fetch_add(1, Ordering::Relaxed);
+        if argument % 2 == 0 {
+            sched::yield_now();
+        }
+    }
+    sched_test::WORKERS_FINISHED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A thread that never yields and never sleeps.
+///
+/// The point of the preemption test: if the timer cannot take the processor
+/// away from this, nothing else in the system will ever run again.
+fn self_test_hog(_argument: usize) {
+    use core::sync::atomic::Ordering;
+
+    while sched_test::STOP_HOG.load(Ordering::Relaxed) == 0 {
+        sched_test::HOG_ITERATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A thread that sleeps in a loop while the hog spins.
+fn self_test_ticker(_argument: usize) {
+    use core::sync::atomic::Ordering;
+
+    for _ in 0..5 {
+        sched::sleep_ms(20);
+        sched_test::TICKER_WAKEUPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Verify that threads actually run, finish, and can be preempted.
+///
+/// Two things are checked, and the second is the one that matters. Cooperative
+/// scheduling is easy to get right and easy to test. Preemption is neither: it
+/// is only real if a thread that never yields can still be taken off the
+/// processor, and the only way to know is to run one and see whether anything
+/// else makes progress.
+fn scheduler_self_test() {
+    use core::sync::atomic::Ordering;
+
+    kprintln!("[test] spawning {WORKER_COUNT} worker threads");
+    for index in 0..WORKER_COUNT {
+        let priority = if index < 2 {
+            sched::thread::Priority::Normal
+        } else {
+            sched::thread::Priority::Background
+        };
+        if let Err(error) = sched::spawn("worker", priority, self_test_worker, index as usize) {
+            kprintln!("[test] FAILED: could not spawn worker {index}: {error}");
+            return;
+        }
+    }
+
+    // Wait for them, but not forever: a scheduler that never runs them must
+    // report that rather than hang the boot.
+    let deadline = arch::pit::ticks() + 5000;
+    while sched_test::WORKERS_FINISHED.load(Ordering::Relaxed) < WORKER_COUNT
+        && arch::pit::ticks() < deadline
+    {
+        sched::sleep_ms(10);
+    }
+
+    let finished = sched_test::WORKERS_FINISHED.load(Ordering::Relaxed);
+    let work = sched_test::WORK_DONE.load(Ordering::Relaxed);
+    if finished != WORKER_COUNT {
+        kprintln!("[test] FAILED: only {finished} of {WORKER_COUNT} workers finished");
+        return;
+    }
+    if work != WORKER_COUNT * WORKER_ITERATIONS {
+        kprintln!(
+            "[test] FAILED: workers completed {work} iterations, expected {}",
+            WORKER_COUNT * WORKER_ITERATIONS
+        );
+        return;
+    }
+    kprintln!("[test] {finished} threads ran to completion, {work} iterations total");
+
+    // Now the real question: can a thread that never yields be preempted?
+    kprintln!("[test] starting a thread that never yields, at equal priority");
+    let spawned = sched::spawn("cpu-hog", sched::thread::Priority::Normal, self_test_hog, 0)
+        .and_then(|_| {
+            sched::spawn(
+                "ticker",
+                sched::thread::Priority::Normal,
+                self_test_ticker,
+                0,
+            )
+        });
+    if let Err(error) = spawned {
+        kprintln!("[test] FAILED: could not spawn the preemption test threads: {error}");
+        return;
+    }
+
+    let deadline = arch::pit::ticks() + 3000;
+    while sched_test::TICKER_WAKEUPS.load(Ordering::Relaxed) < 5 && arch::pit::ticks() < deadline {
+        sched::sleep_ms(10);
+    }
+    sched_test::STOP_HOG.store(1, Ordering::Relaxed);
+
+    let wakeups = sched_test::TICKER_WAKEUPS.load(Ordering::Relaxed);
+    let hog = sched_test::HOG_ITERATIONS.load(Ordering::Relaxed);
+    if wakeups < 5 {
+        kprintln!(
+            "[test] FAILED: preemption is not working. The ticker woke {wakeups} of 5 times \
+             while a thread that never yields held the processor"
+        );
+        return;
+    }
+    if hog == 0 {
+        kprintln!("[test] FAILED: the non-yielding thread never ran at all");
+        return;
+    }
+
+    kprintln!(
+        "[test] preemption verified: the ticker woke {wakeups} times while a non-yielding \
+         thread completed {hog} iterations"
+    );
+
+    // Let the hog observe the stop flag and retire, then reclaim everything.
+    sched::sleep_ms(50);
+    let reaped = sched::reap_finished();
+    kprintln!("[test] reclaimed {reaped} finished threads");
+    sched::dump_threads();
 }
 
 /// Exercise the kernel heap and cross-check the page tables that back it.
@@ -494,31 +716,6 @@ fn overflow_stack(depth: u64) -> u64 {
         core::ptr::write_volatile(frame.as_mut_ptr(), depth);
         let deeper = overflow_stack(depth + 1);
         core::ptr::read_volatile(frame.as_ptr()).wrapping_add(deeper)
-    }
-}
-
-/// Park the processor until there is work for it.
-///
-/// This becomes the idle thread once the scheduler exists. `hlt` rather than a
-/// spin so the host CPU is not burned while the guest has nothing to do.
-fn idle_loop() -> ! {
-    let mut last_report = 0u64;
-    loop {
-        arch::wait_for_interrupt();
-
-        // A heartbeat every five seconds, which is how a boot test tells a
-        // healthy idle apart from a hang.
-        let uptime = arch::pit::uptime_ms();
-        if uptime >= last_report + 5000 {
-            last_report = uptime - (uptime % 5000);
-            kprintln!(
-                "[idle] uptime {}.{:03}s, {} ticks, {} spurious interrupts",
-                uptime / 1000,
-                uptime % 1000,
-                arch::pit::ticks(),
-                arch::interrupts::spurious_count()
-            );
-        }
     }
 }
 

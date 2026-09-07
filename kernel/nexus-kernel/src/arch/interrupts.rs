@@ -76,8 +76,23 @@ where
 /// is where preemption is triggered.
 extern "x86-interrupt" fn timer_interrupt(_frame: InterruptStackFrame) {
     pit::on_tick();
+    crate::sched::tick();
+
+    // Acknowledge before any possible context switch. If the switch happened
+    // first, the controller would still be holding this interrupt in service
+    // and would deliver nothing further until this thread ran again -- which,
+    // for a thread that never becomes runnable, is never.
     // SAFETY: called exactly once, from the handler for this vector.
     unsafe { pic::end_of_interrupt(pic::TIMER_VECTOR) };
+
+    // Preempt if the running thread has used up its slice. This is safe from
+    // inside the handler because the handler runs on the interrupted thread's
+    // own kernel stack: the `iretq` frame stays there with the saved registers,
+    // so resuming the thread later returns here and then returns from the
+    // interrupt exactly where it left off.
+    if crate::sched::needs_reschedule() {
+        crate::sched::schedule();
+    }
 }
 
 /// The PIC's spurious interrupt, raised when a line drops before it is

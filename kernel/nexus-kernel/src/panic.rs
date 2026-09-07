@@ -33,6 +33,12 @@ fn panic(info: &PanicInfo) -> ! {
              =======================================================\n"
         ));
 
+        crate::serial::write_fmt_unlocked(format_args!(
+            "thread:   {}
+",
+            crate::sched::current_id()
+        ));
+
         if let Some(location) = info.location() {
             crate::serial::write_fmt_unlocked(format_args!(
                 "location: {}:{}:{}\n",
