@@ -154,6 +154,63 @@ pub struct InterruptStackFrame {
     pub stack_segment: u64,
 }
 
+/// Restores the kernel's `GS` base for as long as a handler entered from ring 3
+/// is running, and puts the user's back on the way out.
+///
+/// Every entry into the kernel from user mode has to do this, and doing it in
+/// the handler rather than in an assembly stub works because nothing between
+/// the processor pushing this frame and the guard being constructed touches
+/// `GS`: the `x86-interrupt` prologue only saves registers, and reading the
+/// frame is stack-relative.
+///
+/// The alternative — trusting `GS` across a trip through ring 3 — is not
+/// available. User code can zero `GS.base` with a single `mov gs, ax`, and the
+/// next timer interrupt would then read this processor's state through a null
+/// pointer.
+pub struct KernelGs(bool);
+
+/// Interrupts and exceptions taken while a processor was in ring 3.
+///
+/// The one piece of evidence that user code really ran at user privilege, and
+/// that it was preemptible while it did. A user program can be observed making
+/// system calls without either being true -- `syscall` is legal from ring 0 --
+/// so this counts the entries that could only have come from ring 3, which is
+/// the ones where the saved code selector says so.
+static FROM_USER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// How many interrupts and exceptions have arrived from ring 3.
+#[must_use]
+pub fn entries_from_user() -> u64 {
+    FROM_USER.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+impl KernelGs {
+    /// Swap in the kernel's `GS` if `frame` was pushed by user code.
+    #[inline]
+    #[must_use]
+    pub fn enter(frame: &InterruptStackFrame) -> Self {
+        // The low two bits of the saved code selector are the privilege the
+        // interrupted code was running at.
+        let from_user = frame.code_segment & 3 == 3;
+        if from_user {
+            FROM_USER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            // SAFETY: entered from ring 3, so the kernel's base is the
+            // inactive one; `Drop` performs the matching swap.
+            unsafe { super::percpu::swap_gs() };
+        }
+        Self(from_user)
+    }
+}
+
+impl Drop for KernelGs {
+    fn drop(&mut self) {
+        if self.0 {
+            // SAFETY: pairs with the swap in `enter`.
+            unsafe { super::percpu::swap_gs() };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

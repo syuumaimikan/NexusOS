@@ -163,6 +163,12 @@ extern "sysv64" fn application_processor_entry(cpu_index: u64) -> ! {
         // This core's own APIC and timer. The frequency is already known from
         // the boot processor's calibration, so nothing is measured again.
         apic::init_processor(super::interrupts::APIC_TIMER_VECTOR, time::frequency_hz());
+
+        // Per processor, not once: `EFER`, `STAR`, `LSTAR` and `FMASK` are
+        // per-processor registers, so a core that skipped this would take an
+        // invalid opcode the first time a user thread migrated onto it and made
+        // a call.
+        super::syscall::init();
     }
 
     STARTED.fetch_add(1, Ordering::Release);

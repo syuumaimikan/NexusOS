@@ -95,6 +95,7 @@ core to shoot down.
 - TLB shootdown across processors
 - SMP bring-up via the MADT, per-CPU data
 - Ring 3 transition, `syscall`/`sysret`
+- A separate address space per process
 
 Delivered: kernel threads with their own guarded stacks, context switching,
 preemption from the timer, strict priority with round-robin inside each level,
@@ -128,9 +129,25 @@ polling — from every spin loop — reaches one spinning for a lock with interr
 masked, which is the case that otherwise deadlocks, since reaping a thread
 unmaps its stack while holding the scheduler lock.
 
-Still outstanding: per-processor run queues, thread affinity,
-user mode and address-space separation. "Thread" still means a kernel thread,
-and nothing is isolated yet.
+Ring 3 is open. A user program runs at user privilege, in pages of its own that
+it cannot write and on a stack it cannot execute, and the only way back into the
+kernel is `syscall`. The entry stub is the interesting part: `syscall` does not
+switch stacks, so the processor arrives in ring 0 still standing on the user's,
+and `swapgs` plus the per-CPU area is how it gets off without destroying a
+register belonging to the caller. Every interrupt entry does the same, because
+user code can zero `GS.base` with one instruction and the next timer tick would
+otherwise read per-CPU state through a null pointer.
+
+Five system calls, each one exercised from ring 3 by the program the kernel
+starts at boot, because a call that has never been made from user mode is a
+function with an unusual name. The boot test fails unless an interrupt was taken
+from ring 3 — system calls alone would not prove user privilege, since `syscall`
+is legal from ring 0 — and an injection build reads kernel memory from ring 3 to
+show the boundary keeps something out rather than merely being crossable.
+
+Still outstanding: per-processor run queues, thread affinity, and address-space
+separation. There is one address space; ring 3 is kept apart by the user bit
+rather than by `cr3`, so "process" is not yet a word this kernel has earned.
 
 ## Input 🚧
 

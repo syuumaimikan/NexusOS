@@ -62,7 +62,7 @@ use crate::kprintln;
 use crate::sync::IrqSpinLock;
 
 use context::context_switch;
-use thread::{Priority, Thread, ThreadEntry, ThreadId, ThreadState, TIME_SLICE_TICKS};
+use thread::{Priority, Thread, ThreadEntry, ThreadId, ThreadState, UserStart, TIME_SLICE_TICKS};
 
 /// Scheduler state shared by every processor.
 struct Scheduler {
@@ -261,6 +261,51 @@ pub fn spawn(
     // slice it is not using.
     percpu::request_reschedule_everywhere();
     Ok(id)
+}
+
+/// Create a thread that begins executing in ring 3 at `entry`.
+///
+/// The thread starts in the kernel like any other and leaves for user mode as
+/// its first act, because something has to set up the transition and only code
+/// already running on the thread's own kernel stack can.
+pub fn spawn_user(name: &str, entry: u64, stack_top: u64) -> Result<ThreadId, SpawnError> {
+    let id = {
+        let mut scheduler = SCHEDULER.lock();
+        let id = scheduler.create(name, Priority::Normal, user_trampoline, 0)?;
+        if let Some(thread) = scheduler.threads.get_mut(&id) {
+            thread.user_start = Some(UserStart { entry, stack_top });
+        }
+        scheduler.enqueue(id);
+        id
+    };
+
+    percpu::request_reschedule_everywhere();
+    Ok(id)
+}
+
+/// The kernel side of a user thread: hand the processor to ring 3.
+fn user_trampoline(_argument: usize) {
+    let start = {
+        let scheduler = SCHEDULER.lock();
+        scheduler
+            .threads
+            .get(&ThreadId(percpu::current_thread()))
+            .and_then(|thread| thread.user_start)
+    };
+
+    let Some(start) = start else {
+        kprintln!("[sched] a user thread had no entry point; not entering ring 3");
+        return;
+    };
+
+    // `schedule` has already pointed this processor's `rsp0` and syscall stack
+    // at this thread's kernel stack, which is what the first interrupt or
+    // system call out of ring 3 will land on.
+    //
+    // SAFETY: the caller of `spawn_user` mapped both addresses into the user
+    // half. This never returns, so nothing after it can observe a half-left
+    // kernel.
+    unsafe { crate::user::enter(start.entry, start.stack_top) }
 }
 
 /// The thread running on this processor, if it has joined the scheduler.
@@ -533,7 +578,7 @@ pub fn schedule() {
                 &mut thread.stack_pointer as *mut u64
             };
 
-            let incoming_stack = {
+            let (incoming_stack, incoming_kernel_stack) = {
                 let thread = scheduler
                     .threads
                     .get_mut(&next)
@@ -541,8 +586,24 @@ pub fn schedule() {
                 thread.state = ThreadState::Running;
                 thread.slice_remaining = TIME_SLICE_TICKS;
                 thread.switches += 1;
-                thread.stack_pointer
+                (thread.stack_pointer, thread.kernel_stack_top())
             };
+
+            // Where the processor lands when it comes back from ring 3, by
+            // either door. Set on every switch rather than only for user
+            // threads: leaving a stale pointer here would mean an interrupt
+            // from user mode landing on a stack belonging to some other thread,
+            // and the cost of writing two words is nothing next to finding
+            // that.
+            //
+            // A thread with no kernel stack of its own -- the boot context, and
+            // the idle threads -- never runs in ring 3, so the processor's own
+            // stack is the honest answer for it.
+            let kernel_stack = incoming_kernel_stack.unwrap_or_else(percpu::kernel_stack_top);
+            percpu::set_syscall_stack_top(kernel_stack);
+            // SAFETY: `kernel_stack` is the top of a mapped stack, and only this
+            // processor writes its own TSS.
+            unsafe { arch::gdt::set_kernel_stack(percpu::cpu_index() as usize, kernel_stack) };
 
             percpu::set_current_thread(next.0);
             scheduler.context_switches += 1;

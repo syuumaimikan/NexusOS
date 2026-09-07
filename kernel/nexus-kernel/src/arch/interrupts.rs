@@ -103,7 +103,10 @@ where
 /// already in flight lands on a vector with no handler; falling silent means a
 /// straggler is acknowledged and ignored, and the clock is never advanced twice
 /// for the same instant.
-extern "x86-interrupt" fn pit_interrupt(_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn pit_interrupt(frame: InterruptStackFrame) {
+    // Entered from ring 3 as readily as from the kernel, and a device
+    // interrupt is the likeliest of all of them to land on user code.
+    let _gs = super::idt::KernelGs::enter(&frame);
     let driving = time::is_source(TimerSource::Pit);
     if driving {
         time::on_tick();
@@ -134,7 +137,10 @@ extern "x86-interrupt" fn pit_interrupt(_frame: InterruptStackFrame) {
 /// that moved time forward is the one that can know a deadline has passed —
 /// while charging the tick to a thread and deciding to preempt it are per
 /// processor, because the thread being charged is.
-extern "x86-interrupt" fn apic_timer_interrupt(_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn apic_timer_interrupt(frame: InterruptStackFrame) {
+    // Entered from ring 3 as readily as from the kernel, and a device
+    // interrupt is the likeliest of all of them to land on user code.
+    let _gs = super::idt::KernelGs::enter(&frame);
     // Counted on every processor, including the boot one: the count is how a
     // wedged core is spotted, and a core that is excluded from the count cannot
     // be seen to have stopped.
@@ -164,7 +170,10 @@ extern "x86-interrupt" fn apic_timer_interrupt(_frame: InterruptStackFrame) {
 /// The handler is only half of how a request arrives: a processor spinning for
 /// a lock has interrupts masked and would never take this, so the same mailbox
 /// is polled from every spin loop. See [`super::tlb`].
-extern "x86-interrupt" fn tlb_shootdown_interrupt(_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn tlb_shootdown_interrupt(frame: InterruptStackFrame) {
+    // Entered from ring 3 as readily as from the kernel, and a device
+    // interrupt is the likeliest of all of them to land on user code.
+    let _gs = super::idt::KernelGs::enter(&frame);
     super::tlb::on_interrupt();
 
     // Acknowledged after the invalidation, not before: the sender is waiting on
@@ -191,7 +200,10 @@ fn preempt() {
 /// Reads one scancode into a queue and acknowledges. Decoding happens on a
 /// thread: an interrupt handler runs with interrupts masked on this processor,
 /// and decoding needs modifier state that a handler has no business locking.
-extern "x86-interrupt" fn keyboard_interrupt(_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn keyboard_interrupt(frame: InterruptStackFrame) {
+    // Entered from ring 3 as readily as from the kernel, and a device
+    // interrupt is the likeliest of all of them to land on user code.
+    let _gs = super::idt::KernelGs::enter(&frame);
     // SAFETY: called only as the handler for this vector, and the read of the
     // controller's output buffer is what clears its interrupt.
     unsafe {
@@ -205,7 +217,10 @@ extern "x86-interrupt" fn keyboard_interrupt(_frame: InterruptStackFrame) {
 /// Counted, never acknowledged: the APIC raises no in-service bit for it, so an
 /// end-of-interrupt here would clear a different interrupt that is genuinely
 /// pending.
-extern "x86-interrupt" fn apic_spurious_interrupt(_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn apic_spurious_interrupt(frame: InterruptStackFrame) {
+    // Entered from ring 3 as readily as from the kernel, and a device
+    // interrupt is the likeliest of all of them to land on user code.
+    let _gs = super::idt::KernelGs::enter(&frame);
     apic::on_spurious();
 }
 
@@ -216,7 +231,10 @@ extern "x86-interrupt" fn apic_spurious_interrupt(_frame: InterruptStackFrame) {
 /// electrical behaviour, and treating it as a fault would be wrong. A steadily
 /// climbing count, on the other hand, points at a real problem, which is why
 /// the number is kept.
-extern "x86-interrupt" fn spurious_interrupt(_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn spurious_interrupt(frame: InterruptStackFrame) {
+    // Entered from ring 3 as readily as from the kernel, and a device
+    // interrupt is the likeliest of all of them to land on user code.
+    let _gs = super::idt::KernelGs::enter(&frame);
     SPURIOUS_COUNT.fetch_add(1, Ordering::Relaxed);
     // A genuine spurious interrupt must *not* be acknowledged: the controller
     // never raised its in-service bit, so an EOI would clear a real interrupt

@@ -78,6 +78,7 @@ fn report_selector_error(code: u64) {
 macro_rules! simple_handler {
     ($name:ident, $vector:expr, $description:expr) => {
         extern "x86-interrupt" fn $name(frame: InterruptStackFrame) {
+            let _gs = super::idt::KernelGs::enter(&frame);
             report_header($vector, $description, &frame);
             report_footer()
         }
@@ -88,6 +89,7 @@ macro_rules! simple_handler {
 macro_rules! selector_error_handler {
     ($name:ident, $vector:expr, $description:expr) => {
         extern "x86-interrupt" fn $name(frame: InterruptStackFrame, error_code: u64) {
+            let _gs = super::idt::KernelGs::enter(&frame);
             report_header($vector, $description, &frame);
             report_selector_error(error_code);
             report_footer()
@@ -123,6 +125,7 @@ selector_error_handler!(control_protection, 21, "control-protection exception");
 /// self-test. Returning from it means execution continues at the instruction
 /// after the trap.
 extern "x86-interrupt" fn breakpoint_trap(frame: InterruptStackFrame) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     kprintln!(
         "[intr] breakpoint at {:#018x} ({} mode); resuming",
         frame.instruction_pointer,
@@ -136,6 +139,7 @@ extern "x86-interrupt" fn breakpoint_trap(frame: InterruptStackFrame) {
 /// most often raised with a zero error code, where the selector decode would be
 /// misleading noise.
 extern "x86-interrupt" fn general_protection_fault(frame: InterruptStackFrame, error_code: u64) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(13, "general protection fault", &frame);
     if error_code == 0 {
         kprintln!("  error code : 0 (no segment selector involved)");
@@ -151,6 +155,7 @@ extern "x86-interrupt" fn general_protection_fault(frame: InterruptStackFrame, e
 /// it was for. Together they identify almost every paging bug outright, so both
 /// are decoded in full.
 extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, error_code: u64) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     let address = read_cr2();
 
     report_header(14, "page fault", &frame);
@@ -211,6 +216,7 @@ extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, error_code: u64
 /// failed is that the current stack is unusable. It cannot return: the
 /// architecture does not define what the interrupted state means.
 extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, error_code: u64) -> ! {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(8, "double fault", &frame);
     kprintln!("  error code : {error_code:#x} (always zero)");
     kprintln!("  note       : running on the double-fault IST stack");
@@ -222,6 +228,7 @@ extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, error_code: u
 /// Machine check. Runs on its own stack; hardware has reported a fault it
 /// cannot correct.
 extern "x86-interrupt" fn machine_check(frame: InterruptStackFrame) -> ! {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(18, "machine check", &frame);
     kprintln!("  note       : the processor reported an uncorrectable error");
     report_footer()
@@ -229,18 +236,21 @@ extern "x86-interrupt" fn machine_check(frame: InterruptStackFrame) -> ! {
 
 /// Alignment check, which pushes an (always zero) error code.
 extern "x86-interrupt" fn alignment_check(frame: InterruptStackFrame, _error_code: u64) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(17, "alignment check", &frame);
     report_footer()
 }
 
 /// Hypervisor injection exception.
 extern "x86-interrupt" fn hypervisor_injection(frame: InterruptStackFrame) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(28, "hypervisor injection exception", &frame);
     report_footer()
 }
 
 /// VMM communication exception.
 extern "x86-interrupt" fn vmm_communication(frame: InterruptStackFrame, error_code: u64) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(29, "VMM communication exception", &frame);
     kprintln!("  error code : {error_code:#x}");
     report_footer()
@@ -248,6 +258,7 @@ extern "x86-interrupt" fn vmm_communication(frame: InterruptStackFrame, error_co
 
 /// Security exception.
 extern "x86-interrupt" fn security_exception(frame: InterruptStackFrame, error_code: u64) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(30, "security exception", &frame);
     kprintln!("  error code : {error_code:#x}");
     report_footer()
@@ -258,6 +269,7 @@ extern "x86-interrupt" fn security_exception(frame: InterruptStackFrame, error_c
 /// Registering this everywhere means an unexpected interrupt produces a message
 /// naming the vector, instead of a triple fault that names nothing.
 extern "x86-interrupt" fn unhandled(frame: InterruptStackFrame) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(255, "unhandled interrupt", &frame);
     kprintln!("  note       : no handler is registered for this vector");
     report_footer()

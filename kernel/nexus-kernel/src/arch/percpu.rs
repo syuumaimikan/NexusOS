@@ -65,7 +65,34 @@ pub struct PerCpu {
     /// opportunity. Per-processor because the answer differs per processor.
     pub needs_reschedule: bool,
     _padding: [u8; 6],
+    /// Top of the kernel stack a `syscall` from ring 3 should switch to.
+    ///
+    /// The running thread's own, not the processor's: a system call has to be
+    /// able to block, and a thread that blocks on a stack shared with the
+    /// processor would be resumed on top of whatever ran there in between.
+    /// Updated by the scheduler on every switch.
+    pub syscall_stack_top: u64,
+    /// Where the entry stub parks the user stack pointer for the duration.
+    pub user_stack_pointer: u64,
 }
+
+/// Byte offsets the `syscall` entry stub reaches through `gs:`.
+///
+/// Assembly cannot ask Rust for a field offset, so these are written out and
+/// then checked against the real layout below. Getting one wrong would not fail
+/// to compile; it would switch to a stack that is not a stack.
+pub mod offset {
+    /// [`PerCpu::syscall_stack_top`].
+    pub const SYSCALL_STACK_TOP: usize = 64;
+    /// [`PerCpu::user_stack_pointer`].
+    pub const USER_STACK_POINTER: usize = 72;
+}
+
+const _: () = {
+    assert!(core::mem::offset_of!(PerCpu, self_pointer) == 0);
+    assert!(core::mem::offset_of!(PerCpu, syscall_stack_top) == offset::SYSCALL_STACK_TOP);
+    assert!(core::mem::offset_of!(PerCpu, user_stack_pointer) == offset::USER_STACK_POINTER);
+};
 
 /// The thread fields' "nothing here" value.
 ///
@@ -87,6 +114,8 @@ impl PerCpu {
             online: false,
             needs_reschedule: false,
             _padding: [0; 6],
+            syscall_stack_top: 0,
+            user_stack_pointer: 0,
         }
     }
 }
@@ -172,6 +201,20 @@ pub fn needs_reschedule() -> bool {
     unsafe { (*this()).needs_reschedule }
 }
 
+/// Top of the stack this processor entered the kernel on.
+#[inline]
+#[must_use]
+pub fn kernel_stack_top() -> u64 {
+    // SAFETY: as above.
+    unsafe { (*this()).kernel_stack_top }
+}
+
+/// Record the kernel stack a `syscall` arriving on this processor should use.
+pub fn set_syscall_stack_top(top: u64) {
+    // SAFETY: as above.
+    unsafe { (*this()).syscall_stack_top = top };
+}
+
 /// Set or clear this processor's preemption request.
 pub fn set_needs_reschedule(value: bool) {
     // SAFETY: as above.
@@ -210,6 +253,9 @@ static ONLINE_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// `IA32_GS_BASE`, the segment base `gs:` offsets are taken from.
 const IA32_GS_BASE: u32 = 0xC000_0101;
 
+/// `IA32_KERNEL_GS_BASE`, the value `swapgs` exchanges with the active one.
+const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+
 /// Prepare slot `index` and install it as this processor's `GS` base.
 ///
 /// # Safety
@@ -232,6 +278,13 @@ pub unsafe fn install(index: usize, apic_id: u32, kernel_stack_top: u64) {
         (*slot).online = true;
 
         write_gs_base(slot as u64);
+        // Both bases, not just the active one. User code can zero `GS.base`
+        // simply by loading a segment selector, so the kernel cannot rely on
+        // it surviving a trip through ring 3; what it relies on is the
+        // *inactive* base still holding this processor's state, which is what
+        // `swapgs` brings back on entry. Setting both here means the very
+        // first entry from user mode has something correct to swap in.
+        write_kernel_gs_base(slot as u64);
     }
 
     ONLINE_COUNT.fetch_add(1, Ordering::Release);
@@ -252,6 +305,39 @@ unsafe fn write_gs_base(base: u64) {
             in("edx") (base >> 32) as u32,
             options(nomem, nostack, preserves_flags),
         );
+    }
+}
+
+/// Set `IA32_KERNEL_GS_BASE`.
+///
+/// # Safety
+///
+/// `base` must point at a live [`PerCpu`] whose self-pointer is correct.
+unsafe fn write_kernel_gs_base(base: u64) {
+    // SAFETY: upheld by the caller.
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") IA32_KERNEL_GS_BASE,
+            in("eax") base as u32,
+            in("edx") (base >> 32) as u32,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// Exchange `IA32_GS_BASE` with `IA32_KERNEL_GS_BASE`.
+///
+/// # Safety
+///
+/// Must be paired. Executing this an odd number of times between entering and
+/// leaving the kernel leaves `GS` pointing at the wrong thing, which is not a
+/// fault but a silent read of another address space's idea of per-CPU state.
+#[inline]
+pub unsafe fn swap_gs() {
+    // SAFETY: upheld by the caller.
+    unsafe {
+        core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
     }
 }
 

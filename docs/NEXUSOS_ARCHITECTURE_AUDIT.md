@@ -66,7 +66,9 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | TLB shootdown | **DONE** | Mailbox per processor, interrupted and polled; verified by injection |
 | I/O APIC | **DONE** | Redirection entries programmed, source overrides honoured |
 | MSI, MSI-X | **MISSING** | No PCI enumeration yet, so nothing to target |
-| User mode, processes | **MISSING** | Threads are kernel-only; no ring 3 yet |
+| Ring 3 | **DONE** | A user thread runs at CPL 3, preemptible, in its own pages |
+| System calls | **PARTIAL** | `syscall`/`sysret` entry, five calls; no handles or IPC |
+| Processes, address spaces | **MISSING** | One address space; ring 3 is separated by the user bit, not by `cr3` |
 | Handles, IPC, syscalls | **MISSING** | |
 
 ### Everything above the kernel
@@ -147,55 +149,64 @@ The build produces zero warnings and passes `clippy -D warnings`.
 
 These are real and are tracked, not hidden:
 
-1. **The run queues are shared, not per-processor.** One lock covers the thread
+1. **One address space.** The user mappings live in the kernel's own page
+   tables and are kept apart by the `USER` bit rather than by being absent.
+   That is enough for the boundary to be enforced — a build that reads kernel
+   memory from ring 3 is an injection test, and it faults — and it is not
+   isolation: two user programs would share everything. A `cr3` per process is
+   what makes "process" mean something, and it brings page-table lifetime and
+   the TLB work that goes with it.
+2. **No user memory copy helpers.** `Call::Log` validates its range and then
+   reads it directly. A user pointer that is unmapped faults in the kernel, on
+   the kernel's stack, and is reported as a kernel fault; it should be turned
+   into an error returned to the caller. That needs a fault handler that knows
+   about a fixup table, which is its own piece of work.
+3. **The run queues are shared, not per-processor.** One lock covers the thread
    table and all four queues. That is correct and it is what makes every
    processor able to take work, but it is a point of contention that will matter
    once there are more processors or more threads than a desktop has today.
    Per-processor queues with balancing between them is the next step, and it
    wants contention to measure rather than to be guessed at.
-2. **No thread affinity.** A thread can be resumed on any processor, which is
+4. **No thread affinity.** A thread can be resumed on any processor, which is
    right for fairness and wrong for cache locality. There is nothing to measure
    it with yet.
-3. **Shootdowns are broadcast to every processor.** A processor that never
+5. **Shootdowns are broadcast to every processor.** A processor that never
    touched the address is interrupted anyway, because nothing tracks which
    address spaces are live where. There is one address space, so today the
    broadcast is also the correct set; tracking becomes worth it when there are
    processes.
-4. **The framebuffer is mapped write-back, not write-combining.** Correct in
+6. **The framebuffer is mapped write-back, not write-combining.** Correct in
    QEMU, slow on real hardware. Needs PAT configuration.
-5. **Bootloader allocations are over-conservative.** Page tables, the handoff
+7. **Bootloader allocations are over-conservative.** Page tables, the handoff
    block and the kernel image are allocated as `RuntimeServicesData`, which the
    kernel treats as permanently reserved. This wastes on the order of 100 KiB.
-6. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
+8. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
    directory. Excellent for iteration, but it means NexusOS has never booted
    from a genuine partition table. A real GPT + FAT32 image builder is needed
    before any hardware test.
-7. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
+9. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
    automatically.
-8. **The heap never shrinks.** It grows on demand and keeps what it takes.
-   Acceptable for a kernel of this size; worth revisiting when there are
-   long-running workloads.
-9. **The kernel binary has no host test harness.** It is `no_main` with its own
-   panic handler, so tests written inside it would compile and never run. What
-   can be checked statically is checked with const assertions; the rest is
-   covered by boot-marker checks, fault injection and screenshots. Logic worth
-   unit testing is moved into a library crate instead, which is why the
-   allocators live in `nexus-mm`.
-10. **Threads are kernel-only.** There is no ring 3, no address-space separation
-    and no system-call boundary yet, so "thread" currently means a kernel thread
-    and nothing is isolated from anything else.
-11. **No ageing in the scheduler.** Strict priority means a busy high-priority
+10. **The heap never shrinks.** It grows on demand and keeps what it takes.
+    Acceptable for a kernel of this size; worth revisiting when there are
+    long-running workloads.
+11. **The kernel binary has no host test harness.** It is `no_main` with its own
+    panic handler, so tests written inside it would compile and never run. What
+    can be checked statically is checked with const assertions; the rest is
+    covered by boot-marker checks, fault injection and screenshots. Logic worth
+    unit testing is moved into a library crate instead, which is why the
+    allocators live in `nexus-mm`.
+12. **No ageing in the scheduler.** Strict priority means a busy high-priority
     thread starves everything below it. Deliberate for now, and it needs real
     workloads before it can be tuned honestly.
-12. **CJK glyphs depend on the build machine.** They are rasterised at build
+13. **CJK glyphs depend on the build machine.** They are rasterised at build
     time from an installed font, because bundling one would redistribute it.
     A machine without a suitable font still builds, but non-Latin text renders
     as placeholder boxes. See [i18n.md](i18n.md).
-13. **Input goes nowhere but the kernel.** Keys are decoded and acted on
+14. **Input goes nowhere but the kernel.** Keys are decoded and acted on
     inside the kernel because there is no focus, no window and no process to
     deliver them to. There is no IME either, so Japanese can be displayed but
     not typed.
-14. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
+15. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
     no bidirectional text, no ligatures or combining marks.
 
 Resolved since the first audit: the missing IDT (Phase 2), the
@@ -204,7 +215,9 @@ image on the ESP, which was costing megabytes of boot-time reads for a
 hundred-kilobyte load, the two scripts that staged that ESP differently, so
 whichever ran last decided what the next boot would load, and the
 single-processor scheduler: every processor now runs threads, and the boot test
-fails if the workers all land on one of them. Stale translations on the other
+fails if the workers all land on one of them; and the absence of any user mode
+at all — a program now runs at ring 3, and the boot test fails unless an
+interrupt was taken from it. Stale translations on the other
 cores went with it: mapping changes are shot down across every processor, and a
 build that deliberately keeps the shootdown local is one of the injection tests,
 so the check that looks for staleness has been seen to fail when there is some.
@@ -242,8 +255,9 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **Ring 3 and the system-call entry path**, which is what turns a kernel
-   thread into a process and makes isolation mean anything.
+1. **A separate address space per process**, which is what turns a thread that
+   happens to run at ring 3 into something isolated, and what the word
+   "process" is currently borrowing credit for.
 2. **Handles and IPC**, where the capability model starts. Input needs it too:
    a wait queue is what lets the input thread sleep until a key arrives instead
    of polling fifty times a second.

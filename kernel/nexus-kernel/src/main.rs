@@ -30,6 +30,7 @@ mod panic;
 mod sched;
 mod serial;
 mod sync;
+mod user;
 
 use nexus_abi::{layout, BootInfo, MemoryKind, MemoryRegion};
 
@@ -216,6 +217,14 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
 fn start_system_threads() {
     display::start_thread();
     input::start_thread();
+
+    // The first thing NexusOS runs that it does not trust. Not fatal if it
+    // fails: the system is less of a system without it, but it is still one.
+    // SAFETY: the heap and the scheduler are both running by now, and this is
+    // the only call.
+    if let Err(error) = unsafe { user::start() } {
+        kprintln!("[user] could not start user mode: {error}");
+    }
     match sched::spawn(
         "monitor",
         sched::thread::Priority::Interactive,
@@ -295,6 +304,15 @@ fn monitor_thread(_argument: usize) {
             let (shootdowns, timeouts) = arch::tlb::statistics();
             kprintln!("[mon ] {shootdowns} TLB shootdowns broadcast, {timeouts} unacknowledged");
         }
+
+        // Interrupts taken from ring 3 are the evidence that user code ran at
+        // user privilege and was preemptible while it did. System calls alone
+        // would not say either: `syscall` is legal from ring 0 too.
+        let (calls, unknown) = arch::syscall::statistics();
+        let from_user = arch::idt::entries_from_user();
+        kprintln!(
+            "[mon ] {calls} system calls ({unknown} unimplemented),              {from_user} interrupts taken from ring 3"
+        );
     }
 }
 
@@ -340,7 +358,12 @@ fn adopt_local_apic(info: &acpi::AcpiInfo) {
                     nexus_abi::layout::KERNEL_BOOT_STACK_BASE
                         + nexus_abi::layout::KERNEL_BOOT_STACK_SIZE,
                 );
+
+                // The system-call boundary, which needs both the descriptor
+                // table and per-CPU state and so cannot be opened before here.
+                arch::syscall::init();
             }
+            arch::syscall::report();
         }
         Err(error) => kprintln!("[apic] {error}; staying on the legacy timer"),
     }

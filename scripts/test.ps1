@@ -119,6 +119,11 @@ Invoke-Step 'boot test' {
         'preemption verified',
         'TLB shootdown verified',
         'TLB shootdowns broadcast',
+        'syscall entry at',
+        'hello from ring 3',
+        'callee-saved registers survived',
+        'thread exited through the system-call boundary',
+        'interrupts taken from ring 3',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -151,6 +156,21 @@ Invoke-Step 'boot test' {
     }
     if ([int]$Matches[2] -gt 1 -and [int]$Matches[1] -lt 2) {
         throw "work ran on only $($Matches[1]) of $($Matches[2]) processors"
+    }
+    # Ring 3 has to have actually been ring 3. System calls alone would not say
+    # so -- `syscall` is legal from ring 0 -- but an interrupt whose saved code
+    # selector has privilege 3 could only have come from user mode.
+    if (-not ($output -match '(\d+) interrupts taken from ring 3')) {
+        throw 'the kernel never reported interrupts taken from ring 3'
+    }
+    if ([int]$Matches[1] -lt 1) {
+        throw 'no interrupt ever arrived from ring 3, so nothing ran at user privilege'
+    }
+    # A user program that reported a failure across the boundary is a failure.
+    if ($output -match '\[user\][^
+]*FAILED[^
+]*') {
+        throw "the user program reported: $($Matches[0])"
     }
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }

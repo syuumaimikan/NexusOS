@@ -133,10 +133,28 @@ const fn index_for(virt: u64, level: usize) -> usize {
 
 /// Walk to the page table containing `virt`, creating tables as needed.
 ///
+/// `user` marks every table on the path reachable from ring 3, and must be set
+/// exactly when the leaf being installed is a user mapping. The processor takes
+/// the effective permission as the AND across all four levels, so a user leaf
+/// under a kernel-only table is simply unreachable — which faults on the first
+/// instruction of the first user program and looks nothing like the missing bit
+/// that it is.
+///
+/// Kernel mappings leave it clear, so a kernel table can never be reached from
+/// ring 3 even if a leaf below it is later marked user by mistake. Nothing is
+/// lost by being permissive at the intermediate levels of the *user* half:
+/// every leaf there is a user leaf, and a leaf without the bit is still
+/// unreachable whatever the tables above it say.
+///
 /// # Safety
 ///
 /// `root` must be a live root page table reachable through the direct map.
-unsafe fn walk_to_page_table(root: u64, virt: u64, create: bool) -> Result<u64, MapError> {
+unsafe fn walk_to_page_table(
+    root: u64,
+    virt: u64,
+    create: bool,
+    user: bool,
+) -> Result<u64, MapError> {
     let mut table = root;
 
     for level in 0..3 {
@@ -147,6 +165,13 @@ unsafe fn walk_to_page_table(root: u64, virt: u64, create: bool) -> Result<u64, 
         if entry & PRESENT != 0 {
             if entry & HUGE != 0 {
                 return Err(MapError::CoveredByLargePage);
+            }
+            // A table created for an earlier kernel mapping and now on the path
+            // to a user one has to gain the bit; the first user page under a
+            // given table is where that happens.
+            if user && entry & USER == 0 {
+                // SAFETY: `table` is a live table and `index` is in range.
+                unsafe { write_entry(table, index, entry | USER) };
             }
             table = entry & ADDRESS_MASK;
             continue;
@@ -161,12 +186,8 @@ unsafe fn walk_to_page_table(root: u64, virt: u64, create: bool) -> Result<u64, 
         // map. A page table must start zeroed or its entries are garbage.
         unsafe {
             core::ptr::write_bytes(layout::phys_to_virt(frame) as *mut u8, 0, 4096);
-            // Intermediate entries are permissive in write and restrictive in
-            // user access: the effective permission is the AND across levels,
-            // so the leaf decides what is writable, but leaving USER clear here
-            // means a kernel table can never be reached from ring 3 even if a
-            // leaf below it is later marked USER by mistake.
-            write_entry(table, index, frame | PRESENT | WRITABLE);
+            let extra = if user { USER } else { 0 };
+            write_entry(table, index, frame | PRESENT | WRITABLE | extra);
         }
         table = frame;
     }
@@ -184,7 +205,7 @@ unsafe fn walk_to_page_table(root: u64, virt: u64, create: bool) -> Result<u64, 
 pub unsafe fn map_page(virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
     let root = active_root();
     // SAFETY: `root` is the live root table; the direct map covers it.
-    let table = unsafe { walk_to_page_table(root, virt, true)? };
+    let table = unsafe { walk_to_page_table(root, virt, true, flags & USER != 0)? };
     let index = index_for(virt, 3);
 
     // SAFETY: `table` is a live page table.
@@ -241,7 +262,7 @@ pub unsafe fn map_range(virt: u64, phys: u64, size: u64, flags: u64) -> Result<(
 pub unsafe fn unmap_page(virt: u64) -> Result<u64, MapError> {
     let root = active_root();
     // SAFETY: `root` is the live root table.
-    let table = unsafe { walk_to_page_table(root, virt, false)? };
+    let table = unsafe { walk_to_page_table(root, virt, false, false)? };
     let index = index_for(virt, 3);
 
     // SAFETY: `table` is a live page table.
@@ -274,7 +295,7 @@ pub unsafe fn unmap_page(virt: u64) -> Result<u64, MapError> {
 pub unsafe fn remap_page(virt: u64, phys: u64, flags: u64) -> Result<u64, MapError> {
     let root = active_root();
     // SAFETY: `root` is the live root table; the direct map covers it.
-    let table = unsafe { walk_to_page_table(root, virt, false)? };
+    let table = unsafe { walk_to_page_table(root, virt, false, flags & USER != 0)? };
     let index = index_for(virt, 3);
 
     // SAFETY: `table` is a live page table.
@@ -311,7 +332,7 @@ pub unsafe fn unmap_range(virt: u64, pages: u64) -> u64 {
         let address = virt + page * 4096;
         let root = active_root();
         // SAFETY: `root` is the live root table.
-        let Ok(table) = (unsafe { walk_to_page_table(root, address, false) }) else {
+        let Ok(table) = (unsafe { walk_to_page_table(root, address, false, false) }) else {
             continue;
         };
         let index = index_for(address, 3);

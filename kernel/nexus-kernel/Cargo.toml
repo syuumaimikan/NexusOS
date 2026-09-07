@@ -34,3 +34,8 @@ inject-divide-error = []
 # stale translations has to be shown to fail when there is something to catch;
 # otherwise it is a line of output that would print either way.
 inject-no-shootdown = []
+
+# Replaces the user program with one that reads kernel memory. The ordinary
+# program shows the boundary can be crossed; only an access that must fail shows
+# the boundary is there.
+inject-user-violation = []

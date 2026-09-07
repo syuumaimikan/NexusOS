@@ -160,6 +160,15 @@ impl Drop for KernelStack {
 /// The function a thread runs.
 pub type ThreadEntry = fn(usize);
 
+/// Where a user thread begins executing in ring 3.
+#[derive(Debug, Clone, Copy)]
+pub struct UserStart {
+    /// First instruction, in the user half of the address space.
+    pub entry: u64,
+    /// Initial user stack pointer, one past the top of its stack.
+    pub stack_top: u64,
+}
+
 /// A kernel thread.
 pub struct Thread {
     pub id: ThreadId,
@@ -173,6 +182,12 @@ pub struct Thread {
     pub stack: Option<KernelStack>,
     /// Entry point and argument, read once by the trampoline.
     pub entry: Option<(ThreadEntry, usize)>,
+    /// Where this thread starts in ring 3, if it is a user thread.
+    ///
+    /// Held on the thread rather than passed as the entry argument because
+    /// there are two values and a `ThreadEntry` takes one; inventing a table to
+    /// index into would be the same thing with more moving parts.
+    pub user_start: Option<UserStart>,
     /// Remaining ticks in the current time slice.
     pub slice_remaining: u32,
     /// Total ticks this thread has been scheduled for.
@@ -217,6 +232,7 @@ impl Thread {
             stack_pointer: 0,
             stack: None,
             entry: None,
+            user_start: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
             switches: 0,
@@ -246,6 +262,7 @@ impl Thread {
             stack_pointer,
             stack: Some(stack),
             entry: Some((entry, argument)),
+            user_start: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
             switches: 0,
@@ -295,6 +312,15 @@ impl Thread {
 
             flags_slot
         }
+    }
+
+    /// Top of this thread's kernel stack, if it owns one.
+    ///
+    /// What the processor switches to when an interrupt arrives while this
+    /// thread is in ring 3, and what a system call from it lands on.
+    #[must_use]
+    pub fn kernel_stack_top(&self) -> Option<u64> {
+        self.stack.as_ref().map(KernelStack::top)
     }
 
     /// Whether this thread is waiting for a deadline that has now passed.

@@ -75,6 +75,27 @@ $Cases = @(
             '[test] FAILED: processors',
             'kept a stale translation after the shootdown'
         )
+    },
+    # Also not a fault in the kernel: a fault the kernel is supposed to take.
+    # The user program NexusOS starts at boot shows that ring 3 can be entered
+    # and that the system-call boundary works. It cannot show that the boundary
+    # keeps anything out -- a kernel that mapped itself readable from ring 3
+    # would run it identically. This build reads kernel memory from ring 3, and
+    # the protection is real only if that faults and says where it came from.
+    @{
+        Name = 'ring 3 reaching into kernel memory'
+        Feature = 'inject-user-violation'
+        Processors = 4
+        Expect = @(
+            'about to read kernel memory from ring 3',
+            'EXCEPTION 14: page fault',
+            'address    : 0xffffffff80000000',
+            'origin   : user mode',
+            'the system has been halted'
+        )
+        Reject = @(
+            'FAILED: ring 3 read kernel memory'
+        )
     }
 )
 
@@ -151,6 +172,20 @@ foreach ($case in $Cases) {
         } else {
             Write-Host "    FAIL missing: $expected" -ForegroundColor Red
             $caseFailed = $true
+        }
+    }
+
+    # Strings that must be absent. A case whose point is that something is
+    # rejected cannot be checked by presence alone: the program says so itself
+    # if it got through, and that line appearing is the failure.
+    if ($case.ContainsKey('Reject')) {
+        foreach ($forbidden in $case.Reject) {
+            if ($output.Contains($forbidden)) {
+                Write-Host "    FAIL present but must not be: $forbidden" -ForegroundColor Red
+                $caseFailed = $true
+            } else {
+                Write-Host "    ok   absent: $forbidden" -ForegroundColor DarkGray
+            }
         }
     }
 

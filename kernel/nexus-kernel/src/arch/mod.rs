@@ -19,6 +19,7 @@ pub mod percpu;
 pub mod pic;
 pub mod pit;
 pub mod smp;
+pub mod syscall;
 pub mod time;
 pub mod tlb;
 
