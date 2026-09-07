@@ -101,6 +101,38 @@ pub struct Processor {
     pub enabled: bool,
 }
 
+/// A firmware correction to the legacy IRQ-to-interrupt mapping.
+///
+/// The old 8259 wiring is not what the I/O APIC sees. Firmware describes the
+/// difference here, and a kernel that assumes IRQ *n* is global system
+/// interrupt *n* will program the wrong pin on many machines — most commonly
+/// for the timer, where IRQ 0 is routed to GSI 2.
+#[derive(Debug, Clone, Copy)]
+pub struct InterruptOverride {
+    /// The legacy IRQ number.
+    pub source_irq: u8,
+    /// The global system interrupt it actually arrives on.
+    pub global_system_interrupt: u32,
+    /// Raw flags: bits 0..2 polarity, bits 2..4 trigger mode.
+    pub flags: u16,
+}
+
+impl InterruptOverride {
+    /// Whether this interrupt is active low rather than active high.
+    #[must_use]
+    pub fn is_active_low(&self) -> bool {
+        // 0 means "conforms to the bus default", which for ISA is active high.
+        self.flags & 0b11 == 0b11
+    }
+
+    /// Whether this interrupt is level triggered rather than edge triggered.
+    #[must_use]
+    pub fn is_level_triggered(&self) -> bool {
+        // As above: 0 conforms to the ISA default, which is edge.
+        (self.flags >> 2) & 0b11 == 0b11
+    }
+}
+
 /// One I/O APIC.
 #[derive(Debug, Clone, Copy)]
 pub struct IoApic {
@@ -119,6 +151,8 @@ pub struct AcpiInfo {
     pub processors: Vec<Processor>,
     /// I/O APICs the firmware reported.
     pub io_apics: Vec<IoApic>,
+    /// Corrections to the legacy IRQ mapping.
+    pub interrupt_overrides: Vec<InterruptOverride>,
     /// Whether the firmware says a legacy 8259 PIC is present and must be
     /// masked before the APIC is used.
     pub has_legacy_pic: bool,
@@ -129,6 +163,37 @@ impl AcpiInfo {
     #[must_use]
     pub fn enabled_processor_count(&self) -> usize {
         self.processors.iter().filter(|cpu| cpu.enabled).count()
+    }
+
+    /// The global system interrupt a legacy IRQ actually arrives on.
+    ///
+    /// Identity unless firmware said otherwise, which is the rule the ACPI
+    /// specification gives and the one that is wrong often enough to matter.
+    #[must_use]
+    pub fn global_system_interrupt_for(&self, irq: u8) -> u32 {
+        self.interrupt_overrides
+            .iter()
+            .find(|override_entry| override_entry.source_irq == irq)
+            .map_or(u32::from(irq), |entry| entry.global_system_interrupt)
+    }
+
+    /// The override describing `irq`, if firmware supplied one.
+    #[must_use]
+    pub fn override_for(&self, irq: u8) -> Option<&InterruptOverride> {
+        self.interrupt_overrides
+            .iter()
+            .find(|entry| entry.source_irq == irq)
+    }
+
+    /// The I/O APIC that handles `global_system_interrupt`, and the pin index
+    /// within it.
+    #[must_use]
+    pub fn route(&self, global_system_interrupt: u32) -> Option<(&IoApic, u32)> {
+        self.io_apics
+            .iter()
+            .filter(|io_apic| io_apic.gsi_base <= global_system_interrupt)
+            .max_by_key(|io_apic| io_apic.gsi_base)
+            .map(|io_apic| (io_apic, global_system_interrupt - io_apic.gsi_base))
     }
 }
 
@@ -254,6 +319,7 @@ fn parse_madt(madt: &Table) -> AcpiInfo {
 
     let mut processors = Vec::new();
     let mut io_apics = Vec::new();
+    let mut interrupt_overrides = Vec::new();
 
     // Entries follow the 8 bytes of MADT-specific header. Each is
     // `type, length, payload`, and the length is what advances the cursor —
@@ -287,6 +353,15 @@ fn parse_madt(madt: &Table) -> AcpiInfo {
                     id: entry[2],
                     address: read_u32(entry, 4).unwrap_or(0),
                     gsi_base: read_u32(entry, 8).unwrap_or(0),
+                });
+            }
+            // Interrupt Source Override: the legacy IRQ wiring as the I/O APIC
+            // actually sees it.
+            2 if entry_length >= 10 => {
+                interrupt_overrides.push(InterruptOverride {
+                    source_irq: entry[3],
+                    global_system_interrupt: read_u32(entry, 4).unwrap_or(0),
+                    flags: u16::from(entry[8]) | (u16::from(entry[9]) << 8),
                 });
             }
             // Local APIC Address Override: a 64-bit address replacing the
@@ -323,6 +398,7 @@ fn parse_madt(madt: &Table) -> AcpiInfo {
         local_apic_address,
         processors,
         io_apics,
+        interrupt_overrides,
         has_legacy_pic,
     }
 }
@@ -354,6 +430,23 @@ pub fn report(info: &AcpiInfo) {
             io_apic.id,
             io_apic.address,
             io_apic.gsi_base
+        );
+    }
+    for entry in &info.interrupt_overrides {
+        kprintln!(
+            "[acpi]   IRQ {} is really global system interrupt {}{}{}",
+            entry.source_irq,
+            entry.global_system_interrupt,
+            if entry.is_active_low() {
+                ", active low"
+            } else {
+                ""
+            },
+            if entry.is_level_triggered() {
+                ", level triggered"
+            } else {
+                ""
+            }
         );
     }
     if info.has_legacy_pic {

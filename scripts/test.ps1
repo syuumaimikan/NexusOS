@@ -10,11 +10,13 @@
          descriptor encoding)
       3. a boot test: build, boot in QEMU, and require the serial log to contain
          every marker a healthy boot produces
-      4. fault-handling tests, which provoke real CPU exceptions and check that
+      4. an input test, which sends real keystrokes through QEMU's monitor and
+         checks what the kernel made of them
+      5. fault-handling tests, which provoke real CPU exceptions and check that
          each is reported rather than resetting the machine
 
 .PARAMETER SkipFaults
-    Skip layer 4, which is the slowest because it boots QEMU three times.
+    Skip layer 5, which is the slowest because it boots QEMU three times.
 #>
 [CmdletBinding()]
 param(
@@ -116,10 +118,11 @@ Invoke-Step 'boot test' {
         'boot thread retiring',
         'display adopted',
         'display thread',
+        'I/O APIC 0 version',
+        'keyboard on IRQ 1',
+        'input thread',
         'glyphs available, including CJK',
         'interface language en-US, 2 available',
-        'interface language is now ja-JP',
-        'interface language is now en-US',
         '[mon ]'
     )
     $missing = @($markers | Where-Object { -not $output.Contains($_) })
@@ -134,6 +137,10 @@ Invoke-Step 'boot test' {
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }
 
     Write-Host "    $($markers.Count) boot markers present" -ForegroundColor DarkGray
+}
+
+Invoke-Step 'input' {
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-input.ps1')) 'input tests'
 }
 
 if (-not $SkipFaults) {

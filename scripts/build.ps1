@@ -25,6 +25,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'stage.ps1')
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
 $EspDir = Join-Path $BuildDir 'esp'
@@ -64,36 +66,12 @@ try {
 $BootEfi = Join-Path $RepoRoot "target\x86_64-unknown-uefi\$Profile\nexus-boot.efi"
 $KernelElf = Join-Path $RepoRoot "target\x86_64-nexus\$Profile\nexus-kernel"
 
-foreach ($artifact in @($BootEfi, $KernelElf)) {
-    if (-not (Test-Path $artifact)) { throw "expected build output is missing: $artifact" }
-}
-
 Write-Host '==> Staging EFI System Partition tree' -ForegroundColor Cyan
-New-Item -ItemType Directory -Force -Path (Join-Path $EspDir 'EFI\BOOT') | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $EspDir 'nexus') | Out-Null
+$staged = Publish-Esp -BootEfi $BootEfi -KernelElf $KernelElf -EspDir $EspDir
 
-Copy-Item $BootEfi (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI') -Force
-
-# Deploy a stripped kernel. Debug info is the overwhelming majority of the
-# linked image and none of it is loadable, but the bootloader still has to read
-# every byte off the ESP before it can parse the program headers -- which on a
-# debug build means reading megabytes to load a hundred kilobytes. The
-# unstripped image stays in target/ for debuggers and symbolisation.
-$StagedKernel = Join-Path $EspDir 'nexus\kernel.elf'
-$Sysroot = (& rustc +nightly --print sysroot).Trim()
-$ObjCopy = Join-Path $Sysroot 'lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objcopy.exe'
-
-if (Test-Path $ObjCopy) {
-    & $ObjCopy --strip-debug $KernelElf $StagedKernel
-    if ($LASTEXITCODE -ne 0) { throw "llvm-objcopy failed (exit $LASTEXITCODE)" }
-} else {
-    Write-Host "    llvm-objcopy not found; deploying an unstripped kernel" -ForegroundColor Yellow
-    Copy-Item $KernelElf $StagedKernel -Force
-}
-
-$bootSize = [math]::Round((Get-Item $BootEfi).Length / 1KB, 1)
-$kernelSize = [math]::Round((Get-Item $StagedKernel).Length / 1KB, 1)
-$unstrippedSize = [math]::Round((Get-Item $KernelElf).Length / 1KB, 1)
+$bootSize = $staged.BootSize
+$kernelSize = $staged.KernelSize
+$unstrippedSize = $staged.UnstrippedSize
 
 Write-Host ''
 Write-Host 'NexusOS build complete' -ForegroundColor Green

@@ -49,6 +49,10 @@ The local APIC is deferred to after Phase 4: its registers sit above RAM, so
 mapping them needs a virtual memory manager. The PIT reaches the same place
 through port I/O alone.
 
+Also delivered since: the I/O APIC. Its redirection entries are programmed from
+the MADT, including the interrupt source overrides, so devices other than the
+timer can raise interrupts — which is what made a keyboard possible at all.
+
 ## Phase 3 — Physical memory ✅
 
 - Frame allocator over the handoff memory map (buddy allocator)
@@ -110,6 +114,24 @@ Still outstanding: per-processor scheduling (only the boot processor schedules
 today), TLB shootdown, user mode and address-space separation. "Thread" still
 means a kernel thread, and nothing is isolated yet.
 
+## Input 🚧
+
+Not a phase of its own either: the system had to become interactive before the
+language could be *chosen* rather than cycled on a timer.
+
+Delivered: the I/O APIC routing the keyboard's line to a vector, a PS/2 driver
+reading scancode set 1, decoding to keys, and an input thread that acts on them
+— typing edits a line on screen, F1 switches the interface language.
+
+Verified from outside: `scripts/test-input.ps1` types through QEMU's monitor and
+checks the guest reports back the word that was typed and the language change.
+Nothing internal can prove an input path; only driving it from outside can.
+
+Outstanding: the input thread polls, because sleeping until a key arrives needs
+the wait queues that come with Phase 6. There is no focus, no delivery to a
+process, and no mouse. Keys are acted on by the kernel itself, which is where a
+window server will take over.
+
 ## Phase 6 — Handles, IPC, system calls ⬜
 
 - Handle table with per-handle rights, the root of the capability model
@@ -138,7 +160,7 @@ replaced by the real one.
 
 - Nexus Graphics abstraction over the framebuffer, later a GPU
 - Nexus Compositor: surfaces, damage tracking, frame scheduling, multi-monitor
-- Input: keyboard, mouse, touchpad
+- Input routing: focus, event delivery to processes, mouse and touchpad
 
 ## Phase 10 — NexusUI ⬜
 
@@ -202,8 +224,9 @@ text rendering with half- and full-width advances, build-time glyph
 rasterisation for CJK, and runtime language switching. See
 [i18n.md](i18n.md).
 
-Outstanding: input methods (blocked on a keyboard driver), text shaping,
-vertical writing, and further languages.
+Outstanding: input methods — the keyboard now exists and F1 switches language,
+but composing Japanese needs a conversion engine and a candidate window — plus
+text shaping, vertical writing, and further languages.
 
 ## Cross-cutting work
 

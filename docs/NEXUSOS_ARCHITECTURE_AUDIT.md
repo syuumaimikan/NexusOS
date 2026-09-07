@@ -1,6 +1,6 @@
 # NexusOS Architecture Audit
 
-**Date:** 2026-09-08 (updated after SMP bring-up)
+**Date:** 2026-09-08 (updated after I/O APIC and keyboard input)
 **Scope:** full repository
 **Verified by:** building both components and booting them in QEMU with edk2 firmware
 
@@ -57,11 +57,14 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Framebuffer drawing | **PARTIAL** | Text, rectangles, gradients; no compositor, no windows |
 | Localisation | **DONE** | English and Japanese, switchable at runtime |
 | Text rendering | **PARTIAL** | UTF-8, half and full width, integer scaling; no shaping |
-| Input, IME | **MISSING** | No keyboard driver, so nothing to type into |
+| Keyboard input | **DONE** | PS/2 set 1, interrupt driven, decoded to keys |
+| Input dispatch | **PARTIAL** | The kernel acts on keys itself; no focus, no delivery |
+| IME | **MISSING** | Latin only; nothing to compose Japanese with |
 | Local APIC, APIC timer | **DONE** | Calibrated against the PIT; drives the tick |
 | SMP bring-up | **DONE** | All processors started, each on its own APIC timer |
 | SMP scheduling | **MISSING** | Only the boot processor schedules; see §4 |
-| I/O APIC, MSI | **MISSING** | Enumerated, not programmed; no device interrupts yet |
+| I/O APIC | **DONE** | Redirection entries programmed, source overrides honoured |
+| MSI, MSI-X | **MISSING** | No PCI enumeration yet, so nothing to target |
 | User mode, processes | **MISSING** | Threads are kernel-only; no ring 3 yet |
 | Handles, IPC, syscalls | **MISSING** | |
 
@@ -114,6 +117,13 @@ Not asserted — observed, on every boot:
   around twelve million iterations. Cooperative scheduling would hang here, so
   this is the check that distinguishes real preemption from the appearance of
   it.
+- The keyboard's interrupt is routed through the I/O APIC to its vector, with
+  the MADT's source overrides applied. Keys typed into QEMU's monitor arrive as
+  scancodes, decode to the letters that were sent, and reach something that
+  acts on them: `scripts/test-input.ps1` types `nexus` and F1 and checks the
+  guest reports the word back and switches language. A unit test could check a
+  scancode table; only this checks that the pin, the vector, the handler's
+  drain of the controller and the delivery all work.
 - A 1920x1200 status screen renders live uptime, memory, heap, thread and
   context-switch figures, repainted twice a second by its own thread and
   captured by `scripts/screenshot.ps1`.
@@ -176,15 +186,18 @@ These are real and are tracked, not hidden:
     time from an installed font, because bundling one would redistribute it.
     A machine without a suitable font still builds, but non-Latin text renders
     as placeholder boxes. See [i18n.md](i18n.md).
-12. **No input method.** Without a keyboard driver there is nothing to type
-    into and no IME, so the language cycles on a timer instead of being chosen.
+12. **Input goes nowhere but the kernel.** Keys are decoded and acted on
+    inside the kernel because there is no focus, no window and no process to
+    deliver them to. There is no IME either, so Japanese can be displayed but
+    not typed.
 13. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
     no bidirectional text, no ligatures or combining marks.
 
 Resolved since the first audit: the missing IDT (Phase 2), the
-non-interrupt-safe spinlock (`IrqSpinLock`, Phase 2), and the unstripped kernel
+non-interrupt-safe spinlock (`IrqSpinLock`, Phase 2), the unstripped kernel
 image on the ESP, which was costing megabytes of boot-time reads for a
-hundred-kilobyte load.
+hundred-kilobyte load, and the two scripts that staged that ESP differently, so
+whichever ran last decided what the next boot would load.
 
 ## 5. Architectural decisions and why
 
@@ -222,11 +235,12 @@ In order, and for the reason given:
 1. **Per-processor scheduling**: a current thread and run queue per core, so
    the processors that are already running can be given work, plus the TLB
    shootdown that four running cores now make necessary.
-2. **The I/O APIC**, so devices other than the timer can raise interrupts. This
-   is the precondition for a keyboard, and therefore for input of any kind.
-3. **Ring 3 and the system-call entry path**, which is what turns a kernel
+2. **Ring 3 and the system-call entry path**, which is what turns a kernel
    thread into a process and makes isolation mean anything.
-4. **Handles and IPC**, where the capability model starts.
-5. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
+3. **Handles and IPC**, where the capability model starts. Input needs it too:
+   a wait queue is what lets the input thread sleep until a key arrives instead
+   of polling fifty times a second.
+4. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
+5. **CI**, so the five test layers run on every change rather than on request.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

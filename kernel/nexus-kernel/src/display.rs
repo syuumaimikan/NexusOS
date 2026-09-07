@@ -20,7 +20,7 @@ use nexus_abi::FramebufferInfo;
 
 use crate::framebuffer::{font, Color, Framebuffer};
 use crate::sync::IrqSpinLock;
-use crate::{arch, i18n, kprintln, memory, sched};
+use crate::{arch, i18n, input, kprintln, memory, sched};
 
 /// The framebuffer, once the kernel has adopted it.
 static DISPLAY: IrqSpinLock<Option<Framebuffer>> = IrqSpinLock::new(None);
@@ -39,9 +39,6 @@ const TEXT: Color = Color(0x00E6_EDF5);
 const MUTED: Color = Color(0x0084_9AB8);
 /// The bar along the bottom.
 const BAR: Color = Color(0x0008_0E18);
-
-/// How long each language is shown for by the demonstration thread.
-const LOCALE_CYCLE_MS: u64 = 6000;
 
 /// Adopt the framebuffer and paint the initial screen.
 ///
@@ -63,8 +60,9 @@ pub unsafe fn init(info: &FramebufferInfo) -> bool {
     );
     if font::has_generated_face() {
         kprintln!(
-            "[disp] {} glyphs available, including CJK",
-            font::generated_glyph_count()
+            "[disp] {} glyphs available, including CJK, from {}",
+            font::generated_glyph_count(),
+            font::generated_source()
         );
     } else {
         // Worth saying plainly: if this line appears, Japanese labels will be
@@ -247,7 +245,7 @@ static PAINTED_HEIGHT: IrqSpinLock<u32> = IrqSpinLock::new(0);
 static PAINTED_LOCALE: IrqSpinLock<usize> = IrqSpinLock::new(usize::MAX);
 
 /// Gather the current system state as translated label and value pairs.
-fn status_rows() -> [StatusRow; 7] {
+fn status_rows() -> [StatusRow; 8] {
     let uptime_ms = arch::time::uptime_ms();
     let scheduler = sched::stats();
     let heap = memory::heap::stats();
@@ -326,6 +324,17 @@ fn status_rows() -> [StatusRow; 7] {
             label: String::from(i18n::text("status.language")),
             value: String::from(i18n::current().name),
         },
+        StatusRow {
+            label: String::from(i18n::text("status.input")),
+            value: {
+                let typed = input::line();
+                if typed.is_empty() {
+                    String::from(i18n::text("value.input_empty"))
+                } else {
+                    i18n::format("value.input", &[("text", &typed)])
+                }
+            },
+        },
     ]
 }
 
@@ -400,25 +409,6 @@ fn display_thread(_argument: usize) {
     }
 }
 
-/// Cycles the interface language, to demonstrate that switching works at
-/// runtime.
-///
-/// A real system changes language from settings, and only when asked. There is
-/// no settings UI yet, and a language selectable only at build time has not
-/// really been shown to work — the point of this thread is that every string,
-/// and the layout derived from it, is recomputed live.
-fn locale_demo_thread(_argument: usize) {
-    loop {
-        sched::sleep_ms(LOCALE_CYCLE_MS);
-        let locale = i18n::next_locale();
-        // The tag, not the name. The name is in its own language, and putting
-        // UTF-8 on the serial line turns the log into mojibake for anyone whose
-        // terminal is not set to it -- which is the whole reason logs here stay
-        // ASCII. The tag is also what a developer would grep for.
-        kprintln!("[i18n] interface language is now {}", locale.tag);
-    }
-}
-
 /// Start the display threads. Does nothing when there is no framebuffer.
 pub fn start_thread() {
     if !is_available() {
@@ -433,21 +423,5 @@ pub fn start_thread() {
     ) {
         Ok(id) => kprintln!("[disp] display thread {id} started"),
         Err(error) => kprintln!("[disp] could not start the display thread: {error}"),
-    }
-
-    if i18n::locale_count() > 1 {
-        match sched::spawn(
-            "locale-demo",
-            sched::thread::Priority::Background,
-            locale_demo_thread,
-            0,
-        ) {
-            Ok(id) => kprintln!(
-                "[i18n] thread {id} cycles {} languages every {} ms",
-                i18n::locale_count(),
-                LOCALE_CYCLE_MS
-            ),
-            Err(error) => kprintln!("[i18n] could not start the language demonstration: {error}"),
-        }
     }
 }

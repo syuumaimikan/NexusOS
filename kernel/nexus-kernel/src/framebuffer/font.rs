@@ -247,6 +247,18 @@ pub fn generated_glyph_count() -> usize {
     generated::GLYPH_COUNT
 }
 
+/// Which host font the generated face was rasterised from, and at what em size.
+///
+/// Reported at boot because font resolution has silently gone wrong twice: once
+/// choosing a proportional face squeezed down to seven-pixel capitals, once
+/// dropping every lowercase letter. Both were only visible by staring at a
+/// screenshot. Naming the source in the log turns the next such substitution
+/// into something a test can read.
+#[must_use]
+pub fn generated_source() -> &'static str {
+    generated::SOURCE
+}
+
 // The kernel binary has no host test harness -- it is `no_main` with its own
 // panic handler -- so what can be checked here is checked at compile time
 // instead of in tests that would never run. Rendering itself is verified by

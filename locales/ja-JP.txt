@@ -27,6 +27,7 @@ status.heap = ヒープ
 status.threads = スレッド
 status.switches = 切り替え
 status.timer = タイマー
+status.input = 入力
 status.language = 言語
 
 value.uptime = {seconds}.{millis} 秒
@@ -35,4 +36,6 @@ value.heap = 全 {total} KiB 中 {used} KiB 使用
 value.threads = {total} 個 (実行可能 {ready}、待機 {sleeping})
 value.switches = {count} 回
 value.timer = {source} により {hz} Hz、{ticks} 回
+value.input_empty = キーを押してください (F1 で言語切り替え)
+value.input = {text}
 value.unavailable = 取得できません

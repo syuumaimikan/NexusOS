@@ -14,6 +14,7 @@ pub mod gdt;
 pub mod idt;
 pub mod interrupts;
 pub mod io;
+pub mod ioapic;
 pub mod percpu;
 pub mod pic;
 pub mod pit;

@@ -13,6 +13,12 @@ use crate::kprintln;
 /// live during the handover without either landing on the other's handler.
 pub const APIC_TIMER_VECTOR: u8 = super::idt::IRQ_BASE + 16;
 
+/// Vector the keyboard is routed to through the I/O APIC.
+///
+/// Above the legacy range and clear of the APIC timer, so nothing has to be
+/// unrouted before this can be used.
+pub const KEYBOARD_VECTOR: u8 = super::idt::IRQ_BASE + 17;
+
 /// Vector the local APIC reports spurious interrupts on.
 ///
 /// The architecture requires the low four bits to be set on some older
@@ -162,6 +168,20 @@ fn preempt() {
     crate::sched::schedule();
 }
 
+/// The keyboard.
+///
+/// Reads one scancode into a queue and acknowledges. Decoding happens on a
+/// thread: an interrupt handler runs with interrupts masked on this processor,
+/// and decoding needs modifier state that a handler has no business locking.
+extern "x86-interrupt" fn keyboard_interrupt(_frame: InterruptStackFrame) {
+    // SAFETY: called only as the handler for this vector, and the read of the
+    // controller's output buffer is what clears its interrupt.
+    unsafe {
+        crate::drivers::keyboard::on_interrupt();
+        apic::end_of_interrupt();
+    }
+}
+
 /// The local APIC's spurious interrupt.
 ///
 /// Counted, never acknowledged: the APIC raises no in-service bit for it, so an
@@ -231,6 +251,7 @@ pub unsafe fn init(timer_hz: u32) {
         // Registered now, before the APIC exists, so that the vectors are never
         // reachable-but-unhandled during the handover.
         idt.set_handler(APIC_TIMER_VECTOR, apic_timer_interrupt as *const ());
+        idt.set_handler(KEYBOARD_VECTOR, keyboard_interrupt as *const ());
         idt.set_handler(SPURIOUS_VECTOR, apic_spurious_interrupt as *const ());
 
         // `load` needs a `&'static` table; `IDT` is a static, and it is never

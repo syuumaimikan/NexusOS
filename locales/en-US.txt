@@ -27,6 +27,7 @@ status.heap = heap
 status.threads = threads
 status.switches = switches
 status.timer = timer
+status.input = input
 status.language = language
 
 value.uptime = {seconds}.{millis} s
@@ -35,4 +36,6 @@ value.heap = {used} KiB used of {total} KiB
 value.threads = {total} ({ready} ready, {sleeping} sleeping)
 value.switches = {count}
 value.timer = {hz} Hz via {source}, {ticks} ticks
+value.input_empty = press keys; F1 switches language
+value.input = {text}
 value.unavailable = unavailable

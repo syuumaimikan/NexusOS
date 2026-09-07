@@ -21,8 +21,10 @@ extern crate alloc;
 mod acpi;
 mod arch;
 mod display;
+mod drivers;
 mod framebuffer;
 mod i18n;
+mod input;
 mod memory;
 mod panic;
 mod sched;
@@ -150,6 +152,7 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         Ok(info) => {
             acpi::report(&info);
             adopt_local_apic(&info);
+            bring_up_device_interrupts(&info);
             start_other_processors(&info);
         }
         Err(error) => {
@@ -212,6 +215,7 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
 /// Spawn the long-lived threads and hand the processor over to them.
 fn start_system_threads() {
     display::start_thread();
+    input::start_thread();
     match sched::spawn(
         "monitor",
         sched::thread::Priority::Interactive,
@@ -258,6 +262,19 @@ fn monitor_thread(_argument: usize) {
                 memory.free_frames * 4096 / (1024 * 1024),
                 heap.used / 1024,
                 heap.total / 1024
+            );
+        }
+        let (received, dropped, decoded) = drivers::keyboard::statistics();
+        if received > 0 {
+            // The decoded line is included on purpose: a scancode count says
+            // interrupts arrived, but only the text says the scancode table,
+            // the modifier handling and the delivery to the input thread are
+            // all correct.
+            kprintln!(
+                "[mon ] keyboard: {received} scancodes, {decoded} keys decoded,                  {} acted on{}, line \"{}\"",
+                input::handled_count(),
+                if dropped > 0 { " (some dropped)" } else { "" },
+                input::line()
             );
         }
         if arch::smp::processor_count() > 1 {
@@ -314,6 +331,59 @@ fn adopt_local_apic(info: &acpi::AcpiInfo) {
             }
         }
         Err(error) => kprintln!("[apic] {error}; staying on the legacy timer"),
+    }
+}
+
+/// Bring up the I/O APIC and route the devices the kernel has drivers for.
+///
+/// Reported and tolerated on failure: without it the system has no input, which
+/// is a poorer system rather than no system.
+fn bring_up_device_interrupts(info: &acpi::AcpiInfo) {
+    // The legacy IRQ number is not the pin number. Firmware says what it really
+    // is, and assuming otherwise programs the wrong pin on a great many
+    // machines -- on this very platform IRQ 0 turns out to be global interrupt 2.
+    let irq = drivers::keyboard::KEYBOARD_IRQ;
+    let gsi = info.global_system_interrupt_for(irq);
+
+    // Pick the I/O APIC that actually serves this interrupt rather than the
+    // first one listed: a machine with several splits the range between them.
+    let Some((io_apic, _pin)) = info.route(gsi) else {
+        kprintln!("[ioapic] no I/O APIC serves global interrupt {gsi}; input is unavailable");
+        return;
+    };
+
+    // SAFETY: called once, with the virtual memory manager running, using the
+    // window firmware reported.
+    if let Err(error) = unsafe { arch::ioapic::init(io_apic.address, io_apic.gsi_base) } {
+        kprintln!("[ioapic] {error}; devices cannot raise interrupts");
+        return;
+    }
+
+    let (active_low, level) = info.override_for(irq).map_or((false, false), |entry| {
+        (entry.is_active_low(), entry.is_level_triggered())
+    });
+
+    // SAFETY: the controller is drained and scanning enabled before the pin is
+    // unmasked, so the first interrupt has a byte to read and a handler to
+    // read it.
+    unsafe {
+        drivers::keyboard::drain_controller();
+        drivers::keyboard::enable_scanning();
+        drivers::keyboard::drain_controller();
+
+        match arch::ioapic::route(
+            gsi,
+            arch::interrupts::KEYBOARD_VECTOR,
+            arch::apic::local_id(),
+            active_low,
+            level,
+        ) {
+            Ok(()) => kprintln!(
+                "[input] keyboard on IRQ {irq} (global interrupt {gsi}) routed to vector {}",
+                arch::interrupts::KEYBOARD_VECTOR
+            ),
+            Err(error) => kprintln!("[input] could not route the keyboard: {error}"),
+        }
     }
 }
 

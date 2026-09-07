@@ -21,6 +21,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'stage.ps1')
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
 $EspDir = Join-Path $BuildDir 'esp'
@@ -82,12 +84,11 @@ foreach ($case in $Cases) {
         Pop-Location
     }
 
-    New-Item -ItemType Directory -Force -Path (Join-Path $EspDir 'EFI\BOOT') | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $EspDir 'nexus') | Out-Null
-    Copy-Item (Join-Path $RepoRoot 'target\x86_64-unknown-uefi\debug\nexus-boot.efi') `
-        (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI') -Force
-    Copy-Item (Join-Path $RepoRoot 'target\x86_64-nexus\debug\nexus-kernel') `
-        (Join-Path $EspDir 'nexus\kernel.elf') -Force
+    # Through the same staging the build script uses, so these runs boot the
+    # same shape of image the build produces and differ only in the feature.
+    Publish-Esp -BootEfi (Join-Path $RepoRoot 'target\x86_64-unknown-uefi\debug\nexus-boot.efi') `
+        -KernelElf (Join-Path $RepoRoot 'target\x86_64-nexus\debug\nexus-kernel') `
+        -EspDir $EspDir | Out-Null
 
     # A fresh variable store per case, so a previous run's boot entries cannot
     # change what the firmware does.
@@ -156,8 +157,8 @@ Write-Host ''
 Write-Host '==> Restoring the default kernel build' -ForegroundColor Cyan
 Push-Location $RepoRoot
 try { & cargo +nightly kernel | Out-Null } finally { Pop-Location }
-Copy-Item (Join-Path $RepoRoot 'target\x86_64-nexus\debug\nexus-kernel') `
-    (Join-Path $EspDir 'nexus\kernel.elf') -Force
+Publish-EspKernel -KernelElf (Join-Path $RepoRoot 'target\x86_64-nexus\debug\nexus-kernel') `
+    -EspDir $EspDir | Out-Null
 
 Write-Host ''
 if ($failures -eq 0) {
