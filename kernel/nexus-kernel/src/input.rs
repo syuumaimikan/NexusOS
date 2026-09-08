@@ -1,8 +1,14 @@
 //! Input handling.
 //!
-//! Turns decoded keys into something the system does. This is the whole of the
-//! input stack for now: no focus, no windows, no applications to deliver to, so
-//! the kernel acts on keys itself.
+//! Turns decoded keys into something the system does, and passes a copy of each
+//! one to whoever is routing.
+//!
+//! The kernel still acts on keys itself, because the panel is still the
+//! kernel's: what was typed appears there, and F1 changes the interface
+//! language. What it does *not* do is decide which program a key is for. A copy
+//! of every key crosses a channel, and whoever holds the other end -- the
+//! compositor -- knows which window has focus and sends it on. That is policy,
+//! and policy in the kernel is the thing this system is trying not to have.
 //!
 //! It exists mainly so that the system is *interactive*. Until a key could
 //! change something, the language had to cycle on a timer to show that switching
@@ -38,9 +44,73 @@ pub fn handled_count() -> u64 {
     HANDLED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Where keys go besides the panel, once something has asked for them.
+///
+/// The compositor, in practice. The kernel goes on decoding scancodes and
+/// showing what was typed, because the panel is still the kernel's; what
+/// changes is that a copy of every key also crosses a channel, and whoever
+/// holds the other end decides which program it is for. Routing is not the
+/// kernel's business -- knowing which window has focus is exactly the kind of
+/// policy a process should own.
+static ROUTE: crate::sync::IrqSpinLock<Option<alloc::sync::Arc<crate::ipc::Endpoint>>> =
+    crate::sync::IrqSpinLock::new(None);
+
+/// Send a copy of every key down `endpoint` from now on.
+pub fn route_to(endpoint: alloc::sync::Arc<crate::ipc::Endpoint>) {
+    *ROUTE.lock() = Some(endpoint);
+}
+
+/// What a key looks like on the wire.
+///
+/// Five bytes: what kind of key it was, and a number whose meaning depends on
+/// the kind -- a Unicode code point for a character, a number for a function
+/// key, nothing for the rest. Fixed width because the reader is a program and
+/// not a person, and a length that never varies is one fewer thing for it to
+/// get wrong.
+pub mod wire {
+    pub const CHARACTER: u8 = 1;
+    pub const BACKSPACE: u8 = 2;
+    pub const ENTER: u8 = 3;
+    pub const ESCAPE: u8 = 4;
+    pub const TAB: u8 = 5;
+    pub const FUNCTION: u8 = 6;
+    /// Bytes one key takes.
+    pub const SIZE: usize = 5;
+}
+
+/// Pass a key on to whoever is routing.
+///
+/// A failure is dropped rather than reported. The receiver's queue being full
+/// means it is not keeping up with the keyboard, which is a thing that happens;
+/// logging a line per dropped key would turn a slow program into a flooded
+/// serial console, and the key is gone either way.
+fn route(key: Key) {
+    let Some(endpoint) = ROUTE.lock().clone() else {
+        return;
+    };
+
+    let (kind, value) = match key {
+        Key::Character(character) => (wire::CHARACTER, character as u32),
+        Key::Backspace => (wire::BACKSPACE, 0),
+        Key::Enter => (wire::ENTER, 0),
+        Key::Escape => (wire::ESCAPE, 0),
+        Key::Tab => (wire::TAB, 0),
+        Key::Function(number) => (wire::FUNCTION, u32::from(number)),
+        // Nothing downstream can do anything with a scancode the kernel could
+        // not name, and passing it on would be passing on a problem.
+        Key::Unknown(_) => return,
+    };
+
+    let mut message = [0u8; wire::SIZE];
+    message[0] = kind;
+    message[1..5].copy_from_slice(&value.to_le_bytes());
+    endpoint.send(&message, alloc::vec::Vec::new()).ok();
+}
+
 /// Act on one key.
 fn handle(key: Key) {
     HANDLED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    route(key);
 
     match key {
         Key::Character(character) => {

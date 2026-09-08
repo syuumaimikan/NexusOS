@@ -598,8 +598,28 @@ worth doing and is not what this establishes — which is that the path from a
 client's pixel to the display runs through a process rather than through the
 kernel.
 
-Outstanding here: no windows, no stacking, no input routing, no resizing. Tiles
-are laid out once and never move. Nothing routes a keystroke to a client.
+And keys reach a client. The kernel goes on decoding scancodes and showing what
+was typed, because the panel is still the kernel's and F1 still switches the
+interface language; what changed is that a copy of every key crosses a channel,
+and the compositor decides which program it is for. Routing is policy, and
+knowing which window someone is looking at is exactly the kind of policy that
+does not belong in a kernel: the kernel knows a key was pressed and has no idea
+what a window is.
+
+Tab is the key the compositor keeps. It moves the focus, and the focused client
+is drawn with a ring around its tile — by the compositor, over the client's own
+pixels, after its surface has been copied out. That is what a decoration is:
+something the client did not draw, cannot draw, and cannot remove. A client that
+could paint its own focus ring could claim a focus it does not have.
+
+The input test types `n e x tab u s f1` and requires exactly three keys to reach
+the first client and exactly two the second. Both halves matter: a client that
+heard all five heard someone else's keys, which is the difference between
+routing and broadcasting, and it is how what is typed into one window ends up in
+another.
+
+Outstanding here: no windows, no stacking, no resizing, no pointer. Tiles are
+laid out once and never move.
 
 
 

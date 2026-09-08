@@ -30,6 +30,16 @@ use nexus_user::Handle;
 /// The channel to the compositor that started this program.
 const COMPOSITOR: Handle = Handle(1);
 
+/// What a key looks like on the wire: a kind, then a number.
+///
+/// The same shape the kernel sends and the compositor forwards without opening.
+/// A client is the first thing on that path that has any business reading it.
+mod key {
+    pub const CHARACTER: u8 = 1;
+    /// Bytes one key takes.
+    pub const SIZE: usize = 5;
+}
+
 /// Where this program maps its surface. Its own choice, as every mapping is.
 const SURFACE_AT: usize = 0x0000_0000_1000_0000;
 
@@ -61,6 +71,16 @@ pub extern "C" fn _start() -> ! {
     )
 }
 
+/// How many keys this program has been sent, and the last one.
+///
+/// Drawn into the surface, so that a key arriving is something to *see* and not
+/// only something in a log. A client with focus looks different from one
+/// without because it is being typed at.
+static KEYS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Which client this is, as the compositor numbered it.
+static WHICH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 extern "C" fn main() -> ! {
     let mut buffer = [0u8; 32];
     let mut handles = [Handle(0); 1];
@@ -72,7 +92,7 @@ extern "C" fn main() -> ! {
             finish();
         }
     };
-    if received.handles != 1 || received.bytes < 12 {
+    if received.handles != 1 || received.bytes < 16 {
         failed("client: FAILED: no surface came with the message");
         finish();
     }
@@ -80,6 +100,9 @@ extern "C" fn main() -> ! {
     let width = read_u32(&buffer, 0);
     let height = read_u32(&buffer, 4);
     let tint = read_u32(&buffer, 8);
+    // Only so that this program can name itself in a log. It cannot address
+    // another client and there is nothing for it to index into.
+    WHICH.store(read_u32(&buffer, 12), core::sync::atomic::Ordering::Relaxed);
     let surface = handles[0];
 
     let Ok(mapped) = nexus_user::memory_map(surface, SURFACE_AT, true) else {
@@ -108,11 +131,24 @@ extern "C" fn main() -> ! {
             failed("client: FAILED: could not say it had drawn");
             finish();
         }
-        let mut reply = [0u8; 16];
-        let mut none = [Handle(0); 1];
-        if nexus_user::receive(COMPOSITOR, &mut reply, &mut none).is_err() {
-            failed("client: FAILED: the compositor stopped answering");
-            finish();
+        // Read until the acknowledgement. Keys may arrive in between -- they
+        // are sent when someone presses one, not when this program asks -- so
+        // the loop takes whatever comes and stops at the reply it was waiting
+        // for. A client that assumed the next message was its acknowledgement
+        // would treat the first keystroke as one and then run a frame ahead.
+        loop {
+            let mut reply = [0u8; 16];
+            let mut none = [Handle(0); 1];
+            let Ok(received) = nexus_user::receive(COMPOSITOR, &mut reply, &mut none) else {
+                failed("client: FAILED: the compositor stopped answering");
+                finish();
+            };
+            if &reply[..received.bytes] == SHOWN {
+                break;
+            }
+            if received.bytes >= key::SIZE {
+                heard(&reply[..received.bytes]);
+            }
         }
 
         nexus_user::sleep(FRAME_MS).ok();
@@ -122,6 +158,31 @@ extern "C" fn main() -> ! {
     finish()
 }
 
+/// What the compositor says when a frame is on screen.
+const SHOWN: &[u8] = b"shown";
+
+/// Note a key that was sent to this program.
+///
+/// Only a program with focus is sent one, so this running at all is the whole
+/// claim: a keystroke went into the kernel's keyboard driver, crossed a channel
+/// to the compositor, was routed to one client and not the other, and arrived
+/// here.
+fn heard(message: &[u8]) {
+    KEYS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if message[0] != key::CHARACTER {
+        return;
+    }
+    // Two fixed strings rather than a formatted one: there is no allocator
+    // here, and which of them appears is the whole point -- a key that reached
+    // both clients would print both.
+    nexus_user::log(if WHICH.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+        "client 0: heard a key from the compositor"
+    } else {
+        "client 1: heard a key from the compositor"
+    })
+    .ok();
+}
+
 /// Fill the surface: a border, and a gradient shaded by `tint` and `frame`.
 ///
 /// A gradient rather than a flat colour, because a flat rectangle is what a
@@ -129,7 +190,10 @@ extern "C" fn main() -> ! {
 /// directions says every pixel was addressed correctly, and one that changes
 /// with the frame says the compositor is showing this frame and not the last.
 fn draw(width: u32, height: u32, tint: u32, frame: u32) {
-    let shift = frame * 60;
+    // Keys move the gradient as well as the frame does, so a client being typed
+    // at looks different from one that is not -- which makes routing something
+    // to see and not only something in a log.
+    let shift = frame * 60 + KEYS.load(core::sync::atomic::Ordering::Relaxed) * 24;
 
     for row in 0..height {
         for column in 0..width {

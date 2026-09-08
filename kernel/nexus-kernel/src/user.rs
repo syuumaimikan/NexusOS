@@ -1100,8 +1100,14 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
 
     let (service, client) = ipc::Endpoint::pair();
 
+    // Keys go to it too, so that deciding which program a keystroke is for is
+    // its decision and not the kernel's. The kernel goes on showing what was
+    // typed on its own panel; what crosses here is a copy.
+    let (keys_here, keys_there) = ipc::Endpoint::pair();
+
     // In this order, because the program names them by the numbers they get:
-    // the channel the display arrives on, then the one it asks for clients on.
+    // the channel the display arrives on, the one it asks for clients on, and
+    // the one keys arrive on.
     // SAFETY: as above.
     unsafe {
         start_from_disk(
@@ -1110,9 +1116,11 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
             &[
                 (ipc::Object::Channel(client), ipc::Rights::ALL),
                 (ipc::Object::Channel(spawner), ipc::Rights::ALL),
+                (ipc::Object::Channel(keys_there), ipc::Rights::ALL),
             ],
         )?;
     }
+    crate::input::route_to(keys_here);
 
     let mut message = [0u8; 32];
     for (index, value) in [

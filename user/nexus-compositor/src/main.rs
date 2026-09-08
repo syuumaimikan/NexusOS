@@ -22,20 +22,38 @@
 //!
 //! * a client says it has drawn, so its surface is copied to the display and
 //!   it is told it may draw again;
-//! * a client has ended, so its tile is cleared and it is forgotten.
+//! * a client has ended, so its tile is cleared and it is forgotten;
+//! * a key was pressed, so it goes to whichever client has focus.
 //!
-//! Both arrive through the same wait, which is why a wait set had to exist
+//! All three arrive through the same wait, which is why a wait set had to exist
 //! before this program could. A compositor that blocked reading one client
 //! would stop compositing for everyone else the moment that client stopped
-//! talking, and one that could not hear a client *end* would hold a dead
-//! client's tile on screen forever.
+//! talking; one that could not hear a client *end* would hold a dead client's
+//! tile on screen forever; and one that had to choose between waiting for a
+//! client and waiting for the keyboard would be deaf to one of them.
+//!
+//! # Focus
+//!
+//! Keys go to one client and not to all of them, and tab moves which. That is
+//! the first piece of policy this program owns rather than the kernel: the
+//! kernel knows a key was pressed and has no idea what a window is, let alone
+//! which one someone is looking at. A compositor that sent every key to every
+//! client would be broadcasting rather than routing, and that is how what
+//! someone types into one window arrives in another.
+//!
+//! Which client has focus is drawn as a ring around its tile — by this program,
+//! over the client's own pixels, after its surface has been copied out. That is
+//! what a decoration is: something the client did not draw, cannot draw and
+//! cannot remove. A client that could paint its own focus ring could claim a
+//! focus it does not have.
 //!
 //! # What it is not
 //!
-//! There are no windows, no stacking, no input routing and no resizing. Tiles
-//! are laid out once and never move. Those are all worth having and none of
-//! them is what this establishes, which is that the path from a client's pixel
-//! to the display runs through a process rather than through the kernel.
+//! There are no windows, no stacking and no resizing. Tiles are laid out once
+//! and never move. Those are worth having and none of them is what this
+//! establishes, which is that the path from a client's pixel to the display,
+//! and from a keystroke to a client, runs through a process rather than through
+//! the kernel.
 
 #![no_std]
 #![no_main]
@@ -48,6 +66,26 @@ use nexus_user::Handle;
 const KERNEL: Handle = Handle(1);
 /// The channel to whoever is allowed to start programs.
 const SPAWNER: Handle = Handle(2);
+/// The channel keys arrive on.
+const KEYS: Handle = Handle(3);
+
+/// The key this program gives the keyboard in its wait set.
+///
+/// Above anything a client can be given, since client keys are an index shifted
+/// left with a bit for which of its two things became ready.
+const KEY_KEYBOARD: u64 = 0xFFFF;
+
+/// What a key looks like on the wire: a kind, then a number.
+///
+/// Only tab is named here, because it is the only one this program acts on
+/// itself. Everything else is forwarded without being looked at -- a compositor
+/// that inspected the keys it routes would be a compositor that could read what
+/// someone typed into a window.
+mod key {
+    pub const TAB: u8 = 5;
+    /// Bytes one key takes.
+    pub const SIZE: usize = 5;
+}
 
 /// Where this program maps the framebuffer.
 const FRAMEBUFFER_AT: usize = 0x0000_0000_2000_0000;
@@ -94,6 +132,8 @@ struct Tile {
     live: bool,
     /// Frames composited from it, for the report at the end.
     frames: u32,
+    /// Keys forwarded to it, likewise.
+    keys: u32,
 }
 
 #[unsafe(naked)]
@@ -260,12 +300,16 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
         return None;
     };
 
-    let mut message = [0u8; 12];
+    let mut message = [0u8; 16];
     message[0..4].copy_from_slice(&width.to_le_bytes());
     message[4..8].copy_from_slice(&height.to_le_bytes());
     // A different tint per client, so two tiles that are the same colour mean
     // one buffer reached both and not that compositing worked.
     message[8..12].copy_from_slice(&(0x40u32 + index as u32 * 0x70).to_le_bytes());
+    // And which client it is, only so that it can say so. A client has no use
+    // for the number beyond naming itself in a log -- it cannot address another
+    // client, and there is nothing for it to index into.
+    message[12..16].copy_from_slice(&(index as u32).to_le_bytes());
 
     if nexus_user::send(channel, &message, &[theirs]).is_err() {
         failed("compositor: FAILED: could not give a client its surface");
@@ -283,6 +327,7 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
         height,
         live: true,
         frames: 0,
+        keys: 0,
     })
 }
 
@@ -310,8 +355,18 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
         }
     }
 
+    if nexus_user::watch(set, KEYS, KEY_KEYBOARD).is_err() {
+        failed("compositor: FAILED: could not watch the keyboard");
+        return;
+    }
+
     let mut composited = 0u32;
+    let mut forwarded = 0u32;
     let mut ended = 0usize;
+    // Which client keys go to. A compositor without this would have to send
+    // every key to everyone, which is not routing -- it is broadcasting, and it
+    // is how a password ends up in a program that was only ever on screen.
+    let mut focus = 0usize;
 
     // Bounded, so a client that neither draws nor dies cannot hang the machine.
     // The bound is generous: it is a backstop and not a schedule.
@@ -330,6 +385,14 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
         }
 
         for key in &keys[..count] {
+            if *key == KEY_KEYBOARD {
+                match read_key(screen, set, tiles, &mut focus) {
+                    Some(sent) => forwarded += sent,
+                    None => return,
+                }
+                continue;
+            }
+
             let index = (*key >> 1) as usize;
             let Some(Some(tile)) = tiles.get_mut(index) else {
                 failed("compositor: FAILED: a wait set returned a key it was never given");
@@ -345,6 +408,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
                 match nexus_user::receive(tile.channel, &mut message, &mut none) {
                     Ok(_) => {
                         composite(screen, tile);
+                        outline(screen, tile, index == focus);
                         tile.frames += 1;
                         composited += 1;
                         // Answered, so the client knows the buffer is free
@@ -384,6 +448,110 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
         return;
     }
     nexus_user::log("compositor: composited every frame its clients drew").ok();
+    if forwarded > 0 {
+        nexus_user::log("compositor: routed keys to the client that had focus").ok();
+    }
+}
+
+/// Read whatever the keyboard sent and decide who it is for.
+///
+/// Tab moves the focus and is not passed on, which is the first piece of policy
+/// this program owns rather than the kernel: the kernel knows a key was pressed
+/// and has no idea what a window is. Everything else goes to the focused
+/// client, and to nobody else -- a compositor that sent every key to every
+/// client would be broadcasting, not routing, and that is how what someone
+/// types into one window ends up in another.
+///
+/// Returns how many keys were passed on, or `None` if something went wrong
+/// badly enough to stop.
+fn read_key(
+    screen: &Screen,
+    set: Handle,
+    tiles: &mut [Option<Tile>; CLIENTS],
+    focus: &mut usize,
+) -> Option<u32> {
+    let mut message = [0u8; 32];
+    let mut none = [Handle(0); 1];
+    let Ok(received) = nexus_user::receive(KEYS, &mut message, &mut none) else {
+        // The kernel has stopped sending. Not a failure: it means there is no
+        // keyboard any more, and there is still a screen to composite.
+        nexus_user::unwatch(set, KEY_KEYBOARD).ok();
+        return Some(0);
+    };
+    if received.bytes < key::SIZE {
+        failed("compositor: FAILED: a key arrived in the wrong shape");
+        return None;
+    }
+
+    if message[0] == key::TAB {
+        // Round-robin over the clients that are still alive. A focus that could
+        // land on a dead client would send its keys nowhere.
+        for step in 1..=CLIENTS {
+            let candidate = (*focus + step) % CLIENTS;
+            if matches!(tiles.get(candidate), Some(Some(tile)) if tile.live) {
+                *focus = candidate;
+                break;
+            }
+        }
+        nexus_user::log(if *focus == 0 {
+            "compositor: focus moved to the first client"
+        } else {
+            "compositor: focus moved to the second client"
+        })
+        .ok();
+
+        // Redrawn now rather than at the next frame, so the ring follows the
+        // focus rather than the focus following a client's drawing.
+        for (index, tile) in tiles.iter().enumerate() {
+            if let Some(tile) = tile {
+                if tile.live {
+                    outline(screen, tile, index == *focus);
+                }
+            }
+        }
+        return Some(0);
+    }
+
+    let Some(Some(tile)) = tiles.get_mut(*focus) else {
+        return Some(0);
+    };
+    if !tile.live {
+        return Some(0);
+    }
+    if nexus_user::send(tile.channel, &message[..key::SIZE], &[]).is_err() {
+        // It has gone. Ordinary, and the process key will say so.
+        return Some(0);
+    }
+    tile.keys += 1;
+    Some(1)
+}
+
+/// Draw a ring around a tile saying whether it has focus.
+///
+/// Drawn by this program, over the client's own pixels, after its surface has
+/// been copied out. That is what a decoration is: something the client did not
+/// draw, cannot draw, and cannot remove -- a client that could paint its own
+/// focus ring could claim focus it does not have.
+fn outline(screen: &Screen, tile: &Tile, focused: bool) {
+    let colour = if focused { 0x0046_C8FF } else { 0x0020_2C3C };
+
+    for row in 0..tile.height {
+        let edge = row < 2 || row + 2 >= tile.height;
+        let destination = FRAMEBUFFER_AT
+            + (((tile.y + row) as usize * screen.stride as usize) + tile.x as usize) * 4;
+
+        for column in 0..tile.width as usize {
+            if !edge && column >= 2 && column + 2 < tile.width as usize {
+                continue;
+            }
+            // SAFETY: as in `composite` -- the framebuffer is mapped writable
+            // and this address is inside this tile's own rectangle, which was
+            // checked against the screen when the display was taken.
+            unsafe {
+                core::ptr::write_volatile((destination + column * 4) as *mut u32, colour);
+            }
+        }
+    }
 }
 
 /// Stop hearing from a client's channel, without deciding it has ended.

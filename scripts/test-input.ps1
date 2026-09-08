@@ -60,7 +60,10 @@ $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -Pass
 # The keys to send, and what the kernel should make of them. "nexus" spells out
 # a word so that a mis-decoded scancode shows up as a wrong letter rather than
 # as merely a different count.
-$Keys = @('n', 'e', 'x', 'u', 's', 'f1')
+# `tab` in the middle on purpose: it is the key the compositor keeps for itself,
+# so what comes after it has to arrive somewhere different from what came
+# before. That is what separates routing from broadcasting.
+$Keys = @('n', 'e', 'x', 'tab', 'u', 's', 'f1')
 
 try {
     # Let the system finish booting and start its input thread before typing.
@@ -118,9 +121,9 @@ if (-not ($output -match 'keyboard: (\d+) scancodes')) {
     $failures += 'no scancodes were received'
 } else {
     $scancodes = [int]$Matches[1]
-    # Six keys, each a press and a release, so at least twelve.
-    if ($scancodes -lt 12) {
-        $failures += "only $scancodes scancodes arrived; expected at least 12"
+    # Seven keys, each a press and a release, so at least fourteen.
+    if ($scancodes -lt 14) {
+        $failures += "only $scancodes scancodes arrived; expected at least 14"
     } else {
         Write-Host "    ok   $scancodes scancodes received" -ForegroundColor DarkGray
     }
@@ -129,10 +132,43 @@ if (-not ($output -match 'keyboard: (\d+) scancodes')) {
 # The decode path, end to end: the letters have to come back as the word that
 # was typed. A count of scancodes would pass with a completely wrong scancode
 # table; the text will not.
-if ($output.Contains('line "nexus"')) {
-    Write-Host '    ok   the typed letters decoded to "nexus"' -ForegroundColor DarkGray
+# The tab in the middle is a space to the kernel's own panel, which is why the
+# expected text has one: the kernel goes on acting on every key for the panel
+# while the compositor routes a copy of the same keys to a client.
+if ($output.Contains('line "nex us"')) {
+    Write-Host '    ok   the typed letters decoded to "nex us"' -ForegroundColor DarkGray
 } else {
-    $failures += 'the typed letters did not decode to "nexus"'
+    $failures += 'the typed letters did not decode to "nex us"'
+}
+
+# And the part that is new: a keystroke went into the kernel's keyboard driver,
+# crossed a channel to the compositor, was routed to one client, and arrived.
+$first = ([regex]::Matches($output, 'client 0: heard a key')).Count
+$second = ([regex]::Matches($output, 'client 1: heard a key')).Count
+if ($first -lt 1) {
+    $failures += 'no key ever reached a client'
+} else {
+    Write-Host "    ok   $first keys reached the first client" -ForegroundColor DarkGray
+}
+
+# Tab is the key the compositor keeps for itself, so what was typed after it has
+# to arrive somewhere different from what came before. Both clients hearing
+# something is what says this is routing; either of them hearing *everything*
+# would say it is broadcasting.
+if (-not $output.Contains('compositor: focus moved to the second client')) {
+    $failures += 'tab did not move the focus'
+} elseif ($second -lt 1) {
+    $failures += 'the focus moved but no key followed it'
+} else {
+    Write-Host "    ok   $second keys followed the focus to the second client" -ForegroundColor DarkGray
+}
+
+# And neither of them saw the other's keys. Three letters were typed before the
+# tab and two after it, so a client that heard all five heard someone else's.
+if ($first -gt 3 -or $second -gt 2) {
+    $failures += "a client heard keys meant for the other ($first and $second of 3 and 2)"
+} else {
+    Write-Host '    ok   neither client heard the keys meant for the other' -ForegroundColor DarkGray
 }
 
 # F1 is a distinct key, and acting on it says the decoded key reached something
