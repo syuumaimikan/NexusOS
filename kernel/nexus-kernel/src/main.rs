@@ -559,20 +559,20 @@ fn self_test() {
 
 /// The sector the write test uses.
 ///
-/// Well away from the ones the read test checks, so a write that landed on the
-/// wrong sector shows up as a *read* failing rather than as the write appearing
-/// to succeed.
-const DISK_SCRATCH_SECTOR: u64 = 4096;
+/// Inside the gap between the partition table and the first partition, which is
+/// a megabyte of nothing on any disk laid out this century. Writing anywhere
+/// inside the filesystem would be writing on the thing the next boot has to
+/// read to start at all.
+const DISK_SCRATCH_SECTOR: u64 = 200;
 
 /// Read and write the disk.
 ///
-/// Every sector of the image begins with its own number written as text, which
-/// is the whole point of building it that way: the failure a block driver has to
-/// be caught making is fetching a *different* sector than it was asked for, and
-/// a disk of zeroes cannot tell that apart from working. Three sectors are
-/// checked -- the first, one in the middle, and the last -- because an
-/// off-by-one in the descriptor address shows up at an end and not in the
-/// middle.
+/// The image is a real one: a protective master boot record, a GPT, and a FAT32
+/// partition the firmware boots from. Everything outside the partition keeps its
+/// own sector number written as text, and that is what the driver is tested
+/// against -- the failure a block driver has to be caught making is fetching a
+/// *different* sector than it was asked for, and a disk of zeroes cannot tell
+/// that apart from working.
 fn disk_self_test() {
     use drivers::virtio_blk::{self, SECTOR_SIZE};
 
@@ -584,7 +584,32 @@ fn disk_self_test() {
     let capacity = virtio_blk::capacity();
     let mut buffer = [0u8; SECTOR_SIZE];
 
-    for sector in [0u64, 100, capacity - 1] {
+    // Sector zero is the protective master boot record. Its signature is two
+    // bytes at a fixed offset, so a driver that returned a neighbouring sector
+    // fails here before anything else is looked at.
+    if let Err(error) = virtio_blk::read_sector(0, &mut buffer) {
+        kprintln!("[test] FAILED: could not read the first sector: {error}");
+        return;
+    }
+    if buffer[510] != 0x55 || buffer[511] != 0xAA || buffer[450] != 0xEE {
+        kprintln!("[test] FAILED: sector 0 is not a protective master boot record");
+        return;
+    }
+
+    // And sector one is the GPT header, which says so in ASCII.
+    if let Err(error) = virtio_blk::read_sector(1, &mut buffer) {
+        kprintln!("[test] FAILED: could not read the partition table: {error}");
+        return;
+    }
+    if !buffer.starts_with(b"EFI PART") {
+        kprintln!("[test] FAILED: sector 1 is not a GPT header");
+        return;
+    }
+
+    // Then three labelled sectors: one near the start, one in the middle of the
+    // gap, and the last one the disk has. An off-by-one in a descriptor address
+    // shows up at an end and not in the middle.
+    for sector in [100u64, 1000, capacity - 34] {
         if let Err(error) = virtio_blk::read_sector(sector, &mut buffer) {
             kprintln!("[test] FAILED: could not read sector {sector}: {error}");
             return;
@@ -606,8 +631,8 @@ fn disk_self_test() {
     }
 
     // Keep what is there, so the image is the same afterwards as before. A test
-    // that leaves the disk different from how it found it makes the next boot's
-    // read test depend on whether this one ran.
+    // that leaves the disk different from how it found it makes the next boot
+    // depend on whether this one ran.
     let mut original = [0u8; SECTOR_SIZE];
     if let Err(error) = virtio_blk::read_sector(DISK_SCRATCH_SECTOR, &mut original) {
         kprintln!("[test] FAILED: could not read the scratch sector: {error}");
@@ -649,8 +674,8 @@ fn disk_self_test() {
 
     let (read, wrote) = virtio_blk::statistics();
     kprintln!(
-        "[test] disk verified: {capacity} sectors, three read by name, one written and read back \
-         ({read} reads, {wrote} writes)"
+        "[test] disk verified: {capacity} sectors, a GPT at the front, three read by name, \
+         one written and read back ({read} reads, {wrote} writes)"
     );
 }
 
@@ -690,10 +715,15 @@ fn ipc_test_receiver(_argument: usize) {
 
     match endpoint.receive() {
         Some(message) => {
-            ipc_test::RECEIVED.store(message.bytes.len() as u64, Ordering::Relaxed);
             if message.bytes == IPC_MESSAGE {
                 ipc_test::MATCHED.store(1, Ordering::Relaxed);
             }
+            // Published last, and with release ordering, because it is what the
+            // waiting thread watches. Storing it first with relaxed ordering let
+            // the compiler hoist it above the verdict, so the waiter could see a
+            // length and not yet the answer -- and report a message that had
+            // arrived intact as having arrived wrong.
+            ipc_test::RECEIVED.store(message.bytes.len() as u64, Ordering::Release);
         }
         None => {
             ipc_test::CLOSED.store(1, Ordering::Relaxed);
@@ -780,11 +810,13 @@ fn ipc_self_test() {
     }
 
     let deadline = arch::time::ticks() + 2000;
-    while ipc_test::RECEIVED.load(Ordering::Relaxed) == 0 && arch::time::ticks() < deadline {
+    while ipc_test::RECEIVED.load(Ordering::Acquire) == 0 && arch::time::ticks() < deadline {
         sched::sleep_ms(1);
     }
 
-    let received = ipc_test::RECEIVED.load(Ordering::Relaxed);
+    // Acquire, pairing with the receiver's release: seeing the length is what
+    // makes everything the receiver decided before storing it visible here.
+    let received = ipc_test::RECEIVED.load(Ordering::Acquire);
     if received != IPC_MESSAGE.len() as u64 {
         kprintln!(
             "[test] FAILED: the receiver got {received} bytes, expected {}",

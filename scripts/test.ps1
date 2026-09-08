@@ -12,7 +12,9 @@
          every marker a healthy boot produces
       4. an input test, which sends real keystrokes through QEMU's monitor and
          checks what the kernel made of them
-      5. injection tests, which break the kernel one way per build -- a real
+      5. a boot from the disk image alone, which is the only run where the
+         firmware reads the partition table and filesystem this project writes
+      6. injection tests, which break the kernel one way per build -- a real
          CPU exception, a broken TLB shootdown -- and check that
          each is reported rather than resetting the machine
 
@@ -265,8 +267,8 @@ Invoke-Step 'boot test' {
     if (-not ($output -match 'disk (\d+) sectors, (\d+) read, (\d+) written')) {
         throw 'the kernel never reported what it did with the disk'
     }
-    if ([int]$Matches[1] -ne 8192) {
-        throw "the disk reports $($Matches[1]) sectors, expected 8192"
+    if ([int]$Matches[1] -ne 131072) {
+        throw "the disk reports $($Matches[1]) sectors, expected 131072"
     }
     if ([int]$Matches[2] -lt 1 -or [int]$Matches[3] -lt 1) {
         throw 'the disk was found but never read or written'
@@ -275,6 +277,10 @@ Invoke-Step 'boot test' {
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }
 
     Write-Host "    $($markers.Count) boot markers present" -ForegroundColor DarkGray
+}
+
+Invoke-Step 'boot from the image' {
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-image.ps1')) 'image boot'
 }
 
 Invoke-Step 'input' {

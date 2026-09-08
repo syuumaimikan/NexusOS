@@ -73,8 +73,13 @@ $bootSize = $staged.BootSize
 $kernelSize = $staged.KernelSize
 $unstrippedSize = $staged.UnstrippedSize
 
-# The disk the kernel drives. Made once and left alone: the tests write to it,
-# and rebuilding it on every build would erase what a previous run proved.
+# The disk the kernel drives. Data only, with nothing to boot from: a machine
+# given two bootable disks leaves the firmware to choose between them, and it
+# chose the one whose kernel was older. Made once and left alone, because the
+# tests write to it and rebuilding would erase what a previous run proved.
+#
+# The bootable image is a different file, made by test-image.ps1, which is the
+# only run that is about whether an image boots.
 $DiskImage = Join-Path $BuildDir 'nexus-disk.img'
 if (-not (Test-Path $DiskImage)) {
     Write-Host '==> Making the disk image' -ForegroundColor Cyan

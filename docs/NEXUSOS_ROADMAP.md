@@ -271,8 +271,22 @@ middle and the last, checks that a sector past the end is refused, writes a
 position-dependent pattern to a scratch sector, reads it back, and restores what
 was there.
 
-Outstanding: nothing reads a partition table or a filesystem, so the disk holds
-sectors and not files. The driver polls one request at a time and takes no
+And the image is a real one, built here rather than by a formatter: a protective
+master boot record, a GPT with its backup at the far end, and a FAT32 written
+sector by sector -- boot sector, FSInfo, two file allocation tables, directories
+as cluster chains of 32-byte entries. A test boots a machine with nothing but
+that image attached, so the firmware has to find the partition table, recognise
+the EFI system partition, read the filesystem and load the bootloader out of it;
+NexusOS had never done any of that before, because QEMU had always been
+pretending a directory was a filesystem on its behalf.
+
+The data disk and the bootable image are separate files on purpose. A machine
+given two bootable disks leaves the firmware to choose between them, and it
+chose the one whose kernel was older -- which made every fault-injection build
+boot a binary that was not the one under test, and every result mean nothing.
+
+Outstanding: nothing *in the kernel* reads a partition table or a filesystem, so
+it sees sectors and not files. The driver polls one request at a time and takes no
 interrupt. NexusFS is not started.
 
 ## Phase 8 — Drivers and user space ⬜

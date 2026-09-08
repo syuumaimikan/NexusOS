@@ -67,7 +67,8 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | I/O APIC | **DONE** | Redirection entries programmed, source overrides honoured |
 | PCI enumeration | **DONE** | Every function of every device, through the legacy port window |
 | Block device | **PARTIAL** | virtio-blk over the legacy transport, one request at a time, polled |
-| Filesystems | **MISSING** | The disk is sectors; nothing reads a partition table or a filesystem |
+| Disk image | **DONE** | GPT, protective MBR and a FAT32 the firmware boots from |
+| Filesystems | **MISSING** | The kernel sees sectors; nothing in it reads a partition table or a filesystem |
 | MSI, MSI-X | **MISSING** | Devices are found; nothing routes their interrupts yet |
 | Ring 3 | **DONE** | A user thread runs at CPL 3, preemptible, in its own pages |
 | System calls | **PARTIAL** | `syscall`/`sysret` entry, five calls; no handles or IPC |
@@ -196,10 +197,9 @@ These are real and are tracked, not hidden:
 10. **Bootloader allocations are over-conservative.** Page tables, the handoff
     block and the kernel image are allocated as `RuntimeServicesData`, which the
     kernel treats as permanently reserved. This wastes on the order of 100 KiB.
-11. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
-    directory. Excellent for iteration, but it means NexusOS has never booted
-    from a genuine partition table. A real GPT + FAT32 image builder is needed
-    before any hardware test.
+11. **The kernel reads no filesystem.** The image has a GPT and a FAT32 that
+    the firmware boots from, and the kernel sees only numbered sectors. A
+    partition-table reader and a FAT32 reader are what turn that into files.
 12. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
     automatically.
 13. **The heap never shrinks.** It grows on demand and keeps what it takes.
@@ -231,7 +231,9 @@ image on the ESP, which was costing megabytes of boot-time reads for a
 hundred-kilobyte load, the two scripts that staged that ESP differently, so
 whichever ran last decided what the next boot would load, and the
 single-processor scheduler: every processor now runs threads, and the boot test
-fails if the workers all land on one of them; the absence of any user mode at
+fails if the workers all land on one of them; booting only from a directory QEMU
+pretended was a filesystem, which is now a genuine GPT and FAT32 that a test
+boots with nothing else attached; the absence of any user mode at
 all — a program now runs at ring 3, and the boot test fails unless an interrupt
 was taken from it; the single address space, which is now one per process, with
 the boot test comparing the two processes' page tables and the injection suite
