@@ -128,6 +128,7 @@ Invoke-Step 'boot test' {
         'process alpha kept its own memory',
         'process beta kept its own memory',
         'address spaces created',
+        'threads waiting for a key',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -189,6 +190,21 @@ Invoke-Step 'boot test' {
     }
     if ([int]$Matches[1] -ne [int]$Matches[2]) {
         throw "$($Matches[1]) address spaces were created but only $($Matches[2]) freed"
+    }
+    # The input thread must be blocked, not sleeping. It is the difference
+    # between a thread that costs nothing between keystrokes and one that wakes
+    # fifty times a second to find nothing, and only the state says which.
+    if (-not ($output -match '(\d+) blocked\)')) {
+        throw 'the kernel never reported how many threads are blocked'
+    }
+    if ([int]$Matches[1] -lt 1) {
+        throw 'no thread is blocked, so the input thread is still polling'
+    }
+    if (-not ($output -match '(\d+) threads waiting for a key')) {
+        throw 'the kernel never reported who is waiting for a key'
+    }
+    if ([int]$Matches[1] -lt 1) {
+        throw 'nothing is waiting for a key'
     }
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }

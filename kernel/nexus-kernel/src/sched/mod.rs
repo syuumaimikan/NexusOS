@@ -52,6 +52,7 @@
 
 pub mod context;
 pub mod thread;
+pub mod wait;
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -456,6 +457,52 @@ pub fn sleep_ms(milliseconds: u64) {
     schedule();
 }
 
+/// Mark the running thread blocked, ready to be switched away from.
+///
+/// Called by [`wait::WaitQueue`] while it holds its own lock, so that joining
+/// the queue and leaving the run queues look like one step to anyone waking it.
+/// The `switching_out` flag goes on with the state, for the same reason it does
+/// in `sleep_ms`: between here and the stack switch the thread is still
+/// executing, and a waker acting on the announcement in that window would queue
+/// a thread that has not saved its stack pointer.
+pub(super) fn mark_blocked(id: ThreadId) {
+    let mut scheduler = SCHEDULER.lock();
+    if let Some(thread) = scheduler.threads.get_mut(&id) {
+        thread.state = ThreadState::Blocked;
+        thread.switching_out = true;
+    }
+}
+
+/// Make a blocked thread runnable again.
+///
+/// The enqueue is conditional, and this is the whole of the handshake with the
+/// scheduler: a thread that has not yet finished leaving its processor is
+/// marked ready and left alone, and `finish_switch` queues it once it has
+/// stopped. Exactly one of the two does it.
+pub(super) fn wake_blocked(id: ThreadId) {
+    let mut scheduler = SCHEDULER.lock();
+    let Some(thread) = scheduler.threads.get_mut(&id) else {
+        return;
+    };
+    if !matches!(thread.state, ThreadState::Blocked) {
+        // Already awake: two wakers raced, or the thread was woken and has not
+        // reached its condition check yet. Both are ordinary.
+        return;
+    }
+
+    thread.state = ThreadState::Ready;
+    if thread.switching_out {
+        return;
+    }
+    let level = thread.priority.index();
+    scheduler.ready[level].push_back(id);
+    drop(scheduler);
+
+    // Whichever processor is idle should take it now rather than at the end of
+    // a slice it is not using.
+    percpu::request_reschedule_everywhere();
+}
+
 /// Wake every thread whose sleep deadline has passed.
 ///
 /// Called by the processor that owns the clock. Any processor could do it, but
@@ -699,6 +746,8 @@ pub struct SchedulerStats {
     pub threads: usize,
     pub ready: usize,
     pub sleeping: usize,
+    /// Waiting on a wait queue, which no amount of time will end.
+    pub blocked: usize,
     pub finished: usize,
     pub running: usize,
     pub context_switches: u64,
@@ -710,12 +759,14 @@ pub fn stats() -> SchedulerStats {
     let scheduler = SCHEDULER.lock();
     let mut ready = 0;
     let mut sleeping = 0;
+    let mut blocked = 0;
     let mut finished = 0;
     let mut running = 0;
     for thread in scheduler.threads.values() {
         match thread.state {
             ThreadState::Ready => ready += 1,
             ThreadState::Sleeping { .. } => sleeping += 1,
+            ThreadState::Blocked => blocked += 1,
             // Counted with the finished: it is done, and the only thing left is
             // the processor it is leaving noticing.
             ThreadState::Finished | ThreadState::Exiting => finished += 1,
@@ -727,6 +778,7 @@ pub fn stats() -> SchedulerStats {
         threads: scheduler.threads.len(),
         ready,
         sleeping,
+        blocked,
         finished,
         running,
         context_switches: scheduler.context_switches,

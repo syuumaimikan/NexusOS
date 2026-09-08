@@ -97,6 +97,28 @@ impl ScancodeQueue {
 
 static QUEUE: IrqSpinLock<ScancodeQueue> = IrqSpinLock::new(ScancodeQueue::new());
 
+/// Threads waiting for a scancode to arrive.
+///
+/// This is what lets the input thread cost nothing between keystrokes. It used
+/// to wake fifty times a second to find an empty queue, on a system where a key
+/// arrives a few times a minute.
+static ARRIVALS: crate::sched::wait::WaitQueue = crate::sched::wait::WaitQueue::new();
+
+/// Block until a scancode is waiting.
+///
+/// Returns as soon as the queue is non-empty. Spurious wake-ups are handled by
+/// the queue itself, which re-checks rather than trusting that a wake-up means
+/// what it hoped.
+pub fn wait_for_scancode() {
+    ARRIVALS.wait_until(|| QUEUE.lock().length > 0);
+}
+
+/// Threads currently waiting for a key.
+#[must_use]
+pub fn waiting_threads() -> usize {
+    ARRIVALS.len()
+}
+
 /// Scancodes received since boot.
 static RECEIVED: AtomicU64 = AtomicU64::new(0);
 /// Scancodes dropped because the queue was full.
@@ -188,6 +210,12 @@ pub unsafe fn on_interrupt() {
     if !QUEUE.lock().push(byte) {
         DROPPED.fetch_add(1, Ordering::Relaxed);
     }
+
+    // Waking from an interrupt handler is safe here: it takes two short locks
+    // and never switches. It must also happen after the push and outside the
+    // queue's lock, so that a thread woken by it finds the scancode already
+    // there rather than deciding it was a spurious wake-up.
+    ARRIVALS.wake_one();
 }
 
 /// Take the next decoded key, if one is ready.

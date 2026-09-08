@@ -63,6 +63,15 @@ pub enum ThreadState {
     Running,
     /// Waiting until the tick counter reaches this value.
     Sleeping { until_tick: u64 },
+    /// Waiting on a [`WaitQueue`](super::wait::WaitQueue) for something to
+    /// happen.
+    ///
+    /// Different from [`Sleeping`](Self::Sleeping) in what ends it: a sleeper
+    /// is woken by the clock, and the clock always comes. A blocked thread is
+    /// woken by another thread or an interrupt, and if nobody wakes it, it
+    /// waits forever -- which is the correct behaviour for a thread waiting on
+    /// a channel nobody will ever write to.
+    Blocked,
     /// Done running, but still standing on its own stack.
     ///
     /// The gap between the two matters: a thread that has decided to exit is

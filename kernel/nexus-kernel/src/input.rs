@@ -76,19 +76,20 @@ fn handle(key: Key) {
 
 /// The thread that drains the keyboard.
 ///
-/// It polls. Blocking on a wait queue would be better — a thread that sleeps
-/// until a key arrives costs nothing, where this wakes fifty times a second to
-/// find nothing — but wait queues need the IPC layer, which does not exist yet.
-/// Twenty milliseconds is below the threshold where typing feels delayed.
+/// It blocks. Between keystrokes it is not on a run queue, does not take a time
+/// slice, and does not appear in a scheduling decision at all; the interrupt
+/// that receives a scancode is what makes it runnable again. It used to poll at
+/// fifty hertz, which cost a wake-up every twenty milliseconds to find nothing,
+/// on a system where a key arrives a few times a minute.
 fn input_thread(_argument: usize) {
     loop {
         // Drain everything queued, not one key per wake: a fast typist or a
         // burst from an autorepeat would otherwise fall progressively further
-        // behind.
+        // behind, and one wake-up can cover a whole burst.
         while let Some(key) = keyboard::next_key() {
             handle(key);
         }
-        sched::sleep_ms(20);
+        keyboard::wait_for_scancode();
     }
 }
 

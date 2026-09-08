@@ -265,8 +265,8 @@ fn monitor_thread(_argument: usize) {
         reported += 5;
 
         kprintln!(
-            "[mon ] {reported}s uptime {}.{:03}s | threads {} ({} running, {} ready, {} sleeping) | \
-             {} switches, {} awaiting reaping{}",
+            "[mon ] {reported}s uptime {}.{:03}s | threads {} ({} running, {} ready, {} sleeping, \
+             {} blocked) | {} switches, {} awaiting reaping{}",
             arch::time::uptime_ms() / 1000,
             arch::time::uptime_ms() % 1000,
             stats.threads,
@@ -276,6 +276,9 @@ fn monitor_thread(_argument: usize) {
             stats.running,
             stats.ready,
             stats.sleeping,
+            // Blocked, not sleeping: no amount of time will wake these. The
+            // input thread lives here between keystrokes.
+            stats.blocked,
             stats.context_switches,
             stats.finished,
             if reaped > 0 { " | reaped threads" } else { "" }
@@ -288,6 +291,10 @@ fn monitor_thread(_argument: usize) {
                 heap.total / 1024
             );
         }
+        kprintln!(
+            "[mon ] {} threads waiting for a key",
+            drivers::keyboard::waiting_threads()
+        );
         let (received, dropped, decoded) = drivers::keyboard::statistics();
         if received > 0 {
             // The decoded line is included on purpose: a scancode count says
