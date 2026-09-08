@@ -46,6 +46,44 @@ pub unsafe fn inb(port: u16) -> u8 {
     value
 }
 
+/// Write a 16-bit word to an I/O port.
+///
+/// # Safety
+///
+/// See [`outb`].
+#[inline]
+pub unsafe fn outw(port: u16, value: u16) {
+    // SAFETY: as above.
+    unsafe {
+        core::arch::asm!(
+            "out dx, ax",
+            in("dx") port,
+            in("ax") value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// Read a 16-bit word from an I/O port.
+///
+/// # Safety
+///
+/// See [`outb`].
+#[inline]
+pub unsafe fn inw(port: u16) -> u16 {
+    let value: u16;
+    // SAFETY: as above.
+    unsafe {
+        core::arch::asm!(
+            "in ax, dx",
+            out("ax") value,
+            in("dx") port,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    value
+}
+
 /// Write a 32-bit word to an I/O port.
 ///
 /// # Safety

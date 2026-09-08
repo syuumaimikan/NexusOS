@@ -139,6 +139,9 @@ Invoke-Step 'boot test' {
         'a request from the client, on the channel it passed over',
         'an answer from the server, on the channel it was handed',
         'server: the passed channel closed',
+        'devices',
+        'virtio disk at',
+        'disk verified',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -255,6 +258,18 @@ Invoke-Step 'boot test' {
     }
     if ($closed -lt $answer) {
         throw 'the server saw the channel close before it had answered'
+    }
+    # The disk has to be the one the build made, and the driver has to have
+    # used it. A driver that found the device and never moved a sector would
+    # print the line above and nothing else would notice.
+    if (-not ($output -match 'disk (\d+) sectors, (\d+) read, (\d+) written')) {
+        throw 'the kernel never reported what it did with the disk'
+    }
+    if ([int]$Matches[1] -ne 8192) {
+        throw "the disk reports $($Matches[1]) sectors, expected 8192"
+    }
+    if ([int]$Matches[2] -lt 1 -or [int]$Matches[3] -lt 1) {
+        throw 'the disk was found but never read or written'
     }
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }

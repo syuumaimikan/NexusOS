@@ -35,6 +35,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'qemu.ps1')
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
 $EspDir = Join-Path $BuildDir 'esp'
@@ -77,29 +79,10 @@ if (-not (Test-Path $FirmwareVars)) {
 
 if (Test-Path $SerialLog) { Remove-Item $SerialLog -Force }
 
-$QemuArgs = @(
-    '-machine', 'q35',
-    '-cpu', 'qemu64,+pdpe1gb',
-    '-smp', '4',
-    '-m', $Memory,
-
-    # UEFI firmware: read-only code plus a writable variable store.
-    '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$FirmwareCodeLocal",
-    '-drive', "if=pflash,format=raw,unit=1,file=$FirmwareVars",
-
-    # Present build/esp as a FAT filesystem. QEMU's virtual FAT layer means
-    # there is no image to rebuild between runs: edit, build, boot.
-    '-drive', "format=raw,file=fat:rw:$EspDir",
-
-    # Serial is the kernel console.
-    '-serial', "file:$SerialLog",
-
-    # A triple fault should stop the machine with a diagnosable state rather
-    # than silently rebooting into another boot attempt.
-    '-no-reboot',
-    '-d', 'guest_errors',
-    '-D', (Join-Path $BuildDir 'qemu.log')
-)
+$QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
+    -FirmwareCode $FirmwareCodeLocal -FirmwareVars $FirmwareVars -SerialLog $SerialLog `
+    -Memory $Memory
+$QemuArgs += @('-d', 'guest_errors')
 
 if ($Headless) {
     $QemuArgs += @('-display', 'none')

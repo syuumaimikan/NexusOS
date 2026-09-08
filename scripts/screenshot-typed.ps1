@@ -23,6 +23,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'qemu.ps1')
+
 # Split what the caller passed, whether it arrived as an array or as one string.
 #
 # `powershell -File screenshot-typed.ps1 -Keys n,e,x,u,s,f1` does not bind six
@@ -58,19 +60,9 @@ foreach ($stale in @($SerialLog, $PpmPath, $Output)) {
 }
 
 $MonitorPort = Get-Random -Minimum 26000 -Maximum 26999
-$QemuArgs = @(
-    '-machine', 'q35',
-    '-cpu', 'qemu64',
-    '-smp', '4',
-    '-m', '1G',
-    '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$FirmwareCode",
-    '-drive', "if=pflash,format=raw,unit=1,file=$FirmwareVars",
-    '-drive', "format=raw,file=fat:rw:$EspDir",
-    '-serial', "file:$SerialLog",
-    '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait",
-    '-display', 'none',
-    '-no-reboot'
-)
+$QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
+    -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $SerialLog `
+    -MonitorPort $MonitorPort -Headless
 
 Write-Host "==> Booting NexusOS (monitor on port $MonitorPort)" -ForegroundColor Cyan
 $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow

@@ -244,11 +244,36 @@ given something it may use and may not delegate.
 Outstanding: shared memory, events and semaphores. A channel copies its message
 twice, which is right for a request and wrong for a framebuffer.
 
-## Phase 7 — Storage and NexusFS ⬜
+## Phase 7 — Storage and NexusFS 🚧
 
 - virtio-blk, then NVMe and AHCI
 - Block cache, VFS layer
 - NexusFS: copy-on-write, journaling, checksums, snapshots, compression
+
+Delivered: PCI enumeration and a virtio block driver.
+
+Everything the machine has that is not on the processor is behind PCI, so
+finding devices came first: every function of every device, through the legacy
+port window, which reaches all of what enumeration and a virtio driver need.
+
+The disk is driven the way a modern device is driven -- descriptors placed in
+memory for the hardware to come and fetch, rather than bytes pushed through a
+port. A virtqueue is three shared arrays: descriptors, an available ring the
+driver appends to, and a used ring the device appends to. A block request is
+three descriptors chained -- a header, the data, and one byte for the device to
+report on.
+
+The image every sector of which begins with its own number, written as text, is
+the point of the test: the failure a block driver has to be caught making is
+fetching a *different* sector than it was asked for, and a disk of zeroes cannot
+tell that apart from working. The boot test reads the first sector, one in the
+middle and the last, checks that a sector past the end is refused, writes a
+position-dependent pattern to a scratch sector, reads it back, and restores what
+was there.
+
+Outstanding: nothing reads a partition table or a filesystem, so the disk holds
+sectors and not files. The driver polls one request at a time and takes no
+interrupt. NexusFS is not started.
 
 ## Phase 8 — Drivers and user space ⬜
 

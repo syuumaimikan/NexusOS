@@ -176,6 +176,21 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         }
     }
 
+    // What the machine has. Everything that is not on the processor is behind
+    // PCI, so this is the first thing the kernel does that is about the machine
+    // rather than the CPU.
+    // SAFETY: called once, before anything drives a device.
+    let devices = unsafe { drivers::pci::enumerate() };
+    drivers::pci::report(&devices);
+
+    // The disk. Not fatal if there is none: everything else works without it,
+    // and saying so beats refusing to boot a machine that has no storage the
+    // kernel can drive yet.
+    // SAFETY: called once, after enumeration, with the allocators running.
+    if let Err(error) = unsafe { drivers::virtio_blk::init(&devices) } {
+        kprintln!("[blk ] no block device: {error}");
+    }
+
     // The display comes up only now, after the heap: translated strings are
     // built at runtime by substituting into templates, so drawing anything
     // localised allocates. Bringing the display up earlier cost a boot to an
@@ -340,6 +355,13 @@ fn monitor_thread(_argument: usize) {
                 "[mon ] {started} processes started, {ended} ended |                  {spaces} address spaces created, {freed} freed"
             );
             kprintln!("[mon ] {channels} channels, {sent} messages sent, {taken} received");
+            if drivers::virtio_blk::is_present() {
+                let (read, wrote) = drivers::virtio_blk::statistics();
+                kprintln!(
+                    "[mon ] disk {} sectors, {read} read, {wrote} written",
+                    drivers::virtio_blk::capacity()
+                );
+            }
         }
         let (calls, unknown) = arch::syscall::statistics();
         let (entered, returned) = arch::syscall::yield_statistics();
@@ -532,6 +554,104 @@ fn self_test() {
     scheduler_self_test();
     tlb_self_test();
     ipc_self_test();
+    disk_self_test();
+}
+
+/// The sector the write test uses.
+///
+/// Well away from the ones the read test checks, so a write that landed on the
+/// wrong sector shows up as a *read* failing rather than as the write appearing
+/// to succeed.
+const DISK_SCRATCH_SECTOR: u64 = 4096;
+
+/// Read and write the disk.
+///
+/// Every sector of the image begins with its own number written as text, which
+/// is the whole point of building it that way: the failure a block driver has to
+/// be caught making is fetching a *different* sector than it was asked for, and
+/// a disk of zeroes cannot tell that apart from working. Three sectors are
+/// checked -- the first, one in the middle, and the last -- because an
+/// off-by-one in the descriptor address shows up at an end and not in the
+/// middle.
+fn disk_self_test() {
+    use drivers::virtio_blk::{self, SECTOR_SIZE};
+
+    if !virtio_blk::is_present() {
+        kprintln!("[test] no disk attached; skipping the block tests");
+        return;
+    }
+
+    let capacity = virtio_blk::capacity();
+    let mut buffer = [0u8; SECTOR_SIZE];
+
+    for sector in [0u64, 100, capacity - 1] {
+        if let Err(error) = virtio_blk::read_sector(sector, &mut buffer) {
+            kprintln!("[test] FAILED: could not read sector {sector}: {error}");
+            return;
+        }
+        let expected = alloc::format!("NEXUSOS-SECTOR-{sector:08}");
+        if !buffer.starts_with(expected.as_bytes()) {
+            let seen = core::str::from_utf8(&buffer[..23]).unwrap_or("<not text>");
+            kprintln!("[test] FAILED: sector {sector} reads \"{seen}\", expected \"{expected}\"");
+            return;
+        }
+    }
+
+    // A sector past the end has to be refused rather than wrapped or clamped.
+    // A driver that silently read something else here would be one that could
+    // be asked to read anything.
+    if virtio_blk::read_sector(capacity, &mut buffer) != Err(virtio_blk::BlockError::OutOfRange) {
+        kprintln!("[test] FAILED: reading past the end of the disk was not refused");
+        return;
+    }
+
+    // Keep what is there, so the image is the same afterwards as before. A test
+    // that leaves the disk different from how it found it makes the next boot's
+    // read test depend on whether this one ran.
+    let mut original = [0u8; SECTOR_SIZE];
+    if let Err(error) = virtio_blk::read_sector(DISK_SCRATCH_SECTOR, &mut original) {
+        kprintln!("[test] FAILED: could not read the scratch sector: {error}");
+        return;
+    }
+
+    let mut written = [0u8; SECTOR_SIZE];
+    for (index, byte) in written.iter_mut().enumerate() {
+        // A pattern that depends on the offset, so a write that put the right
+        // bytes in the wrong order still fails.
+        *byte = (index as u8).wrapping_mul(31).wrapping_add(7);
+    }
+
+    if let Err(error) = virtio_blk::write_sector(DISK_SCRATCH_SECTOR, &written) {
+        kprintln!("[test] FAILED: could not write the scratch sector: {error}");
+        return;
+    }
+    if let Err(error) = virtio_blk::read_sector(DISK_SCRATCH_SECTOR, &mut buffer) {
+        kprintln!("[test] FAILED: could not read back the scratch sector: {error}");
+        return;
+    }
+    if buffer != written {
+        kprintln!("[test] FAILED: the scratch sector did not read back as it was written");
+        return;
+    }
+
+    if let Err(error) = virtio_blk::write_sector(DISK_SCRATCH_SECTOR, &original) {
+        kprintln!("[test] FAILED: could not restore the scratch sector: {error}");
+        return;
+    }
+    if let Err(error) = virtio_blk::read_sector(DISK_SCRATCH_SECTOR, &mut buffer) {
+        kprintln!("[test] FAILED: could not verify the restored sector: {error}");
+        return;
+    }
+    if buffer != original {
+        kprintln!("[test] FAILED: the scratch sector was not restored");
+        return;
+    }
+
+    let (read, wrote) = virtio_blk::statistics();
+    kprintln!(
+        "[test] disk verified: {capacity} sectors, three read by name, one written and read back \
+         ({read} reads, {wrote} writes)"
+    );
 }
 
 /// State for the IPC self-test.

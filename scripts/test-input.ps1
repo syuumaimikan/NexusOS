@@ -24,6 +24,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'qemu.ps1')
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
 $EspDir = Join-Path $BuildDir 'esp'
@@ -48,19 +50,9 @@ if (Test-Path $SerialLog) { Remove-Item $SerialLog -Force }
 
 $MonitorPort = Get-Random -Minimum 25000 -Maximum 25999
 
-$QemuArgs = @(
-    '-machine', 'q35',
-    '-cpu', 'qemu64',
-    '-smp', '4',
-    '-m', '1G',
-    '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$FirmwareCode",
-    '-drive', "if=pflash,format=raw,unit=1,file=$FirmwareVars",
-    '-drive', "format=raw,file=fat:rw:$EspDir",
-    '-serial', "file:$SerialLog",
-    '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait",
-    '-display', 'none',
-    '-no-reboot'
-)
+$QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
+    -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $SerialLog `
+    -MonitorPort $MonitorPort -Headless
 
 Write-Host "==> Booting NexusOS with a monitor on port $MonitorPort" -ForegroundColor Cyan
 $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow

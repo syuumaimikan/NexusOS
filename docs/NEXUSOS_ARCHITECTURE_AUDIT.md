@@ -65,7 +65,10 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | SMP scheduling | **DONE** | Every processor schedules; shared run queues, per-CPU current thread |
 | TLB shootdown | **DONE** | Mailbox per processor, interrupted and polled; verified by injection |
 | I/O APIC | **DONE** | Redirection entries programmed, source overrides honoured |
-| MSI, MSI-X | **MISSING** | No PCI enumeration yet, so nothing to target |
+| PCI enumeration | **DONE** | Every function of every device, through the legacy port window |
+| Block device | **PARTIAL** | virtio-blk over the legacy transport, one request at a time, polled |
+| Filesystems | **MISSING** | The disk is sectors; nothing reads a partition table or a filesystem |
+| MSI, MSI-X | **MISSING** | Devices are found; nothing routes their interrupts yet |
 | Ring 3 | **DONE** | A user thread runs at CPL 3, preemptible, in its own pages |
 | System calls | **PARTIAL** | `syscall`/`sysret` entry, five calls; no handles or IPC |
 | Processes, address spaces | **DONE** | A page-table root per process; kernel upper half shared by pointer |
@@ -151,65 +154,75 @@ The build produces zero warnings and passes `clippy -D warnings`.
 
 These are real and are tracked, not hidden:
 
-1. **No shared memory, events or semaphores.** A channel copies its message
+1. **The block driver polls, one request at a time.** Completion is waited for
+   by reading the used ring rather than by taking the device's interrupt, and
+   the driver holds its lock across the whole transfer. That is the wrong shape
+   for a system that cares about power or throughput, and the right shape for a
+   first driver: an interrupt-driven request needs somewhere to hand the buffer
+   back to, which is the block layer that does not exist yet.
+2. **No device teardown.** Nothing resets a device or frees its queue, because
+   nothing shuts down. A device left mastering the bus into memory the
+   allocator had taken back would be serious, so this wants doing before there
+   is any path that frees a driver's memory.
+3. **No shared memory, events or semaphores.** A channel copies its message
    twice, once out of the sender and once into the receiver, which is right for
    a request and wrong for a framebuffer. Shared memory with a handle to it is
    the next object kind, and the compositor will need it before anything else
    does.
-2. **A process has no parent, no exit status, and no way to be created from
+4. **A process has no parent, no exit status, and no way to be created from
    inside the system.** Every process NexusOS runs is one the kernel builds at
    boot. Creating one is a request to whoever is allowed to answer it, so it
    wants handle transfer underneath it.
-3. **No user memory copy helpers.** `Call::Log` validates its range and then
+5. **No user memory copy helpers.** `Call::Log` validates its range and then
    reads it directly. A user pointer that is unmapped faults in the kernel, on
    the kernel's stack, and is reported as a kernel fault; it should be turned
    into an error returned to the caller. That needs a fault handler that knows
    about a fixup table, which is its own piece of work.
-4. **The run queues are shared, not per-processor.** One lock covers the thread
+6. **The run queues are shared, not per-processor.** One lock covers the thread
    table and all four queues. That is correct and it is what makes every
    processor able to take work, but it is a point of contention that will matter
    once there are more processors or more threads than a desktop has today.
    Per-processor queues with balancing between them is the next step, and it
    wants contention to measure rather than to be guessed at.
-5. **No thread affinity.** A thread can be resumed on any processor, which is
+7. **No thread affinity.** A thread can be resumed on any processor, which is
    right for fairness and wrong for cache locality. There is nothing to measure
    it with yet.
-6. **Shootdowns are broadcast to every processor.** A processor that never
+8. **Shootdowns are broadcast to every processor.** A processor that never
    loaded the address space is interrupted anyway, because nothing tracks which
    spaces are live where. Correct, and more work than necessary now that there
    is more than one address space to be wrong about.
-7. **The framebuffer is mapped write-back, not write-combining.** Correct in
+9. **The framebuffer is mapped write-back, not write-combining.** Correct in
    QEMU, slow on real hardware. Needs PAT configuration.
-8. **Bootloader allocations are over-conservative.** Page tables, the handoff
-   block and the kernel image are allocated as `RuntimeServicesData`, which the
-   kernel treats as permanently reserved. This wastes on the order of 100 KiB.
-9. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
-   directory. Excellent for iteration, but it means NexusOS has never booted
-   from a genuine partition table. A real GPT + FAT32 image builder is needed
-   before any hardware test.
-10. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
+10. **Bootloader allocations are over-conservative.** Page tables, the handoff
+    block and the kernel image are allocated as `RuntimeServicesData`, which the
+    kernel treats as permanently reserved. This wastes on the order of 100 KiB.
+11. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
+    directory. Excellent for iteration, but it means NexusOS has never booted
+    from a genuine partition table. A real GPT + FAT32 image builder is needed
+    before any hardware test.
+12. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
     automatically.
-11. **The heap never shrinks.** It grows on demand and keeps what it takes.
+13. **The heap never shrinks.** It grows on demand and keeps what it takes.
     Acceptable for a kernel of this size; worth revisiting when there are
     long-running workloads.
-12. **The kernel binary has no host test harness.** It is `no_main` with its own
+14. **The kernel binary has no host test harness.** It is `no_main` with its own
     panic handler, so tests written inside it would compile and never run. What
     can be checked statically is checked with const assertions; the rest is
     covered by boot-marker checks, fault injection and screenshots. Logic worth
     unit testing is moved into a library crate instead, which is why the
     allocators live in `nexus-mm`.
-13. **No ageing in the scheduler.** Strict priority means a busy high-priority
+15. **No ageing in the scheduler.** Strict priority means a busy high-priority
     thread starves everything below it. Deliberate for now, and it needs real
     workloads before it can be tuned honestly.
-14. **CJK glyphs depend on the build machine.** They are rasterised at build
+16. **CJK glyphs depend on the build machine.** They are rasterised at build
     time from an installed font, because bundling one would redistribute it.
     A machine without a suitable font still builds, but non-Latin text renders
     as placeholder boxes. See [i18n.md](i18n.md).
-15. **Input goes nowhere but the kernel.** Keys are decoded and acted on
+17. **Input goes nowhere but the kernel.** Keys are decoded and acted on
     inside the kernel because there is no focus, no window and no process to
     deliver them to. There is no IME either, so Japanese can be displayed but
     not typed.
-16. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
+18. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
     no bidirectional text, no ligatures or combining marks.
 
 Resolved since the first audit: the missing IDT (Phase 2), the
@@ -263,10 +276,12 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **Process creation from user space**, which is now a request a process can
+1. **A partition table and a filesystem**, so that the disk holds files rather
+   than sectors, and so that NexusOS can boot from an image with a real GPT
+   rather than from a directory QEMU pretends is one.
+2. **Process creation from user space**, which is now a request a process can
    make over a channel to whoever is allowed to answer it, rather than a system
    call that trusts the asker.
-2. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
-3. **CI**, so the five test layers run on every change rather than on request.
+3. **CI**, so the six test layers run on every change rather than on request.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

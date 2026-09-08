@@ -73,6 +73,16 @@ $bootSize = $staged.BootSize
 $kernelSize = $staged.KernelSize
 $unstrippedSize = $staged.UnstrippedSize
 
+# The disk the kernel drives. Made once and left alone: the tests write to it,
+# and rebuilding it on every build would erase what a previous run proved.
+$DiskImage = Join-Path $BuildDir 'nexus-disk.img'
+if (-not (Test-Path $DiskImage)) {
+    Write-Host '==> Making the disk image' -ForegroundColor Cyan
+    & powershell -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $PSScriptRoot 'make-disk.ps1') -Output $DiskImage
+    if ($LASTEXITCODE -ne 0) { throw 'could not make the disk image' }
+}
+
 Write-Host ''
 Write-Host 'NexusOS build complete' -ForegroundColor Green
 Write-Host "  bootloader : $bootSize KiB  -> EFI\BOOT\BOOTX64.EFI"

@@ -24,6 +24,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'qemu.ps1')
+
 . (Join-Path $PSScriptRoot 'stage.ps1')
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -155,21 +157,10 @@ foreach ($case in $Cases) {
     $Log = Join-Path $BuildDir "fault-$($case.Feature).log"
     if (Test-Path $Log) { Remove-Item $Log -Force }
 
-    $QemuArgs = @(
-        '-machine', 'q35',
-        '-cpu', 'qemu64',
-        '-smp', "$(if ($case.ContainsKey('Processors')) { $case.Processors } else { 1 })",
-        '-m', '1G',
-        '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$FirmwareCode",
-        '-drive', "if=pflash,format=raw,unit=1,file=$Vars",
-        '-drive', "format=raw,file=fat:rw:$EspDir",
-        '-serial', "file:$Log",
-        '-display', 'none',
-        # Without this a triple fault would reboot and look like a hang rather
-        # than the specific failure it is.
-        '-no-reboot',
-        '-no-shutdown'
-    )
+        $processors = if ($case.ContainsKey('Processors')) { $case.Processors } else { 1 }
+    $QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
+        -FirmwareCode $FirmwareCode -FirmwareVars $Vars -SerialLog $Log `
+        -Processors $processors -Headless -StopOnFault
 
     $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
     if (-not $process.WaitForExit($Timeout * 1000)) {
