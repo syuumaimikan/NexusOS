@@ -546,7 +546,62 @@ still cannot write and skips long names. The block driver polls one request at a
 time and takes no interrupt. A program gets no arguments, and nothing can end a
 process but its own thread.
 
-## Phase 8 — Drivers and user space ⬜
+## Phase 8 — Drivers and user space 🚧
+
+- PCI/PCIe enumeration, MSI/MSI-X, IOMMU
+- User-space driver model over IPC
+
+Delivered: a compositor, which is where the display now lives.
+
+Everything drawn before it was drawn by whoever could reach the framebuffer.
+The kernel drew the banner and the status panel because it *has* the
+framebuffer; `paint` drew a rectangle because it was handed the framebuffer.
+Both are the same arrangement — draw by having the display — and it does not
+survive a second program wanting to draw.
+
+So `paint` is gone and a compositor has taken its place. One process holds the
+display. Everyone else holds a *surface*: memory of its own, of a size it was
+told, that it draws into and never sees the destination of. A client cannot
+scribble over another client's window because it cannot reach one; cannot read
+what another is showing for the same reason; and cannot be broken by the
+compositor moving things around, because it was never told where it was. Two
+clients run, each drawing a gradient of its own into its own surface, and the
+compositor lays them out side by side in the rectangle the kernel keeps for it.
+
+It waits on every client channel and every client process at once, in one wait
+set, and does one of two things with what it hears: a client says it has drawn,
+so its surface is copied to the display and it is told it may draw again; or a
+client has ended, so its tile is cleared and it is forgotten. Both arrive
+through the same wait, which is why the wait set had to exist first. A
+compositor blocked reading one client stops compositing for everyone the moment
+that client stops talking, and one that cannot hear a client *end* holds a dead
+client's tile on screen forever, which is a lie about what is running.
+
+Three primitives were missing and are now there. **Handle duplication**: handles
+move when they cross a channel, so a compositor that sent a client its surface
+would have *given it away* — the object would die with the client and take the
+frames out from under the compositor's own mapping. Rights can only be dropped
+in a duplicate, never gained, or a capability system is undone in one call. The
+surface a client gets carries read, write and transfer but not close, so it can
+draw and it cannot pull the buffer out from under the thing compositing it.
+**Sleep**: a client that redrew flat out would spend a processor animating a
+rectangle, and there was no way for a program to pace itself. And the reply per
+frame, which is not a primitive but is the same kind of thing: the compositor
+answers each "damaged" so the client knows the buffer is free, because without
+it the two race for the surface and tearing is what that looks like.
+
+The kernel still owns the rest of the screen. That is the honest halfway house:
+the banner and the status panel are the kernel's, the rectangle is the
+compositor's, and the boundary is a number both agree on. Moving the whole
+screen behind the compositor means moving the panel into a program, which is
+worth doing and is not what this establishes — which is that the path from a
+client's pixel to the display runs through a process rather than through the
+kernel.
+
+Outstanding here: no windows, no stacking, no input routing, no resizing. Tiles
+are laid out once and never move. Nothing routes a keystroke to a client.
+
+
 
 - PCI/PCIe enumeration, MSI/MSI-X, IOMMU
 - User-space driver model over IPC

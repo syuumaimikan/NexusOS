@@ -8,7 +8,8 @@ members = [
     "user/nexus-user",
     "user/nexus-init",
     "user/nexus-hello",
-    "user/nexus-paint",
+    "user/nexus-compositor",
+    "user/nexus-client",
 ]
 
 [workspace.package]

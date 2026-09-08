@@ -83,6 +83,15 @@ impl Rights {
 
     /// The raw bits, for reporting across the system-call boundary.
     #[must_use]
+    /// The rights those bits name.
+    ///
+    /// Bits this system does not define are dropped rather than rejected: a
+    /// caller asking for a right that does not exist gets a handle without it,
+    /// which is the safe reading of an unknown request.
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits & Self::ALL.0)
+    }
+
     pub const fn bits(self) -> u32 {
         self.0
     }
@@ -644,6 +653,28 @@ impl HandleTable {
             }
             _ => Err(HandleError::WrongKind),
         }
+    }
+
+    /// Another handle to the same object, carrying no more than this one.
+    ///
+    /// What a program needs to hand something on and keep it. Without it, a
+    /// process that gives a client a buffer has given it away: the object dies
+    /// with the client's handle, and the frames it was mapping go back to the
+    /// allocator underneath whoever else still had them mapped.
+    ///
+    /// Rights can only be dropped, never gained. A duplicate that could add one
+    /// would make every handle equal to the most powerful handle in the system,
+    /// which is the whole of what a capability is, undone in one call.
+    pub fn duplicate(&self, id: u32, rights: Rights) -> Result<u32, HandleError> {
+        let object = {
+            let entries = self.entries.lock();
+            let handle = entries.get(&id).ok_or(HandleError::NotFound)?;
+            if !handle.rights.contains(rights) {
+                return Err(HandleError::Denied);
+            }
+            handle.object.clone()
+        };
+        Ok(self.insert(object, rights))
     }
 
     /// What `id` may be used for.

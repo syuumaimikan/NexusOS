@@ -268,11 +268,16 @@ pub enum Call {
     /// Block until something is ready. `(set, pointer, capacity)`, returning
     /// how many keys were written.
     WaitSetWait = 24,
+    /// Another handle to the same object, with no more rights than this one.
+    /// `(handle, rights)`.
+    HandleDuplicate = 25,
+    /// Stop running for a while. `(milliseconds)`.
+    Sleep = 26,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 25;
+    pub const COUNT: usize = 27;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -302,6 +307,8 @@ impl Call {
             22 => Some(Self::WaitSetAdd),
             23 => Some(Self::WaitSetRemove),
             24 => Some(Self::WaitSetWait),
+            25 => Some(Self::HandleDuplicate),
+            26 => Some(Self::Sleep),
             _ => None,
         }
     }
@@ -424,6 +431,8 @@ extern "sysv64" fn dispatch(
         Some(Call::WaitSetAdd) => wait_set_add(argument0, argument1, argument2),
         Some(Call::WaitSetRemove) => wait_set_remove(argument0, argument1),
         Some(Call::WaitSetWait) => wait_set_wait(argument0, argument1, argument2),
+        Some(Call::HandleDuplicate) => handle_duplicate(argument0, argument1),
+        Some(Call::Sleep) => sleep(argument0),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -1312,4 +1321,61 @@ fn wait_set_wait(set: u64, pointer: u64, capacity: u64) -> u64 {
         return EINVAL;
     }
     ready.len() as u64
+}
+
+/// [`Call::HandleDuplicate`]: another handle to the same object.
+///
+/// What a program needs to hand something on and keep it. A process that gives
+/// a client a buffer without this has *given it away*: handles move when they
+/// cross a channel, so the object would die with the client and take the frames
+/// with it, out from under anyone else still mapping them.
+///
+/// Rights can only be dropped. A duplicate that could add one would make every
+/// handle equal to the most powerful handle in the system, which is a
+/// capability system undone in a single call -- so the requested set has to be
+/// a subset of what the original carries, and asking for more is refused rather
+/// than quietly trimmed.
+fn handle_duplicate(handle: u64, rights: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+    let Ok(rights) = u32::try_from(rights) else {
+        return EINVAL;
+    };
+
+    match process
+        .handles
+        .duplicate(handle, crate::ipc::Rights::from_bits(rights))
+    {
+        Ok(new) => u64::from(new),
+        Err(error) => handle_error(error),
+    }
+}
+
+/// Longest a single call will sleep for.
+///
+/// A bound rather than a trust. The argument comes from ring 3, and a thread
+/// asked to sleep for four hundred million years is a thread that never comes
+/// back -- which is a program's own business, except that it looks exactly like
+/// a hang to whoever is reading the boot log.
+const MAX_SLEEP_MS: u64 = 60 * 1000;
+
+/// [`Call::Sleep`]: stop running for a while.
+///
+/// The thread leaves the run queues entirely and is put back when the tick
+/// counter passes its deadline, so a sleeping program costs nothing. That is
+/// the difference between this and a loop that yields, which costs a context
+/// switch every time round for as long as it lasts.
+fn sleep(milliseconds: u64) -> u64 {
+    if milliseconds > MAX_SLEEP_MS {
+        return EINVAL;
+    }
+    if milliseconds > 0 {
+        crate::sched::sleep_ms(milliseconds);
+    }
+    0
 }

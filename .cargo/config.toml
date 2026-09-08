@@ -34,7 +34,8 @@ bootloader = ["build", "-p", "nexus-boot", "--target", "x86_64-unknown-uefi"]
 # command by that name and an alias that shadows one is ignored with a warning.
 # The same custom-target machinery as the kernel, with the small
 # code model, because they live in the low half of the address space.
-user = ["build", "-p", "nexus-init", "-p", "nexus-hello", "-p", "nexus-paint", "--target", "targets/x86_64-nexus-user.json",
+user = ["build", "-p", "nexus-init", "-p", "nexus-hello",
+        "-p", "nexus-compositor", "-p", "nexus-client", "--target", "targets/x86_64-nexus-user.json",
         "-Zbuild-std=core,compiler_builtins",
         "-Zbuild-std-features=compiler-builtins-mem"]
 

@@ -14,6 +14,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-client"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-compositor"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-hello"
 version = "0.1.0"
 dependencies = [
@@ -40,13 +54,6 @@ name = "nexus-mm"
 version = "0.1.0"
 dependencies = [
  "nexus-abi",
-]
-
-[[package]]
-name = "nexus-paint"
-version = "0.1.0"
-dependencies = [
- "nexus-user",
 ]
 
 [[package]]

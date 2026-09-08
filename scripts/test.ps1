@@ -182,8 +182,8 @@ Invoke-Step 'boot test' {
         'hello: read the shared page and wrote back into it',
         'init: the other process wrote into memory we both map',
         'rectangle at (',
-        'paint: filled its rectangle from user space',
-        'the painter reported that it had drawn',
+        'client: drew every frame into a surface it was given',
+        'compositor: composited every frame its clients drew',
         'shared pages made',
         'early initialisation complete',
         'boot thread retiring',
@@ -284,14 +284,19 @@ Invoke-Step 'boot test' {
     }
     # Messages sent must all have been received. A send that quietly went
     # nowhere would still print the line above it.
-    if (-not ($output -match '(\d+) channels, (\d+) messages sent, (\d+) received')) {
+    #
+    # The last report, not the first: a message in flight when the monitor ran
+    # is a message in flight and not a message lost.
+    $traffic = [regex]::Matches($output, '(\d+) channels, (\d+) messages sent, (\d+) received')
+    if ($traffic.Count -lt 1) {
         throw 'the kernel never reported the channel traffic'
     }
-    if ([int]$Matches[2] -lt 1) {
+    $last = $traffic[$traffic.Count - 1]
+    if ([int]$last.Groups[2].Value -lt 1) {
         throw 'no message was ever sent across a channel'
     }
-    if ([int]$Matches[2] -ne [int]$Matches[3]) {
-        throw "$($Matches[2]) messages were sent but $($Matches[3]) received"
+    if ([int]$last.Groups[2].Value -ne [int]$last.Groups[3].Value) {
+        throw "$($last.Groups[2].Value) messages were sent but $($last.Groups[3].Value) received"
     }
     # The conversation has to have gone the way a conversation goes. Both lines
     # being present says two processes logged something; the order says the
@@ -328,14 +333,19 @@ Invoke-Step 'boot test' {
     }
     # Shared memory has to be given back. It is the one kind of frame an address
     # space deliberately does not free, so a leak here would be silent.
-    if (-not ($output -match '(\d+) shared pages made, (\d+) released')) {
+    #
+    # And the last report again, for the same reason: memory still mapped by a
+    # process that has not exited yet is memory in use, not memory leaked.
+    $shared = [regex]::Matches($output, '(\d+) shared pages made, (\d+) released')
+    if ($shared.Count -lt 1) {
         throw 'the kernel never reported what became of the shared memory'
     }
-    if ([int]$Matches[1] -lt 1) {
+    $last = $shared[$shared.Count - 1]
+    if ([int]$last.Groups[1].Value -lt 1) {
         throw 'no shared memory was ever created'
     }
-    if ([int]$Matches[1] -ne [int]$Matches[2]) {
-        throw "$($Matches[1]) shared pages were made but only $($Matches[2]) released"
+    if ([int]$last.Groups[1].Value -ne [int]$last.Groups[2].Value) {
+        throw "$($last.Groups[1].Value) shared pages were made but only $($last.Groups[2].Value) released"
     }
     # The disk has to be the one the build made, and the driver has to have
     # used it. A driver that found the device and never moved a sector would

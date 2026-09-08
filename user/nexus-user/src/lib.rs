@@ -126,6 +126,8 @@ enum Call {
     WaitSetAdd = 22,
     WaitSetRemove = 23,
     WaitSetWait = 24,
+    HandleDuplicate = 25,
+    Sleep = 26,
 }
 
 /// Make a system call.
@@ -199,6 +201,17 @@ pub fn log(text: &str) -> Result<usize, Error> {
 pub fn uptime() -> u64 {
     // SAFETY: takes no arguments.
     unsafe { syscall(Call::Uptime, 0, 0, 0, 0, 0, 0) }
+}
+
+/// Stop running for `milliseconds`.
+///
+/// The thread leaves the run queues and costs nothing until its time is up,
+/// which is what separates this from a loop that yields: that costs a context
+/// switch every time round for as long as it lasts.
+pub fn sleep(milliseconds: u64) -> Result<(), Error> {
+    // SAFETY: takes one integer.
+    let result = unsafe { syscall(Call::Sleep, milliseconds, 0, 0, 0, 0, 0) };
+    check(result).map(|_| ())
 }
 
 /// Give up the rest of this thread's turn.
@@ -340,6 +353,46 @@ pub fn memory_size(handle: Handle) -> Result<usize, Error> {
     // SAFETY: takes one integer.
     let result = unsafe { syscall(Call::MemorySize, u64::from(handle.0), 0, 0, 0, 0, 0) };
     check(result).map(|size| size as usize)
+}
+
+/// Rights a handle can carry.
+pub mod rights {
+    /// Read from it, receive on it, wait on it.
+    pub const READ: u32 = 1 << 0;
+    /// Write to it, send on it, change it.
+    pub const WRITE: u32 = 1 << 1;
+    /// Close it.
+    pub const CLOSE: u32 = 1 << 2;
+    /// Send it to another process.
+    pub const TRANSFER: u32 = 1 << 3;
+    /// Everything.
+    pub const ALL: u32 = READ | WRITE | CLOSE | TRANSFER;
+}
+
+/// Another handle to the same object, carrying no more than this one.
+///
+/// What a program needs to hand something on and *keep* it. Handles move when
+/// they cross a channel, so a process that sends a client a buffer without
+/// duplicating it first has given it away -- and the object dies with the
+/// client, taking the frames out from under anyone else still mapping them.
+///
+/// Rights can only be dropped. Asking for one the original does not carry is
+/// refused rather than quietly trimmed, because a program that believes it
+/// handed out a read-only handle should find out that it did not.
+pub fn duplicate(handle: Handle, rights: u32) -> Result<Handle, Error> {
+    // SAFETY: takes two integers.
+    let result = unsafe {
+        syscall(
+            Call::HandleDuplicate,
+            u64::from(handle.0),
+            u64::from(rights),
+            0,
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|handle| Handle(handle as u32))
 }
 
 /// What a handle may be used for.
