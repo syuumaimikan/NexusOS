@@ -68,7 +68,8 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | PCI enumeration | **DONE** | Every function of every device, through the legacy port window |
 | Block device | **PARTIAL** | virtio-blk over the legacy transport, one request at a time, polled |
 | Disk image | **DONE** | GPT, protective MBR and a FAT32 the firmware boots from |
-| Filesystems | **MISSING** | The kernel sees sectors; nothing in it reads a partition table or a filesystem |
+| Partition table | **DONE** | GPT read and both checksums verified |
+| Filesystems | **PARTIAL** | FAT32 read only: paths, cluster chains, no long names, no writing |
 | MSI, MSI-X | **MISSING** | Devices are found; nothing routes their interrupts yet |
 | Ring 3 | **DONE** | A user thread runs at CPL 3, preemptible, in its own pages |
 | System calls | **PARTIAL** | `syscall`/`sysret` entry, five calls; no handles or IPC |
@@ -197,9 +198,12 @@ These are real and are tracked, not hidden:
 10. **Bootloader allocations are over-conservative.** Page tables, the handoff
     block and the kernel image are allocated as `RuntimeServicesData`, which the
     kernel treats as permanently reserved. This wastes on the order of 100 KiB.
-11. **The kernel reads no filesystem.** The image has a GPT and a FAT32 that
-    the firmware boots from, and the kernel sees only numbered sectors. A
-    partition-table reader and a FAT32 reader are what turn that into files.
+11. **The filesystem reader cannot write, and skips long names.** FAT32 is
+    read only: a writer has to keep two allocation tables and the free-cluster
+    count consistent through a power failure, and nothing yet needs to write to
+    the boot partition. Long names are skipped rather than half-assembled,
+    because a partial implementation would look like it worked. NexusFS is not
+    started.
 12. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
     automatically.
 13. **The heap never shrinks.** It grows on demand and keeps what it takes.
@@ -233,7 +237,7 @@ whichever ran last decided what the next boot would load, and the
 single-processor scheduler: every processor now runs threads, and the boot test
 fails if the workers all land on one of them; booting only from a directory QEMU
 pretended was a filesystem, which is now a genuine GPT and FAT32 that a test
-boots with nothing else attached; the absence of any user mode at
+boots with nothing else attached, and which the kernel now reads for itself; the absence of any user mode at
 all — a program now runs at ring 3, and the boot test fails unless an interrupt
 was taken from it; the single address space, which is now one per process, with
 the boot test comparing the two processes' page tables and the injection suite
@@ -278,12 +282,9 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **A partition table and a filesystem**, so that the disk holds files rather
-   than sectors, and so that NexusOS can boot from an image with a real GPT
-   rather than from a directory QEMU pretends is one.
-2. **Process creation from user space**, which is now a request a process can
+1. **Process creation from user space**, which is now a request a process can
    make over a channel to whoever is allowed to answer it, rather than a system
    call that trusts the asker.
-3. **CI**, so the six test layers run on every change rather than on request.
+2. **CI**, so the six test layers run on every change rather than on request.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

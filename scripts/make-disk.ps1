@@ -319,6 +319,26 @@ $greeting = "NexusOS reads its own filesystem.`r`n"
 Add-File -Directory $rootCluster -Name 'HELLO.TXT' `
     -Content ([System.Text.Encoding]::ASCII.GetBytes($greeting))
 
+# And one inside a directory, so that walking a path is something the reader is
+# tested on rather than something it merely contains code for. A file in the
+# root exercises none of it.
+# Named so it cannot collide with anything in a tree copied in below. It once
+# was `NEXUS`, which is also what the ESP calls the directory holding the
+# kernel, and the firmware found this one first and reported no kernel at all.
+$deepDirectory = New-Directory -Parent $rootCluster -Name 'TESTS'
+$deep = "This file is one directory down.`r`n"
+Add-File -Directory $deepDirectory -Name 'DEEP.TXT' `
+    -Content ([System.Text.Encoding]::ASCII.GetBytes($deep))
+
+# A file longer than one cluster, so that following a chain is tested too. Its
+# contents are position-dependent, so a reader that stitched the clusters
+# together in the wrong order fails rather than returning the right length.
+$long = New-Object byte[] 5000
+for ($i = 0; $i -lt $long.Length; $i++) {
+    $long[$i] = [byte](($i * 31 + 7) -band 0xFF)
+}
+Add-File -Directory $rootCluster -Name 'CHAIN.BIN' -Content $long
+
 # And the tree the firmware boots from, if one was given.
 if ($SourceDir -and (Test-Path $SourceDir)) {
     function Copy-Tree {

@@ -144,6 +144,9 @@ Invoke-Step 'boot test' {
         'devices',
         'virtio disk at',
         'disk verified',
+        'EFI system partition',
+        'mounted at sector',
+        'filesystem verified',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -272,6 +275,15 @@ Invoke-Step 'boot test' {
     }
     if ([int]$Matches[2] -lt 1 -or [int]$Matches[3] -lt 1) {
         throw 'the disk was found but never read or written'
+    }
+    # The filesystem reader has to have walked a path and followed a chain, not
+    # merely opened something in the root. The count of root entries is what
+    # says the directory walk saw the whole directory.
+    if (-not ($output -match 'filesystem verified: (\d+) partitions, (\d+) entries in the root')) {
+        throw 'the kernel never reported reading its filesystem'
+    }
+    if ([int]$Matches[1] -lt 1 -or [int]$Matches[2] -lt 3) {
+        throw "the filesystem reader saw $($Matches[1]) partitions and $($Matches[2]) root entries"
     }
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }

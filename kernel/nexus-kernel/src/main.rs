@@ -23,6 +23,7 @@ mod arch;
 mod display;
 mod drivers;
 mod framebuffer;
+mod fs;
 mod i18n;
 mod input;
 mod ipc;
@@ -555,6 +556,175 @@ fn self_test() {
     tlb_self_test();
     ipc_self_test();
     disk_self_test();
+    filesystem_self_test();
+}
+
+/// The file the filesystem test reads, and what it must contain.
+///
+/// Fixed on both sides: the image builder writes exactly this, so a reader that
+/// found *a* file rather than *the* file is caught by what it says rather than
+/// by whether it managed to read something.
+const FS_TEST_FILE: &str = "HELLO.TXT";
+/// The file one directory down, which is what makes path walking a thing the
+/// reader is tested on rather than a thing it merely contains code for.
+const FS_DEEP_FILE: &str = "TESTS/DEEP.TXT";
+const FS_DEEP_CONTENTS: &str = "This file is one directory down.\r\n";
+/// A file longer than one cluster, so that following a chain is tested.
+const FS_CHAIN_FILE: &str = "CHAIN.BIN";
+const FS_CHAIN_SIZE: usize = 5000;
+const FS_TEST_CONTENTS: &str = "NexusOS reads its own filesystem.\r\n";
+
+/// Read the partition table and the filesystem inside it.
+///
+/// The two readers are tested together because neither is worth much alone: a
+/// partition table that parses says nothing until something is read through it,
+/// and a filesystem reader has to be pointed at a partition by something.
+fn filesystem_self_test() {
+    use fs::{fat32, gpt};
+
+    if !drivers::virtio_blk::is_present() {
+        return;
+    }
+
+    let partitions = match gpt::read() {
+        Ok(partitions) => partitions,
+        Err(error) => {
+            kprintln!("[test] FAILED: could not read the partition table: {error}");
+            return;
+        }
+    };
+
+    for partition in &partitions {
+        kprintln!(
+            "[gpt ] partition {} \"{}\": sectors {}..{} ({} MiB){}",
+            partition.index,
+            partition.name.as_str(),
+            partition.first_lba,
+            partition.last_lba,
+            partition.sectors() * drivers::virtio_blk::SECTOR_SIZE as u64 / (1024 * 1024),
+            if partition.is_esp() {
+                ", EFI system partition"
+            } else {
+                ""
+            }
+        );
+    }
+
+    let Some(esp) = partitions.iter().find(|partition| partition.is_esp()) else {
+        kprintln!("[test] FAILED: the disk has no EFI system partition");
+        return;
+    };
+
+    let volume = match fat32::Volume::mount(esp.first_lba) {
+        Ok(volume) => volume,
+        Err(error) => {
+            kprintln!("[test] FAILED: could not mount the EFI system partition: {error}");
+            return;
+        }
+    };
+
+    kprintln!(
+        "[fat ] \"{}\" mounted at sector {}: {} clusters of {} bytes",
+        volume.label.as_str(),
+        volume.start_lba(),
+        volume.cluster_count(),
+        volume.cluster_bytes()
+    );
+
+    let root = match volume.root() {
+        Ok(root) => root,
+        Err(error) => {
+            kprintln!("[test] FAILED: could not read the root directory: {error}");
+            return;
+        }
+    };
+    for entry in &root {
+        kprintln!(
+            "[fat ]   {}{} {} bytes",
+            entry.name.as_str(),
+            if entry.is_directory { "/" } else { "" },
+            entry.size
+        );
+    }
+
+    let contents = match volume.read_file(FS_TEST_FILE) {
+        Ok(contents) => contents,
+        Err(error) => {
+            kprintln!("[test] FAILED: could not read {FS_TEST_FILE}: {error}");
+            return;
+        }
+    };
+
+    // The length first, because a reader that returned the whole last cluster
+    // instead of the file would otherwise pass a prefix comparison.
+    if contents.len() != FS_TEST_CONTENTS.len() {
+        kprintln!(
+            "[test] FAILED: {FS_TEST_FILE} is {} bytes, expected {}",
+            contents.len(),
+            FS_TEST_CONTENTS.len()
+        );
+        return;
+    }
+    if contents != FS_TEST_CONTENTS.as_bytes() {
+        kprintln!("[test] FAILED: {FS_TEST_FILE} does not contain what it should");
+        return;
+    }
+
+    // A file one directory down, so that walking a path is tested rather than
+    // merely present. A reader that ignored everything but the last component
+    // would pass every check above this one.
+    match volume.read_file(FS_DEEP_FILE) {
+        Ok(deep) => {
+            if deep != FS_DEEP_CONTENTS.as_bytes() {
+                kprintln!("[test] FAILED: {FS_DEEP_FILE} does not contain what it should");
+                return;
+            }
+        }
+        Err(error) => {
+            kprintln!("[test] FAILED: could not read {FS_DEEP_FILE}: {error}");
+            return;
+        }
+    }
+
+    // And a file longer than a cluster, so that following a chain is tested.
+    // Its contents depend on the offset, so clusters stitched together in the
+    // wrong order fail rather than merely being the right length.
+    match volume.read_file(FS_CHAIN_FILE) {
+        Ok(chain) => {
+            if chain.len() != FS_CHAIN_SIZE {
+                kprintln!(
+                    "[test] FAILED: {FS_CHAIN_FILE} is {} bytes, expected {FS_CHAIN_SIZE}",
+                    chain.len()
+                );
+                return;
+            }
+            for (index, byte) in chain.iter().enumerate() {
+                let expected = (index as u8).wrapping_mul(31).wrapping_add(7);
+                if *byte != expected {
+                    kprintln!("[test] FAILED: {FS_CHAIN_FILE} differs at byte {index}");
+                    return;
+                }
+            }
+        }
+        Err(error) => {
+            kprintln!("[test] FAILED: could not read {FS_CHAIN_FILE}: {error}");
+            return;
+        }
+    }
+
+    // And a name that is not there has to come back as an error rather than as
+    // whatever happened to be next in the directory.
+    if volume.read_file("NOSUCH.TXT") != Err(fat32::FatError::NotFound) {
+        kprintln!("[test] FAILED: reading a file that does not exist was not refused");
+        return;
+    }
+
+    kprintln!(
+        "[test] filesystem verified: {} partitions, {} entries in the root, {FS_TEST_FILE} read \
+         and matched",
+        partitions.len(),
+        root.len()
+    );
 }
 
 /// The sector the write test uses.
