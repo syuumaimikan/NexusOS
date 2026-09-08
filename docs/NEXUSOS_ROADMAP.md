@@ -244,6 +244,21 @@ given something it may use and may not delegate.
 Outstanding: shared memory, events and semaphores. A channel copies its message
 twice, which is right for a request and wrong for a framebuffer.
 
+## Continuous integration ✅
+
+Not a phase, and it should have come earlier. Two jobs: one that needs only a
+toolchain -- formatting, lints, the host unit tests, and that all four targets
+build -- and one that needs QEMU and boots the thing.
+
+The second is the one that matters. Every claim in this project is verified by
+running rather than by compiling, and those runs are the ones that cannot be
+reproduced from a build log. A hosted runner has no emulation acceleration, so
+boots take seconds instead of milliseconds; the timeouts allow for it, and the
+one measurement that would otherwise be sensitive to a slow machine -- the APIC
+calibration -- measures against the PIT rather than assuming a frequency, so a
+slower host gives a smaller number and not a wrong one. A failing run keeps the
+serial logs, because a red cross is not a diagnosis.
+
 ## Phase 7 — Storage and NexusFS 🚧
 
 - virtio-blk, then NVMe and AHCI

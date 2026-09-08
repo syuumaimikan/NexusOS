@@ -210,8 +210,10 @@ These are real and are tracked, not hidden:
     the boot partition. Long names are skipped rather than half-assembled,
     because a partial implementation would look like it worked. NexusFS is not
     started.
-13. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
-    automatically.
+13. **CI has never run.** The workflow is written and its commands are checked
+    locally, but nothing has pushed to the remote, so no run exists to point
+    at. It also has no acceleration available on a hosted runner, which makes
+    the QEMU layers minutes rather than seconds.
 14. **The heap never shrinks.** It grows on demand and keeps what it takes.
     Acceptable for a kernel of this size; worth revisiting when there are
     long-running workloads.
@@ -294,6 +296,8 @@ In order, and for the reason given:
 
 1. **An exit status, and something to wait on it**, so that a process that
    started another can find out how it ended rather than only that it began.
-2. **CI**, so the six test layers run on every change rather than on request.
+2. **Shared memory**, which is the next kind of handle and the one the
+   compositor will need: a channel copies its message twice, which is right for
+   a request and wrong for a framebuffer.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

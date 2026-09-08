@@ -1,0 +1,126 @@
+# NexusOS continuous integration.
+#
+# Two jobs, split by what they need rather than by how long they take.
+#
+# `checks` needs only a toolchain: formatting, lints, the host-side unit tests,
+# and that all four targets build. It is the one that catches most mistakes, and
+# it finishes in a couple of minutes.
+#
+# `system` needs QEMU, and runs the tests that boot the thing. Those are the
+# ones that matter -- every claim in this project is verified by running rather
+# than by compiling -- and they are also the ones that cannot be reproduced from
+# a build log, so they are worth the wait.
+#
+# There is no emulation acceleration on a hosted runner, so QEMU runs the guest
+# with its own translator. Boots take seconds rather than milliseconds; the
+# timeouts in the test scripts are generous enough for that, and the one place
+# that would not be -- the APIC calibration, which measures against the PIT --
+# measures rather than assumes, so a slower machine gives a smaller number and
+# not a wrong one.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failure that only shows a backtrace-less panic is a failure someone has to
+  # reproduce before they can read it.
+  RUST_BACKTRACE: 1
+
+jobs:
+  checks:
+    name: Formatting, lints, unit tests, and every target
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel and the components; installing the
+      # toolchain is letting rustup read it rather than repeating it here.
+      - name: Install the toolchain
+        run: rustup show
+
+      - name: Cache cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Formatting
+        run: cargo +nightly fmt --all -- --check
+
+      - name: Lints
+        run: >
+          cargo +nightly clippy
+          -p nexus-abi -p nexus-boot -p nexus-mm -p nexus-user
+          --lib -- -D warnings
+
+      - name: Host unit tests
+        run: >
+          cargo +nightly test
+          -p nexus-abi -p nexus-boot -p nexus-mm -p nexus-user --lib
+
+      # The three cross builds, each with its own target and its own flags. A
+      # change that compiles for one and not another is exactly what this is for.
+      - name: Build the bootloader, the kernel and the user programs
+        run: |
+          cargo +nightly bootloader
+          cargo +nightly kernel
+          cargo +nightly user
+
+  system:
+    name: Boot it
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: rustup show
+
+      - name: Cache cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install QEMU
+        run: |
+          choco install qemu --no-progress -y
+          # The installer does not put it on PATH for the rest of the job.
+          "C:\Program Files\qemu" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Check QEMU is there
+        run: qemu-system-x86_64 --version
+
+      - name: Build
+        run: .\scripts\build.ps1
+
+      # Every layer: the boot markers, the boot from a disk image the build
+      # writes itself, real keystrokes through QEMU's monitor, and the injection
+      # builds that break the kernel one way each to show the checks can fail.
+      - name: The whole test suite
+        run: .\scripts\test.ps1
+
+      # A failing run is worth more than a red cross. The serial logs are what
+      # anyone would ask for first.
+      - name: Keep the serial logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-logs
+          path: |
+            build/*.log
+          if-no-files-found: warn
+          retention-days: 7
