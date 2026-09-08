@@ -30,8 +30,10 @@
 //! twelfth boot if the eleventh really wrote it down and the disk really kept
 //! it.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::gpt;
@@ -73,6 +75,8 @@ pub enum StoreError {
     NoPartition,
     /// The filesystem itself said no.
     Fs(FsError),
+    /// Something still holds a handle to the thing being removed.
+    Busy,
 }
 
 impl core::fmt::Display for StoreError {
@@ -82,6 +86,7 @@ impl core::fmt::Display for StoreError {
             Self::PartitionTable(error) => write!(f, "the partition table: {error}"),
             Self::NoPartition => f.write_str("the disk has no NexusFS partition"),
             Self::Fs(error) => write!(f, "{error}"),
+            Self::Busy => f.write_str("something still has that open"),
         }
     }
 }
@@ -356,4 +361,163 @@ fn remove_tree(volume: &mut Volume, parent: u32, name: &str) -> Result<(), FsErr
         }
     }
     volume.unlink(parent, name)
+}
+
+// -- Open files and directories -----------------------------------------------
+
+/// How many handles name each open inode.
+///
+/// A handle carries an inode number, and an inode number is not a reference: if
+/// a name were removed while somebody held a handle to what it named, the inode
+/// would be freed and the handle would go on naming it -- reading whatever the
+/// next file to be created put there. The count is what makes that impossible,
+/// and [`remove_child`] consults it.
+static OPEN: IrqSpinLock<BTreeMap<u32, u32>> = IrqSpinLock::new(BTreeMap::new());
+
+/// An open file or directory.
+///
+/// The unit of authority for the filesystem. There is no call that takes a
+/// path: a process reaches a file by naming a single component inside a
+/// directory it already holds, so what it can reach is exactly the subtree
+/// under the handles it was given. A program that was never handed a directory
+/// cannot open anything, and there is no name it could use instead -- the same
+/// argument as for the spawner channel, applied to files.
+pub struct Node {
+    inode: u32,
+    directory: bool,
+}
+
+impl Node {
+    /// Register an open reference to `inode`.
+    fn open(inode: u32, directory: bool) -> Arc<Self> {
+        *OPEN.lock().entry(inode).or_insert(0) += 1;
+        Arc::new(Self { inode, directory })
+    }
+
+    /// Whether it is a directory rather than a file.
+    #[must_use]
+    pub const fn is_directory(&self) -> bool {
+        self.directory
+    }
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        let mut open = OPEN.lock();
+        if let Some(count) = open.get_mut(&self.inode) {
+            *count -= 1;
+            if *count == 0 {
+                open.remove(&self.inode);
+            }
+        }
+    }
+}
+
+/// Whether anything still holds a handle to `inode`.
+fn is_open(inode: u32) -> bool {
+    OPEN.lock().contains_key(&inode)
+}
+
+/// A handle to the root directory.
+///
+/// The whole filesystem, which is why it is handed out by the kernel to the
+/// programs it starts and never obtained by a program for itself.
+pub fn root() -> Result<Arc<Node>, StoreError> {
+    let volume = VOLUME.lock();
+    volume.as_ref().ok_or(StoreError::NoDisk)?;
+    drop(volume);
+    Ok(Node::open(super::nexusfs::ROOT, true))
+}
+
+/// Open one name inside a directory.
+pub fn open_child(parent: &Node, name: &str) -> Result<Arc<Node>, StoreError> {
+    if !parent.directory {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let entry = {
+        let mut volume = VOLUME.lock();
+        let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+        volume.lookup(parent.inode, name)?
+    };
+    Ok(Node::open(entry.inode, entry.kind == Kind::Directory))
+}
+
+/// Make a file or directory inside a directory, and open it.
+pub fn create_child(parent: &Node, name: &str, directory: bool) -> Result<Arc<Node>, StoreError> {
+    if !parent.directory {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let kind = if directory {
+        Kind::Directory
+    } else {
+        Kind::File
+    };
+    let inode = {
+        let mut volume = VOLUME.lock();
+        let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+        volume.create(parent.inode, name, kind)?
+    };
+    Ok(Node::open(inode, directory))
+}
+
+/// Remove a name, and the thing it named.
+///
+/// Refused while a handle names it. Freeing an inode somebody is holding would
+/// leave that handle pointing at a number the filesystem is free to hand to the
+/// next file, and reading through it would then read that file.
+pub fn remove_child(parent: &Node, name: &str) -> Result<(), StoreError> {
+    if !parent.directory {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let entry = {
+        let mut volume = VOLUME.lock();
+        let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+        volume.lookup(parent.inode, name)?
+    };
+    if is_open(entry.inode) {
+        return Err(StoreError::Busy);
+    }
+
+    let mut volume = VOLUME.lock();
+    let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+    volume.unlink(parent.inode, name)?;
+    Ok(())
+}
+
+/// Everything in an open directory.
+pub fn entries(node: &Node) -> Result<Vec<super::nexusfs::Entry>, StoreError> {
+    if !node.directory {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let mut volume = VOLUME.lock();
+    let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+    Ok(volume.list(node.inode)?)
+}
+
+/// Everything in an open file.
+pub fn read_node(node: &Node) -> Result<Vec<u8>, StoreError> {
+    if node.directory {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let mut volume = VOLUME.lock();
+    let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+    Ok(volume.read(node.inode)?)
+}
+
+/// Replace everything in an open file.
+pub fn write_node(node: &Node, data: &[u8]) -> Result<(), StoreError> {
+    if node.directory {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let mut volume = VOLUME.lock();
+    let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+    volume.write(node.inode, data)?;
+    Ok(())
+}
+
+/// How many bytes an open file or directory holds.
+pub fn size(node: &Node) -> Result<u64, StoreError> {
+    let volume = VOLUME.lock();
+    let volume = volume.as_ref().ok_or(StoreError::NoDisk)?;
+    Ok(volume.stat(node.inode)?.1)
 }

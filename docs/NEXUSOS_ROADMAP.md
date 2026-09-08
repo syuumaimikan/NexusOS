@@ -437,14 +437,40 @@ the one under test. It is now a check rather than a thing to remember: attaching
 the data disk scans it for `BOOTX64.EFI` and refuses to start a machine that
 would have a choice.
 
+And programs reach it -- through handles, and only through handles. There is no
+system call that takes a path. A process opens one name inside a directory it
+already holds, so what it can reach is exactly the subtree under what it was
+given, and a `/` in a name is refused rather than walked because a directory
+handle that could be escaped with `../..` would not be an authority over
+anything. A handle opened through another carries no more rights than its
+parent, which is what makes handing a program a read-only directory mean
+something.
+
+`init` starts holding two things: the channel to the spawn service, and the root
+directory. It lists the root, makes its own directory, reads what the previous
+boot left there, writes a file, reads it back through the same handle, and
+checks the refusals -- a buffer too small, a name with a separator, a name that
+is not there, and removing a file that is still open. The persistence test now
+requires it to *make* that file on the first boot and *find* it on the second,
+which is the claim one level up from the kernel's own: not that the filesystem
+persists, but that a program can put something in it and get it back across the
+system-call boundary.
+
+Two things fall out of doing it this way. A buffer too small is an error and
+never a truncation, because half a file that reports its own length is
+indistinguishable from a whole one. And removing a name is refused while any
+handle still names it: a handle carries an inode number, an inode number is not
+a reference, and freeing the inode would leave the handle pointing at a number
+the filesystem is free to give to the next file.
+
 Outstanding: NexusFS has no journal, so a power failure between two writes can
 leave the bitmap saying a block is taken that no file points at -- space leaked,
 nothing corrupted, which is the right way round for the failure to be. No
 permissions, no timestamps beyond the tick a thing was made at, no partial
-writes, and no user-space access: nothing below the kernel can open a file yet.
-The FAT32 reader still cannot write and skips long names. The block driver polls
-one request at a time and takes no interrupt. A program gets no arguments, and
-nothing says when one ended or how.
+writes and no seek, so a large file is read and written whole. The FAT32 reader
+still cannot write and skips long names. The block driver polls one request at a
+time and takes no interrupt. A program gets no arguments, and nothing says when
+one ended or how.
 
 ## Phase 8 — Drivers and user space ⬜
 

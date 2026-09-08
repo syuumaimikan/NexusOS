@@ -199,7 +199,56 @@ a boot and meaningless across one.
 
 **No partial writes, no append, no seek.** See above.
 
-**No access from user space.** Nothing below the kernel can open a file yet.
+**No user-space `fsck`, no quotas, no mount points.** One volume, found by
+partition type.
+
+## Reaching it from user space
+
+Through handles, and only through handles. There is no system call that takes a
+path: a process opens one name inside a directory it already holds, so what it
+can reach is exactly the subtree under what it was given. A program handed
+nothing can open nothing, and there is no name it could use instead — the same
+argument as for the spawner channel, applied to files.
+
+`init` starts holding two things: handle 1, the channel to the spawn service,
+and handle 2, the root directory. Both are given by the kernel before the
+program runs. A machine whose disk carries no NexusFS still starts `init`, which
+then finds that handle 2 is not a handle; the kernel does not invent an empty
+filesystem so that the call succeeds.
+
+| Call | Arguments | Result |
+|------|-----------|--------|
+| `NodeOpen` | directory, name | a handle |
+| `NodeCreate` | directory, name, is-directory | a handle |
+| `NodeRemove` | directory, name | — |
+| `NodeList` | directory, buffer | bytes written |
+| `NodeRead` | file, buffer | the file's length |
+| `NodeWrite` | file, bytes | bytes written |
+| `NodeSize` | handle | bytes |
+
+A name is one component. A `/` in it is refused by the name check rather than
+walked, because a directory handle that could be escaped with `../..` would not
+be an authority over a subtree.
+
+A handle opened through another carries no more rights than its parent, so
+handing a program a read-only directory means something: nothing reachable
+through it can be written.
+
+A buffer too small is an error, never a truncation. Half a file that reports its
+own length is indistinguishable from a whole one, and a program that acted on it
+would act on a fragment.
+
+Removing a name is refused while any handle still names what it names. A handle
+carries an inode number, and an inode number is not a reference: freeing the
+inode would leave the handle pointing at a number the filesystem is free to give
+to the next file, and reading through it would then read that file. The kernel
+keeps a count of open inodes for exactly this.
+
+Errors are deliberately few. `ENOENT` and `EEXIST` are distinguished because a
+program will act on both; a full disk, a corrupt directory and an unreachable
+disk are all "the filesystem said no", because inventing a code per internal
+condition would publish the implementation as an interface. The kernel log
+carries the detail.
 
 ## How it is tested
 
@@ -222,9 +271,18 @@ and forgets it passes every other check and fails that one. It then re-reads the
 superblock from the disk and requires it to agree, because every later boot
 starts by reading it.
 
+`init` exercises the interface from ring 3 on every boot: it lists the root,
+makes its own directory (or opens it, on a later boot), reads what the previous
+boot left, writes a file, reads it back through the same handle, and then checks
+the refusals — a buffer too small, a name with a separator in it, a name that is
+not there, and removing a file that is still open.
+
 `scripts/test-persistence.ps1` boots twice on the same image without rebuilding.
 The first boot must *make* the filesystem and report boot 1 with one line in
 `/system/boot.log`; the second must *mount* it and report boot 2 with two lines.
 One boot cannot tell a filesystem from a convincing pretence at one — a
 filesystem that kept everything in memory would pass every same-boot check ever
-written.
+written. It also requires `init` to *make* its file on the first boot and *find*
+it on the second, which is the same claim one level up: not only that the
+filesystem persists, but that a program can put something in it and get it back
+through the system-call boundary and the handle table.

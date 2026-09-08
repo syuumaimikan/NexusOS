@@ -128,11 +128,23 @@ function Read-Report {
     if (-not ($Output -match 'the boot log has (\d+) lines, ending "boot (\d+) at')) {
         throw "boot $Number never reported its boot log"
     }
+    $lines = [int]$Matches[1]
+    $lastLog = [int]$Matches[2]
+
+    # And what the user program made of it. The kernel writing its own file
+    # proves the filesystem persists; this proves a *program* can, which is the
+    # part that goes through the system-call boundary and the handle table.
+    $userState = ''
+    if ($Output -match 'init: made a directory and a file') { $userState = 'made' }
+    elseif ($Output -match 'init: read what a previous boot wrote') { $userState = 'read' }
+    else { throw "boot $Number : init never reported what it did with the filesystem" }
+
     return [pscustomobject]@{
-        State   = $state
-        Boots   = $boots
-        Lines   = [int]$Matches[1]
-        LastLog = [int]$Matches[2]
+        State     = $state
+        Boots     = $boots
+        Lines     = $lines
+        LastLog   = $lastLog
+        UserState = $userState
     }
 }
 
@@ -144,6 +156,9 @@ if ($first.State -ne 'made') {
 }
 if ($first.Boots -ne 1) { $failures += "the first boot called itself boot $($first.Boots)" }
 if ($first.Lines -ne 1) { $failures += "the first boot's log has $($first.Lines) lines" }
+if ($first.UserState -ne 'made') {
+    $failures += "on the first boot init found a file it should have had to create"
+}
 
 $second = Read-Report -Output (Invoke-Boot -Number 2) -Number 2
 if ($second.State -ne 'mounted') {
@@ -163,6 +178,11 @@ if ($second.Lines -ne 2) {
 }
 if ($second.LastLog -ne 2) {
     $failures += "the log's last line says boot $($second.LastLog)"
+}
+if ($second.UserState -ne 'read') {
+    $failures += 'the second boot did not find the file the user program wrote on the first'
+} else {
+    Write-Host '    ok   a user program read back the file it wrote on the previous boot' -ForegroundColor DarkGray
 }
 
 Write-Host ''

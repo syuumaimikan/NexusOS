@@ -825,13 +825,9 @@ pub unsafe fn start() -> Result<(), UserError> {
         // SAFETY: the scheduler is running.
         let spawner = unsafe { start_spawn_service() }?;
         // SAFETY: as above, and the block device is up.
-        if let Err(error) = unsafe {
-            start_from_disk(
-                "BIN/INIT.ELF",
-                "init",
-                Some((ipc::Object::Channel(spawner), ipc::Rights::ALL)),
-            )
-        } {
+        if let Err(error) =
+            unsafe { start_from_disk("BIN/INIT.ELF", "init", &init_endowments(spawner)) }
+        {
             kprintln!("[user] could not start init from disk: {error}");
         }
 
@@ -993,7 +989,7 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
         start_from_disk(
             path,
             "spawned",
-            Some((ipc::Object::Channel(to_parent), ipc::Rights::ALL)),
+            &[(ipc::Object::Channel(to_parent), ipc::Rights::ALL)],
         )
     };
 
@@ -1068,7 +1064,7 @@ unsafe fn start_painter() -> Result<(), UserError> {
         start_from_disk(
             "BIN/PAINT.ELF",
             "paint",
-            Some((ipc::Object::Channel(client), ipc::Rights::ALL)),
+            &[(ipc::Object::Channel(client), ipc::Rights::ALL)],
         )?;
     }
 
@@ -1156,7 +1152,7 @@ const DISK_STACK_TOP: u64 = 0x0000_0000_0100_0000;
 pub unsafe fn start_from_disk(
     path: &str,
     name: &str,
-    endowment: Option<(ipc::Object, ipc::Rights)>,
+    endowments: &[(ipc::Object, ipc::Rights)],
 ) -> Result<crate::process::ProcessId, UserError> {
     let partitions = fs::gpt::read().map_err(UserError::PartitionTable)?;
     let esp = partitions
@@ -1241,10 +1237,13 @@ pub unsafe fn start_from_disk(
     let id = process.id;
 
     // Whatever authority the caller decided this program should have, handed
-    // over before it runs. A program starts with exactly what it was given.
-    if let Some((object, rights)) = endowment {
-        let handle = process.handles.insert(object, rights);
-        kprintln!("[user] process {id} \"{name}\" starts holding handle {handle}");
+    // over before it runs. A program starts with exactly what it was given, in
+    // the order it was given it, so a program can name its endowments by the
+    // handle numbers they will have rather than by discovering them.
+    for (object, rights) in endowments {
+        let kind = object.kind();
+        let handle = process.handles.insert(object.clone(), *rights);
+        kprintln!("[user] process {id} \"{name}\" starts holding {kind} handle {handle}");
     }
 
     sched::spawn_user(
@@ -1264,6 +1263,29 @@ pub unsafe fn start_from_disk(
         span_pages * layout::PAGE_SIZE as usize / 1024
     );
     Ok(id)
+}
+
+/// What `init` starts holding.
+///
+/// Handle 1 is the channel to the spawn service, and handle 2 is the root of
+/// the system's filesystem. That is the whole of what `init` can reach: a
+/// program has no ambient authority here, so a filesystem it was not handed is
+/// a filesystem it cannot name, and the numbers are fixed only because they are
+/// issued in this order and `init` has to call them something.
+///
+/// The directory comes second and may not come at all -- a machine whose disk
+/// has no NexusFS on it still starts `init`, which then finds handle 2 is not a
+/// handle. That is the honest shape: the program asks and is told no, rather
+/// than the kernel inventing an empty filesystem so that the call succeeds.
+fn init_endowments(
+    spawner: alloc::sync::Arc<ipc::Endpoint>,
+) -> alloc::vec::Vec<(ipc::Object, ipc::Rights)> {
+    let mut endowments = alloc::vec![(ipc::Object::Channel(spawner), ipc::Rights::ALL)];
+    match fs::store::root() {
+        Ok(root) => endowments.push((ipc::Object::Node(root), ipc::Rights::ALL)),
+        Err(error) => kprintln!("[user] init gets no filesystem: {error}"),
+    }
+    endowments
 }
 
 /// Smallest buddy order whose block holds `pages` pages.

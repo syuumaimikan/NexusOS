@@ -164,6 +164,8 @@ Invoke-Step 'boot test' {
         'the NexusFS on-disk format checks out',
         'NexusFS verified',
         'the boot log has',
+        'starts holding directory handle',
+        'init: made a directory and a file',
         'loaded from BIN/INIT.ELF',
         'init: loaded from disk and running in ring 3',
         'init: clock, channel and handle checks all passed',

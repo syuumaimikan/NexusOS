@@ -419,24 +419,37 @@ pub fn memory_statistics() -> (u64, u64) {
 
 /// A kernel object a handle can refer to.
 ///
-/// An enum rather than a trait object: there is one kind so far, the set is
-/// closed and small, and a match that must be updated when a kind is added is
-/// worth more here than dynamic dispatch.
+/// An enum rather than a trait object: the set is closed and small, and a match
+/// that must be updated when a kind is added is worth more here than dynamic
+/// dispatch.
 #[derive(Clone)]
 pub enum Object {
     /// One end of a channel.
     Channel(Arc<Endpoint>),
     /// Memory more than one process can map.
     Memory(Arc<MemoryObject>),
+    /// An open file or directory in the system's filesystem.
+    ///
+    /// A directory handle is the authority to reach what is under it, and
+    /// nothing else: there is no call that takes a path. A file handle is the
+    /// authority to read or write that one file.
+    Node(Arc<crate::fs::store::Node>),
 }
 
 impl Object {
     /// A short name, for diagnostics.
     #[must_use]
-    pub const fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         match self {
             Self::Channel(_) => "channel",
             Self::Memory(_) => "memory",
+            Self::Node(node) => {
+                if node.is_directory() {
+                    "directory"
+                } else {
+                    "file"
+                }
+            }
         }
     }
 }
@@ -517,7 +530,7 @@ impl HandleTable {
         }
         match &handle.object {
             Object::Channel(endpoint) => Ok(Arc::clone(endpoint)),
-            Object::Memory(_) => Err(HandleError::WrongKind),
+            _ => Err(HandleError::WrongKind),
         }
     }
 
@@ -530,7 +543,25 @@ impl HandleTable {
         }
         match &handle.object {
             Object::Memory(memory) => Ok(Arc::clone(memory)),
-            Object::Channel(_) => Err(HandleError::WrongKind),
+            _ => Err(HandleError::WrongKind),
+        }
+    }
+
+    /// The open file or directory `id` names, if it names one and carries
+    /// `needed`.
+    pub fn node(
+        &self,
+        id: u32,
+        needed: Rights,
+    ) -> Result<Arc<crate::fs::store::Node>, HandleError> {
+        let entries = self.entries.lock();
+        let handle = entries.get(&id).ok_or(HandleError::NotFound)?;
+        if !handle.rights.contains(needed) {
+            return Err(HandleError::Denied);
+        }
+        match &handle.object {
+            Object::Node(node) => Ok(Arc::clone(node)),
+            _ => Err(HandleError::WrongKind),
         }
     }
 

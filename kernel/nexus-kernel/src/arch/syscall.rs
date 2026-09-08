@@ -239,11 +239,29 @@ pub enum Call {
     MemoryMap = 11,
     /// How large a memory object is. `(handle)`.
     MemorySize = 12,
+    /// Open one name inside a directory.
+    /// `(directory, pointer, length)`, returning a handle.
+    NodeOpen = 13,
+    /// Make a file or directory inside a directory.
+    /// `(directory, pointer, length, directory?)`, returning a handle.
+    NodeCreate = 14,
+    /// Remove a name, and the thing it named.
+    /// `(directory, pointer, length)`.
+    NodeRemove = 15,
+    /// Read a directory into a buffer. `(directory, pointer, capacity)`,
+    /// returning the bytes written.
+    NodeList = 16,
+    /// Read a whole file. `(file, pointer, capacity)`, returning its length.
+    NodeRead = 17,
+    /// Replace a whole file. `(file, pointer, length)`.
+    NodeWrite = 18,
+    /// How many bytes a file or directory holds. `(handle)`.
+    NodeSize = 19,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 20;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -261,6 +279,13 @@ impl Call {
             10 => Some(Self::MemoryCreate),
             11 => Some(Self::MemoryMap),
             12 => Some(Self::MemorySize),
+            13 => Some(Self::NodeOpen),
+            14 => Some(Self::NodeCreate),
+            15 => Some(Self::NodeRemove),
+            16 => Some(Self::NodeList),
+            17 => Some(Self::NodeRead),
+            18 => Some(Self::NodeWrite),
+            19 => Some(Self::NodeSize),
             _ => None,
         }
     }
@@ -287,6 +312,14 @@ pub const EAGAIN: u64 = u64::MAX - 5;
 pub const EMSGSIZE: u64 = u64::MAX - 6;
 /// The caller is not a user process, so it has no handle table.
 pub const ENOPROC: u64 = u64::MAX - 7;
+/// No such file or directory.
+pub const ENOENT: u64 = u64::MAX - 8;
+/// That name is already taken.
+pub const EEXIST: u64 = u64::MAX - 9;
+/// The buffer is not large enough for what would go in it.
+pub const ETOOBIG: u64 = u64::MAX - 10;
+/// The filesystem refused: it is full, damaged, busy, or absent.
+pub const EFS: u64 = u64::MAX - 11;
 
 /// Longest string [`Call::Log`] will accept.
 ///
@@ -349,6 +382,13 @@ extern "sysv64" fn dispatch(
         Some(Call::MemoryCreate) => memory_create(argument0),
         Some(Call::MemoryMap) => memory_map(argument0, argument1, argument2),
         Some(Call::MemorySize) => memory_size(argument0),
+        Some(Call::NodeOpen) => node_open(argument0, argument1, argument2),
+        Some(Call::NodeCreate) => node_create(argument0, argument1, argument2, argument3),
+        Some(Call::NodeRemove) => node_remove(argument0, argument1, argument2),
+        Some(Call::NodeList) => node_list(argument0, argument1, argument2),
+        Some(Call::NodeRead) => node_read(argument0, argument1, argument2),
+        Some(Call::NodeWrite) => node_write(argument0, argument1, argument2),
+        Some(Call::NodeSize) => node_size(argument0),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -816,4 +856,245 @@ unsafe fn write_msr(register: u32, value: u64) {
             options(nomem, nostack, preserves_flags),
         );
     }
+}
+
+// -- Files ---------------------------------------------------------------------
+
+/// Longest name a filesystem call will accept from ring 3.
+///
+/// What NexusFS itself allows. Bounded here as well because the length comes
+/// from user memory, and a call is not entitled to make the kernel walk further
+/// than the format could ever need.
+const MAX_NAME: u64 = crate::fs::nexusfs::MAX_NAME as u64;
+
+/// Largest buffer a filesystem call will read or write in one go.
+///
+/// The whole of the largest file the format can describe, so no legitimate
+/// operation is refused by this, and a length far past it is refused before the
+/// kernel touches any of it.
+const MAX_TRANSFER: u64 = crate::fs::nexusfs::MAX_FILE as u64;
+
+/// Turn a filesystem refusal into the value the caller sees.
+///
+/// Deliberately not one code per cause. A program needs to tell "there is no
+/// such name" and "that name is taken" apart, because both are ordinary
+/// outcomes it will act on; the rest -- a full disk, a corrupt directory, an
+/// unreachable disk -- are all "the filesystem said no", and inventing a code
+/// per internal condition would be publishing the implementation as an
+/// interface. The kernel log carries the detail.
+fn store_error(error: crate::fs::store::StoreError) -> u64 {
+    use crate::fs::nexusfs::FsError;
+    use crate::fs::store::StoreError;
+    match error {
+        StoreError::Fs(FsError::NotFound) => ENOENT,
+        StoreError::Fs(FsError::Exists) => EEXIST,
+        StoreError::Fs(FsError::BadName | FsError::WrongKind) => EINVAL,
+        StoreError::Fs(FsError::TooLarge) => EMSGSIZE,
+        _ => EFS,
+    }
+}
+
+/// Read a name out of user memory.
+fn user_name<'a>(pointer: u64, length: u64) -> Option<&'a str> {
+    let (pointer, length) = user_range(pointer, length, MAX_NAME)?;
+    // SAFETY: the range was checked to lie wholly inside the user half, which
+    // this thread's address space maps. An unmapped range faults, which is the
+    // caller's own page fault.
+    let bytes = unsafe { core::slice::from_raw_parts(pointer as *const u8, length) };
+    core::str::from_utf8(bytes).ok()
+}
+
+/// The node a handle names, together with what that handle is good for.
+///
+/// Both at once, because every call below needs the rights as well: a handle
+/// opened through a read-only directory has to stay read-only, and the only
+/// place that can be decided is where the directory handle is looked up.
+fn caller_node(
+    handle: u64,
+    needed: crate::ipc::Rights,
+) -> Result<(alloc::sync::Arc<crate::fs::store::Node>, crate::ipc::Rights), u64> {
+    let process = caller()?;
+    let handle = u32::try_from(handle).map_err(|_| EBADF)?;
+    let node = process.handles.node(handle, needed).map_err(handle_error)?;
+    let rights = process.handles.rights(handle).map_err(handle_error)?;
+    Ok((node, rights))
+}
+
+/// Put a node in the caller's table, returning the handle.
+fn insert_node(node: alloc::sync::Arc<crate::fs::store::Node>, rights: crate::ipc::Rights) -> u64 {
+    let Ok(process) = caller() else {
+        return ENOPROC;
+    };
+    u64::from(
+        process
+            .handles
+            .insert(crate::ipc::Object::Node(node), rights),
+    )
+}
+
+/// [`Call::NodeOpen`]: open one name inside a directory.
+///
+/// One component, never a path. A directory handle is the authority to reach
+/// what is under it, and a call that took `../..` would make that authority
+/// mean nothing -- so the separator is refused by the name check rather than
+/// interpreted.
+///
+/// The new handle carries no more than the one it came from. Opening through a
+/// read-only directory cannot produce something writable, which is what makes
+/// handing a program a read-only directory mean anything.
+fn node_open(directory: u64, pointer: u64, length: u64) -> u64 {
+    let (node, rights) = match caller_node(directory, crate::ipc::Rights::READ) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+    let Some(name) = user_name(pointer, length) else {
+        return EINVAL;
+    };
+
+    match crate::fs::store::open_child(&node, name) {
+        Ok(child) => insert_node(child, rights),
+        Err(error) => store_error(error),
+    }
+}
+
+/// [`Call::NodeCreate`]: make a file or directory, and open it.
+fn node_create(directory: u64, pointer: u64, length: u64, is_directory: u64) -> u64 {
+    let (node, rights) = match caller_node(directory, crate::ipc::Rights::WRITE) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+    let Some(name) = user_name(pointer, length) else {
+        return EINVAL;
+    };
+
+    match crate::fs::store::create_child(&node, name, is_directory != 0) {
+        Ok(child) => insert_node(child, rights),
+        Err(error) => store_error(error),
+    }
+}
+
+/// [`Call::NodeRemove`]: remove a name, and the thing it named.
+fn node_remove(directory: u64, pointer: u64, length: u64) -> u64 {
+    let (node, _) = match caller_node(directory, crate::ipc::Rights::WRITE) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+    let Some(name) = user_name(pointer, length) else {
+        return EINVAL;
+    };
+
+    match crate::fs::store::remove_child(&node, name) {
+        Ok(()) => 0,
+        Err(error) => store_error(error),
+    }
+}
+
+/// [`Call::NodeList`]: write a directory's entries into a user buffer.
+///
+/// The entries go out in the shape they have on disk -- four bytes of inode
+/// number, one of name length, one of kind, two spare, then the name -- because
+/// a second layout would be a second thing to keep in step with the first for
+/// no gain.
+fn node_list(directory: u64, pointer: u64, capacity: u64) -> u64 {
+    let (node, _) = match caller_node(directory, crate::ipc::Rights::READ) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+    let entries = match crate::fs::store::entries(&node) {
+        Ok(entries) => entries,
+        Err(error) => return store_error(error),
+    };
+
+    let mut packed = alloc::vec::Vec::new();
+    for entry in &entries {
+        packed.extend_from_slice(&entry.inode.to_le_bytes());
+        packed.push(entry.name.len() as u8);
+        packed.push(match entry.kind {
+            crate::fs::nexusfs::Kind::Directory => 2,
+            _ => 1,
+        });
+        packed.extend_from_slice(&[0, 0]);
+        packed.extend_from_slice(entry.name.as_bytes());
+    }
+
+    copy_out(&packed, pointer, capacity)
+}
+
+/// [`Call::NodeRead`]: read a whole file into a user buffer.
+fn node_read(file: u64, pointer: u64, capacity: u64) -> u64 {
+    let (node, _) = match caller_node(file, crate::ipc::Rights::READ) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+    match crate::fs::store::read_node(&node) {
+        Ok(bytes) => copy_out(&bytes, pointer, capacity),
+        Err(error) => store_error(error),
+    }
+}
+
+/// [`Call::NodeWrite`]: replace a whole file from a user buffer.
+///
+/// A whole file, because that is what the filesystem underneath offers: there
+/// is no buffer cache, so a partial write would be a partial write to the disk.
+/// A zero length is a legitimate call -- it empties the file -- so unlike every
+/// other length here it is allowed.
+fn node_write(file: u64, pointer: u64, length: u64) -> u64 {
+    let (node, _) = match caller_node(file, crate::ipc::Rights::WRITE) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+
+    let data: alloc::vec::Vec<u8> = if length == 0 {
+        alloc::vec::Vec::new()
+    } else {
+        let Some((pointer, length)) = user_range(pointer, length, MAX_TRANSFER) else {
+            return EINVAL;
+        };
+        // SAFETY: the range lies inside the user half, which this thread's
+        // address space maps. It is copied before the filesystem is touched, so
+        // nothing below this holds a pointer into user memory across a call
+        // that can block and let the caller unmap it.
+        unsafe { core::slice::from_raw_parts(pointer as *const u8, length) }.to_vec()
+    };
+
+    match crate::fs::store::write_node(&node, &data) {
+        Ok(()) => data.len() as u64,
+        Err(error) => store_error(error),
+    }
+}
+
+/// [`Call::NodeSize`]: how many bytes a file or directory holds.
+fn node_size(handle: u64) -> u64 {
+    let (node, _) = match caller_node(handle, crate::ipc::Rights::READ) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+    match crate::fs::store::size(&node) {
+        Ok(size) => size,
+        Err(error) => store_error(error),
+    }
+}
+
+/// Copy bytes out to a user buffer, saying how many there were.
+///
+/// A buffer too small is an error and not a truncation. Half a file that
+/// reports its own length looks exactly like a whole one, and a program that
+/// acted on it would act on a fragment.
+fn copy_out(bytes: &[u8], pointer: u64, capacity: u64) -> u64 {
+    if bytes.len() as u64 > capacity {
+        return ETOOBIG;
+    }
+    if bytes.is_empty() {
+        return 0;
+    }
+    let Some((pointer, length)) = user_range(pointer, bytes.len() as u64, MAX_TRANSFER) else {
+        return EINVAL;
+    };
+    // SAFETY: the range was checked to lie wholly inside the user half, which
+    // this thread's address space maps, and is exactly as long as what is being
+    // written into it.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer as *mut u8, length);
+    }
+    bytes.len() as u64
 }

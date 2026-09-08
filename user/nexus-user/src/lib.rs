@@ -53,6 +53,14 @@ pub enum Error {
     TooLong,
     /// The caller is not a user process.
     NotAProcess,
+    /// No such file or directory.
+    NotFound,
+    /// That name is already taken.
+    Exists,
+    /// The buffer is smaller than what would go in it.
+    TooBig,
+    /// The filesystem refused: it is full, damaged, busy, or absent.
+    Filesystem,
     /// Something the kernel returned that this runtime does not recognise.
     Unknown(u64),
 }
@@ -71,6 +79,10 @@ impl Error {
             v if v == u64::MAX - 5 => Self::Again,
             v if v == u64::MAX - 6 => Self::TooLong,
             v if v == u64::MAX - 7 => Self::NotAProcess,
+            v if v == u64::MAX - 8 => Self::NotFound,
+            v if v == u64::MAX - 9 => Self::Exists,
+            v if v == u64::MAX - 10 => Self::TooBig,
+            v if v == u64::MAX - 11 => Self::Filesystem,
             other => Self::Unknown(other),
         }
     }
@@ -102,6 +114,13 @@ enum Call {
     MemoryCreate = 10,
     MemoryMap = 11,
     MemorySize = 12,
+    NodeOpen = 13,
+    NodeCreate = 14,
+    NodeRemove = 15,
+    NodeList = 16,
+    NodeRead = 17,
+    NodeWrite = 18,
+    NodeSize = 19,
 }
 
 /// Make a system call.
@@ -314,4 +333,199 @@ pub fn rights(handle: Handle) -> Result<u32, Error> {
     // SAFETY: takes one integer.
     let result = unsafe { syscall(Call::HandleRights, u64::from(handle.0), 0, 0, 0, 0, 0) };
     check(result).map(|bits| bits as u32)
+}
+
+// -- Files and directories ---------------------------------------------------
+//
+// There is no `open("/etc/passwd")` here and there will not be one. A program
+// reaches a file by naming a single component inside a directory it already
+// holds a handle to, so what it can reach is exactly the subtree under what it
+// was given. A program handed nothing can open nothing, and there is no name it
+// could use instead.
+//
+// Files are read and written whole. The filesystem underneath has no buffer
+// cache, so a partial write would be a partial write to the disk; when there is
+// one, this grows the interface that deserves.
+
+/// What a directory entry names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Directory,
+}
+
+/// One entry of a directory, borrowed from the buffer it was read into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryEntry<'a> {
+    pub name: &'a str,
+    pub kind: Kind,
+}
+
+/// Open one name inside a directory.
+///
+/// The name is one component. A `/` in it is refused rather than walked, which
+/// is what keeps a directory handle meaning "this subtree".
+pub fn open(directory: Handle, name: &str) -> Result<Handle, Error> {
+    // SAFETY: the pointer and length describe a live string in this process.
+    let result = unsafe {
+        syscall(
+            Call::NodeOpen,
+            u64::from(directory.0),
+            name.as_ptr() as u64,
+            name.len() as u64,
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|handle| Handle(handle as u32))
+}
+
+/// Make a file or a directory, and open it.
+pub fn create(directory: Handle, name: &str, kind: Kind) -> Result<Handle, Error> {
+    // SAFETY: as above.
+    let result = unsafe {
+        syscall(
+            Call::NodeCreate,
+            u64::from(directory.0),
+            name.as_ptr() as u64,
+            name.len() as u64,
+            u64::from(kind == Kind::Directory),
+            0,
+            0,
+        )
+    };
+    check(result).map(|handle| Handle(handle as u32))
+}
+
+/// Remove a name, and the thing it named.
+///
+/// A directory has to be empty, and nothing may still hold a handle to what is
+/// being removed.
+pub fn remove(directory: Handle, name: &str) -> Result<(), Error> {
+    // SAFETY: as above.
+    let result = unsafe {
+        syscall(
+            Call::NodeRemove,
+            u64::from(directory.0),
+            name.as_ptr() as u64,
+            name.len() as u64,
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|_| ())
+}
+
+/// Read a directory into `buffer`, returning how many bytes it filled.
+///
+/// Use [`entries`] to walk what comes back. Returns [`Error::TooBig`] rather
+/// than a prefix when the buffer is too small: half a directory looks exactly
+/// like a whole one.
+pub fn list(directory: Handle, buffer: &mut [u8]) -> Result<usize, Error> {
+    // SAFETY: the buffer is live and writable here.
+    let result = unsafe {
+        syscall(
+            Call::NodeList,
+            u64::from(directory.0),
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|bytes| bytes as usize)
+}
+
+/// Walk what [`list`] wrote.
+///
+/// Returns `None` at the first entry that does not parse, rather than skipping
+/// it: the entries are packed one after another, so an unreadable one means
+/// every byte after it is at an unknown offset.
+#[must_use]
+pub fn entries(packed: &[u8]) -> Entries<'_> {
+    Entries { packed }
+}
+
+/// The iterator [`entries`] returns.
+pub struct Entries<'a> {
+    packed: &'a [u8],
+}
+
+impl<'a> Iterator for Entries<'a> {
+    type Item = DirectoryEntry<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.packed.is_empty() {
+            return None;
+        }
+        if self.packed.len() < 8 {
+            self.packed = &[];
+            return None;
+        }
+        let length = self.packed[4] as usize;
+        let kind = match self.packed[5] {
+            2 => Kind::Directory,
+            _ => Kind::File,
+        };
+        if self.packed.len() < 8 + length {
+            self.packed = &[];
+            return None;
+        }
+        let Ok(name) = core::str::from_utf8(&self.packed[8..8 + length]) else {
+            self.packed = &[];
+            return None;
+        };
+        self.packed = &self.packed[8 + length..];
+        Some(DirectoryEntry { name, kind })
+    }
+}
+
+/// Read a whole file into `buffer`, returning its length.
+///
+/// [`Error::TooBig`] when the buffer is smaller than the file. Ask with
+/// [`size`] first if the length is not already known.
+pub fn read(file: Handle, buffer: &mut [u8]) -> Result<usize, Error> {
+    // SAFETY: the buffer is live and writable here.
+    let result = unsafe {
+        syscall(
+            Call::NodeRead,
+            u64::from(file.0),
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|bytes| bytes as usize)
+}
+
+/// Replace a whole file, returning how many bytes it now holds.
+///
+/// An empty slice empties the file, which is the one length that is not an
+/// error.
+pub fn write(file: Handle, data: &[u8]) -> Result<usize, Error> {
+    // SAFETY: the slice is live here.
+    let result = unsafe {
+        syscall(
+            Call::NodeWrite,
+            u64::from(file.0),
+            data.as_ptr() as u64,
+            data.len() as u64,
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|bytes| bytes as usize)
+}
+
+/// How many bytes a file or directory holds.
+pub fn size(node: Handle) -> Result<usize, Error> {
+    // SAFETY: takes one integer.
+    let result = unsafe { syscall(Call::NodeSize, u64::from(node.0), 0, 0, 0, 0, 0) };
+    check(result).map(|size| size as usize)
 }
