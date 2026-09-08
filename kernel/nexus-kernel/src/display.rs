@@ -18,7 +18,7 @@ use alloc::string::String;
 
 use nexus_abi::FramebufferInfo;
 
-use crate::framebuffer::{font, Color, Framebuffer};
+use crate::framebuffer::{font, Color, Framebuffer, Gradient};
 use crate::sync::IrqSpinLock;
 use crate::{arch, fs, i18n, input, kprintln, memory, sched};
 
@@ -134,43 +134,37 @@ pub fn is_available() -> bool {
 /// again on every language change -- which it did, and looked exactly like a
 /// user program that had failed to draw.
 fn clear_rows(fb: &mut Framebuffer, start_y: u32, end_y: u32) {
-    let surface = fb.height();
+    let background = Gradient {
+        top: BACKGROUND_TOP,
+        bottom: BACKGROUND_BOTTOM,
+        surface_height: fb.height(),
+    };
     let Some((x, y, width, height)) = unclaimed_region() else {
-        fb.vertical_gradient_region(start_y, end_y, surface, BACKGROUND_TOP, BACKGROUND_BOTTOM);
+        fb.vertical_gradient_region(start_y, end_y, background);
         return;
     };
 
     // Rows above and below the reserved rectangle: the whole width.
     let above = end_y.min(y);
     if above > start_y {
-        fb.vertical_gradient_region(start_y, above, surface, BACKGROUND_TOP, BACKGROUND_BOTTOM);
+        fb.vertical_gradient_region(start_y, above, background);
     }
     let below = start_y.max(y + height);
     if end_y > below {
-        fb.vertical_gradient_region(below, end_y, surface, BACKGROUND_TOP, BACKGROUND_BOTTOM);
+        fb.vertical_gradient_region(below, end_y, background);
     }
 
     // And the rows beside it: everything but the rectangle itself.
     let overlap_start = start_y.max(y);
     let overlap_end = end_y.min(y + height);
     if overlap_end > overlap_start {
-        fb.vertical_gradient_span(
-            0,
-            x,
-            overlap_start,
-            overlap_end,
-            surface,
-            BACKGROUND_TOP,
-            BACKGROUND_BOTTOM,
-        );
+        fb.vertical_gradient_span(0, x, overlap_start, overlap_end, background);
         fb.vertical_gradient_span(
             x + width,
             fb.width(),
             overlap_start,
             overlap_end,
-            surface,
-            BACKGROUND_TOP,
-            BACKGROUND_BOTTOM,
+            background,
         );
     }
 }

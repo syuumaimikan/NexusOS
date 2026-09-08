@@ -685,17 +685,15 @@ impl Volume {
             // A file that grows past its direct blocks needs somewhere to keep
             // the rest; that block is metadata and is not counted as content.
             if wanted > DIRECT && inode.indirect == 0 {
-                match self.allocate_block() {
-                    Ok(block) => {
-                        inode.indirect = block;
-                        taken.push(block);
-                        let empty = [0u8; BLOCK_SIZE];
-                        if let Err(error) = self.write_block(block, &empty) {
-                            self.give_back(&taken);
-                            return Err(error);
-                        }
-                    }
-                    Err(error) => return Err(error),
+                // Nothing has been taken yet, so a failure here owes
+                // nothing back.
+                let block = self.allocate_block()?;
+                inode.indirect = block;
+                taken.push(block);
+                let empty = [0u8; BLOCK_SIZE];
+                if let Err(error) = self.write_block(block, &empty) {
+                    self.give_back(&taken);
+                    return Err(error);
                 }
             }
             while blocks.len() < wanted {

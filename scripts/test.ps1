@@ -3,23 +3,26 @@
     Runs the full NexusOS test suite.
 
 .DESCRIPTION
-    Four layers, cheapest first, so a failure surfaces as early as possible:
+    Eight layers, cheapest first, so a failure surfaces as early as possible:
 
-      1. formatting and lints
-      2. host unit tests (UEFI layouts, ELF parsing, memory-map normalization,
+      1. formatting
+      2. lints, over every crate including the kernel
+      3. host unit tests (UEFI layouts, ELF parsing, memory-map normalization,
          descriptor encoding)
-      3. a boot test: build, boot in QEMU, and require the serial log to contain
+      4. a boot test: build, boot in QEMU, and require the serial log to contain
          every marker a healthy boot produces
-      4. an input test, which sends real keystrokes through QEMU's monitor and
-         checks what the kernel made of them
       5. a boot from the disk image alone, which is the only run where the
          firmware reads the partition table and filesystem this project writes
-      6. injection tests, which break the kernel one way per build -- a real
+      6. a persistence test, which boots twice on one disk and requires the
+         second boot to find what the first one wrote
+      7. an input test, which sends real keystrokes through QEMU's monitor and
+         checks what the kernel made of them
+      8. injection tests, which break the kernel one way per build -- a real
          CPU exception, a broken TLB shootdown -- and check that
          each is reported rather than resetting the machine
 
 .PARAMETER SkipFaults
-    Skip layer 5, which is the slowest because it boots QEMU three times.
+    Skip layer 8, which is the slowest because it boots QEMU six times.
 #>
 [CmdletBinding()]
 param(
@@ -74,6 +77,17 @@ Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
         Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
+
+        # And the kernel, which needs its own target and core rebuilt for it,
+        # and so was left out until it had accumulated a dozen findings nobody
+        # had seen. It is the largest crate in the tree; leaving the biggest
+        # thing unlinted made the step read as passing when it covered a third
+        # of the code.
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-kernel',
+            '--target', 'targets/x86_64-nexus.json',
+            '-Zbuild-std=core,compiler_builtins,alloc',
+            '-Zbuild-std-features=compiler-builtins-mem',
+            '--', '-D', 'warnings') 'clippy (kernel)'
     } finally { Pop-Location }
 }
 

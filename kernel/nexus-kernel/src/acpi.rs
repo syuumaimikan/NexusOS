@@ -57,6 +57,13 @@ fn checksum_is_valid(bytes: &[u8]) -> bool {
 /// Size of the header every system description table starts with.
 const SDT_HEADER_LEN: usize = 36;
 
+/// Lengths a table may plausibly claim.
+///
+/// Shorter than its own header, or larger than a megabyte, and the value came
+/// from something other than a table -- which matters because the length is
+/// what says how much memory to read.
+const PLAUSIBLE_TABLE: core::ops::RangeInclusive<usize> = SDT_HEADER_LEN..=1024 * 1024;
+
 /// A system description table: its signature and its full contents.
 struct Table {
     signature: [u8; 4],
@@ -74,7 +81,7 @@ unsafe fn read_table(phys: u64) -> Option<Table> {
     let header = unsafe { read_bytes(phys, SDT_HEADER_LEN) };
     let length = read_u32(header, 4)? as usize;
 
-    if length < SDT_HEADER_LEN || length > 1024 * 1024 {
+    if !PLAUSIBLE_TABLE.contains(&length) {
         return None;
     }
 

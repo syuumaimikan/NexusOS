@@ -235,7 +235,7 @@ impl Volume {
         let raw = self.read_chain(cluster, usize::MAX)?;
         let mut entries = Vec::new();
 
-        for record in raw.chunks_exact(32) {
+        for record in raw.as_chunks::<32>().0 {
             match record[0] {
                 // A zero first byte means this entry and every one after it in
                 // this directory is unused, so the walk stops rather than

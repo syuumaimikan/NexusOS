@@ -430,7 +430,7 @@ pub fn translate(virt: u64) -> Option<u64> {
 pub fn translate_in(root: u64, virt: u64) -> Option<u64> {
     let mut table = root;
 
-    for level in 0..4 {
+    for (level, shift) in LEVEL_SHIFTS.iter().enumerate() {
         let index = index_for(virt, level);
         // SAFETY: the walk only follows present, non-huge entries, each of
         // which points at a live table reachable through the direct map.
@@ -444,7 +444,7 @@ pub fn translate_in(root: u64, virt: u64) -> Option<u64> {
         }
         if entry & HUGE != 0 {
             // A large page at this level; the offset is everything below it.
-            let page_mask = (1u64 << LEVEL_SHIFTS[level]) - 1;
+            let page_mask = (1u64 << shift) - 1;
             return Some((entry & ADDRESS_MASK & !page_mask) | (virt & page_mask));
         }
         table = entry & ADDRESS_MASK;

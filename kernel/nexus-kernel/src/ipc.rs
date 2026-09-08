@@ -351,7 +351,7 @@ impl MemoryObject {
     /// that stays valid for the life of the system, and that the caller is
     /// entitled to expose to a process.
     pub unsafe fn borrowed(base: u64, size: usize) -> Option<Arc<Self>> {
-        if size == 0 || base % PAGE_SIZE as u64 != 0 {
+        if size == 0 || !base.is_multiple_of(PAGE_SIZE as u64) {
             return None;
         }
         let pages = size.div_ceil(PAGE_SIZE);

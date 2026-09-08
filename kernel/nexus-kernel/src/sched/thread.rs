@@ -319,7 +319,7 @@ impl Thread {
         // off the top of the stack.
         let terminator = top - 8;
         let return_slot = top - 16;
-        debug_assert!(return_slot % 16 == 0);
+        debug_assert!(return_slot.is_multiple_of(16));
 
         // SAFETY: the whole range lies inside the stack just mapped, and no
         // thread is running on it yet.

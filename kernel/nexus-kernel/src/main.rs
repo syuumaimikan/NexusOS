@@ -64,7 +64,7 @@ macro_rules! kprint {
 /// [`BootInfo`]. Not callable from Rust.
 #[no_mangle]
 #[link_section = ".text.boot"]
-pub extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
+pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     serial::init();
 
     kprintln!();
@@ -1378,7 +1378,7 @@ fn self_test_worker(argument: usize) {
         // Sampled every iteration, not once: a thread can be preempted and
         // resumed on a different processor, and both are worth recording.
         sched_test::WORKER_PROCESSORS.fetch_or(1 << arch::percpu::cpu_index(), Ordering::Relaxed);
-        if argument % 2 == 0 {
+        if argument.is_multiple_of(2) {
             sched::yield_now();
         }
         // Sleep occasionally, so the work outlasts the time it takes the other

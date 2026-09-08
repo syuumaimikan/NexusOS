@@ -710,7 +710,7 @@ fn memory_map(handle: u64, address: u64, writable: u64) -> u64 {
         Err(error) => return handle_error(error),
     };
 
-    if address % nexus_abi::layout::PAGE_SIZE != 0 {
+    if !address.is_multiple_of(nexus_abi::layout::PAGE_SIZE) {
         return EINVAL;
     }
     let bytes = memory.pages() as u64 * nexus_abi::layout::PAGE_SIZE;

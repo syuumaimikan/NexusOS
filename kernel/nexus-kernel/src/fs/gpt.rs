@@ -176,8 +176,8 @@ pub fn read() -> Result<Vec<Partition>, GptError> {
 /// is shorter than its 36 characters.
 fn utf16_name(bytes: &[u8]) -> String {
     let mut units = Vec::new();
-    for pair in bytes.chunks_exact(2) {
-        let unit = u16::from_le_bytes([pair[0], pair[1]]);
+    for pair in bytes.as_chunks::<2>().0 {
+        let unit = u16::from_le_bytes(*pair);
         if unit == 0 {
             break;
         }

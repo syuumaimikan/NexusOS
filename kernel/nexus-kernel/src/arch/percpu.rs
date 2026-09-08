@@ -246,6 +246,10 @@ pub fn set_needs_reschedule(value: bool) {
 /// which is a correctness problem. An IPI would cost a delivery and an
 /// acknowledgement on every wake to save that millisecond, which is not a
 /// trade worth making until something is measured that cares.
+// Indices, not an iterator over `PER_CPU`. Iterating would take a reference to
+// a static that every other processor is writing to at the same time, which is
+// the thing the raw-pointer accesses below exist to avoid.
+#[allow(clippy::needless_range_loop)]
 pub fn request_reschedule_everywhere() {
     for index in 0..MAX_PROCESSORS {
         // SAFETY: the slot exists for the life of the kernel. Writing another
