@@ -22,6 +22,8 @@ use alloc::sync::Arc;
 use nexus_abi::layout;
 
 use crate::arch::gdt;
+use crate::drivers;
+use crate::fs;
 use crate::ipc;
 use crate::memory::{address_space, paging};
 use crate::{kprintln, memory, sched};
@@ -566,6 +568,14 @@ pub enum UserError {
     Map(paging::MapError),
     /// The thread could not be started.
     Spawn(sched::SpawnError),
+    /// The partition table could not be read.
+    PartitionTable(fs::gpt::GptError),
+    /// The disk has no filesystem to read a program from.
+    NoFilesystem,
+    /// The filesystem could not be read.
+    Filesystem(fs::fat32::FatError),
+    /// The file is not a program this kernel can load.
+    Image(nexus_abi::elf::ElfError),
 }
 
 impl core::fmt::Display for UserError {
@@ -576,6 +586,10 @@ impl core::fmt::Display for UserError {
             Self::Space(error) => write!(f, "could not create an address space: {error}"),
             Self::Map(error) => write!(f, "could not map user memory: {error:?}"),
             Self::Spawn(error) => write!(f, "could not start the user thread: {error}"),
+            Self::PartitionTable(error) => write!(f, "could not read the partition table: {error}"),
+            Self::NoFilesystem => f.write_str("the disk has no EFI system partition"),
+            Self::Filesystem(error) => write!(f, "could not read the filesystem: {error}"),
+            Self::Image(error) => write!(f, "not a program this kernel can load: {error}"),
         }
     }
 }
@@ -801,6 +815,18 @@ pub unsafe fn start() -> Result<(), UserError> {
         core::ptr::addr_of!(nexus_user_server_end) as usize,
     );
 
+    // The first program that is a *file*. Everything else here is assembled
+    // into the kernel and copied into a page; this one is read off a
+    // filesystem, which is the difference between running user code and running
+    // programs. Reported rather than fatal: a machine with no disk still boots.
+    //
+    // SAFETY: the heap, the scheduler and the block device are all running.
+    if drivers::virtio_blk::is_present() {
+        if let Err(error) = unsafe { start_from_disk("BIN/INIT.ELF", "init") } {
+            kprintln!("[user] could not start init from disk: {error}");
+        }
+    }
+
     // SAFETY: the heap, the frame allocator and the scheduler are all running.
     let (alpha, beta) = unsafe {
         spawn_process("abi", abi, 0, None, None)?;
@@ -868,6 +894,134 @@ pub unsafe fn start() -> Result<(), UserError> {
     let (created, destroyed) = address_space::statistics();
     kprintln!("[user] {created} address spaces created, {destroyed} destroyed");
     Ok(())
+}
+
+/// Where a program loaded from disk gets its stack.
+///
+/// Above anything a link script puts an image at, and below the halfway line by
+/// a long way. One page, which is enough for a program that does not recurse
+/// and is the right amount to notice when one does.
+const DISK_STACK_TOP: u64 = 0x0000_0000_0100_0000;
+
+/// Read a program from the filesystem and start it in a process of its own.
+///
+/// This is the difference between a system that can run user code and one that
+/// can run *programs*. Everything in ring 3 before this was assembled into the
+/// kernel and copied into a page; this is an ELF file on a disk, built as its
+/// own binary, loaded into an address space that did not exist a moment ago.
+///
+/// # Safety
+///
+/// Call with the heap, the scheduler and the block device running.
+pub unsafe fn start_from_disk(path: &str, name: &str) -> Result<(), UserError> {
+    let partitions = fs::gpt::read().map_err(UserError::PartitionTable)?;
+    let esp = partitions
+        .iter()
+        .find(|partition| partition.is_esp())
+        .ok_or(UserError::NoFilesystem)?;
+    let volume = fs::fat32::Volume::mount(esp.first_lba).map_err(UserError::Filesystem)?;
+    let image = volume.read_file(path).map_err(UserError::Filesystem)?;
+
+    let space = address_space::AddressSpace::new().map_err(UserError::Space)?;
+
+    // One contiguous span for the whole image, which is what the loader wants:
+    // it computes every segment's place as an offset from the base. The pages
+    // are handed back individually when the address space is dropped, and the
+    // allocator merges them back into the block they came from -- which is why
+    // every page of the span is mapped below, gaps included. A page that was
+    // allocated and never mapped would never be freed, and the block it came
+    // from would stay split for the life of the system.
+    let mut span_base = 0u64;
+    let mut span_pages = 0usize;
+
+    // SAFETY: the closure returns a block reachable through the direct map,
+    // which is what `to_virtual` says.
+    let loaded = unsafe {
+        nexus_abi::elf::load(
+            &image,
+            |pages| {
+                let order = order_for_pages(pages);
+                let base = memory::allocate_block(order)?;
+                span_base = base;
+                span_pages = 1usize << order;
+                Some(base)
+            },
+            layout::phys_to_virt,
+        )
+    }
+    .map_err(UserError::Image)?;
+
+    // Every page of the image span, with the permissions of whichever segment
+    // covers it. A page in a gap between segments belongs to the image and has
+    // to be mapped so that it is freed with it, but nothing should be able to
+    // read or run it, so it gets the least of everything.
+    for page in 0..(loaded.image_size / layout::PAGE_SIZE) {
+        let virt = loaded.virt_base + page * layout::PAGE_SIZE;
+        let phys = loaded.phys_base + page * layout::PAGE_SIZE;
+
+        let segment = loaded.segments[..loaded.segment_count]
+            .iter()
+            .find(|segment| virt >= segment.virt_start && virt < segment.virt_start + segment.size);
+
+        let mut flags = paging::USER;
+        match segment {
+            Some(segment) => {
+                if segment.flags.writable {
+                    flags |= paging::WRITABLE;
+                }
+                if !segment.flags.executable {
+                    flags |= paging::NO_EXECUTE;
+                }
+            }
+            None => flags |= paging::NO_EXECUTE,
+        }
+
+        // SAFETY: the frame is part of the block just allocated for this image,
+        // and the address is in the user half of a space nothing else has.
+        unsafe { space.map(virt, phys, flags) }.map_err(UserError::Map)?;
+    }
+
+    let stack = zeroed_frame()?;
+    // SAFETY: as above.
+    unsafe {
+        space
+            .map(
+                DISK_STACK_TOP - layout::PAGE_SIZE,
+                stack,
+                paging::USER | paging::WRITABLE | paging::NO_EXECUTE,
+            )
+            .map_err(UserError::Map)?;
+    }
+
+    let process = crate::process::Process::new(name, Arc::new(space));
+    let id = process.id;
+
+    sched::spawn_user(
+        name,
+        loaded.entry_point,
+        DISK_STACK_TOP - INITIAL_STACK_OFFSET,
+        process,
+    )
+    .map_err(UserError::Spawn)?;
+
+    kprintln!(
+        "[user] process {id} \"{name}\" loaded from {path}: {} bytes, entry {:#x}, \
+         {} segments in {} KiB",
+        image.len(),
+        loaded.entry_point,
+        loaded.segment_count,
+        span_pages * layout::PAGE_SIZE as usize / 1024
+    );
+    Ok(())
+}
+
+/// Smallest buddy order whose block holds `pages` pages.
+fn order_for_pages(pages: usize) -> usize {
+    let mut order = 0;
+    while (1usize << order) < pages {
+        order += 1;
+    }
+    order
 }
 
 /// Leave the kernel for ring 3. Never returns.

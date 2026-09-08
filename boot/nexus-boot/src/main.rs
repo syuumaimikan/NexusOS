@@ -26,10 +26,10 @@
 use core::ffi::c_void;
 use core::panic::PanicInfo;
 
-use nexus_abi::{layout, BootInfo, MemoryMapInfo, MemoryRegion, BOOT_MAGIC, BOOT_VERSION};
+use nexus_abi::{elf, layout, BootInfo, MemoryMapInfo, MemoryRegion, BOOT_MAGIC, BOOT_VERSION};
 
 use nexus_boot::uefi::{BootServices, Handle, MemoryType, Status, SystemTable};
-use nexus_boot::{elf, fs, graphics, log, log_raw, memory, paging, serial, uefi};
+use nexus_boot::{fs, graphics, log, log_raw, memory, paging, serial, uefi};
 
 /// Size of the stack the kernel starts on, before it builds its own.
 const BOOT_STACK_SIZE: u64 = layout::KERNEL_BOOT_STACK_SIZE;
@@ -179,11 +179,14 @@ pub extern "efiapi" fn efi_main(image_handle: Handle, system_table: *mut SystemT
     // is allocated as runtime-services data so that the firmware, and later the
     // kernel's own allocator, treat it as off-limits.
     // SAFETY: the closure returns identity-mapped, writable pages, which is
-    // what `elf::load` requires.
+    // what `elf::load` requires. Physical and virtual are the same thing here,
+    // which is what the identity translation says.
     let kernel = match unsafe {
-        elf::load(image, |pages| {
-            allocate_zeroed_pages(services, pages, MemoryType::RuntimeServicesData)
-        })
+        elf::load(
+            image,
+            |pages| allocate_zeroed_pages(services, pages, MemoryType::RuntimeServicesData),
+            |physical| physical,
+        )
     } {
         Ok(kernel) => kernel,
         Err(error) => {

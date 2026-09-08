@@ -13,7 +13,6 @@
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-pub mod elf;
 pub mod fs;
 pub mod graphics;
 pub mod memory;

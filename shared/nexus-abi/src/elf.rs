@@ -1,13 +1,20 @@
-//! A minimal, allocation-free ELF64 loader for the Nexus kernel image.
+//! A minimal, allocation-free ELF64 loader.
 //!
-//! The kernel is linked as a non-PIE static executable at a fixed higher-half
-//! address, so loading it needs neither relocation processing nor dynamic
-//! symbol resolution: the loader reserves one contiguous physical span, copies
-//! every `PT_LOAD` segment into it, and reports where it landed.
+//! Used twice, which is why it is here rather than in either of the crates that
+//! use it: the bootloader loads the kernel with it, and the kernel loads user
+//! programs with it. Both load a non-PIE static executable linked at a fixed
+//! address, so neither needs relocation processing or dynamic symbols -- the
+//! loader reserves one contiguous physical span, copies every `PT_LOAD` segment
+//! into it, and reports where it landed.
+//!
+//! The one thing that differs between the two is how physical memory is
+//! reached: the bootloader runs with an identity map, the kernel through its
+//! direct map. That is a parameter rather than an assumption.
 //!
 //! All multi-byte fields are read byte-wise. The file buffer comes straight
-//! from firmware and carries no alignment guarantee, so a `read_unaligned` of a
-//! `repr(C)` header would be the only other correct option and this is clearer.
+//! from firmware or a disk and carries no alignment guarantee, so a
+//! `read_unaligned` of a `repr(C)` header would be the only other correct
+//! option and this is clearer.
 
 use core::fmt;
 
@@ -234,14 +241,24 @@ where
 /// physical base address of that many contiguous, page-aligned pages, or `None`
 /// if it cannot satisfy the request.
 ///
+/// `to_virtual` says how to reach a physical address for writing. The
+/// bootloader runs identity mapped and passes the identity; the kernel passes
+/// its direct map. Making it a parameter is what lets one loader serve both,
+/// and stops either of them assuming the other's arrangement.
+///
 /// # Safety
 ///
-/// The physical range returned by `allocate` must be writable through its
-/// identity mapping for the duration of this call; the loader writes the image
+/// The physical range returned by `allocate` must be writable through
+/// `to_virtual` for the duration of this call; the loader writes the image
 /// there directly.
-pub unsafe fn load<A>(image: &[u8], mut allocate: A) -> Result<LoadedImage, ElfError>
+pub unsafe fn load<A, V>(
+    image: &[u8],
+    mut allocate: A,
+    to_virtual: V,
+) -> Result<LoadedImage, ElfError>
 where
     A: FnMut(usize) -> Option<u64>,
+    V: Fn(u64) -> u64,
 {
     let (entry_point, phoff, phentsize, phnum) = parse_header(image)?;
 
@@ -274,9 +291,9 @@ where
     // start clean; the second pass then only has to copy file-backed bytes.
     //
     // SAFETY: the caller guarantees `phys_base .. phys_base + image_size` is
-    // allocated, writable and identity mapped.
+    // allocated and writable through `to_virtual`.
     unsafe {
-        core::ptr::write_bytes(phys_base as *mut u8, 0, image_size as usize);
+        core::ptr::write_bytes(to_virtual(phys_base) as *mut u8, 0, image_size as usize);
     }
 
     let mut segments = [LoadedSegment {
@@ -309,7 +326,11 @@ where
         // allocated and zeroed above, because `vaddr + memsz <= max_vaddr_end`
         // and `filesz <= memsz`.
         unsafe {
-            core::ptr::copy_nonoverlapping(source.as_ptr(), destination as *mut u8, source.len());
+            core::ptr::copy_nonoverlapping(
+                source.as_ptr(),
+                to_virtual(destination) as *mut u8,
+                source.len(),
+            );
         }
 
         if segment_count < MAX_SEGMENTS {
@@ -418,7 +439,8 @@ mod tests {
         let base = destination.base;
         // SAFETY: `base` points at page-aligned, writable, host-owned memory
         // large enough for the one-page image below.
-        let loaded = unsafe { load(&image, |_pages| Some(base)) }.expect("image should load");
+        let loaded = unsafe { load(&image, |_pages| Some(base), |physical| physical) }
+            .expect("image should load");
 
         assert_eq!(loaded.entry_point, VADDR);
         assert_eq!(loaded.virt_base, VADDR);
@@ -442,7 +464,8 @@ mod tests {
         destination.storage.fill(0xFF);
         let base = destination.base;
         // SAFETY: as above.
-        unsafe { load(&image, |_pages| Some(base)) }.expect("image should load");
+        unsafe { load(&image, |_pages| Some(base), |physical| physical) }
+            .expect("image should load");
 
         assert_eq!(destination.bytes_at(0, 8), &payload);
         assert!(
@@ -467,7 +490,8 @@ mod tests {
         let destination = Destination::new(8);
         let base = destination.base;
         // SAFETY: as above.
-        let loaded = unsafe { load(&image, |_pages| Some(base)) }.expect("image should load");
+        let loaded = unsafe { load(&image, |_pages| Some(base), |physical| physical) }
+            .expect("image should load");
 
         assert_eq!(loaded.virt_base, BASE);
         assert_eq!(loaded.image_size, 2 * PAGE_SIZE);
@@ -486,25 +510,28 @@ mod tests {
         // SAFETY: the loader rejects these before touching the destination.
         unsafe {
             assert_eq!(
-                load(&truncated, |_| Some(base)).err(),
+                load(&truncated, |_| Some(base), |physical| physical).err(),
                 Some(ElfError::TooSmall)
             );
 
             let mut bad_magic = good.clone();
             bad_magic[1] = b'X';
             assert_eq!(
-                load(&bad_magic, |_| Some(base)).err(),
+                load(&bad_magic, |_| Some(base), |physical| physical).err(),
                 Some(ElfError::BadMagic)
             );
 
             let mut bit32 = good.clone();
             bit32[4] = 1; // ELFCLASS32
-            assert_eq!(load(&bit32, |_| Some(base)).err(), Some(ElfError::NotElf64));
+            assert_eq!(
+                load(&bit32, |_| Some(base), |physical| physical).err(),
+                Some(ElfError::NotElf64)
+            );
 
             let mut wrong_machine = good.clone();
             wrong_machine[18..20].copy_from_slice(&0x00F3u16.to_le_bytes()); // EM_RISCV
             assert_eq!(
-                load(&wrong_machine, |_| Some(base)).err(),
+                load(&wrong_machine, |_| Some(base), |physical| physical).err(),
                 Some(ElfError::WrongType)
             );
         }
@@ -515,7 +542,7 @@ mod tests {
         const VADDR: u64 = 0xFFFF_FFFF_8000_0000;
         let image = synthetic_elf(VADDR, &[(VADDR, PF_R, &[7u8; 32], 32)]);
         // SAFETY: the allocator refuses, so nothing is ever written.
-        let result = unsafe { load(&image, |_pages| None) };
+        let result = unsafe { load(&image, |_pages| None, |physical| physical) };
         assert_eq!(result.err(), Some(ElfError::OutOfMemory));
     }
 
@@ -531,7 +558,7 @@ mod tests {
         let destination = Destination::new(4);
         let dest_base = destination.base;
         // SAFETY: the bounds check rejects the segment before any copy.
-        let result = unsafe { load(&image, |_pages| Some(dest_base)) };
+        let result = unsafe { load(&image, |_pages| Some(dest_base), |physical| physical) };
         assert_eq!(result.err(), Some(ElfError::SegmentOutOfBounds));
     }
 
@@ -546,7 +573,7 @@ mod tests {
         let destination = Destination::new(4);
         let dest_base = destination.base;
         // SAFETY: rejected during the first pass, before allocation.
-        let result = unsafe { load(&image, |_pages| Some(dest_base)) };
+        let result = unsafe { load(&image, |_pages| Some(dest_base), |physical| physical) };
         assert_eq!(result.err(), Some(ElfError::InconsistentSegment));
     }
 }

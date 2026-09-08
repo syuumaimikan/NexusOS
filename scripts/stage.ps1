@@ -47,6 +47,35 @@ function Publish-EspKernel {
     return $staged
 }
 
+# Copy a user program into the directory the disk image builder reads.
+#
+# Stripped for the same reason the kernel is: the debug information dwarfs the
+# program, and the kernel has to read every byte off the filesystem before it
+# can look at a single program header.
+function Publish-Program {
+    param(
+        [Parameter(Mandatory = $true)][string]$Elf,
+        [Parameter(Mandatory = $true)][string]$ProgramDir,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if (-not (Test-Path $Elf)) { throw "expected build output is missing: $Elf" }
+    New-Item -ItemType Directory -Force -Path $ProgramDir | Out-Null
+
+    $staged = Join-Path $ProgramDir $Name
+    $sysroot = (& rustc +nightly --print sysroot).Trim()
+    $objcopy = Join-Path $sysroot 'lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objcopy.exe'
+
+    if (Test-Path $objcopy) {
+        & $objcopy --strip-debug $Elf $staged
+        if ($LASTEXITCODE -ne 0) { throw "llvm-objcopy failed (exit $LASTEXITCODE)" }
+    } else {
+        Copy-Item $Elf $staged -Force
+    }
+
+    return $staged
+}
+
 # Stage a complete bootable tree: the bootloader where firmware looks for it,
 # and the kernel where the bootloader looks for it.
 function Publish-Esp {

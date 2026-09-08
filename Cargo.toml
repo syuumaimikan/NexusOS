@@ -5,6 +5,8 @@ members = [
     "boot/nexus-boot",
     "kernel/nexus-mm",
     "kernel/nexus-kernel",
+    "user/nexus-user",
+    "user/nexus-init",
 ]
 
 [workspace.package]

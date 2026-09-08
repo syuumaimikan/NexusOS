@@ -73,14 +73,14 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
     } finally { Pop-Location }
 }
 
 Invoke-Step 'host unit tests' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '--lib') 'unit tests'
+        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-user', '--lib') 'unit tests'
     } finally { Pop-Location }
 }
 
@@ -147,6 +147,9 @@ Invoke-Step 'boot test' {
         'EFI system partition',
         'mounted at sector',
         'filesystem verified',
+        'loaded from BIN/INIT.ELF',
+        'init: loaded from disk and running in ring 3',
+        'init: clock, channel and handle checks all passed',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',

@@ -26,6 +26,11 @@
 .PARAMETER SourceDir
     A directory tree to copy into the partition. Names must fit 8.3.
 
+.PARAMETER ProgramDir
+    A directory of programs, copied into `BIN`. Kept separate from the tree the
+    firmware boots so that the data disk can carry programs without becoming
+    bootable, which is what stops the firmware choosing between two disks.
+
 .PARAMETER SizeMiB
     How large to make the image.
 #>
@@ -33,6 +38,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Output,
     [string]$SourceDir,
+    [string]$ProgramDir,
     [int]$SizeMiB = 64
 )
 
@@ -338,6 +344,16 @@ for ($i = 0; $i -lt $long.Length; $i++) {
     $long[$i] = [byte](($i * 31 + 7) -band 0xFF)
 }
 Add-File -Directory $rootCluster -Name 'CHAIN.BIN' -Content $long
+
+# Programs, under `BIN`. The kernel reads them from here; the firmware does not
+# look at them.
+if ($ProgramDir -and (Test-Path $ProgramDir)) {
+    $binDirectory = New-Directory -Parent $rootCluster -Name 'BIN'
+    foreach ($item in Get-ChildItem -Path $ProgramDir -File | Sort-Object Name) {
+        Add-File -Directory $binDirectory -Name $item.Name `
+            -Content ([System.IO.File]::ReadAllBytes($item.FullName))
+    }
+}
 
 # And the tree the firmware boots from, if one was given.
 if ($SourceDir -and (Test-Path $SourceDir)) {

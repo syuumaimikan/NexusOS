@@ -299,8 +299,31 @@ stitched together in the wrong order fail rather than being the right length;
 and a name that does not exist, which has to come back as an error rather than
 as whatever was next in the directory.
 
-Outstanding: the reader cannot write and skips long names. The driver polls one
-request at a time and takes no interrupt. NexusFS is not started.
+And a program now comes off it. `init` is built as its own binary for its own
+target -- the same custom-target machinery as the kernel, with the small code
+model, because a user program lives in the low half of the address space -- and
+the kernel reads it off the filesystem, loads its segments into an address space
+that did not exist a moment earlier, and enters it in ring 3. Everything that
+ran at user privilege before this was assembled into the kernel and copied into
+a page. This is the difference between a system that can run user code and one
+that can run *programs*.
+
+The ELF loader is the same one the bootloader uses, moved into the shared crate
+now that there are two callers. The one thing that differed between them is how
+physical memory is reached -- identity map for the bootloader, direct map for the
+kernel -- so that became a parameter rather than an assumption either of them
+made about the other.
+
+Every page of a loaded image is mapped, gaps between segments included, with the
+permissions of whichever segment covers it and the least of everything for the
+gaps. That is not tidiness: the image is one contiguous block from the buddy
+allocator, and the pages are handed back individually when the address space is
+dropped. A page that was allocated and never mapped would never be freed, and
+the block it came from would stay split for the life of the system.
+
+Outstanding: the filesystem reader cannot write and skips long names. The block
+driver polls one request at a time and takes no interrupt. A program gets no
+arguments, and only the kernel can decide to start one. NexusFS is not started.
 
 ## Phase 8 — Drivers and user space ⬜
 

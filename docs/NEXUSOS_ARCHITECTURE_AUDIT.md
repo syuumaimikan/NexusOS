@@ -72,7 +72,8 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Filesystems | **PARTIAL** | FAT32 read only: paths, cluster chains, no long names, no writing |
 | MSI, MSI-X | **MISSING** | Devices are found; nothing routes their interrupts yet |
 | Ring 3 | **DONE** | A user thread runs at CPL 3, preemptible, in its own pages |
-| System calls | **PARTIAL** | `syscall`/`sysret` entry, five calls; no handles or IPC |
+| User programs | **PARTIAL** | Built as their own binaries and loaded from disk; no arguments, no dynamic linking |
+| System calls | **PARTIAL** | `syscall`/`sysret` entry, ten calls; no shared memory or events |
 | Processes, address spaces | **DONE** | A page-table root per process; kernel upper half shared by pointer |
 | Handles, capabilities | **DONE** | Per-process table, rights checked on every use |
 | IPC | **DONE** | Blocking channels, handles carried in messages, rights checked on transfer |
@@ -172,61 +173,66 @@ These are real and are tracked, not hidden:
    the next object kind, and the compositor will need it before anything else
    does.
 4. **A process has no parent, no exit status, and no way to be created from
-   inside the system.** Every process NexusOS runs is one the kernel builds at
-   boot. Creating one is a request to whoever is allowed to answer it, so it
-   wants handle transfer underneath it.
-5. **No user memory copy helpers.** `Call::Log` validates its range and then
+   inside the system.** The kernel can load a program from a disk into a
+   process of its own, but only it can decide to. Making that a request a
+   process sends over a channel — to whoever holds the authority to answer it —
+   is what turns loading into spawning.
+5. **A program gets no arguments and no environment.** It is entered with a
+   stack and nothing on it. Whatever a program needs to be told should reach it
+   through a handle it was given, which is the right shape and is not yet wired
+   to anything.
+6. **No user memory copy helpers.** `Call::Log` validates its range and then
    reads it directly. A user pointer that is unmapped faults in the kernel, on
    the kernel's stack, and is reported as a kernel fault; it should be turned
    into an error returned to the caller. That needs a fault handler that knows
    about a fixup table, which is its own piece of work.
-6. **The run queues are shared, not per-processor.** One lock covers the thread
+7. **The run queues are shared, not per-processor.** One lock covers the thread
    table and all four queues. That is correct and it is what makes every
    processor able to take work, but it is a point of contention that will matter
    once there are more processors or more threads than a desktop has today.
    Per-processor queues with balancing between them is the next step, and it
    wants contention to measure rather than to be guessed at.
-7. **No thread affinity.** A thread can be resumed on any processor, which is
+8. **No thread affinity.** A thread can be resumed on any processor, which is
    right for fairness and wrong for cache locality. There is nothing to measure
    it with yet.
-8. **Shootdowns are broadcast to every processor.** A processor that never
+9. **Shootdowns are broadcast to every processor.** A processor that never
    loaded the address space is interrupted anyway, because nothing tracks which
    spaces are live where. Correct, and more work than necessary now that there
    is more than one address space to be wrong about.
-9. **The framebuffer is mapped write-back, not write-combining.** Correct in
-   QEMU, slow on real hardware. Needs PAT configuration.
-10. **Bootloader allocations are over-conservative.** Page tables, the handoff
+10. **The framebuffer is mapped write-back, not write-combining.** Correct in
+    QEMU, slow on real hardware. Needs PAT configuration.
+11. **Bootloader allocations are over-conservative.** Page tables, the handoff
     block and the kernel image are allocated as `RuntimeServicesData`, which the
     kernel treats as permanently reserved. This wastes on the order of 100 KiB.
-11. **The filesystem reader cannot write, and skips long names.** FAT32 is
+12. **The filesystem reader cannot write, and skips long names.** FAT32 is
     read only: a writer has to keep two allocation tables and the free-cluster
     count consistent through a power failure, and nothing yet needs to write to
     the boot partition. Long names are skipped rather than half-assembled,
     because a partial implementation would look like it worked. NexusFS is not
     started.
-12. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
+13. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
     automatically.
-13. **The heap never shrinks.** It grows on demand and keeps what it takes.
+14. **The heap never shrinks.** It grows on demand and keeps what it takes.
     Acceptable for a kernel of this size; worth revisiting when there are
     long-running workloads.
-14. **The kernel binary has no host test harness.** It is `no_main` with its own
+15. **The kernel binary has no host test harness.** It is `no_main` with its own
     panic handler, so tests written inside it would compile and never run. What
     can be checked statically is checked with const assertions; the rest is
     covered by boot-marker checks, fault injection and screenshots. Logic worth
     unit testing is moved into a library crate instead, which is why the
     allocators live in `nexus-mm`.
-15. **No ageing in the scheduler.** Strict priority means a busy high-priority
+16. **No ageing in the scheduler.** Strict priority means a busy high-priority
     thread starves everything below it. Deliberate for now, and it needs real
     workloads before it can be tuned honestly.
-16. **CJK glyphs depend on the build machine.** They are rasterised at build
+17. **CJK glyphs depend on the build machine.** They are rasterised at build
     time from an installed font, because bundling one would redistribute it.
     A machine without a suitable font still builds, but non-Latin text renders
     as placeholder boxes. See [i18n.md](i18n.md).
-17. **Input goes nowhere but the kernel.** Keys are decoded and acted on
+18. **Input goes nowhere but the kernel.** Keys are decoded and acted on
     inside the kernel because there is no focus, no window and no process to
     deliver them to. There is no IME either, so Japanese can be displayed but
     not typed.
-18. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
+19. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
     no bidirectional text, no ligatures or combining marks.
 
 Resolved since the first audit: the missing IDT (Phase 2), the
