@@ -497,15 +497,54 @@ a pointer as its status. The suite now requires every process in a boot to exit
 with zero, because a garbage status looks exactly like a working system until a
 parent believes it means failure.
 
+And a program can wait for whichever of several things happens first, which is
+the thing that had to exist before anything could be a *server*. Every blocking
+call until now named one object: a thread read this channel or waited for that
+process, and while it did it could do nothing else. Something holding channels
+to four clients could not serve the second while blocked on the first, and a
+thread per client is the arrangement that stops scaling first and hides
+deadlocks in the meantime.
+
+A wait set is an object held by a handle, like everything else. A process puts
+handles into one under keys of its own choosing, waits, and is told which keys
+are ready. The keys are the caller's and not the kernel's, because the caller is
+the one who has to recognise them: a handle number would make the answer a thing
+to look up, and it already has a name for that client.
+
+Level-triggered, on purpose. Waiting re-tests every member rather than
+remembering which one signalled. An edge -- "a message arrived" -- is a fact
+about a moment, and a set that stored edges would have to be right about every
+one of them forever; an edge delivered while nobody was waiting is a client that
+never gets served again. A level -- "there is a message waiting" -- is a fact
+about now, costs a lock per member to re-read, and cannot be lost. So a signal
+from a channel or a process is only a hint that something may have changed: it
+need not be accurate, need not arrive once, and a spurious one costs a re-poll.
+
+A channel is ready when it holds a message *or* its peer has gone, because both
+are things the holder must act on, and a set that reported only the first would
+hang on a client that died.
+
+Building it turned up a lost wake-up in the wait queues underneath, present
+since they were written. `wait_until` tested its condition outside the queue's
+lock -- it has to, because the condition lives behind an inbox or a status word
+and taking those locks in that order is a deadlock rather than a race -- so a
+waker landing between the test and the block found an empty queue, woke nobody,
+and left the thread asleep with its condition already true. The queue now
+carries a wake counter: a waiter reads it before testing and blocks only if it
+has not moved, and the comparison happens under the same lock as joining the
+queue. There is no third case, which is the point. A wake that a set depends on
+is much easier to lose than one a single blocking receive depends on, because
+there is always another message coming on a channel and there is not always
+another client.
+
 Outstanding: NexusFS has no journal, so a power failure between two writes can
 leave the bitmap saying a block is taken that no file points at -- space leaked,
 nothing corrupted, which is the right way round for the failure to be. No
 permissions, no timestamps beyond the tick a thing was made at, no partial
 writes and no seek, so a large file is read and written whole. The FAT32 reader
 still cannot write and skips long names. The block driver polls one request at a
-time and takes no interrupt. A program gets no arguments, nothing can end a
-process but its own thread, and there is no way to wait for several things at
-once.
+time and takes no interrupt. A program gets no arguments, and nothing can end a
+process but its own thread.
 
 ## Phase 8 — Drivers and user space ⬜
 

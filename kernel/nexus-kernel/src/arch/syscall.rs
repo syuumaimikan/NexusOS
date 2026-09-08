@@ -259,11 +259,20 @@ pub enum Call {
     NodeSize = 19,
     /// Wait for a process to end, and take its status. `(handle)`.
     ProcessWait = 20,
+    /// Somewhere to wait for several things at once.
+    WaitSetCreate = 21,
+    /// Watch a handle under a key. `(set, handle, key)`.
+    WaitSetAdd = 22,
+    /// Stop watching whatever has a key. `(set, key)`.
+    WaitSetRemove = 23,
+    /// Block until something is ready. `(set, pointer, capacity)`, returning
+    /// how many keys were written.
+    WaitSetWait = 24,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 25;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -289,6 +298,10 @@ impl Call {
             18 => Some(Self::NodeWrite),
             19 => Some(Self::NodeSize),
             20 => Some(Self::ProcessWait),
+            21 => Some(Self::WaitSetCreate),
+            22 => Some(Self::WaitSetAdd),
+            23 => Some(Self::WaitSetRemove),
+            24 => Some(Self::WaitSetWait),
             _ => None,
         }
     }
@@ -407,6 +420,10 @@ extern "sysv64" fn dispatch(
         Some(Call::NodeWrite) => node_write(argument0, argument1, argument2),
         Some(Call::NodeSize) => node_size(argument0),
         Some(Call::ProcessWait) => process_wait(argument0),
+        Some(Call::WaitSetCreate) => wait_set_create(),
+        Some(Call::WaitSetAdd) => wait_set_add(argument0, argument1, argument2),
+        Some(Call::WaitSetRemove) => wait_set_remove(argument0, argument1),
+        Some(Call::WaitSetWait) => wait_set_wait(argument0, argument1, argument2),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -1165,4 +1182,134 @@ fn process_wait(handle: u64) -> u64 {
         return EINVAL;
     }
     status
+}
+
+// -- Wait sets -----------------------------------------------------------------
+
+/// Bytes one key takes in the buffer [`Call::WaitSetWait`] fills.
+const KEY_SIZE: u64 = 8;
+
+/// Turn a wait-set refusal into the value the caller sees.
+fn waitset_error(error: crate::waitset::WaitSetError) -> u64 {
+    use crate::waitset::WaitSetError;
+    match error {
+        WaitSetError::Full => EMSGSIZE,
+        WaitSetError::DuplicateKey => EEXIST,
+        WaitSetError::NoSuchKey => ENOENT,
+    }
+}
+
+/// The wait set a handle names, with the rights the operation needs.
+fn caller_set(
+    handle: u64,
+    needed: crate::ipc::Rights,
+) -> Result<alloc::sync::Arc<crate::waitset::WaitSet>, u64> {
+    let process = caller()?;
+    let handle = u32::try_from(handle).map_err(|_| EBADF)?;
+    process
+        .handles
+        .wait_set(handle, needed)
+        .map_err(handle_error)
+}
+
+/// [`Call::WaitSetCreate`]: somewhere to wait for several things at once.
+fn wait_set_create() -> u64 {
+    let Ok(process) = caller() else {
+        return ENOPROC;
+    };
+    let set = alloc::sync::Arc::new(crate::waitset::WaitSet::new());
+    u64::from(
+        process
+            .handles
+            .insert(crate::ipc::Object::WaitSet(set), crate::ipc::Rights::ALL),
+    )
+}
+
+/// [`Call::WaitSetAdd`]: watch a handle, under a key of the caller's choosing.
+///
+/// The key is the caller's and not the kernel's. A wait that answered with
+/// handle numbers would make the answer a thing to look up in a table the
+/// program keeps anyway; a key is whatever the program already calls that
+/// client, and comes back unchanged.
+///
+/// Adding needs the right to read the thing being watched, because knowing that
+/// a message has arrived is most of the way to reading it: a set that would
+/// watch a handle its holder cannot read would leak the timing of everything
+/// happening on it.
+fn wait_set_add(set: u64, handle: u64, key: u64) -> u64 {
+    let set = match caller_set(set, crate::ipc::Rights::WRITE) {
+        Ok(set) => set,
+        Err(error) => return error,
+    };
+    let Ok(process) = caller() else {
+        return ENOPROC;
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+
+    // A channel or a process. Everything else is either always ready or never
+    // becomes ready, and adding one would be a program waiting for something
+    // that cannot arrive.
+    let watched = match process.handles.watchable(handle, crate::ipc::Rights::READ) {
+        Ok(watched) => watched,
+        Err(error) => return handle_error(error),
+    };
+
+    match set.add(key, watched) {
+        Ok(()) => 0,
+        Err(error) => waitset_error(error),
+    }
+}
+
+/// [`Call::WaitSetRemove`]: stop watching whatever has this key.
+fn wait_set_remove(set: u64, key: u64) -> u64 {
+    let set = match caller_set(set, crate::ipc::Rights::WRITE) {
+        Ok(set) => set,
+        Err(error) => return error,
+    };
+    match set.remove(key) {
+        Ok(()) => 0,
+        Err(error) => waitset_error(error),
+    }
+}
+
+/// [`Call::WaitSetWait`]: block until something is ready, and say what.
+///
+/// Every ready key is returned, not the first: a caller that got one at a time
+/// would make a system call per ready client, which is the cost a wait set
+/// exists to avoid.
+///
+/// An empty set returns zero rather than blocking. Nothing can ever make it
+/// ready, so waiting would be waiting forever -- the same judgement `receive`
+/// makes about a channel whose peer has gone.
+fn wait_set_wait(set: u64, pointer: u64, capacity: u64) -> u64 {
+    let set = match caller_set(set, crate::ipc::Rights::READ) {
+        Ok(set) => set,
+        Err(error) => return error,
+    };
+
+    // Checked before blocking, so a caller with a buffer that could never hold
+    // the answer is told so now rather than after an unbounded wait.
+    let room = capacity / KEY_SIZE;
+    if room == 0 {
+        return ETOOBIG;
+    }
+
+    let ready = set.wait();
+    if ready.is_empty() {
+        return 0;
+    }
+    if ready.len() as u64 > room {
+        return ETOOBIG;
+    }
+
+    let mut packed = alloc::vec::Vec::with_capacity(ready.len() * KEY_SIZE as usize);
+    for key in &ready {
+        packed.extend_from_slice(&key.to_le_bytes());
+    }
+    if copy_out(&packed, pointer, capacity) >= ERROR_BASE {
+        return EINVAL;
+    }
+    ready.len() as u64
 }

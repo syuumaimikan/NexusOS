@@ -167,6 +167,8 @@ Invoke-Step 'boot test' {
         'starts holding directory handle',
         'init: made a directory and a file',
         'process lifetime verified',
+        'wait set verified',
+        'one wait covered a channel and a process, and reported both',
         'exited with status 0',
         'the program it asked for finished, and said it worked',
         'loaded from BIN/INIT.ELF',
@@ -239,11 +241,18 @@ Invoke-Step 'boot test' {
         throw "alpha and beta share the frame at $($Matches[1])"
     }
     # Every address space a process was given has to come back when it exits.
-    if (-not ($output -match '(\d+) address spaces created, (\d+) freed')) {
+    #
+    # The *last* monitor line, not the first. The monitor reports every five
+    # seconds, and the earliest report is taken while processes are still
+    # running, so a program that has not exited yet reads as a leak. What is
+    # being asserted is that nothing is outstanding once the system has settled.
+    $spaces = [regex]::Matches($output, '(\d+) address spaces created, (\d+) freed')
+    if ($spaces.Count -lt 1) {
         throw 'the kernel never reported what became of the address spaces'
     }
-    if ([int]$Matches[1] -ne [int]$Matches[2]) {
-        throw "$($Matches[1]) address spaces were created but only $($Matches[2]) freed"
+    $last = $spaces[$spaces.Count - 1]
+    if ([int]$last.Groups[1].Value -ne [int]$last.Groups[2].Value) {
+        throw "$($last.Groups[1].Value) address spaces were created but only $($last.Groups[2].Value) freed"
     }
     # The input thread must be blocked, not sleeping. It is the difference
     # between a thread that costs nothing between keystrokes and one that wakes
@@ -262,12 +271,16 @@ Invoke-Step 'boot test' {
     }
     # Every process that started has to have ended, and its address space with
     # it. A process that leaked would look exactly like one that is still
-    # usefully running.
-    if (-not ($output -match '(\d+) processes started, (\d+) ended')) {
+    # usefully running -- which is also why this reads the last report and not
+    # the first: early on, one that is still running is one that is still
+    # running.
+    $processes = [regex]::Matches($output, '(\d+) processes started, (\d+) ended')
+    if ($processes.Count -lt 1) {
         throw 'the kernel never reported what became of the processes'
     }
-    if ([int]$Matches[1] -ne [int]$Matches[2]) {
-        throw "$($Matches[1]) processes started but only $($Matches[2]) ended"
+    $last = $processes[$processes.Count - 1]
+    if ([int]$last.Groups[1].Value -ne [int]$last.Groups[2].Value) {
+        throw "$($last.Groups[1].Value) processes started but only $($last.Groups[2].Value) ended"
     }
     # Messages sent must all have been received. A send that quietly went
     # nowhere would still print the line above it.

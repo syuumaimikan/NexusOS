@@ -72,6 +72,8 @@ pub struct Completion {
     status: AtomicU64,
     /// Threads waiting for it to end.
     waiters: WaitQueue,
+    /// Wait sets to tell when it does.
+    watchers: crate::waitset::Watchers,
 }
 
 impl Completion {
@@ -90,7 +92,15 @@ impl Completion {
         // Published second. A waiter that sees this cannot read a status that
         // has not been written, which is what the two flags buy.
         self.finished.store(true, Ordering::Release);
-        while self.waiters.wake_one() {}
+        // Everyone, not one. Ending is permanent, so a thread left asleep here
+        // would be asleep on something that cannot happen twice.
+        self.waiters.wake_all();
+        self.watchers.signal();
+    }
+
+    /// Start telling `set` when this process ends.
+    pub fn watch(&self, set: alloc::sync::Weak<crate::waitset::WaitSet>) {
+        self.watchers.add(set);
     }
 
     /// The status, if it has ended.
@@ -154,6 +164,7 @@ impl Process {
                 finished: AtomicBool::new(false),
                 status: AtomicU64::new(0),
                 waiters: WaitQueue::new(),
+                watchers: crate::waitset::Watchers::new(),
             }),
         })
     }

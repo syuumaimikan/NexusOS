@@ -122,6 +122,10 @@ enum Call {
     NodeWrite = 18,
     NodeSize = 19,
     ProcessWait = 20,
+    WaitSetCreate = 21,
+    WaitSetAdd = 22,
+    WaitSetRemove = 23,
+    WaitSetWait = 24,
 }
 
 /// Make a system call.
@@ -555,4 +559,76 @@ pub fn wait(process: Handle) -> Result<u32, Error> {
     // SAFETY: takes one integer.
     let result = unsafe { syscall(Call::ProcessWait, u64::from(process.0), 0, 0, 0, 0, 0) };
     check(result).map(|status| status as u32)
+}
+
+// -- Waiting for several things ------------------------------------------------
+//
+// Every other blocking call names one object, which is enough for a program with
+// one thing to do and not enough for a server: something holding channels to
+// four clients cannot serve the second while blocked on the first. A wait set is
+// the answer, and it is an object held by a handle like everything else here.
+//
+// Put handles into one under keys of your own choosing, wait on the set, and be
+// told which keys are ready. The keys come back unchanged -- they are whatever
+// the program already calls that client, not something to look up.
+
+/// Somewhere to wait for whichever of several things happens first.
+pub fn wait_set() -> Result<Handle, Error> {
+    // SAFETY: takes no arguments.
+    let result = unsafe { syscall(Call::WaitSetCreate, 0, 0, 0, 0, 0, 0) };
+    check(result).map(|handle| Handle(handle as u32))
+}
+
+/// Watch `handle` as part of `set`, under `key`.
+///
+/// Channels and processes only. A channel is ready when a message is waiting
+/// *or* its peer has gone, because both are things the holder has to act on; a
+/// process is ready when it has ended. Anything else is never not ready, and
+/// watching one would be waiting for something that cannot arrive.
+pub fn watch(set: Handle, handle: Handle, key: u64) -> Result<(), Error> {
+    // SAFETY: takes three integers.
+    let result = unsafe {
+        syscall(
+            Call::WaitSetAdd,
+            u64::from(set.0),
+            u64::from(handle.0),
+            key,
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|_| ())
+}
+
+/// Stop watching whatever has this key.
+pub fn unwatch(set: Handle, key: u64) -> Result<(), Error> {
+    // SAFETY: takes two integers.
+    let result = unsafe { syscall(Call::WaitSetRemove, u64::from(set.0), key, 0, 0, 0, 0) };
+    check(result).map(|_| ())
+}
+
+/// Block until something in `set` is ready, and fill `keys` with what is.
+///
+/// Returns how many keys were written. Every ready key comes back, not the
+/// first, so a server with four clients ready serves four of them for one
+/// system call.
+///
+/// Returns zero when the set is empty: nothing can ever make it ready, so
+/// waiting would be waiting forever.
+pub fn wait_any(set: Handle, keys: &mut [u64]) -> Result<usize, Error> {
+    // SAFETY: the buffer is live and writable here, and its length is given in
+    // bytes because that is what the kernel checks the range against.
+    let result = unsafe {
+        syscall(
+            Call::WaitSetWait,
+            u64::from(set.0),
+            keys.as_mut_ptr() as u64,
+            core::mem::size_of_val(keys) as u64,
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|count| count as usize)
 }

@@ -35,6 +35,7 @@ mod selftest;
 mod serial;
 mod sync;
 mod user;
+mod waitset;
 
 use nexus_abi::{layout, BootInfo, MemoryKind, MemoryRegion};
 
@@ -561,6 +562,7 @@ fn self_test() {
     tlb_self_test();
     ipc_self_test();
     process_self_test();
+    waitset_self_test();
     disk_self_test();
     filesystem_self_test();
     nexusfs_self_test();
@@ -938,6 +940,270 @@ fn disk_self_test() {
 }
 
 /// State for the IPC self-test.
+/// Shared state for the wait-set self-test.
+mod waitset_test {
+    use alloc::sync::Arc;
+    use core::sync::atomic::AtomicU64;
+
+    use crate::sync::IrqSpinLock;
+    use crate::waitset::WaitSet;
+
+    /// The set the waiting thread waits on.
+    pub static SET: IrqSpinLock<Option<Arc<WaitSet>>> = IrqSpinLock::new(None);
+    /// The key the waiter was given, plus one, so zero means "not yet".
+    pub static WOKE_FOR: AtomicU64 = AtomicU64::new(0);
+    /// How many keys came back with it, so a set that reported everything as
+    /// ready is caught rather than read as a pass.
+    pub static WOKE_COUNT: AtomicU64 = AtomicU64::new(0);
+}
+
+/// The keys the wait-set test uses.
+///
+/// Large and unrelated to any handle number, so a set that returned a handle
+/// instead of the key it was given fails rather than coincidentally matching.
+const KEY_FIRST: u64 = 0x1111_0000;
+const KEY_SECOND: u64 = 0x2222_0000;
+const KEY_PROCESS: u64 = 0x3333_0000;
+
+/// A thread that blocks on a wait set and records the first thing it hears.
+fn waitset_test_waiter(_argument: usize) {
+    use core::sync::atomic::Ordering;
+
+    let set = waitset_test::SET.lock().clone();
+    let Some(set) = set else {
+        return;
+    };
+    let ready = set.wait();
+    waitset_test::WOKE_COUNT.store(ready.len() as u64, Ordering::Relaxed);
+    // Published last and with release ordering, because it is what the waiting
+    // thread watches: a count seen without the key it belongs to would be read
+    // as a wake-up for key zero.
+    waitset_test::WOKE_FOR.store(ready.first().copied().unwrap_or(0) + 1, Ordering::Release);
+}
+
+/// Exercise waiting for whichever of several things happens first.
+///
+/// The claim worth making is not that a set can be polled -- that is a loop
+/// over a list -- but that a thread blocked on one is woken by *whichever*
+/// member becomes ready, having been asleep until it did. So this blocks a
+/// thread on a set of three things, checks it left the run queues, makes
+/// exactly one of them ready, and requires the key that comes back to be that
+/// one and only that one.
+///
+/// Then the same again for a member of a different kind, because a set whose
+/// wake-up path worked for channels and not for processes would pass the first
+/// half and hang a real server on the day a client died.
+fn waitset_self_test() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::Ordering;
+
+    let (first_write, first_read) = ipc::Endpoint::pair();
+    let (_second_write, second_read) = ipc::Endpoint::pair();
+
+    let space = match memory::address_space::AddressSpace::new() {
+        Ok(space) => space,
+        Err(error) => {
+            kprintln!("[test] FAILED: could not make an address space to watch: {error}");
+            return;
+        }
+    };
+    let subject = process::Process::new("watched", Arc::new(space));
+    let completion = Arc::clone(&subject.completion);
+
+    let set = Arc::new(waitset::WaitSet::new());
+    let members = [
+        (
+            KEY_FIRST,
+            waitset::Watched::Channel(Arc::clone(&first_read)),
+        ),
+        (
+            KEY_SECOND,
+            waitset::Watched::Channel(Arc::clone(&second_read)),
+        ),
+        (
+            KEY_PROCESS,
+            waitset::Watched::Process(Arc::clone(&completion)),
+        ),
+    ];
+    for (key, what) in members {
+        if let Err(error) = set.add(key, what) {
+            kprintln!("[test] FAILED: could not add to a wait set: {error}");
+            return;
+        }
+    }
+
+    // The same key twice must be refused. Two members under one name would make
+    // the answer ambiguous, which is worse than an error.
+    if set.add(
+        KEY_FIRST,
+        waitset::Watched::Process(Arc::clone(&completion)),
+    ) != Err(waitset::WaitSetError::DuplicateKey)
+    {
+        kprintln!("[test] FAILED: a wait set accepted the same key twice");
+        return;
+    }
+    if set.len() != 3 {
+        kprintln!(
+            "[test] FAILED: a wait set holds {} members, not 3",
+            set.len()
+        );
+        return;
+    }
+
+    // Nothing has happened yet, so nothing is ready. A set that reported a
+    // member ready here would make every wait return immediately and turn the
+    // whole thing into a spin.
+    if !set.poll().is_empty() {
+        kprintln!("[test] FAILED: a wait set reported something ready before anything happened");
+        return;
+    }
+
+    // -- A channel, with a thread already asleep on the set ------------------
+
+    *waitset_test::SET.lock() = Some(Arc::clone(&set));
+    waitset_test::WOKE_FOR.store(0, Ordering::Relaxed);
+    let blocked_before = sched::stats().blocked;
+
+    if let Err(error) = sched::spawn(
+        "waiting",
+        sched::thread::Priority::Normal,
+        waitset_test_waiter,
+        0,
+    ) {
+        kprintln!("[test] FAILED: could not start a thread to wait on a set: {error}");
+        return;
+    }
+
+    let mut blocked = false;
+    for _ in 0..200 {
+        if sched::stats().blocked > blocked_before {
+            blocked = true;
+            break;
+        }
+        sched::sleep_ms(1);
+    }
+    if !blocked {
+        kprintln!("[test] FAILED: the thread waiting on a wait set never blocked");
+        return;
+    }
+    if waitset_test::WOKE_FOR.load(Ordering::Acquire) != 0 {
+        kprintln!("[test] FAILED: a wait on a set returned before anything was ready");
+        return;
+    }
+
+    if let Err(error) = first_write.send(b"one", alloc::vec::Vec::new()) {
+        kprintln!("[test] FAILED: could not send to a watched channel: {error}");
+        return;
+    }
+
+    let mut woke = 0;
+    for _ in 0..200 {
+        woke = waitset_test::WOKE_FOR.load(Ordering::Acquire);
+        if woke != 0 {
+            break;
+        }
+        sched::sleep_ms(1);
+    }
+    if woke == 0 {
+        kprintln!("[test] FAILED: a message on a watched channel did not wake the wait set");
+        return;
+    }
+    if woke - 1 != KEY_FIRST {
+        kprintln!(
+            "[test] FAILED: the wait set woke for key {:#x} and not {KEY_FIRST:#x}",
+            woke - 1
+        );
+        return;
+    }
+    if waitset_test::WOKE_COUNT.load(Ordering::Relaxed) != 1 {
+        kprintln!(
+            "[test] FAILED: the wait set reported {} keys ready, not 1",
+            waitset_test::WOKE_COUNT.load(Ordering::Relaxed)
+        );
+        return;
+    }
+
+    // -- And a process, which is the other kind of member --------------------
+
+    // The message is read rather than left. Nothing needs its contents, but a
+    // message sent and never received is exactly what the boot's own
+    // sent-versus-received check exists to catch, and a self-test that trips
+    // the system's accounting is a self-test that has to be explained away
+    // every time someone reads the numbers.
+    if first_read.try_receive().is_none() {
+        kprintln!("[test] FAILED: the message a wait set reported was not there to read");
+        return;
+    }
+
+    // The channel is no longer ready, but it is taken out of the set anyway:
+    // what is being tested next is whether a *process* ending wakes the set,
+    // and a member that could become ready for any other reason would make the
+    // wait return whether it did or not.
+    if let Err(error) = set.remove(KEY_FIRST) {
+        kprintln!("[test] FAILED: could not remove a key from a wait set: {error}");
+        return;
+    }
+    if set.remove(KEY_FIRST) != Err(waitset::WaitSetError::NoSuchKey) {
+        kprintln!("[test] FAILED: removing a key twice was not refused");
+        return;
+    }
+
+    waitset_test::WOKE_FOR.store(0, Ordering::Relaxed);
+    let blocked_before = sched::stats().blocked;
+    if let Err(error) = sched::spawn(
+        "waiting",
+        sched::thread::Priority::Normal,
+        waitset_test_waiter,
+        0,
+    ) {
+        kprintln!("[test] FAILED: could not start a second thread to wait: {error}");
+        return;
+    }
+    let mut blocked = false;
+    for _ in 0..200 {
+        if sched::stats().blocked > blocked_before {
+            blocked = true;
+            break;
+        }
+        sched::sleep_ms(1);
+    }
+    if !blocked {
+        kprintln!("[test] FAILED: the second thread waiting on a wait set never blocked");
+        return;
+    }
+
+    completion.finish(0);
+
+    let mut woke = 0;
+    for _ in 0..200 {
+        woke = waitset_test::WOKE_FOR.load(Ordering::Acquire);
+        if woke != 0 {
+            break;
+        }
+        sched::sleep_ms(1);
+    }
+    if woke - 1 != KEY_PROCESS {
+        kprintln!(
+            "[test] FAILED: a process ending woke the wait set for key {:#x}, not {KEY_PROCESS:#x}",
+            woke.wrapping_sub(1)
+        );
+        return;
+    }
+
+    // A channel whose peer has gone is ready, and has to be: a holder that was
+    // only told about messages would wait forever on a client that died.
+    drop(_second_write);
+    if !set.poll().contains(&KEY_SECOND) {
+        kprintln!("[test] FAILED: a channel whose peer has gone was not reported ready");
+        return;
+    }
+
+    kprintln!(
+        "[test] wait set verified: a thread blocked on three members, was woken by a message \
+         for one key and by a process ending for another, and a dead peer reads as ready"
+    );
+}
+
 /// Shared state for the process-lifetime self-test.
 mod process_test {
     use alloc::sync::Arc;

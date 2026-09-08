@@ -127,6 +127,8 @@ pub struct Endpoint {
     /// The other end, weakly, so that a channel both of whose ends are still
     /// referenced by their owners does not keep itself alive after they go.
     peer: IrqSpinLock<Weak<Endpoint>>,
+    /// Wait sets to tell when a message arrives or the peer goes.
+    watchers: crate::waitset::Watchers,
 }
 
 /// Why a channel operation could not be completed.
@@ -170,7 +172,13 @@ impl Endpoint {
             inbox: IrqSpinLock::new(VecDeque::new()),
             arrivals: WaitQueue::new(),
             peer: IrqSpinLock::new(Weak::new()),
+            watchers: crate::waitset::Watchers::new(),
         }
+    }
+
+    /// Start telling `set` when a message arrives or the peer goes.
+    pub fn watch(&self, set: alloc::sync::Weak<crate::waitset::WaitSet>) {
+        self.watchers.add(set);
     }
 
     /// Whether the other end still exists.
@@ -210,6 +218,7 @@ impl Endpoint {
         // Outside the inbox lock, and after the push, so a thread this wakes
         // finds the message already there.
         peer.arrivals.wake_one();
+        peer.watchers.signal();
         MESSAGES_SENT.fetch_add(1, Ordering::Relaxed);
         Ok(message.len())
     }
@@ -261,7 +270,11 @@ impl Drop for Endpoint {
         // longer come; waking them lets `receive` notice and report it rather
         // than waiting for a write that will never happen.
         if let Some(peer) = self.peer.lock().upgrade() {
-            peer.arrivals.wake_one();
+            // Every waiter, not one: the peer going is permanent, and a thread
+            // left asleep on it would be asleep on something that cannot
+            // change again.
+            peer.arrivals.wake_all();
+            peer.watchers.signal();
         }
     }
 }
@@ -440,6 +453,8 @@ pub enum Object {
     /// that has finished costs a name and a number rather than the address
     /// space it was running in.
     Process(Arc<crate::process::Completion>),
+    /// Somewhere to wait for whichever of several things happens first.
+    WaitSet(Arc<crate::waitset::WaitSet>),
 }
 
 impl Object {
@@ -457,6 +472,7 @@ impl Object {
                 }
             }
             Self::Process(_) => "process",
+            Self::WaitSet(_) => "wait set",
         }
     }
 }
@@ -585,6 +601,47 @@ impl HandleTable {
         }
         match &handle.object {
             Object::Process(completion) => Ok(Arc::clone(completion)),
+            _ => Err(HandleError::WrongKind),
+        }
+    }
+
+    /// The wait set `id` names, if it names one and carries `needed`.
+    pub fn wait_set(
+        &self,
+        id: u32,
+        needed: Rights,
+    ) -> Result<Arc<crate::waitset::WaitSet>, HandleError> {
+        let entries = self.entries.lock();
+        let handle = entries.get(&id).ok_or(HandleError::NotFound)?;
+        if !handle.rights.contains(needed) {
+            return Err(HandleError::Denied);
+        }
+        match &handle.object {
+            Object::WaitSet(set) => Ok(Arc::clone(set)),
+            _ => Err(HandleError::WrongKind),
+        }
+    }
+
+    /// The thing `id` names, if it is something a wait set can watch.
+    ///
+    /// A channel or a process. Memory and directories are never not ready, so
+    /// watching one would be a program waiting for something that has already
+    /// happened and will not happen again -- which reads as a hang and is one.
+    pub fn watchable(
+        &self,
+        id: u32,
+        needed: Rights,
+    ) -> Result<crate::waitset::Watched, HandleError> {
+        let entries = self.entries.lock();
+        let handle = entries.get(&id).ok_or(HandleError::NotFound)?;
+        if !handle.rights.contains(needed) {
+            return Err(HandleError::Denied);
+        }
+        match &handle.object {
+            Object::Channel(endpoint) => Ok(crate::waitset::Watched::Channel(Arc::clone(endpoint))),
+            Object::Process(completion) => {
+                Ok(crate::waitset::Watched::Process(Arc::clone(completion)))
+            }
             _ => Err(HandleError::WrongKind),
         }
     }

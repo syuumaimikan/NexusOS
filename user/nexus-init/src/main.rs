@@ -165,7 +165,106 @@ fn ask_for_a_program() {
     nexus_user::log("init: asked for a program, got a channel, and used it").ok();
 
     share_memory_with(child);
+    wait_on_both(child, process);
     wait_for(process);
+}
+
+/// The keys this program gives the two things it watches.
+///
+/// Its own names for them, not handle numbers. That is the point of a key: it
+/// comes back unchanged, so a program recognises what became ready instead of
+/// looking it up.
+const KEY_CHILD: u64 = 100;
+const KEY_PROCESS: u64 = 200;
+
+/// Wait on a channel and a process at the same time.
+///
+/// This is the shape every server has and no program here could write until
+/// now. A blocking `receive` on one client cannot be interrupted by a second
+/// client having something to say, and a `wait` for one process cannot be
+/// interrupted by a message. One wait over both is the difference between a
+/// program that serves one thing and a program that serves.
+///
+/// A wait returns as soon as *anything* is ready, not when everything is, so
+/// this loops the way a server loops: take what is ready, deal with it, stop
+/// watching it, wait again. Dealing with it is what a real one would do with
+/// the message; here it is enough to have been told, and stopping watching is
+/// what keeps a level-triggered set from reporting the same thing forever.
+///
+/// The loop ends when the set is empty, which the kernel reports as zero keys
+/// rather than by blocking on something that can never become ready.
+fn wait_on_both(child: nexus_user::Handle, process: nexus_user::Handle) {
+    let Ok(set) = nexus_user::wait_set() else {
+        failed("init: FAILED: could not make a wait set");
+        return;
+    };
+    if nexus_user::watch(set, child, KEY_CHILD).is_err()
+        || nexus_user::watch(set, process, KEY_PROCESS).is_err()
+    {
+        failed("init: FAILED: could not watch a handle");
+        return;
+    }
+
+    // The same key twice has to be refused: two members under one name would
+    // make the answer ambiguous, which is worse than an error.
+    if nexus_user::watch(set, process, KEY_CHILD) != Err(nexus_user::Error::Exists) {
+        failed("init: FAILED: a wait set accepted the same key twice");
+        return;
+    }
+
+    let mut saw_child = false;
+    let mut saw_process = false;
+    let mut waits = 0;
+
+    // Bounded, because a loop that cannot end is the failure this is testing
+    // for: a wait set that never reports the second member would otherwise
+    // hang the boot rather than report anything.
+    while waits < 8 {
+        waits += 1;
+        let mut keys = [0u64; 4];
+        let Ok(count) = nexus_user::wait_any(set, &mut keys) else {
+            failed("init: FAILED: could not wait on a set");
+            return;
+        };
+        if count == 0 {
+            // The set is empty: everything it watched has been dealt with.
+            break;
+        }
+
+        for key in &keys[..count] {
+            match *key {
+                KEY_CHILD => saw_child = true,
+                KEY_PROCESS => saw_process = true,
+                _ => {
+                    failed("init: FAILED: a wait set returned a key it was never given");
+                    return;
+                }
+            }
+            // Stop watching what has been dealt with. Readiness here is a
+            // level and not an edge, so a member left in the set would be
+            // reported again on the next wait, forever.
+            if nexus_user::unwatch(set, *key).is_err() {
+                failed("init: FAILED: could not stop watching a handle");
+                return;
+            }
+        }
+    }
+
+    if !saw_child || !saw_process {
+        failed("init: FAILED: a wait set did not report both of the things it watches");
+        return;
+    }
+
+    // And a key that is no longer in the set has to be refused, so a program
+    // that has stopped caring about a client cannot quietly go on being told
+    // about it.
+    if nexus_user::unwatch(set, KEY_CHILD) != Err(nexus_user::Error::NotFound) {
+        failed("init: FAILED: removing a key twice was not refused");
+        return;
+    }
+
+    nexus_user::close(set).ok();
+    nexus_user::log("init: one wait covered a channel and a process, and reported both").ok();
 }
 
 /// Wait for the program that was started, and say how it went.

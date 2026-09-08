@@ -87,9 +87,15 @@ function Invoke-Boot {
             if ($process.HasExited) { break }
             if (Test-Path $log) {
                 $sofar = (Get-Content $log -Raw -Encoding UTF8) -replace "`0", ''
-                # The filesystem has had its say by the time this appears, and
-                # waiting for the whole timeout would double the run for nothing.
-                if ($sofar -and $sofar.Contains('boot thread retiring')) { break }
+                # Wait for what this test actually reads, not for the kernel
+                # to finish starting. `init` does its filesystem work well
+                # after the boot thread retires, and stopping at that marker
+                # cut the guest off in the middle of it -- which reads as a
+                # filesystem that lost a file rather than as a test that did
+                # not wait.
+                if ($sofar -and ($sofar -match 'init: (made a directory and a file|read what a previous boot wrote)')) {
+                    break
+                }
             }
         }
     } finally {
