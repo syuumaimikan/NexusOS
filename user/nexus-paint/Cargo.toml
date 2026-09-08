@@ -1,0 +1,15 @@
+[package]
+name = "nexus-paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A program that draws on the screen from user space."
+
+[[bin]]
+name = "nexus-paint"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }

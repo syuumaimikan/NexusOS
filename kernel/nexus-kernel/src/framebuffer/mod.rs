@@ -260,12 +260,36 @@ impl Framebuffer {
         top: Color,
         bottom: Color,
     ) {
+        self.vertical_gradient_span(0, self.width, start_y, end_y, surface_height, top, bottom);
+    }
+
+    /// The same, across part of the width rather than all of it.
+    ///
+    /// What makes it possible to repaint the background *around* something. The
+    /// kernel gives a rectangle of the screen to a process, and a clear that
+    /// went from edge to edge would take it back twice a second.
+    pub fn vertical_gradient_span(
+        &mut self,
+        start_x: u32,
+        end_x: u32,
+        start_y: u32,
+        end_y: u32,
+        surface_height: u32,
+        top: Color,
+        bottom: Color,
+    ) {
+        if end_x <= start_x {
+            return;
+        }
         let height = surface_height.max(1);
         let end_y = end_y.min(self.height);
+        let end_x = end_x.min(self.width);
         for row in start_y..end_y {
+            // The shade depends on the row's place on the *surface*, not in the
+            // span, so a strip repainted on its own matches what is beside it.
             let amount = (row as u64 * 255 / height as u64).min(255) as u8;
             let color = top.blend(bottom, amount);
-            self.fill_rect(0, row, self.width, 1, color);
+            self.fill_rect(start_x, row, end_x - start_x, 1, color);
         }
     }
 

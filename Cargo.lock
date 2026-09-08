@@ -43,5 +43,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-paint"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-user"
 version = "0.1.0"

@@ -25,6 +25,49 @@ use crate::{arch, i18n, input, kprintln, memory, sched};
 /// The framebuffer, once the kernel has adopted it.
 static DISPLAY: IrqSpinLock<Option<Framebuffer>> = IrqSpinLock::new(None);
 
+/// What the firmware said about the framebuffer, kept so that a process can be
+/// handed it.
+///
+/// A compositor is a process holding a handle to the display's memory, not a
+/// thing inside the kernel. This is the kernel's half of that: it knows where
+/// the pixels are, and something above it decides what to put in them.
+static GEOMETRY: IrqSpinLock<Option<FramebufferInfo>> = IrqSpinLock::new(None);
+
+/// Where the framebuffer is and what shape it has, if there is one.
+#[must_use]
+pub fn geometry() -> Option<FramebufferInfo> {
+    *GEOMETRY.lock()
+}
+
+/// The region of the screen the kernel's own chrome never touches.
+///
+/// Returned as `(x, y, width, height)` in pixels. It is not a window and it is
+/// not owned: it is a rectangle the kernel promises to leave alone, until there
+/// is a compositor to ask instead of a promise to keep.
+///
+/// Above the panel band, and that is the whole of why it is where it is. The
+/// panel is redrawn twice a second, and clearing it means clearing *whole
+/// rows* -- a translated line is a different length from the one it replaces,
+/// so anything narrower would leave the tail of the previous language on
+/// screen. A rectangle beside the panel is therefore not beside it at all; it
+/// is inside the rows the panel wipes, which is what happened to the first
+/// version of this and showed up as a fifteen-pixel sliver of somebody's
+/// gradient.
+#[must_use]
+pub fn unclaimed_region() -> Option<(u32, u32, u32, u32)> {
+    let info = geometry()?;
+
+    // Where `panel_layout` starts looking for room. Everything from here down
+    // belongs to the panel and the bar.
+    let panel_band_top = info.height * 2 / 5;
+
+    let width = info.width / 5;
+    let margin = 32;
+    let height = (panel_band_top - margin * 2).min(info.height / 5);
+    let x = info.width - width - margin;
+    Some((x, margin, width, height))
+}
+
 /// Background at the top of the gradient.
 const BACKGROUND_TOP: Color = Color(0x000B_1220);
 /// Background at the bottom of the gradient.
@@ -72,6 +115,7 @@ pub unsafe fn init(info: &FramebufferInfo) -> bool {
     }
 
     *DISPLAY.lock() = Some(framebuffer);
+    *GEOMETRY.lock() = Some(*info);
     paint_chrome();
     true
 }
@@ -80,6 +124,55 @@ pub unsafe fn init(info: &FramebufferInfo) -> bool {
 #[must_use]
 pub fn is_available() -> bool {
     DISPLAY.lock().is_some()
+}
+
+/// Repaint the background across rows `start_y..end_y`, leaving the rectangle
+/// that belongs to a process alone.
+///
+/// Every clear in this module goes through here. A clear that ran from edge to
+/// edge would take back the rectangle the kernel gave away, twice a second and
+/// again on every language change -- which it did, and looked exactly like a
+/// user program that had failed to draw.
+fn clear_rows(fb: &mut Framebuffer, start_y: u32, end_y: u32) {
+    let surface = fb.height();
+    let Some((x, y, width, height)) = unclaimed_region() else {
+        fb.vertical_gradient_region(start_y, end_y, surface, BACKGROUND_TOP, BACKGROUND_BOTTOM);
+        return;
+    };
+
+    // Rows above and below the reserved rectangle: the whole width.
+    let above = end_y.min(y);
+    if above > start_y {
+        fb.vertical_gradient_region(start_y, above, surface, BACKGROUND_TOP, BACKGROUND_BOTTOM);
+    }
+    let below = start_y.max(y + height);
+    if end_y > below {
+        fb.vertical_gradient_region(below, end_y, surface, BACKGROUND_TOP, BACKGROUND_BOTTOM);
+    }
+
+    // And the rows beside it: everything but the rectangle itself.
+    let overlap_start = start_y.max(y);
+    let overlap_end = end_y.min(y + height);
+    if overlap_end > overlap_start {
+        fb.vertical_gradient_span(
+            0,
+            x,
+            overlap_start,
+            overlap_end,
+            surface,
+            BACKGROUND_TOP,
+            BACKGROUND_BOTTOM,
+        );
+        fb.vertical_gradient_span(
+            x + width,
+            fb.width(),
+            overlap_start,
+            overlap_end,
+            surface,
+            BACKGROUND_TOP,
+            BACKGROUND_BOTTOM,
+        );
+    }
 }
 
 /// Run `f` with the framebuffer, if there is one.
@@ -107,13 +200,7 @@ fn paint_chrome() {
         // Clear the whole chrome area before redrawing. A translation is a
         // different length from the one it replaces, so anything left over from
         // the previous language would still be on screen underneath.
-        fb.vertical_gradient_region(
-            0,
-            height - bar_height,
-            height,
-            BACKGROUND_TOP,
-            BACKGROUND_BOTTOM,
-        );
+        clear_rows(fb, 0, height - bar_height);
 
         // Sized as a fraction of the surface, so the layout is proportionate at
         // whatever mode the firmware gave us.
@@ -360,13 +447,7 @@ pub fn refresh_status() {
             *painted = (*painted).max(layout.height);
             *painted
         };
-        fb.vertical_gradient_region(
-            layout.y,
-            layout.y + clear_height,
-            fb.height(),
-            BACKGROUND_TOP,
-            BACKGROUND_BOTTOM,
-        );
+        clear_rows(fb, layout.y, layout.y + clear_height);
 
         fb.fill_rect(layout.x, layout.y, layout.width, layout.height, PANEL);
         fb.fill_rect(layout.x, layout.y, layout.width, 2, ACCENT);

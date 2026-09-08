@@ -54,7 +54,7 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Virtual memory manager | **DONE** | map/unmap/translate; identity map torn down |
 | Kernel heap | **DONE** | 16 MiB, `GlobalAlloc`, `alloc` available |
 | Kernel threads, scheduler | **DONE** | Preemptive, priority + round-robin, sleep/wake, reaping |
-| Framebuffer drawing | **PARTIAL** | Text, rectangles, gradients; no compositor, no windows |
+| Framebuffer drawing | **PARTIAL** | Kernel chrome, plus a rectangle a process draws into; no compositor, no windows |
 | Localisation | **DONE** | English and Japanese, switchable at runtime |
 | Text rendering | **PARTIAL** | UTF-8, half and full width, integer scaling; no shaping |
 | Keyboard input | **DONE** | PS/2 set 1, interrupt driven, decoded to keys |
@@ -172,68 +172,73 @@ These are real and are tracked, not hidden:
 3. **No events or semaphores.** A process waits on a channel or on nothing.
    Waiting for one of several things, or for a condition another process sets,
    has no object of its own yet.
-4. **A process has no parent and no exit status.** One can be started at a
+4. **The display is shared by promise, not by ownership.** The kernel draws its
+   own chrome and reserves a rectangle it repaints around; a process that drew
+   outside it would be overwritten twice a second, and one that stopped drawing
+   would leave whatever it left behind. A compositor owns the framebuffer and
+   hands out surfaces; this is the arrangement that exists until there is one.
+5. **A process has no parent and no exit status.** One can be started at a
    process's request, over a channel, and what comes back is a way to talk to
    it — but nothing says when it ended or how, and nothing outlives it. Waiting
    on a process wants an object of its own, which is the next kind of handle.
-5. **A program gets no arguments and no environment.** It is entered with a
+6. **A program gets no arguments and no environment.** It is entered with a
    stack and nothing on it. Whatever a program needs to be told should reach it
    through a handle it was given, which is the right shape and is not yet wired
    to anything.
-6. **No user memory copy helpers.** `Call::Log` validates its range and then
+7. **No user memory copy helpers.** `Call::Log` validates its range and then
    reads it directly. A user pointer that is unmapped faults in the kernel, on
    the kernel's stack, and is reported as a kernel fault; it should be turned
    into an error returned to the caller. That needs a fault handler that knows
    about a fixup table, which is its own piece of work.
-7. **The run queues are shared, not per-processor.** One lock covers the thread
+8. **The run queues are shared, not per-processor.** One lock covers the thread
    table and all four queues. That is correct and it is what makes every
    processor able to take work, but it is a point of contention that will matter
    once there are more processors or more threads than a desktop has today.
    Per-processor queues with balancing between them is the next step, and it
    wants contention to measure rather than to be guessed at.
-8. **No thread affinity.** A thread can be resumed on any processor, which is
+9. **No thread affinity.** A thread can be resumed on any processor, which is
    right for fairness and wrong for cache locality. There is nothing to measure
    it with yet.
-9. **Shootdowns are broadcast to every processor.** A processor that never
-   loaded the address space is interrupted anyway, because nothing tracks which
-   spaces are live where. Correct, and more work than necessary now that there
-   is more than one address space to be wrong about.
-10. **The framebuffer is mapped write-back, not write-combining.** Correct in
+10. **Shootdowns are broadcast to every processor.** A processor that never
+    loaded the address space is interrupted anyway, because nothing tracks which
+    spaces are live where. Correct, and more work than necessary now that there
+    is more than one address space to be wrong about.
+11. **The framebuffer is mapped write-back, not write-combining.** Correct in
     QEMU, slow on real hardware. Needs PAT configuration.
-11. **Bootloader allocations are over-conservative.** Page tables, the handoff
+12. **Bootloader allocations are over-conservative.** Page tables, the handoff
     block and the kernel image are allocated as `RuntimeServicesData`, which the
     kernel treats as permanently reserved. This wastes on the order of 100 KiB.
-12. **The filesystem reader cannot write, and skips long names.** FAT32 is
+13. **The filesystem reader cannot write, and skips long names.** FAT32 is
     read only: a writer has to keep two allocation tables and the free-cluster
     count consistent through a power failure, and nothing yet needs to write to
     the boot partition. Long names are skipped rather than half-assembled,
     because a partial implementation would look like it worked. NexusFS is not
     started.
-13. **CI has never run.** The workflow is written and its commands are checked
+14. **CI has never run.** The workflow is written and its commands are checked
     locally, but nothing has pushed to the remote, so no run exists to point
     at. It also has no acceleration available on a hosted runner, which makes
     the QEMU layers minutes rather than seconds.
-14. **The heap never shrinks.** It grows on demand and keeps what it takes.
+15. **The heap never shrinks.** It grows on demand and keeps what it takes.
     Acceptable for a kernel of this size; worth revisiting when there are
     long-running workloads.
-15. **The kernel binary has no host test harness.** It is `no_main` with its own
+16. **The kernel binary has no host test harness.** It is `no_main` with its own
     panic handler, so tests written inside it would compile and never run. What
     can be checked statically is checked with const assertions; the rest is
     covered by boot-marker checks, fault injection and screenshots. Logic worth
     unit testing is moved into a library crate instead, which is why the
     allocators live in `nexus-mm`.
-16. **No ageing in the scheduler.** Strict priority means a busy high-priority
+17. **No ageing in the scheduler.** Strict priority means a busy high-priority
     thread starves everything below it. Deliberate for now, and it needs real
     workloads before it can be tuned honestly.
-17. **CJK glyphs depend on the build machine.** They are rasterised at build
+18. **CJK glyphs depend on the build machine.** They are rasterised at build
     time from an installed font, because bundling one would redistribute it.
     A machine without a suitable font still builds, but non-Latin text renders
     as placeholder boxes. See [i18n.md](i18n.md).
-18. **Input goes nowhere but the kernel.** Keys are decoded and acted on
+19. **Input goes nowhere but the kernel.** Keys are decoded and acted on
     inside the kernel because there is no focus, no window and no process to
     deliver them to. There is no IME either, so Japanese can be displayed but
     not typed.
-19. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
+20. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
     no bidirectional text, no ligatures or combining marks.
 
 Resolved since the first audit: the missing IDT (Phase 2), the
@@ -295,8 +300,7 @@ In order, and for the reason given:
 
 1. **An exit status, and something to wait on it**, so that a process that
    started another can find out how it ended rather than only that it began.
-2. **Framebuffer access from user space**, which is what shared memory was for:
-   a compositor is a process holding a handle to the display's memory, not a
-   thing inside the kernel.
+2. **A compositor**, which is the process that should own the display rather
+   than the rectangle-sized promise the kernel currently keeps.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

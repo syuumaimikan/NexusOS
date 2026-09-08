@@ -834,6 +834,15 @@ pub unsafe fn start() -> Result<(), UserError> {
         } {
             kprintln!("[user] could not start init from disk: {error}");
         }
+
+        // And a program that draws. Everything on the display so far was drawn
+        // by the kernel; this is the shape a compositor has, which is a process
+        // holding a handle to the display rather than a thing inside the
+        // kernel.
+        // SAFETY: as above, with the display up.
+        if let Err(error) = unsafe { start_painter() } {
+            kprintln!("[user] could not start the painter: {error}");
+        }
     }
 
     // SAFETY: the heap, the frame allocator and the scheduler are all running.
@@ -1019,6 +1028,113 @@ unsafe fn start_spawn_service() -> Result<Arc<ipc::Endpoint>, UserError> {
 
     Ok(client)
 }
+
+/// Start a program and hand it the screen.
+///
+/// The framebuffer is memory the firmware chose, so it is described to a
+/// memory object rather than allocated for one, and the object does not free it
+/// when the last handle goes: those frames are the display and handing them
+/// back to the page allocator would hand out the display with them.
+///
+/// The rectangle it may use, and the shape of the framebuffer, go with the
+/// handle as eight little-endian numbers. Nothing is left to be discovered: a
+/// program that guessed the stride would draw a diagonal smear on the first
+/// machine whose scanlines are padded.
+///
+/// # Safety
+///
+/// Call once, with the display, the scheduler and the block device running.
+unsafe fn start_painter() -> Result<(), UserError> {
+    let Some(info) = crate::display::geometry() else {
+        return Ok(());
+    };
+    let Some((x, y, width, height)) = crate::display::unclaimed_region() else {
+        return Ok(());
+    };
+
+    // SAFETY: the firmware reported this region and the bootloader mapped it;
+    // it stays valid for the life of the system, and handing it to a program is
+    // the point.
+    let Some(memory) = (unsafe { ipc::MemoryObject::borrowed(info.phys_addr, info.size as usize) })
+    else {
+        kprintln!("[user] the framebuffer is not shaped like something a process can map");
+        return Ok(());
+    };
+
+    let (service, client) = ipc::Endpoint::pair();
+
+    // SAFETY: as above.
+    unsafe {
+        start_from_disk(
+            "BIN/PAINT.ELF",
+            "paint",
+            Some((ipc::Object::Channel(client), ipc::Rights::ALL)),
+        )?;
+    }
+
+    let mut message = [0u8; 32];
+    for (index, value) in [
+        x,
+        y,
+        width,
+        height,
+        info.stride,
+        info.bytes_per_pixel,
+        info.width,
+        info.height,
+    ]
+    .iter()
+    .enumerate()
+    {
+        message[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    let handle = ipc::Handle {
+        object: ipc::Object::Memory(memory),
+        rights: ipc::Rights::ALL,
+    };
+    if let Err(error) = service.send(&message, alloc::vec![handle]) {
+        kprintln!("[user] could not hand the screen to the painter: {error}");
+        return Ok(());
+    }
+
+    kprintln!("[user] handed a {width}x{height} rectangle at ({x}, {y}) to a process");
+
+    // Kept so the channel does not close the moment this returns, which the
+    // painter would see as its parent going away before it had drawn anything.
+    *PAINTER.lock() = Some(service);
+
+    // And something to hear back on. The painter reports when it has drawn, and
+    // a message nobody reads is a message that should not have been sent: the
+    // boot test counts what is sent against what is received, and an
+    // unanswered report showed up there before it showed up anywhere else.
+    sched::spawn(
+        "painter-watch",
+        sched::thread::Priority::Background,
+        painter_watch,
+        0,
+    )
+    .map_err(UserError::Spawn)?;
+
+    Ok(())
+}
+
+/// Wait for the painter to say it has drawn.
+fn painter_watch(_argument: usize) {
+    let endpoint = PAINTER.lock().clone();
+    let Some(endpoint) = endpoint else {
+        return;
+    };
+
+    match endpoint.receive() {
+        Some(_) => kprintln!("[user] the painter reported that it had drawn"),
+        None => kprintln!("[user] the painter went away without drawing"),
+    }
+}
+
+/// The kernel's end of the painter's channel, held open for its lifetime.
+static PAINTER: crate::sync::IrqSpinLock<Option<Arc<ipc::Endpoint>>> =
+    crate::sync::IrqSpinLock::new(None);
 
 /// Where a program loaded from disk gets its stack.
 ///

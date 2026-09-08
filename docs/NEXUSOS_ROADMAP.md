@@ -257,6 +257,28 @@ processor and available to the operating system, which is what makes saying it
 possible; the object that owns the frames frees them when its last handle does,
 and the boot test fails if the numbers do not match.
 
+And the first pixels a process put on the screen. `paint` is a program on the
+disk that is handed a rectangle and a handle to the framebuffer -- the same
+shared-memory mechanism two programs use to talk, pointed at memory the firmware
+chose instead of at pages the allocator made. It maps it at an address of its
+own choosing, is told the stride rather than guessing it, checks the rectangle
+against the screen rather than trusting what it was sent, and fills it.
+
+That is the shape a compositor has: a process holding a handle to the display,
+not a thing inside the kernel. This is not one. It has no windows and no
+clients, and the kernel still draws its own chrome -- but it now repaints
+*around* the rectangle it gave away, which it did not before, and the first
+version of this looked exactly like a program that had failed to draw.
+
+Two things came out of measuring it. Mapping a nine-megabyte framebuffer meant
+two and a half thousand rounds of interrupting every processor to shoot down a
+translation for a page that had never been present -- and the architecture does
+not permit a processor to have cached one, because there was nothing to cache.
+New mappings now invalidate locally and say nothing to anyone else; changing or
+removing a present mapping still broadcasts. And the painter's completion
+message had nobody reading it, which the boot test caught by counting messages
+sent against messages received.
+
 Outstanding: events and semaphores. A process waits on a channel or on nothing.
 
 ## Continuous integration ✅

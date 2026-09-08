@@ -235,11 +235,21 @@ pub unsafe fn map_page(virt: u64, phys: u64, flags: u64) -> Result<(), MapError>
 
 /// Map `virt` in the address space rooted at `root`.
 ///
-/// The shootdown is conditional on `root` being the one this processor is
-/// running in. A space that is not active anywhere has no cached translations
-/// to invalidate, and interrupting every processor to tell it about an address
-/// space it has never loaded is pure cost. Comparing against `cr3` here rather
-/// than making the caller decide means the correct answer is the default one.
+/// No shootdown, and that is the interesting part. This turns an entry from
+/// absent to present, and the architecture does not permit a processor to have
+/// cached a translation for a page that was not there: there was nothing to
+/// cache. So no other processor can be holding anything about this address, and
+/// telling them all would be pure cost -- which it measurably was, when mapping
+/// a nine-megabyte framebuffer meant two and a half thousand rounds of
+/// interrupting every processor and waiting.
+///
+/// The local invalidation stays. It costs one instruction and covers the
+/// difference between the architecture's guarantee and an implementation's
+/// behaviour, which is a trade worth making on the processor doing the mapping
+/// and not on the other three.
+///
+/// Changing a present entry is a different matter entirely, and
+/// [`remap_page`] and [`unmap_page`] do broadcast.
 ///
 /// # Safety
 ///
@@ -257,11 +267,8 @@ pub unsafe fn map_page_in(root: u64, virt: u64, phys: u64, flags: u64) -> Result
         write_entry(table, index, (phys & ADDRESS_MASK) | flags | PRESENT);
     }
 
-    // A previously absent translation can still be cached as such on some
-    // processors, so the flush is not optional.
     if root == active_root() {
-        // SAFETY: the entry already holds the new mapping.
-        unsafe { crate::arch::tlb::shoot_down(virt, 1) };
+        flush(virt);
     }
     Ok(())
 }

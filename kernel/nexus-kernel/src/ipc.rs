@@ -287,6 +287,12 @@ pub const MAX_MEMORY_OBJECT: usize = 1 << 20;
 pub struct MemoryObject {
     frames: Vec<u64>,
     size: usize,
+    /// Whether the frames are this object's to free.
+    ///
+    /// False for memory that was already somewhere -- the framebuffer belongs
+    /// to the firmware and the hardware behind it, and handing it back to the
+    /// page allocator would be handing out the display.
+    owned: bool,
 }
 
 impl MemoryObject {
@@ -325,7 +331,40 @@ impl MemoryObject {
         }
 
         OBJECTS_CREATED.fetch_add(1, Ordering::Relaxed);
-        Some(Arc::new(Self { frames, size }))
+        Some(Arc::new(Self {
+            frames,
+            size,
+            owned: true,
+        }))
+    }
+
+    /// Describe memory that already exists, without taking ownership of it.
+    ///
+    /// The framebuffer is the reason this exists: it is physical memory the
+    /// firmware chose, and a process that maps it is looking at the display
+    /// rather than at pages the allocator handed out. Freeing those frames when
+    /// the last handle went would hand the screen to whatever asked next.
+    ///
+    /// # Safety
+    ///
+    /// `base` must be a page-aligned physical region of at least `size` bytes
+    /// that stays valid for the life of the system, and that the caller is
+    /// entitled to expose to a process.
+    pub unsafe fn borrowed(base: u64, size: usize) -> Option<Arc<Self>> {
+        if size == 0 || base % PAGE_SIZE as u64 != 0 {
+            return None;
+        }
+        let pages = size.div_ceil(PAGE_SIZE);
+        let frames = (0..pages)
+            .map(|index| base + (index * PAGE_SIZE) as u64)
+            .collect();
+
+        OBJECTS_CREATED.fetch_add(1, Ordering::Relaxed);
+        Some(Arc::new(Self {
+            frames,
+            size,
+            owned: false,
+        }))
     }
 
     /// Bytes the object holds.
@@ -352,9 +391,11 @@ impl Drop for MemoryObject {
         // The last handle has gone, and with it every mapping: an address space
         // that mapped these frames marked them as not its own, so nothing else
         // will free them.
-        for &frame in &self.frames {
-            // SAFETY: no mapping refers to them any more.
-            unsafe { crate::memory::free_frame(frame) };
+        if self.owned {
+            for &frame in &self.frames {
+                // SAFETY: no mapping refers to them any more.
+                unsafe { crate::memory::free_frame(frame) };
+            }
         }
         OBJECTS_DESTROYED.fetch_add(1, Ordering::Relaxed);
     }
