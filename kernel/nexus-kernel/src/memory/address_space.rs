@@ -246,9 +246,15 @@ unsafe fn free_table(table: u64, level: usize) {
 
         let frame = entry & paging::ADDRESS_MASK;
         if level == 3 || entry & paging::HUGE != 0 {
-            // A leaf: the frame is user memory this space owned.
-            // SAFETY: nothing refers to it any more.
-            unsafe { free_frame(frame) };
+            // A leaf. The frame is this space's to free unless it was marked as
+            // belonging to something else -- a shared memory object maps the
+            // same frame into every space that holds a handle to it, and the
+            // second of those to be dropped would otherwise free a frame the
+            // first had already returned.
+            if entry & paging::SHARED == 0 {
+                // SAFETY: nothing refers to it any more.
+                unsafe { free_frame(frame) };
+            }
         } else {
             // SAFETY: another level of tables, owned by this space alone.
             unsafe { free_table(frame, level + 1) };

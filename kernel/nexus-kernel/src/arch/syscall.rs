@@ -233,11 +233,17 @@ pub enum Call {
     HandleClose = 8,
     /// What a handle may be used for. `(handle)`, returning the rights bits.
     HandleRights = 9,
+    /// Set aside memory more than one process can see. `(size)`.
+    MemoryCreate = 10,
+    /// Map a memory object into this process. `(handle, address, writable)`.
+    MemoryMap = 11,
+    /// How large a memory object is. `(handle)`.
+    MemorySize = 12,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 13;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -252,6 +258,9 @@ impl Call {
             7 => Some(Self::ChannelRead),
             8 => Some(Self::HandleClose),
             9 => Some(Self::HandleRights),
+            10 => Some(Self::MemoryCreate),
+            11 => Some(Self::MemoryMap),
+            12 => Some(Self::MemorySize),
             _ => None,
         }
     }
@@ -337,6 +346,9 @@ extern "sysv64" fn dispatch(
         }
         Some(Call::HandleClose) => handle_close(argument0),
         Some(Call::HandleRights) => handle_rights(argument0),
+        Some(Call::MemoryCreate) => memory_create(argument0),
+        Some(Call::MemoryMap) => memory_map(argument0, argument1, argument2),
+        Some(Call::MemorySize) => memory_size(argument0),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -408,6 +420,7 @@ fn handle_error(error: crate::ipc::HandleError) -> u64 {
     match error {
         crate::ipc::HandleError::NotFound => EBADF,
         crate::ipc::HandleError::Denied => EPERM,
+        crate::ipc::HandleError::WrongKind => EINVAL,
     }
 }
 
@@ -642,6 +655,127 @@ fn handle_rights(handle: u64) -> u64 {
     };
     match process.handles.rights(handle) {
         Ok(rights) => u64::from(rights.bits()),
+        Err(error) => handle_error(error),
+    }
+}
+
+/// [`Call::MemoryCreate`]: set aside memory more than one process can see.
+///
+/// The caller gets a handle and nothing mapped. Mapping is a second step
+/// because where it goes is the caller's business and because the handle is
+/// what travels: a process hands the *handle* to another, and each maps it
+/// wherever suits it.
+fn memory_create(size: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(size) = usize::try_from(size) else {
+        return EINVAL;
+    };
+
+    let Some(memory) = crate::ipc::MemoryObject::new(size) else {
+        return EINVAL;
+    };
+    u64::from(
+        process
+            .handles
+            .insert(crate::ipc::Object::Memory(memory), crate::ipc::Rights::ALL),
+    )
+}
+
+/// [`Call::MemoryMap`]: put a memory object into the caller's address space.
+///
+/// The address is the caller's choice and is checked rather than trusted: page
+/// aligned, wholly inside the user half, and not over anything already there.
+/// Writability is asked for and granted only if the handle carries the right,
+/// so a process can be handed memory it may read and not change.
+fn memory_map(handle: u64, address: u64, writable: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+
+    let wants_write = writable != 0;
+    let needed = if wants_write {
+        crate::ipc::Rights::READ | crate::ipc::Rights::WRITE
+    } else {
+        crate::ipc::Rights::READ
+    };
+    let memory = match process.handles.memory(handle, needed) {
+        Ok(memory) => memory,
+        Err(error) => return handle_error(error),
+    };
+
+    if address % nexus_abi::layout::PAGE_SIZE != 0 {
+        return EINVAL;
+    }
+    let bytes = memory.pages() as u64 * nexus_abi::layout::PAGE_SIZE;
+    let Some(end) = address.checked_add(bytes) else {
+        return EINVAL;
+    };
+    if address == 0 || end > nexus_abi::layout::USER_SPACE_END {
+        return EINVAL;
+    }
+
+    let mut flags = crate::memory::paging::USER
+        | crate::memory::paging::NO_EXECUTE
+        // The frames belong to the object, not to this address space. Without
+        // this the second space to be dropped would free frames the first had
+        // already returned.
+        | crate::memory::paging::SHARED;
+    if wants_write {
+        flags |= crate::memory::paging::WRITABLE;
+    }
+
+    for index in 0..memory.pages() {
+        let Some(frame) = memory.frame(index) else {
+            return EINVAL;
+        };
+        let virt = address + index as u64 * nexus_abi::layout::PAGE_SIZE;
+
+        // SAFETY: the frame belongs to an object this process holds a handle
+        // to, and the address was checked to lie in the user half of this
+        // process's own space.
+        match unsafe { process.address_space.map(virt, frame, flags) } {
+            Ok(()) => {}
+            Err(crate::memory::paging::MapError::AlreadyMapped) => {
+                // Undo the pages already mapped, so a request that collides
+                // partway through leaves the caller as it found it.
+                for done in 0..index {
+                    let virt = address + done as u64 * nexus_abi::layout::PAGE_SIZE;
+                    // SAFETY: mapped by this loop a moment ago, and marked
+                    // shared, so unmapping does not free the frame.
+                    unsafe {
+                        let _ = crate::memory::paging::unmap_page_in(
+                            process.address_space.root(),
+                            virt,
+                        );
+                    }
+                }
+                return EINVAL;
+            }
+            Err(_) => return EINVAL,
+        }
+    }
+
+    bytes
+}
+
+/// [`Call::MemorySize`]: how large a memory object is.
+fn memory_size(handle: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+    match process.handles.memory(handle, crate::ipc::Rights::READ) {
+        Ok(memory) => memory.size() as u64,
         Err(error) => handle_error(error),
     }
 }

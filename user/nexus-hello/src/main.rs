@@ -59,7 +59,63 @@ extern "C" fn main() -> ! {
         }
     }
 
+    share_memory();
     nexus_user::exit()
+}
+
+/// Where this program maps memory someone shares with it.
+///
+/// A different address from the one the other process chose, on purpose: two
+/// processes sharing memory do not have to agree on where it goes, and a test
+/// that used the same address on both sides would not show that.
+const SHARED_AT: usize = 0x0000_0000_0300_0000;
+
+/// What the other process writes, and what this one writes back.
+const THEIRS: u64 = 0x1111_1111_1111_1111;
+const OURS: u64 = 0x2222_2222_2222_2222;
+
+/// Take a memory handle and write into the page it names.
+fn share_memory() {
+    let mut buffer = [0u8; 64];
+    let mut handles = [Handle(0); 1];
+
+    let received = match nexus_user::receive(PARENT, &mut buffer, &mut handles) {
+        Ok(received) => received,
+        Err(_) => {
+            nexus_user::log("hello: FAILED: nothing more came").ok();
+            return;
+        }
+    };
+    if received.handles != 1 {
+        nexus_user::log("hello: FAILED: no memory handle came with it").ok();
+        return;
+    }
+
+    let memory = handles[0];
+    let Ok(size) = nexus_user::memory_size(memory) else {
+        nexus_user::log("hello: FAILED: could not ask how large the memory is").ok();
+        return;
+    };
+    if nexus_user::memory_map(memory, SHARED_AT, true) != Ok(size) {
+        nexus_user::log("hello: FAILED: could not map the shared memory").ok();
+        return;
+    }
+
+    // SAFETY: the kernel mapped the page here, writable, for this process.
+    let seen = unsafe { core::ptr::read_volatile(SHARED_AT as *const u64) };
+    if seen != THEIRS {
+        nexus_user::log("hello: FAILED: the shared page does not hold what was written").ok();
+        return;
+    }
+
+    // SAFETY: as above. The other process sees this through its own mapping of
+    // the same frames, with nothing copied either way.
+    unsafe {
+        core::ptr::write_volatile(SHARED_AT as *mut u64, OURS);
+    }
+
+    nexus_user::log("hello: read the shared page and wrote back into it").ok();
+    nexus_user::send(PARENT, b"written", &[]).ok();
 }
 
 #[panic_handler]

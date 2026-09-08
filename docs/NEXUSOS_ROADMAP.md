@@ -241,8 +241,23 @@ back, because losing authority to a full queue would be a leak the caller could
 not have avoided. Passing one on needs a right of its own, so a process can be
 given something it may use and may not delegate.
 
-Outstanding: shared memory, events and semaphores. A channel copies its message
-twice, which is right for a request and wrong for a framebuffer.
+Shared memory is the second kind of handle. A channel copies its message twice,
+once out of the sender and once into the receiver, which is right for a request
+and wrong for a framebuffer; this is the other arrangement. The frames exist
+once, and a process holding the handle maps them wherever suits it — the two
+programs that demonstrate it deliberately choose different addresses, because
+sharing memory does not mean agreeing on where it goes. The handle crosses the
+channel; the contents never do.
+
+It needed one bit in a page-table entry. An address space frees every frame it
+maps when it is dropped, and a shared frame is mapped in more than one, so
+without a way to say "not mine" the second space to go would free a frame the
+first had already returned. Bits 9 to 11 of an entry are ignored by the
+processor and available to the operating system, which is what makes saying it
+possible; the object that owns the frames frees them when its last handle does,
+and the boot test fails if the numbers do not match.
+
+Outstanding: events and semaphores. A process waits on a channel or on nothing.
 
 ## Continuous integration ✅
 

@@ -99,6 +99,9 @@ enum Call {
     ChannelRead = 7,
     HandleClose = 8,
     HandleRights = 9,
+    MemoryCreate = 10,
+    MemoryMap = 11,
+    MemorySize = 12,
 }
 
 /// Make a system call.
@@ -263,6 +266,47 @@ pub fn close(handle: Handle) -> Result<(), Error> {
     // SAFETY: takes one integer.
     let result = unsafe { syscall(Call::HandleClose, u64::from(handle.0), 0, 0, 0, 0, 0) };
     check(result).map(|_| ())
+}
+
+/// Set aside memory that more than one process can see.
+///
+/// The handle comes back; nothing is mapped. Mapping is separate because where
+/// it goes is the caller's business, and because the *handle* is what travels:
+/// a process hands it to another and each maps it wherever suits it.
+pub fn memory_create(size: usize) -> Result<Handle, Error> {
+    // SAFETY: takes one integer.
+    let result = unsafe { syscall(Call::MemoryCreate, size as u64, 0, 0, 0, 0, 0) };
+    check(result).map(|handle| Handle(handle as u32))
+}
+
+/// Map a memory object at `address`, returning how many bytes were mapped.
+///
+/// The address must be page aligned and must not be over anything already
+/// mapped. Asking for write access to a handle that does not carry it is
+/// refused rather than quietly downgraded, so a program cannot believe it has
+/// writable memory that is not.
+pub fn memory_map(handle: Handle, address: usize, writable: bool) -> Result<usize, Error> {
+    // SAFETY: the kernel checks the address against this process's own space;
+    // nothing is dereferenced here.
+    let result = unsafe {
+        syscall(
+            Call::MemoryMap,
+            u64::from(handle.0),
+            address as u64,
+            u64::from(writable),
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|bytes| bytes as usize)
+}
+
+/// How large a memory object is.
+pub fn memory_size(handle: Handle) -> Result<usize, Error> {
+    // SAFETY: takes one integer.
+    let result = unsafe { syscall(Call::MemorySize, u64::from(handle.0), 0, 0, 0, 0, 0) };
+    check(result).map(|size| size as usize)
 }
 
 /// What a handle may be used for.

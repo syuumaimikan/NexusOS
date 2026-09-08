@@ -155,6 +155,9 @@ Invoke-Step 'boot test' {
         'hello, from the program you asked for',
         'init: asked for a program, got a channel, and used it',
         'init: heard you',
+        'hello: read the shared page and wrote back into it',
+        'init: the other process wrote into memory we both map',
+        'shared pages made',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -284,6 +287,17 @@ Invoke-Step 'boot test' {
     }
     if ($used -lt $spoke) {
         throw 'the asking program finished before the started one spoke'
+    }
+    # Shared memory has to be given back. It is the one kind of frame an address
+    # space deliberately does not free, so a leak here would be silent.
+    if (-not ($output -match '(\d+) shared pages made, (\d+) released')) {
+        throw 'the kernel never reported what became of the shared memory'
+    }
+    if ([int]$Matches[1] -lt 1) {
+        throw 'no shared memory was ever created'
+    }
+    if ([int]$Matches[1] -ne [int]$Matches[2]) {
+        throw "$($Matches[1]) shared pages were made but only $($Matches[2]) released"
     }
     # The disk has to be the one the build made, and the driver has to have
     # used it. A driver that found the device and never moved a sector would

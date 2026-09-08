@@ -29,6 +29,16 @@ pub const NO_CACHE: u64 = 1 << 4;
 pub const HUGE: u64 = 1 << 7;
 /// The translation survives a `cr3` reload.
 pub const GLOBAL: u64 = 1 << 8;
+
+/// Software bit: the frame behind this page belongs to something else.
+///
+/// Bits 9 to 11 of an entry are ignored by the processor and available to the
+/// operating system, which is what makes this possible at all. An address space
+/// frees every frame it maps when it is dropped, and a shared frame is mapped in
+/// more than one -- so without a way to say "not mine" the second space to go
+/// away would free a frame the first had already returned. The object that owns
+/// the frames frees them when its last handle does.
+pub const SHARED: u64 = 1 << 9;
 /// Instruction fetches through this mapping fault.
 pub const NO_EXECUTE: u64 = 1 << 63;
 
@@ -294,8 +304,21 @@ pub unsafe fn map_range(virt: u64, phys: u64, size: u64, flags: u64) -> Result<(
 /// Nothing may access `virt` afterwards. Unmapping memory that is still in use
 /// turns every later access into a page fault.
 pub unsafe fn unmap_page(virt: u64) -> Result<u64, MapError> {
-    let root = active_root();
-    // SAFETY: `root` is the live root table.
+    // SAFETY: upheld by the caller.
+    unsafe { unmap_page_in(active_root(), virt) }
+}
+
+/// Unmap `virt` from the address space rooted at `root`.
+///
+/// Returns the frame that was there, which the caller disposes of -- this does
+/// not free it, because the page may have been a view of memory something else
+/// owns.
+///
+/// # Safety
+///
+/// See [`unmap_page`], and `root` must be a live root page table.
+pub unsafe fn unmap_page_in(root: u64, virt: u64) -> Result<u64, MapError> {
+    // SAFETY: `root` is a live root table.
     let table = unsafe { walk_to_page_table(root, virt, false, false)? };
     let index = index_for(virt, 3);
 

@@ -158,6 +158,67 @@ fn ask_for_a_program() {
     }
 
     nexus_user::log("init: asked for a program, got a channel, and used it").ok();
+
+    share_memory_with(child);
+}
+
+/// Where this program maps memory it shares.
+///
+/// Well above its own image and stack, and a different address from the one the
+/// other program will choose — which is the point of mapping being separate
+/// from creating. Two processes sharing memory do not have to agree on where.
+const SHARED_AT: usize = 0x0000_0000_0200_0000;
+
+/// What this program writes into the shared page, and what it expects back.
+const OURS: u64 = 0x1111_1111_1111_1111;
+const THEIRS: u64 = 0x2222_2222_2222_2222;
+
+/// Share a page with the program on the other end of `child`.
+///
+/// A channel copies its message twice, which is right for a request and wrong
+/// for anything large. This is the other arrangement: one page of memory, two
+/// processes, no copy — and the handle is what crosses the channel rather than
+/// the contents.
+fn share_memory_with(child: nexus_user::Handle) {
+    let Ok(memory) = nexus_user::memory_create(4096) else {
+        nexus_user::log("init: FAILED: could not create shared memory").ok();
+        return;
+    };
+    if nexus_user::memory_map(memory, SHARED_AT, true) != Ok(4096) {
+        nexus_user::log("init: FAILED: could not map shared memory").ok();
+        return;
+    }
+
+    // SAFETY: the kernel mapped a page here, writable, for this process.
+    unsafe {
+        core::ptr::write_volatile(SHARED_AT as *mut u64, OURS);
+    }
+
+    // The handle crosses, not the page. The other process maps the same frames
+    // wherever it likes.
+    if nexus_user::send(child, b"shared memory", &[memory]).is_err() {
+        nexus_user::log("init: FAILED: could not pass the memory handle").ok();
+        return;
+    }
+
+    // Wait for it to say it has written its own value in.
+    let mut buffer = [0u8; 64];
+    let mut none = [nexus_user::Handle(0); 1];
+    if nexus_user::receive(child, &mut buffer, &mut none).is_err() {
+        nexus_user::log("init: FAILED: no answer about the shared page").ok();
+        return;
+    }
+
+    // SAFETY: still mapped; the other process wrote through its own mapping of
+    // the same frames.
+    let seen = unsafe { core::ptr::read_volatile(SHARED_AT as *const u64) };
+    if seen == THEIRS {
+        nexus_user::log("init: the other process wrote into memory we both map").ok();
+    } else if seen == OURS {
+        nexus_user::log("init: FAILED: the shared page still holds only our own value").ok();
+    } else {
+        nexus_user::log("init: FAILED: the shared page holds something neither wrote").ok();
+    }
 }
 
 /// Nothing catches a panic here, so it is reported and the thread stops.

@@ -355,7 +355,10 @@ fn monitor_thread(_argument: usize) {
             kprintln!(
                 "[mon ] {started} processes started, {ended} ended |                  {spaces} address spaces created, {freed} freed"
             );
-            kprintln!("[mon ] {channels} channels, {sent} messages sent, {taken} received");
+            let (shared, released) = ipc::memory_statistics();
+            kprintln!(
+            "[mon ] {channels} channels, {sent} messages sent, {taken} received |              {shared} shared pages made, {released} released"
+        );
             if drivers::virtio_blk::is_present() {
                 let (read, wrote) = drivers::virtio_blk::statistics();
                 kprintln!(

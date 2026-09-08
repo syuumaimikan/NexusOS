@@ -74,10 +74,11 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Ring 3 | **DONE** | A user thread runs at CPL 3, preemptible, in its own pages |
 | User programs | **PARTIAL** | Built as their own binaries and loaded from disk; no arguments, no dynamic linking |
 | Process creation | **PARTIAL** | A process can ask a service over a channel; no exit status, no parent |
-| System calls | **PARTIAL** | `syscall`/`sysret` entry, ten calls; no shared memory or events |
+| System calls | **PARTIAL** | `syscall`/`sysret` entry, thirteen calls; no events or semaphores |
 | Processes, address spaces | **DONE** | A page-table root per process; kernel upper half shared by pointer |
 | Handles, capabilities | **DONE** | Per-process table, rights checked on every use |
 | IPC | **DONE** | Blocking channels, handles carried in messages, rights checked on transfer |
+| Shared memory | **DONE** | A handle to frames two processes map at addresses of their own choosing |
 | Wait queues | **DONE** | Blocking with no lost wake-ups; the input thread no longer polls |
 
 ### Everything above the kernel
@@ -168,11 +169,9 @@ These are real and are tracked, not hidden:
    nothing shuts down. A device left mastering the bus into memory the
    allocator had taken back would be serious, so this wants doing before there
    is any path that frees a driver's memory.
-3. **No shared memory, events or semaphores.** A channel copies its message
-   twice, once out of the sender and once into the receiver, which is right for
-   a request and wrong for a framebuffer. Shared memory with a handle to it is
-   the next object kind, and the compositor will need it before anything else
-   does.
+3. **No events or semaphores.** A process waits on a channel or on nothing.
+   Waiting for one of several things, or for a condition another process sets,
+   has no object of its own yet.
 4. **A process has no parent and no exit status.** One can be started at a
    process's request, over a channel, and what comes back is a way to talk to
    it — but nothing says when it ended or how, and nothing outlives it. Waiting
@@ -296,8 +295,8 @@ In order, and for the reason given:
 
 1. **An exit status, and something to wait on it**, so that a process that
    started another can find out how it ended rather than only that it began.
-2. **Shared memory**, which is the next kind of handle and the one the
-   compositor will need: a channel copies its message twice, which is right for
-   a request and wrong for a framebuffer.
+2. **Framebuffer access from user space**, which is what shared memory was for:
+   a compositor is a process holding a handle to the display's memory, not a
+   thing inside the kernel.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

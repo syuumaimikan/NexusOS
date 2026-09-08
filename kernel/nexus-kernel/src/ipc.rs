@@ -266,6 +266,116 @@ impl Drop for Endpoint {
     }
 }
 
+/// Largest shared memory object this kernel will create.
+///
+/// A bound rather than a policy: the size comes from a process, and every byte
+/// of it is physical memory that process is asking the kernel to set aside.
+pub const MAX_MEMORY_OBJECT: usize = 1 << 20;
+
+/// Memory that more than one process can see.
+///
+/// A channel copies its message twice, once out of the sender and once into the
+/// receiver, which is right for a request and wrong for a framebuffer. This is
+/// the other arrangement: the frames exist once, and a process that holds a
+/// handle can map them into its own address space at an address of its
+/// choosing.
+///
+/// The frames are individually allocated rather than one contiguous block. A
+/// block would have to be freed at the order it was taken at, and the pages of
+/// this are handed back one at a time as the object goes away; individually
+/// allocated pages merge back into whatever blocks they came from on their own.
+pub struct MemoryObject {
+    frames: Vec<u64>,
+    size: usize,
+}
+
+impl MemoryObject {
+    /// Allocate `size` bytes, rounded up to a page, and zero them.
+    ///
+    /// Zeroed because the frames have been somewhere: handing a process pages
+    /// still holding another process's data would be a way of reading memory
+    /// nobody granted.
+    pub fn new(size: usize) -> Option<Arc<Self>> {
+        if size == 0 || size > MAX_MEMORY_OBJECT {
+            return None;
+        }
+        let pages = size.div_ceil(PAGE_SIZE);
+
+        let mut frames = Vec::with_capacity(pages);
+        for _ in 0..pages {
+            let Some(frame) = crate::memory::allocate_frame() else {
+                // Give back what was taken. A partial object would be a leak
+                // the caller could not have known about.
+                for frame in frames {
+                    // SAFETY: each was allocated here and never mapped.
+                    unsafe { crate::memory::free_frame(frame) };
+                }
+                return None;
+            };
+            // SAFETY: just allocated, so nothing else refers to it, and the
+            // direct map reaches every frame.
+            unsafe {
+                core::ptr::write_bytes(
+                    nexus_abi::layout::phys_to_virt(frame) as *mut u8,
+                    0,
+                    PAGE_SIZE,
+                );
+            }
+            frames.push(frame);
+        }
+
+        OBJECTS_CREATED.fetch_add(1, Ordering::Relaxed);
+        Some(Arc::new(Self { frames, size }))
+    }
+
+    /// Bytes the object holds.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Pages it occupies.
+    #[must_use]
+    pub fn pages(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// The frame backing page `index`.
+    #[must_use]
+    pub fn frame(&self, index: usize) -> Option<u64> {
+        self.frames.get(index).copied()
+    }
+}
+
+impl Drop for MemoryObject {
+    fn drop(&mut self) {
+        // The last handle has gone, and with it every mapping: an address space
+        // that mapped these frames marked them as not its own, so nothing else
+        // will free them.
+        for &frame in &self.frames {
+            // SAFETY: no mapping refers to them any more.
+            unsafe { crate::memory::free_frame(frame) };
+        }
+        OBJECTS_DESTROYED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Bytes in a page, as this module needs it.
+const PAGE_SIZE: usize = 4096;
+
+/// Shared memory objects created and destroyed.
+static OBJECTS_CREATED: AtomicU64 = AtomicU64::new(0);
+static OBJECTS_DESTROYED: AtomicU64 = AtomicU64::new(0);
+
+/// Shared memory objects created and destroyed since boot.
+#[must_use]
+pub fn memory_statistics() -> (u64, u64) {
+    (
+        OBJECTS_CREATED.load(Ordering::Relaxed),
+        OBJECTS_DESTROYED.load(Ordering::Relaxed),
+    )
+}
+
 /// A kernel object a handle can refer to.
 ///
 /// An enum rather than a trait object: there is one kind so far, the set is
@@ -275,6 +385,8 @@ impl Drop for Endpoint {
 pub enum Object {
     /// One end of a channel.
     Channel(Arc<Endpoint>),
+    /// Memory more than one process can map.
+    Memory(Arc<MemoryObject>),
 }
 
 impl Object {
@@ -283,6 +395,7 @@ impl Object {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Channel(_) => "channel",
+            Self::Memory(_) => "memory",
         }
     }
 }
@@ -311,6 +424,12 @@ pub enum HandleError {
     NotFound,
     /// The handle does not carry the rights the operation needs.
     Denied,
+    /// The handle names the other kind of object.
+    ///
+    /// Constructible now that there are two kinds. A call that asks for a
+    /// channel and is handed memory is a mistake worth naming rather than one
+    /// to report as a bad handle.
+    WrongKind,
 }
 
 impl core::fmt::Display for HandleError {
@@ -318,6 +437,7 @@ impl core::fmt::Display for HandleError {
         f.write_str(match self {
             Self::NotFound => "no such handle",
             Self::Denied => "the handle does not carry that right",
+            Self::WrongKind => "the handle names the other kind of object",
         })
     }
 }
@@ -356,6 +476,20 @@ impl HandleTable {
         }
         match &handle.object {
             Object::Channel(endpoint) => Ok(Arc::clone(endpoint)),
+            Object::Memory(_) => Err(HandleError::WrongKind),
+        }
+    }
+
+    /// The memory object `id` names, if it names one and carries `needed`.
+    pub fn memory(&self, id: u32, needed: Rights) -> Result<Arc<MemoryObject>, HandleError> {
+        let entries = self.entries.lock();
+        let handle = entries.get(&id).ok_or(HandleError::NotFound)?;
+        if !handle.rights.contains(needed) {
+            return Err(HandleError::Denied);
+        }
+        match &handle.object {
+            Object::Memory(memory) => Ok(Arc::clone(memory)),
+            Object::Channel(_) => Err(HandleError::WrongKind),
         }
     }
 
