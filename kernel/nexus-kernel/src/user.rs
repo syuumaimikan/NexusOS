@@ -822,7 +822,16 @@ pub unsafe fn start() -> Result<(), UserError> {
     //
     // SAFETY: the heap, the scheduler and the block device are all running.
     if drivers::virtio_blk::is_present() {
-        if let Err(error) = unsafe { start_from_disk("BIN/INIT.ELF", "init") } {
+        // SAFETY: the scheduler is running.
+        let spawner = unsafe { start_spawn_service() }?;
+        // SAFETY: as above, and the block device is up.
+        if let Err(error) = unsafe {
+            start_from_disk(
+                "BIN/INIT.ELF",
+                "init",
+                Some((ipc::Object::Channel(spawner), ipc::Rights::ALL)),
+            )
+        } {
             kprintln!("[user] could not start init from disk: {error}");
         }
     }
@@ -896,6 +905,121 @@ pub unsafe fn start() -> Result<(), UserError> {
     Ok(())
 }
 
+/// The service end of the spawn channel, held by the thread that answers on it.
+static SPAWN_SERVICE: crate::sync::IrqSpinLock<Option<Arc<ipc::Endpoint>>> =
+    crate::sync::IrqSpinLock::new(None);
+
+/// Longest program path the spawn service will accept.
+///
+/// A bound rather than a trust: the path arrives from a process that need not
+/// be cooperating, and every byte of it is used to walk a filesystem.
+const MAX_PATH: usize = 64;
+
+/// Answer requests to start a program.
+///
+/// This is what makes process creation something a *process* can ask for
+/// without the kernel trusting it to be allowed. There is no system call to
+/// create a process; there is a channel, and holding one end of it is the
+/// authority. A process that was never given that handle cannot ask, and there
+/// is no name it could use instead — which is the whole argument for handles
+/// over a global namespace, made concrete.
+///
+/// The reply carries a handle to a channel connected to whatever was started,
+/// so the asker gets a way to talk to it and not merely a yes.
+fn spawn_service(_argument: usize) {
+    let endpoint = SPAWN_SERVICE.lock().clone();
+    let Some(endpoint) = endpoint else {
+        return;
+    };
+
+    loop {
+        // Blocks. When this returns nothing, every process that could ask has
+        // gone, and so has the reason for this thread to exist.
+        let Some(request) = endpoint.receive() else {
+            kprintln!("[spawn] no one left to ask; the spawn service is stopping");
+            return;
+        };
+
+        let (text, handles) = handle_spawn_request(&request.bytes);
+        if let Err(error) = endpoint.send(text.as_bytes(), handles) {
+            kprintln!("[spawn] could not reply: {error}");
+        }
+    }
+}
+
+/// Do one request, and say what happened.
+///
+/// One reply, carrying both the text and the channel, because they are one
+/// answer: a caller that had to read two messages to learn one thing would have
+/// to know how many to expect, and a refusal sends fewer than a success.
+///
+/// The text is what the asker logs, so it is written for someone reading a boot
+/// log rather than for a program to parse. A program that needs to know whether
+/// it worked has the handle or does not.
+fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::Vec<ipc::Handle>) {
+    use alloc::format;
+    use alloc::vec::Vec;
+
+    if request.len() > MAX_PATH {
+        return (
+            format!("refused: a path of {} bytes is too long", request.len()),
+            Vec::new(),
+        );
+    }
+    let Ok(path) = core::str::from_utf8(request) else {
+        return (
+            alloc::string::String::from("refused: the path is not text"),
+            Vec::new(),
+        );
+    };
+
+    // A channel between the asker and whatever is about to run. Both ends are
+    // made here because the kernel is the only thing that can hand one to a
+    // process that does not exist yet.
+    let (to_child, to_parent) = ipc::Endpoint::pair();
+
+    // SAFETY: the heap, the scheduler and the block device are all running;
+    // this thread does nothing else while it loads.
+    let result = unsafe {
+        start_from_disk(
+            path,
+            "spawned",
+            Some((ipc::Object::Channel(to_parent), ipc::Rights::ALL)),
+        )
+    };
+
+    match result {
+        Ok(id) => {
+            kprintln!("[spawn] started {id} from {path} at a process's request");
+            // The asker's end goes back with the reply. Handing it over is what
+            // makes this an introduction rather than a notification.
+            (
+                format!("started {id}"),
+                alloc::vec![ipc::Handle {
+                    object: ipc::Object::Channel(to_child),
+                    rights: ipc::Rights::ALL,
+                }],
+            )
+        }
+        Err(error) => (format!("refused: {error}"), Vec::new()),
+    }
+}
+
+/// Start the spawn service, and return the end a process should be given.
+///
+/// # Safety
+///
+/// Call once, with the scheduler running.
+unsafe fn start_spawn_service() -> Result<Arc<ipc::Endpoint>, UserError> {
+    let (service, client) = ipc::Endpoint::pair();
+    *SPAWN_SERVICE.lock() = Some(service);
+
+    sched::spawn("spawn", sched::thread::Priority::Normal, spawn_service, 0)
+        .map_err(UserError::Spawn)?;
+
+    Ok(client)
+}
+
 /// Where a program loaded from disk gets its stack.
 ///
 /// Above anything a link script puts an image at, and below the halfway line by
@@ -913,7 +1037,11 @@ const DISK_STACK_TOP: u64 = 0x0000_0000_0100_0000;
 /// # Safety
 ///
 /// Call with the heap, the scheduler and the block device running.
-pub unsafe fn start_from_disk(path: &str, name: &str) -> Result<(), UserError> {
+pub unsafe fn start_from_disk(
+    path: &str,
+    name: &str,
+    endowment: Option<(ipc::Object, ipc::Rights)>,
+) -> Result<crate::process::ProcessId, UserError> {
     let partitions = fs::gpt::read().map_err(UserError::PartitionTable)?;
     let esp = partitions
         .iter()
@@ -996,6 +1124,13 @@ pub unsafe fn start_from_disk(path: &str, name: &str) -> Result<(), UserError> {
     let process = crate::process::Process::new(name, Arc::new(space));
     let id = process.id;
 
+    // Whatever authority the caller decided this program should have, handed
+    // over before it runs. A program starts with exactly what it was given.
+    if let Some((object, rights)) = endowment {
+        let handle = process.handles.insert(object, rights);
+        kprintln!("[user] process {id} \"{name}\" starts holding handle {handle}");
+    }
+
     sched::spawn_user(
         name,
         loaded.entry_point,
@@ -1012,7 +1147,7 @@ pub unsafe fn start_from_disk(path: &str, name: &str) -> Result<(), UserError> {
         loaded.segment_count,
         span_pages * layout::PAGE_SIZE as usize / 1024
     );
-    Ok(())
+    Ok(id)
 }
 
 /// Smallest buddy order whose block holds `pages` pages.

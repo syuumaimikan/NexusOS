@@ -737,22 +737,34 @@ pub fn schedule() {
 /// [`finish_switch`], which runs after it has stopped executing, so anything
 /// found here is safe to drop without asking which processor it was last on.
 pub fn reap_finished() -> usize {
-    let mut scheduler = SCHEDULER.lock();
+    // Taken out of the table under the lock, and dropped *outside* it. The
+    // distinction is not tidiness: dropping a thread can drop the last
+    // reference to its process, which drops its handle table, which drops the
+    // endpoints in it -- and an endpoint's `Drop` wakes whoever was waiting on
+    // the other end, which takes this very lock. Doing it in here deadlocked
+    // the machine the first time a process held a channel someone was blocked
+    // on, and the symptom was a system that ran every test correctly and then
+    // simply stopped.
+    let reaped: alloc::vec::Vec<alloc::boxed::Box<Thread>> = {
+        let mut scheduler = SCHEDULER.lock();
 
-    let finished: alloc::vec::Vec<ThreadId> = scheduler
-        .threads
-        .values()
-        .filter(|thread| thread.state == ThreadState::Finished)
-        .map(|thread| thread.id)
-        .collect();
+        let finished: alloc::vec::Vec<ThreadId> = scheduler
+            .threads
+            .values()
+            .filter(|thread| thread.state == ThreadState::Finished)
+            .map(|thread| thread.id)
+            .collect();
 
-    let count = finished.len();
-    for id in finished {
-        // Dropping the `Box<Thread>` drops its `KernelStack`, which unmaps the
-        // pages and returns the frames.
-        scheduler.threads.remove(&id);
-    }
-    count
+        finished
+            .into_iter()
+            .filter_map(|id| scheduler.threads.remove(&id))
+            .collect()
+    };
+
+    // Dropping each `Box<Thread>` drops its `KernelStack`, which unmaps the
+    // pages and returns the frames, and its process, which may be the last
+    // reference to an address space.
+    reaped.len()
 }
 
 /// A snapshot of scheduler activity.

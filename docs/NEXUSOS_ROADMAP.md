@@ -321,9 +321,26 @@ allocator, and the pages are handed back individually when the address space is
 dropped. A page that was allocated and never mapped would never be freed, and
 the block it came from would stay split for the life of the system.
 
+And a program can ask for another. There is no system call that creates a
+process: there is a channel, and holding one end of it is the authority to ask.
+`init` is given that end when the kernel starts it, sends the path of a program
+down it, and gets back a message carrying a *handle* — a channel to whatever was
+started. The two then talk, and neither can name the other or find any way to.
+A program that was never given the spawner handle cannot ask, and there is no
+name it could use instead, which is the argument for handles over a global
+namespace made concrete rather than argued.
+
+Finding that took a deadlock with it, and a quiet one. Reaping a finished thread
+held the scheduler's lock while dropping it, and dropping a thread can drop the
+last reference to its process, which drops its handle table, which drops the
+channel endpoints in it — and an endpoint's destructor wakes whoever was blocked
+on the other end, which takes that same lock. The machine ran every test
+correctly and then simply stopped. Threads are now taken out of the table under
+the lock and dropped outside it.
+
 Outstanding: the filesystem reader cannot write and skips long names. The block
 driver polls one request at a time and takes no interrupt. A program gets no
-arguments, and only the kernel can decide to start one. NexusFS is not started.
+arguments, and nothing says when one ended or how. NexusFS is not started.
 
 ## Phase 8 — Drivers and user space ⬜
 

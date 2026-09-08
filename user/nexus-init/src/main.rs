@@ -91,7 +91,73 @@ extern "C" fn main() -> ! {
     }
 
     nexus_user::log("init: clock, channel and handle checks all passed").ok();
+
+    ask_for_a_program();
     nexus_user::exit()
+}
+
+/// The channel to the spawn service, as the kernel hands it over: the first
+/// entry in an otherwise empty table.
+const SPAWNER: nexus_user::Handle = nexus_user::Handle(1);
+
+/// Ask for another program to be started, and then talk to it.
+///
+/// There is no system call that creates a process. There is a channel, and
+/// holding one end of it is the authority to ask; a program that was never
+/// given this handle cannot ask, and there is no name it could use instead.
+/// What comes back is a handle to the thing that started, so the answer is an
+/// introduction rather than a notification.
+fn ask_for_a_program() {
+    const PROGRAM: &[u8] = b"BIN/HELLO.ELF";
+
+    if nexus_user::send(SPAWNER, PROGRAM, &[]).is_err() {
+        nexus_user::log("init: FAILED: could not reach the spawn service").ok();
+        return;
+    }
+
+    let mut buffer = [0u8; 64];
+    let mut handles = [nexus_user::Handle(0); 1];
+    let received = match nexus_user::receive(SPAWNER, &mut buffer, &mut handles) {
+        Ok(received) => received,
+        Err(_) => {
+            nexus_user::log("init: FAILED: the spawn service did not answer").ok();
+            return;
+        }
+    };
+
+    if received.handles != 1 {
+        // The reply text says why, and is worth showing: a refusal is as
+        // interesting as a success and reads the same way in a boot log.
+        let text = core::str::from_utf8(&buffer[..received.bytes]).unwrap_or("<not text>");
+        nexus_user::log(text).ok();
+        nexus_user::log("init: FAILED: no channel to the new program came back").ok();
+        return;
+    }
+
+    let child = handles[0];
+
+    // Whatever it says first. It was started by the kernel on this program's
+    // behalf and neither of them can name the other, so this channel is the
+    // only thing connecting them.
+    let mut incoming = [0u8; 64];
+    let mut none = [nexus_user::Handle(0); 1];
+    match nexus_user::receive(child, &mut incoming, &mut none) {
+        Ok(reply) if reply.bytes > 0 => {
+            let text = core::str::from_utf8(&incoming[..reply.bytes]).unwrap_or("<not text>");
+            nexus_user::log(text).ok();
+        }
+        _ => {
+            nexus_user::log("init: FAILED: the new program said nothing").ok();
+            return;
+        }
+    }
+
+    if nexus_user::send(child, b"init: heard you", &[]).is_err() {
+        nexus_user::log("init: FAILED: could not answer the new program").ok();
+        return;
+    }
+
+    nexus_user::log("init: asked for a program, got a channel, and used it").ok();
 }
 
 /// Nothing catches a panic here, so it is reported and the thread stops.

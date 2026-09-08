@@ -150,6 +150,11 @@ Invoke-Step 'boot test' {
         'loaded from BIN/INIT.ELF',
         'init: loaded from disk and running in ring 3',
         'init: clock, channel and handle checks all passed',
+        "at a process's request",
+        'hello: started because another program asked for me',
+        'hello, from the program you asked for',
+        'init: asked for a program, got a channel, and used it',
+        'init: heard you',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -266,6 +271,19 @@ Invoke-Step 'boot test' {
     }
     if ($closed -lt $answer) {
         throw 'the server saw the channel close before it had answered'
+    }
+    # A program asked for another program and then talked to it. The order is
+    # what says the second was started because the first asked, rather than
+    # because the kernel decided to start both.
+    $asked = $output.IndexOf("at a process's request")
+    $started = $output.IndexOf('hello: started because another program asked for me')
+    $spoke = $output.IndexOf('hello, from the program you asked for')
+    $used = $output.IndexOf('init: asked for a program, got a channel, and used it')
+    if ($asked -lt 0 -or $started -lt 0 -or $spoke -lt 0 -or $used -lt 0) {
+        throw 'a program did not manage to have another one started'
+    }
+    if ($used -lt $spoke) {
+        throw 'the asking program finished before the started one spoke'
     }
     # The disk has to be the one the build made, and the driver has to have
     # used it. A driver that found the device and never moved a sector would

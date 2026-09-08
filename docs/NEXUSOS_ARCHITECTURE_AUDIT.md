@@ -73,6 +73,7 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | MSI, MSI-X | **MISSING** | Devices are found; nothing routes their interrupts yet |
 | Ring 3 | **DONE** | A user thread runs at CPL 3, preemptible, in its own pages |
 | User programs | **PARTIAL** | Built as their own binaries and loaded from disk; no arguments, no dynamic linking |
+| Process creation | **PARTIAL** | A process can ask a service over a channel; no exit status, no parent |
 | System calls | **PARTIAL** | `syscall`/`sysret` entry, ten calls; no shared memory or events |
 | Processes, address spaces | **DONE** | A page-table root per process; kernel upper half shared by pointer |
 | Handles, capabilities | **DONE** | Per-process table, rights checked on every use |
@@ -172,11 +173,10 @@ These are real and are tracked, not hidden:
    a request and wrong for a framebuffer. Shared memory with a handle to it is
    the next object kind, and the compositor will need it before anything else
    does.
-4. **A process has no parent, no exit status, and no way to be created from
-   inside the system.** The kernel can load a program from a disk into a
-   process of its own, but only it can decide to. Making that a request a
-   process sends over a channel — to whoever holds the authority to answer it —
-   is what turns loading into spawning.
+4. **A process has no parent and no exit status.** One can be started at a
+   process's request, over a channel, and what comes back is a way to talk to
+   it — but nothing says when it ended or how, and nothing outlives it. Waiting
+   on a process wants an object of its own, which is the next kind of handle.
 5. **A program gets no arguments and no environment.** It is entered with a
    stack and nothing on it. Whatever a program needs to be told should reach it
    through a handle it was given, which is the right shape and is not yet wired
@@ -243,7 +243,11 @@ whichever ran last decided what the next boot would load, and the
 single-processor scheduler: every processor now runs threads, and the boot test
 fails if the workers all land on one of them; booting only from a directory QEMU
 pretended was a filesystem, which is now a genuine GPT and FAT32 that a test
-boots with nothing else attached, and which the kernel now reads for itself; the absence of any user mode at
+boots with nothing else attached, and which the kernel now reads for itself;
+programs that could only be assembled into the kernel, which are now files on
+that filesystem, built as their own binaries and loaded into address spaces of
+their own; and process creation that only the kernel could decide on, which is
+now a request a program makes over a channel; the absence of any user mode at
 all — a program now runs at ring 3, and the boot test fails unless an interrupt
 was taken from it; the single address space, which is now one per process, with
 the boot test comparing the two processes' page tables and the injection suite
@@ -288,9 +292,8 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **Process creation from user space**, which is now a request a process can
-   make over a channel to whoever is allowed to answer it, rather than a system
-   call that trusts the asker.
+1. **An exit status, and something to wait on it**, so that a process that
+   started another can find out how it ended rather than only that it began.
 2. **CI**, so the six test layers run on every change rather than on request.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

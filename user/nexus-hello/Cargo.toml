@@ -1,0 +1,15 @@
+[package]
+name = "nexus-hello"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A program NexusOS starts because another program asked for it."
+
+[[bin]]
+name = "nexus-hello"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }

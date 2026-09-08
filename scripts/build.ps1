@@ -91,6 +91,10 @@ $InitElf = Join-Path $RepoRoot "target\x86_64-nexus-user\$Profile\nexus-init"
 $StagedInit = Publish-Program -Elf $InitElf -ProgramDir $ProgramDir -Name 'init.elf'
 $initSize = [math]::Round((Get-Item $StagedInit).Length / 1KB, 1)
 
+$HelloElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-hello"
+$StagedHello = Publish-Program -Elf $HelloElf -ProgramDir $ProgramDir -Name 'hello.elf'
+$helloSize = [math]::Round((Get-Item $StagedHello).Length / 1KB, 1)
+
 # The disk the kernel drives. Data only, with nothing to boot from: a machine
 # given two bootable disks leaves the firmware to choose between them, and it
 # chose the one whose kernel was older. Made once and left alone, because the
@@ -119,6 +123,7 @@ Write-Host 'NexusOS build complete' -ForegroundColor Green
 Write-Host "  bootloader : $bootSize KiB  -> EFI\BOOT\BOOTX64.EFI"
 Write-Host "  kernel     : $kernelSize KiB  -> nexus\kernel.elf  (from $unstrippedSize KiB with symbols)"
 Write-Host "  init       : $initSize KiB  -> BIN\INIT.ELF on the disk"
+Write-Host "  hello      : $helloSize KiB  -> BIN\HELLO.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''
 Write-Host 'Run it with: .\scripts\run.ps1'

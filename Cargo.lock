@@ -14,6 +14,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-hello"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-init"
 version = "0.1.0"
 dependencies = [
