@@ -122,6 +122,10 @@ nexus_user_abi_start:
     movl $(4f - 3f), %esi
     syscall
 9:
+    // A status of zero, and it has to be written: `Exit` reads `rdi`, and
+    // whatever a program happened to leave there would otherwise become
+    // what its waiter is told about how it went.
+    xorl %edi, %edi
     movl $0, %eax                       // Call::Exit
     syscall
     // Exit does not return. If it ever did, fault here rather than run on into
@@ -169,6 +173,10 @@ nexus_user_abi_start:
     movl $(3f - 2f), %esi
     syscall
 
+    // A status of zero, and it has to be written: `Exit` reads `rdi`, and
+    // whatever a program happened to leave there would otherwise become
+    // what its waiter is told about how it went.
+    xorl %edi, %edi
     movl $0, %eax                       // Call::Exit
     syscall
     ud2
@@ -233,6 +241,10 @@ nexus_user_isolation_start:
     movl $(6f - 5f), %esi
     syscall
 4:
+    // A status of zero, and it has to be written: `Exit` reads `rdi`, and
+    // whatever a program happened to leave there would otherwise become
+    // what its waiter is told about how it went.
+    xorl %edi, %edi
     movl $0, %eax                       // Call::Exit
     syscall
     ud2
@@ -335,6 +347,10 @@ nexus_user_ipc_start:
     movl $(4f - 3f), %esi
     syscall
 9:
+    // A status of zero, and it has to be written: `Exit` reads `rdi`, and
+    // whatever a program happened to leave there would otherwise become
+    // what its waiter is told about how it went.
+    xorl %edi, %edi
     movl $0, %eax                       // Call::Exit
     syscall
     ud2
@@ -437,6 +453,10 @@ nexus_user_client_start:
     movl $(4f - 3f), %esi
     syscall
 9:
+    // A status of zero, and it has to be written: `Exit` reads `rdi`, and
+    // whatever a program happened to leave there would otherwise become
+    // what its waiter is told about how it went.
+    xorl %edi, %edi
     movl $0, %eax                       // Call::Exit
     syscall
     ud2
@@ -519,6 +539,10 @@ nexus_user_server_start:
     movl $(5f - 4f), %esi
     syscall
 9:
+    // A status of zero, and it has to be written: `Exit` reads `rdi`, and
+    // whatever a program happened to leave there would otherwise become
+    // what its waiter is told about how it went.
+    xorl %edi, %edi
     movl $0, %eax                       // Call::Exit
     syscall
     ud2
@@ -994,16 +1018,25 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
     };
 
     match result {
-        Ok(id) => {
+        Ok(completion) => {
+            let id = completion.id;
             kprintln!("[spawn] started {id} from {path} at a process's request");
-            // The asker's end goes back with the reply. Handing it over is what
-            // makes this an introduction rather than a notification.
+            // Two handles, in a fixed order: the channel to talk to it, and the
+            // process to wait for it. Both go back with the one reply, because
+            // they are one answer -- an introduction and an undertaking to say
+            // when it is over.
             (
                 format!("started {id}"),
-                alloc::vec![ipc::Handle {
-                    object: ipc::Object::Channel(to_child),
-                    rights: ipc::Rights::ALL,
-                }],
+                alloc::vec![
+                    ipc::Handle {
+                        object: ipc::Object::Channel(to_child),
+                        rights: ipc::Rights::ALL,
+                    },
+                    ipc::Handle {
+                        object: ipc::Object::Process(completion),
+                        rights: ipc::Rights::ALL,
+                    },
+                ],
             )
         }
         Err(error) => (format!("refused: {error}"), Vec::new()),
@@ -1153,7 +1186,7 @@ pub unsafe fn start_from_disk(
     path: &str,
     name: &str,
     endowments: &[(ipc::Object, ipc::Rights)],
-) -> Result<crate::process::ProcessId, UserError> {
+) -> Result<alloc::sync::Arc<crate::process::Completion>, UserError> {
     let partitions = fs::gpt::read().map_err(UserError::PartitionTable)?;
     let esp = partitions
         .iter()
@@ -1235,6 +1268,10 @@ pub unsafe fn start_from_disk(
 
     let process = crate::process::Process::new(name, Arc::new(space));
     let id = process.id;
+    // Taken before the process is handed to the scheduler, because after that
+    // it may have exited by the time this function returns and the `Arc` in
+    // hand is the only thing that will still be able to say so.
+    let completion = Arc::clone(&process.completion);
 
     // Whatever authority the caller decided this program should have, handed
     // over before it runs. A program starts with exactly what it was given, in
@@ -1262,7 +1299,7 @@ pub unsafe fn start_from_disk(
         loaded.segment_count,
         span_pages * layout::PAGE_SIZE as usize / 1024
     );
-    Ok(id)
+    Ok(completion)
 }
 
 /// What `init` starts holding.

@@ -52,21 +52,21 @@ extern "C" fn main() -> ! {
     let second = nexus_user::uptime();
 
     if second < first {
-        nexus_user::log("init: FAILED: the clock went backwards").ok();
-        nexus_user::exit();
+        failed("init: FAILED: the clock went backwards");
+        finish();
     }
 
     // A channel to itself, which is the whole of the IPC interface exercised
     // from a program that was not compiled into the kernel.
     let Ok((writer, reader)) = nexus_user::channel() else {
-        nexus_user::log("init: FAILED: could not create a channel").ok();
-        nexus_user::exit();
+        failed("init: FAILED: could not create a channel");
+        finish();
     };
 
     const GREETING: &[u8] = b"a message from a program on disk";
     if nexus_user::send(writer, GREETING, &[]) != Ok(GREETING.len()) {
-        nexus_user::log("init: FAILED: could not send on its own channel").ok();
-        nexus_user::exit();
+        failed("init: FAILED: could not send on its own channel");
+        finish();
     }
 
     let mut buffer = [0u8; 64];
@@ -74,27 +74,27 @@ extern "C" fn main() -> ! {
     match nexus_user::receive(reader, &mut buffer, &mut handles) {
         Ok(received) if received.bytes == GREETING.len() && received.handles == 0 => {
             if &buffer[..received.bytes] != GREETING {
-                nexus_user::log("init: FAILED: the message came back changed").ok();
-                nexus_user::exit();
+                failed("init: FAILED: the message came back changed");
+                finish();
             }
         }
         _ => {
-            nexus_user::log("init: FAILED: could not read its own message").ok();
-            nexus_user::exit();
+            failed("init: FAILED: could not read its own message");
+            finish();
         }
     }
 
     // A handle it was never given has to be refused rather than answered.
     if nexus_user::rights(nexus_user::Handle(9999)) != Err(nexus_user::Error::BadHandle) {
-        nexus_user::log("init: FAILED: a handle it never had was accepted").ok();
-        nexus_user::exit();
+        failed("init: FAILED: a handle it never had was accepted");
+        finish();
     }
 
     nexus_user::log("init: clock, channel and handle checks all passed").ok();
 
     ask_for_a_program();
     use_the_filesystem();
-    nexus_user::exit()
+    finish()
 }
 
 /// The channel to the spawn service, as the kernel hands it over: the first
@@ -106,36 +106,40 @@ const SPAWNER: nexus_user::Handle = nexus_user::Handle(1);
 /// There is no system call that creates a process. There is a channel, and
 /// holding one end of it is the authority to ask; a program that was never
 /// given this handle cannot ask, and there is no name it could use instead.
-/// What comes back is a handle to the thing that started, so the answer is an
-/// introduction rather than a notification.
+/// What comes back is two handles: a channel to the thing that started, so the
+/// answer is an introduction rather than a notification, and the process
+/// itself, which is what makes "and tell me when it is done" something this
+/// program can ask rather than something it has to guess at.
 fn ask_for_a_program() {
     const PROGRAM: &[u8] = b"BIN/HELLO.ELF";
 
     if nexus_user::send(SPAWNER, PROGRAM, &[]).is_err() {
-        nexus_user::log("init: FAILED: could not reach the spawn service").ok();
+        failed("init: FAILED: could not reach the spawn service");
         return;
     }
 
     let mut buffer = [0u8; 64];
-    let mut handles = [nexus_user::Handle(0); 1];
+    let mut handles = [nexus_user::Handle(0); 2];
     let received = match nexus_user::receive(SPAWNER, &mut buffer, &mut handles) {
         Ok(received) => received,
         Err(_) => {
-            nexus_user::log("init: FAILED: the spawn service did not answer").ok();
+            failed("init: FAILED: the spawn service did not answer");
             return;
         }
     };
 
-    if received.handles != 1 {
+    if received.handles != 2 {
         // The reply text says why, and is worth showing: a refusal is as
         // interesting as a success and reads the same way in a boot log.
         let text = core::str::from_utf8(&buffer[..received.bytes]).unwrap_or("<not text>");
         nexus_user::log(text).ok();
-        nexus_user::log("init: FAILED: no channel to the new program came back").ok();
+        failed("init: FAILED: the spawn service did not send both handles");
         return;
     }
 
+    // In the order the service sends them: talk to it, then wait for it.
     let child = handles[0];
+    let process = handles[1];
 
     // Whatever it says first. It was started by the kernel on this program's
     // behalf and neither of them can name the other, so this channel is the
@@ -148,19 +152,54 @@ fn ask_for_a_program() {
             nexus_user::log(text).ok();
         }
         _ => {
-            nexus_user::log("init: FAILED: the new program said nothing").ok();
+            failed("init: FAILED: the new program said nothing");
             return;
         }
     }
 
     if nexus_user::send(child, b"init: heard you", &[]).is_err() {
-        nexus_user::log("init: FAILED: could not answer the new program").ok();
+        failed("init: FAILED: could not answer the new program");
         return;
     }
 
     nexus_user::log("init: asked for a program, got a channel, and used it").ok();
 
     share_memory_with(child);
+    wait_for(process);
+}
+
+/// Wait for the program that was started, and say how it went.
+///
+/// This is the last thing missing from "ask for a program": until now this
+/// process could start one and talk to it, and had no way to learn that it had
+/// finished or whether it had worked. The channel closing says the other end is
+/// gone; it does not say what the program decided.
+///
+/// Blocking is the honest shape. The other program may already have exited --
+/// it very likely has, since everything above this has been a round trip with
+/// it -- and a wait that missed an ending that had already happened would be a
+/// wait that never returned.
+fn wait_for(process: nexus_user::Handle) {
+    match nexus_user::wait(process) {
+        Ok(0) => {
+            nexus_user::log("init: the program it asked for finished, and said it worked").ok();
+        }
+        Ok(status) => {
+            // Reported rather than ignored. A non-zero status here means the
+            // other program decided something went wrong, and a parent that
+            // dropped that would be the reason nobody ever found out.
+            let _ = status;
+            failed("init: FAILED: the program it asked for reported a failure");
+        }
+        Err(_) => {
+            failed("init: FAILED: could not wait for the program it asked for");
+        }
+    }
+
+    // The handle outlives the process on purpose -- a completion is a name and
+    // a number, not an address space -- so it is closed when there is nothing
+    // more to ask it.
+    nexus_user::close(process).ok();
 }
 
 /// Where this program maps memory it shares.
@@ -182,11 +221,11 @@ const THEIRS: u64 = 0x2222_2222_2222_2222;
 /// the contents.
 fn share_memory_with(child: nexus_user::Handle) {
     let Ok(memory) = nexus_user::memory_create(4096) else {
-        nexus_user::log("init: FAILED: could not create shared memory").ok();
+        failed("init: FAILED: could not create shared memory");
         return;
     };
     if nexus_user::memory_map(memory, SHARED_AT, true) != Ok(4096) {
-        nexus_user::log("init: FAILED: could not map shared memory").ok();
+        failed("init: FAILED: could not map shared memory");
         return;
     }
 
@@ -198,7 +237,7 @@ fn share_memory_with(child: nexus_user::Handle) {
     // The handle crosses, not the page. The other process maps the same frames
     // wherever it likes.
     if nexus_user::send(child, b"shared memory", &[memory]).is_err() {
-        nexus_user::log("init: FAILED: could not pass the memory handle").ok();
+        failed("init: FAILED: could not pass the memory handle");
         return;
     }
 
@@ -206,7 +245,7 @@ fn share_memory_with(child: nexus_user::Handle) {
     let mut buffer = [0u8; 64];
     let mut none = [nexus_user::Handle(0); 1];
     if nexus_user::receive(child, &mut buffer, &mut none).is_err() {
-        nexus_user::log("init: FAILED: no answer about the shared page").ok();
+        failed("init: FAILED: no answer about the shared page");
         return;
     }
 
@@ -216,9 +255,9 @@ fn share_memory_with(child: nexus_user::Handle) {
     if seen == THEIRS {
         nexus_user::log("init: the other process wrote into memory we both map").ok();
     } else if seen == OURS {
-        nexus_user::log("init: FAILED: the shared page still holds only our own value").ok();
+        failed("init: FAILED: the shared page still holds only our own value");
     } else {
-        nexus_user::log("init: FAILED: the shared page holds something neither wrote").ok();
+        failed("init: FAILED: the shared page holds something neither wrote");
     }
 }
 
@@ -247,7 +286,7 @@ fn use_the_filesystem() {
     // The root, as it stands. A listing before anything is created, so what
     // this program adds is visibly its own.
     let Ok(length) = nexus_user::list(ROOT, &mut buffer) else {
-        nexus_user::log("init: FAILED: could not read the root directory").ok();
+        failed("init: FAILED: could not read the root directory");
         return;
     };
     let mut found = 0;
@@ -256,7 +295,7 @@ fn use_the_filesystem() {
         let _ = entry;
     }
     if found == 0 {
-        nexus_user::log("init: FAILED: the root directory is empty").ok();
+        failed("init: FAILED: the root directory is empty");
         return;
     }
 
@@ -268,12 +307,12 @@ fn use_the_filesystem() {
         Err(nexus_user::Error::Exists) => match nexus_user::open(ROOT, OUR_DIRECTORY) {
             Ok(handle) => handle,
             Err(_) => {
-                nexus_user::log("init: FAILED: its directory exists and will not open").ok();
+                failed("init: FAILED: its directory exists and will not open");
                 return;
             }
         },
         Err(_) => {
-            nexus_user::log("init: FAILED: could not make a directory").ok();
+            failed("init: FAILED: could not make a directory");
             return;
         }
     };
@@ -290,7 +329,7 @@ fn use_the_filesystem() {
         }
         Err(nexus_user::Error::NotFound) => 0,
         Err(_) => {
-            nexus_user::log("init: FAILED: its own note would not open").ok();
+            failed("init: FAILED: its own note would not open");
             return;
         }
     };
@@ -303,20 +342,20 @@ fn use_the_filesystem() {
             match nexus_user::create(ours, NOTE, nexus_user::Kind::File) {
                 Ok(handle) => handle,
                 Err(_) => {
-                    nexus_user::log("init: FAILED: could not make a file").ok();
+                    failed("init: FAILED: could not make a file");
                     return;
                 }
             }
         }
         Err(_) => {
-            nexus_user::log("init: FAILED: could not open its own file").ok();
+            failed("init: FAILED: could not open its own file");
             return;
         }
     };
 
     const WRITTEN: &[u8] = b"init was here, and wrote this from ring 3\n";
     if nexus_user::write(note, WRITTEN) != Ok(WRITTEN.len()) {
-        nexus_user::log("init: FAILED: could not write to its own file").ok();
+        failed("init: FAILED: could not write to its own file");
         return;
     }
 
@@ -325,12 +364,12 @@ fn use_the_filesystem() {
     match nexus_user::read(note, &mut back) {
         Ok(length) if length == WRITTEN.len() && &back[..length] == WRITTEN => {}
         _ => {
-            nexus_user::log("init: FAILED: what was written did not read back").ok();
+            failed("init: FAILED: what was written did not read back");
             return;
         }
     }
     if nexus_user::size(note) != Ok(WRITTEN.len()) {
-        nexus_user::log("init: FAILED: the file does not know its own length").ok();
+        failed("init: FAILED: the file does not know its own length");
         return;
     }
 
@@ -338,30 +377,30 @@ fn use_the_filesystem() {
     // that reports its own length looks exactly like a whole one.
     let mut tiny = [0u8; 4];
     if nexus_user::read(note, &mut tiny) != Err(nexus_user::Error::TooBig) {
-        nexus_user::log("init: FAILED: a short buffer was filled with a fragment").ok();
+        failed("init: FAILED: a short buffer was filled with a fragment");
         return;
     }
 
     // A name with a separator in it must be refused, not walked. If it were
     // walked, a directory handle would stop meaning "this subtree".
     if nexus_user::open(ROOT, "../system").is_ok() {
-        nexus_user::log("init: FAILED: a path escaped the directory it started in").ok();
+        failed("init: FAILED: a path escaped the directory it started in");
         return;
     }
     // And a name that is not there.
     if nexus_user::open(ours, "nosuch") != Err(nexus_user::Error::NotFound) {
-        nexus_user::log("init: FAILED: a name that is not there was opened").ok();
+        failed("init: FAILED: a name that is not there was opened");
         return;
     }
     // And removing something that is still open.
     if nexus_user::remove(ours, NOTE) != Err(nexus_user::Error::Filesystem) {
-        nexus_user::log("init: FAILED: a file was removed while it was still open").ok();
+        failed("init: FAILED: a file was removed while it was still open");
         return;
     }
 
     // The directory now has the file in it, and says so.
     let Ok(length) = nexus_user::list(ours, &mut buffer) else {
-        nexus_user::log("init: FAILED: could not read its own directory").ok();
+        failed("init: FAILED: could not read its own directory");
         return;
     };
     let mut names = 0;
@@ -373,7 +412,7 @@ fn use_the_filesystem() {
         }
     }
     if names != 1 || !correct {
-        nexus_user::log("init: FAILED: its directory does not hold what it wrote").ok();
+        failed("init: FAILED: its directory does not hold what it wrote");
         return;
     }
 
@@ -388,8 +427,32 @@ fn use_the_filesystem() {
 }
 
 /// Nothing catches a panic here, so it is reported and the thread stops.
+/// Whether anything has gone wrong, for the status this program exits with.
+///
+/// A program that logged a failure and then exited saying it worked would be a
+/// program whose parent has no way to find out. Every `FAILED` path below sets
+/// this, and `finish` turns it into the number the waiter reads.
+static FAILED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Say what happened and stop. Never returns.
+fn finish() -> ! {
+    if FAILED.load(core::sync::atomic::Ordering::Relaxed) {
+        nexus_user::exit_with(1)
+    } else {
+        nexus_user::exit()
+    }
+}
+
+/// Log a failure and remember it.
+fn failed(what: &str) {
+    FAILED.store(true, core::sync::atomic::Ordering::Relaxed);
+    nexus_user::log(what).ok();
+}
+
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     nexus_user::log("init: PANIC").ok();
-    nexus_user::exit()
+    // Straight to the status: a panicking program has no state left worth
+    // consulting, and its waiter is owed a number that says so.
+    nexus_user::exit_with(2)
 }

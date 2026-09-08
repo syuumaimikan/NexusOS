@@ -211,44 +211,42 @@ impl Drop for KernelGs {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn entry_is_sixteen_bytes_and_the_table_is_four_kibibytes() {
-        assert_eq!(size_of::<Entry>(), 16);
-        assert_eq!(size_of::<InterruptDescriptorTable>(), 16 * 256);
+/// Check the descriptor layout against the architecture.
+///
+/// None of this touches the processor: it is what a descriptor has to look like
+/// in memory before one is ever loaded, and getting it wrong produces a machine
+/// that triple-faults on the first interrupt with nothing to say about why.
+/// Run at boot rather than under `cargo test`; see [`crate::selftest`].
+pub fn layout_self_test() -> Result<(), &'static str> {
+    if size_of::<Entry>() != 16 || size_of::<InterruptDescriptorTable>() != 16 * 256 {
+        return Err("a descriptor or the table is not the size the architecture defines");
     }
 
-    #[test]
-    fn set_handler_splits_the_address_across_three_fields() {
-        let mut entry = Entry::missing();
-        let handler = 0xFFFF_FFFF_8012_3456u64;
-        entry.set_handler(handler, 0);
-
-        assert_eq!(entry.offset_low, 0x3456);
-        assert_eq!(entry.offset_mid, 0x8012);
-        assert_eq!(entry.offset_high, 0xFFFF_FFFF);
-        assert_eq!(entry.selector, KERNEL_CODE_SELECTOR);
-        assert_eq!(entry.flags, INTERRUPT_GATE);
-        assert_eq!(entry.ist, 0);
+    // A handler address is stored in three separate fields, which is the one
+    // part of the encoding a reader is likely to get wrong.
+    let mut entry = Entry::missing();
+    entry.set_handler(0xFFFF_FFFF_8012_3456, 0);
+    if entry.offset_low != 0x3456 || entry.offset_mid != 0x8012 || entry.offset_high != 0xFFFF_FFFF
+    {
+        return Err("a handler address was not split across the three offset fields");
+    }
+    if entry.selector != KERNEL_CODE_SELECTOR || entry.flags != INTERRUPT_GATE || entry.ist != 0 {
+        return Err("a gate was not built as a kernel interrupt gate");
     }
 
-    #[test]
-    fn only_the_low_three_bits_of_an_ist_index_are_stored() {
-        let mut entry = Entry::missing();
-        entry.set_handler(0x1000, 1);
-        assert_eq!(entry.ist, 1);
-
-        // Slot numbers above 7 do not exist; the field must not spill into the
-        // reserved bits beside it.
-        entry.set_handler(0x1000, 0xFF);
-        assert_eq!(entry.ist, 7);
+    // Stack slots above seven do not exist, and the field must not spill into
+    // the reserved bits beside it.
+    entry.set_handler(0x1000, 1);
+    if entry.ist != 1 {
+        return Err("an interrupt-stack slot was not stored");
+    }
+    entry.set_handler(0x1000, 0xFF);
+    if entry.ist != 7 {
+        return Err("an out-of-range stack slot spilled into the reserved bits");
     }
 
-    #[test]
-    fn irq_vectors_start_above_the_architectural_exceptions() {
-        assert!(IRQ_BASE >= 32, "vectors 0..32 belong to the architecture");
+    if IRQ_BASE < 32 {
+        return Err("device vectors overlap the architectural exceptions");
     }
+    Ok(())
 }

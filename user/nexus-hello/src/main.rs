@@ -40,8 +40,8 @@ extern "C" fn main() -> ! {
 
     const GREETING: &[u8] = b"hello, from the program you asked for";
     if nexus_user::send(PARENT, GREETING, &[]).is_err() {
-        nexus_user::log("hello: FAILED: could not reach whoever started me").ok();
-        nexus_user::exit();
+        failed("hello: FAILED: could not reach whoever started me");
+        finish();
     }
 
     let mut buffer = [0u8; 64];
@@ -54,13 +54,13 @@ extern "C" fn main() -> ! {
             nexus_user::log(text).ok();
         }
         _ => {
-            nexus_user::log("hello: FAILED: no answer came back").ok();
-            nexus_user::exit();
+            failed("hello: FAILED: no answer came back");
+            finish();
         }
     }
 
     share_memory();
-    nexus_user::exit()
+    finish()
 }
 
 /// Where this program maps memory someone shares with it.
@@ -82,29 +82,29 @@ fn share_memory() {
     let received = match nexus_user::receive(PARENT, &mut buffer, &mut handles) {
         Ok(received) => received,
         Err(_) => {
-            nexus_user::log("hello: FAILED: nothing more came").ok();
+            failed("hello: FAILED: nothing more came");
             return;
         }
     };
     if received.handles != 1 {
-        nexus_user::log("hello: FAILED: no memory handle came with it").ok();
+        failed("hello: FAILED: no memory handle came with it");
         return;
     }
 
     let memory = handles[0];
     let Ok(size) = nexus_user::memory_size(memory) else {
-        nexus_user::log("hello: FAILED: could not ask how large the memory is").ok();
+        failed("hello: FAILED: could not ask how large the memory is");
         return;
     };
     if nexus_user::memory_map(memory, SHARED_AT, true) != Ok(size) {
-        nexus_user::log("hello: FAILED: could not map the shared memory").ok();
+        failed("hello: FAILED: could not map the shared memory");
         return;
     }
 
     // SAFETY: the kernel mapped the page here, writable, for this process.
     let seen = unsafe { core::ptr::read_volatile(SHARED_AT as *const u64) };
     if seen != THEIRS {
-        nexus_user::log("hello: FAILED: the shared page does not hold what was written").ok();
+        failed("hello: FAILED: the shared page does not hold what was written");
         return;
     }
 
@@ -118,8 +118,32 @@ fn share_memory() {
     nexus_user::send(PARENT, b"written", &[]).ok();
 }
 
+/// Whether anything has gone wrong, for the status this program exits with.
+///
+/// A program that logged a failure and then exited saying it worked would be a
+/// program whose parent has no way to find out. Every `FAILED` path below sets
+/// this, and `finish` turns it into the number the waiter reads.
+static FAILED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Say what happened and stop. Never returns.
+fn finish() -> ! {
+    if FAILED.load(core::sync::atomic::Ordering::Relaxed) {
+        nexus_user::exit_with(1)
+    } else {
+        nexus_user::exit()
+    }
+}
+
+/// Log a failure and remember it.
+fn failed(what: &str) {
+    FAILED.store(true, core::sync::atomic::Ordering::Relaxed);
+    nexus_user::log(what).ok();
+}
+
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     nexus_user::log("hello: PANIC").ok();
-    nexus_user::exit()
+    // Straight to the status: a panicking program has no state left worth
+    // consulting, and its waiter is owed a number that says so.
+    nexus_user::exit_with(2)
 }

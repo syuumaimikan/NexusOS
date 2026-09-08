@@ -121,6 +121,7 @@ enum Call {
     NodeRead = 17,
     NodeWrite = 18,
     NodeSize = 19,
+    ProcessWait = 20,
 }
 
 /// Make a system call.
@@ -151,11 +152,20 @@ unsafe fn syscall(call: Call, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u
     result
 }
 
-/// Stop this thread. Never returns.
+/// Stop this process, saying it worked. Never returns.
 pub fn exit() -> ! {
-    // SAFETY: `Exit` takes no arguments and does not return.
+    exit_with(0)
+}
+
+/// Stop this process with a status. Never returns.
+///
+/// The number goes to whoever holds a handle to this process and waits for it.
+/// The kernel attaches no meaning to it; zero means success because that is
+/// what everything here writes, not because anything enforces it.
+pub fn exit_with(status: u32) -> ! {
+    // SAFETY: `Exit` takes a status and does not return.
     unsafe {
-        syscall(Call::Exit, 0, 0, 0, 0, 0, 0);
+        syscall(Call::Exit, u64::from(status), 0, 0, 0, 0, 0);
         // The kernel does not come back from this, but the compiler has no way
         // to know that, and running into whatever follows would be worse than
         // any fault.
@@ -528,4 +538,21 @@ pub fn size(node: Handle) -> Result<usize, Error> {
     // SAFETY: takes one integer.
     let result = unsafe { syscall(Call::NodeSize, u64::from(node.0), 0, 0, 0, 0, 0) };
     check(result).map(|size| size as usize)
+}
+
+// -- Processes -----------------------------------------------------------------
+
+/// Wait for a process to end, and take its status.
+///
+/// Blocks. A process that has already ended answers immediately, which is the
+/// case that matters: a caller that asks after the fact must get the answer
+/// rather than wait forever for something that has been and gone.
+///
+/// The handle is the authority. There is no call that waits on a process
+/// identifier, because an identifier is a number that could be guessed and a
+/// handle is something that had to be given.
+pub fn wait(process: Handle) -> Result<u32, Error> {
+    // SAFETY: takes one integer.
+    let result = unsafe { syscall(Call::ProcessWait, u64::from(process.0), 0, 0, 0, 0, 0) };
+    check(result).map(|status| status as u32)
 }

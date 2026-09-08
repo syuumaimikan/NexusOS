@@ -31,6 +31,7 @@ mod memory;
 mod panic;
 mod process;
 mod sched;
+mod selftest;
 mod serial;
 mod sync;
 mod user;
@@ -553,11 +554,13 @@ fn self_test() {
         kprintln!("[test] timer is live: {ticks} ticks in the first few milliseconds");
     }
 
+    selftest::run();
     memory_self_test();
     heap_self_test();
     scheduler_self_test();
     tlb_self_test();
     ipc_self_test();
+    process_self_test();
     disk_self_test();
     filesystem_self_test();
     nexusfs_self_test();
@@ -572,17 +575,6 @@ fn self_test() {
 /// could have come from is the disk.
 fn nexusfs_self_test() {
     use fs::store;
-
-    // The format, checked against itself first. It needs no disk, so a machine
-    // without one still runs it, and a failure here says the bug is in the
-    // encoding rather than in the driver underneath it.
-    match fs::nexusfs::format_self_test() {
-        Ok(()) => kprintln!("[test] the NexusFS on-disk format checks out"),
-        Err(what) => {
-            kprintln!("[test] FAILED: the NexusFS format: {what}");
-            return;
-        }
-    }
 
     let mounted = match store::mount() {
         Ok(mounted) => mounted,
@@ -946,6 +938,166 @@ fn disk_self_test() {
 }
 
 /// State for the IPC self-test.
+/// Shared state for the process-lifetime self-test.
+mod process_test {
+    use alloc::sync::Arc;
+    use core::sync::atomic::AtomicU64;
+
+    use crate::process::Completion;
+    use crate::sync::IrqSpinLock;
+
+    /// The completion the waiting thread waits on.
+    pub static SUBJECT: IrqSpinLock<Option<Arc<Completion>>> = IrqSpinLock::new(None);
+    /// The status the waiter read, plus one, so that zero means "not yet".
+    ///
+    /// Zero is a legitimate status and this has to distinguish "waiting" from
+    /// "finished with zero"; a second flag would be the same thing with a
+    /// second chance to publish them out of order.
+    pub static OBSERVED: AtomicU64 = AtomicU64::new(0);
+}
+
+/// What the process-lifetime test hands back through its completion.
+///
+/// Not zero, and not one either. A test whose expected value is a number the
+/// code would produce by accident is a test that passes when the status is
+/// dropped entirely and replaced with a default.
+const PROCESS_STATUS: u64 = 0x5A;
+
+/// A thread that blocks until a process ends.
+fn process_test_waiter(_argument: usize) {
+    use core::sync::atomic::Ordering;
+
+    let subject = process_test::SUBJECT.lock().clone();
+    let Some(subject) = subject else {
+        return;
+    };
+    let status = subject.wait();
+    process_test::OBSERVED.store(status + 1, Ordering::Release);
+}
+
+/// Exercise waiting for a process to end.
+///
+/// Two claims, and the second is the one a single boot of the real system does
+/// not make. `init` waits for the program it asks for, but by then that program
+/// has almost always exited already, so what is exercised is the easy path: a
+/// wait on something that has finished, which returns without ever blocking.
+///
+/// This runs the other way round. A thread waits *first*, and is checked to
+/// have left the run queues rather than spun, and only then is the completion
+/// finished. That is the path with the lost wake-up in it: if the ending were
+/// published without waking the queue, or the waiter joined the queue after the
+/// ending was published, this thread would wait forever and every real program
+/// that ever waits for a child would too.
+fn process_self_test() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::Ordering;
+
+    // A completion with no process behind it. It does not need one: what is
+    // being tested is the ending and the waiting, and a real process would add
+    // an address space and a program image to something that is about neither.
+    let space = match memory::address_space::AddressSpace::new() {
+        Ok(space) => space,
+        Err(error) => {
+            kprintln!("[test] FAILED: could not make an address space to end: {error}");
+            return;
+        }
+    };
+    let subject = process::Process::new("ending", Arc::new(space));
+    let completion = Arc::clone(&subject.completion);
+
+    if completion.status().is_some() {
+        kprintln!("[test] FAILED: a process that has not ended reports a status");
+        return;
+    }
+
+    *process_test::SUBJECT.lock() = Some(Arc::clone(&completion));
+    process_test::OBSERVED.store(0, Ordering::Relaxed);
+
+    // Against a baseline, not against zero. Something else may already be
+    // blocked, and a test that read "one thread is blocked" as "our thread is
+    // blocked" would pass without the waiter ever having run.
+    let blocked_before = sched::stats().blocked;
+
+    if let Err(error) = sched::spawn(
+        "waiter",
+        sched::thread::Priority::Normal,
+        process_test_waiter,
+        0,
+    ) {
+        kprintln!("[test] FAILED: could not start a thread to wait: {error}");
+        return;
+    }
+
+    // Wait for it to actually block. Sleeping rather than spinning, so this
+    // thread is off the processor and the waiter can reach the point where it
+    // has nothing left to do.
+    let mut blocked = false;
+    for _ in 0..200 {
+        if sched::stats().blocked > blocked_before {
+            blocked = true;
+            break;
+        }
+        sched::sleep_ms(1);
+    }
+    if !blocked {
+        kprintln!("[test] FAILED: the thread waiting for a process never blocked");
+        return;
+    }
+    if process_test::OBSERVED.load(Ordering::Acquire) != 0 {
+        kprintln!("[test] FAILED: a wait returned before the process had ended");
+        return;
+    }
+
+    completion.finish(PROCESS_STATUS);
+
+    let mut observed = 0;
+    for _ in 0..200 {
+        observed = process_test::OBSERVED.load(Ordering::Acquire);
+        if observed != 0 {
+            break;
+        }
+        sched::sleep_ms(1);
+    }
+    if observed == 0 {
+        kprintln!("[test] FAILED: ending a process did not wake the thread waiting for it");
+        return;
+    }
+    if observed - 1 != PROCESS_STATUS {
+        kprintln!(
+            "[test] FAILED: the waiter read status {} and not {PROCESS_STATUS}",
+            observed - 1
+        );
+        return;
+    }
+
+    // And afterwards: the status stays readable, and a second ending does not
+    // replace it. A parent that asks twice must not get two different answers,
+    // and a process cannot end twice however many threads it comes to have.
+    if completion.status() != Some(PROCESS_STATUS) {
+        kprintln!("[test] FAILED: the status did not survive being read");
+        return;
+    }
+    completion.finish(PROCESS_STATUS + 1);
+    if completion.status() != Some(PROCESS_STATUS) {
+        kprintln!("[test] FAILED: a second ending replaced the first one's status");
+        return;
+    }
+
+    // The completion outlives the process on purpose, which is the whole reason
+    // a handle names one rather than naming the process: a parent that keeps a
+    // handle must not keep an address space.
+    drop(subject);
+    if completion.status() != Some(PROCESS_STATUS) {
+        kprintln!("[test] FAILED: the status went away with the process");
+        return;
+    }
+
+    kprintln!(
+        "[test] process lifetime verified: a thread blocked waiting for a process, \
+         was woken by its ending, and read status {PROCESS_STATUS} back"
+    );
+}
+
 mod ipc_test {
     use alloc::sync::Arc;
     use core::sync::atomic::AtomicU64;

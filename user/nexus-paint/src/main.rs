@@ -66,13 +66,13 @@ extern "C" fn main() -> ! {
     let received = match nexus_user::receive(PARENT, &mut buffer, &mut handles) {
         Ok(received) => received,
         Err(_) => {
-            nexus_user::log("paint: FAILED: nothing arrived to draw on").ok();
-            nexus_user::exit();
+            failed("paint: FAILED: nothing arrived to draw on");
+            finish();
         }
     };
     if received.handles != 1 || received.bytes < 32 {
-        nexus_user::log("paint: FAILED: no framebuffer came with the message").ok();
-        nexus_user::exit();
+        failed("paint: FAILED: no framebuffer came with the message");
+        finish();
     }
 
     let surface = Surface {
@@ -87,18 +87,18 @@ extern "C" fn main() -> ! {
     };
 
     if surface.bytes_per_pixel != 4 {
-        nexus_user::log("paint: FAILED: this program only understands 32-bit pixels").ok();
-        nexus_user::exit();
+        failed("paint: FAILED: this program only understands 32-bit pixels");
+        finish();
     }
 
     let memory = handles[0];
     let Ok(size) = nexus_user::memory_size(memory) else {
-        nexus_user::log("paint: FAILED: could not ask how large the framebuffer is").ok();
-        nexus_user::exit();
+        failed("paint: FAILED: could not ask how large the framebuffer is");
+        finish();
     };
     if nexus_user::memory_map(memory, FRAMEBUFFER_AT, true) != Ok(size) {
-        nexus_user::log("paint: FAILED: could not map the framebuffer").ok();
-        nexus_user::exit();
+        failed("paint: FAILED: could not map the framebuffer");
+        finish();
     }
 
     // The rectangle is checked against the screen rather than trusted, even
@@ -108,15 +108,15 @@ extern "C" fn main() -> ! {
     let right = surface.x + surface.width;
     let bottom = surface.y + surface.height;
     if right > surface.screen_width || bottom > surface.screen_height {
-        nexus_user::log("paint: FAILED: the rectangle is not on the screen").ok();
-        nexus_user::exit();
+        failed("paint: FAILED: the rectangle is not on the screen");
+        finish();
     }
 
     fill(&surface);
 
     nexus_user::log("paint: filled its rectangle from user space").ok();
     nexus_user::send(PARENT, b"painted", &[]).ok();
-    nexus_user::exit()
+    finish()
 }
 
 /// Draw the rectangle: a border, and a gradient inside it.
@@ -162,8 +162,32 @@ fn read_u32(buffer: &[u8], offset: usize) -> u32 {
     ])
 }
 
+/// Whether anything has gone wrong, for the status this program exits with.
+///
+/// A program that logged a failure and then exited saying it worked would be a
+/// program whose parent has no way to find out. Every `FAILED` path below sets
+/// this, and `finish` turns it into the number the waiter reads.
+static FAILED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Say what happened and stop. Never returns.
+fn finish() -> ! {
+    if FAILED.load(core::sync::atomic::Ordering::Relaxed) {
+        nexus_user::exit_with(1)
+    } else {
+        nexus_user::exit()
+    }
+}
+
+/// Log a failure and remember it.
+fn failed(what: &str) {
+    FAILED.store(true, core::sync::atomic::Ordering::Relaxed);
+    nexus_user::log(what).ok();
+}
+
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     nexus_user::log("paint: PANIC").ok();
-    nexus_user::exit()
+    // Straight to the status: a panicking program has no state left worth
+    // consulting, and its waiter is owed a number that says so.
+    nexus_user::exit_with(2)
 }

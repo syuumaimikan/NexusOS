@@ -211,7 +211,7 @@ const syscall_entry: unsafe extern "sysv64" fn() = nexus_syscall_entry;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u64)]
 pub enum Call {
-    /// Stop the calling thread. Does not return.
+    /// Stop the calling thread, with a status. `(status)`. Does not return.
     Exit = 0,
     /// Write a string to the kernel log. `(pointer, length)`.
     Log = 1,
@@ -257,11 +257,13 @@ pub enum Call {
     NodeWrite = 18,
     /// How many bytes a file or directory holds. `(handle)`.
     NodeSize = 19,
+    /// Wait for a process to end, and take its status. `(handle)`.
+    ProcessWait = 20,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 21;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -286,6 +288,7 @@ impl Call {
             17 => Some(Self::NodeRead),
             18 => Some(Self::NodeWrite),
             19 => Some(Self::NodeSize),
+            20 => Some(Self::ProcessWait),
             _ => None,
         }
     }
@@ -321,6 +324,14 @@ pub const ETOOBIG: u64 = u64::MAX - 10;
 /// The filesystem refused: it is full, damaged, busy, or absent.
 pub const EFS: u64 = u64::MAX - 11;
 
+/// Values at or above this are errors rather than results.
+///
+/// Four spare codes above the last one in use, so adding a call does not move
+/// the boundary and make an old program read a new error as a length. The user
+/// runtime carries the same number, and a call that could return a value this
+/// large has to say so rather than let it be read as a failure.
+pub const ERROR_BASE: u64 = u64::MAX - 15;
+
 /// Longest string [`Call::Log`] will accept.
 ///
 /// A bound rather than a trust: the length comes from ring 3, and without one a
@@ -348,12 +359,18 @@ extern "sysv64" fn dispatch(
     let result = match Call::from_number(number) {
         Some(Call::Exit) => {
             match crate::sched::current_process() {
-                Some(process) => kprintln!(
-                    "[sys ] process {} \"{}\" exited through the system-call boundary,                      {} handles open",
-                    process.id,
-                    process.name.as_str(),
-                    process.handles.len()
-                ),
+                Some(process) => {
+                    // Recorded before the log line, so that a process whose
+                    // parent is already waiting is woken as early as possible
+                    // rather than after a serial write.
+                    process.completion.finish(argument0);
+                    kprintln!(
+                        "[sys ] process {} \"{}\" exited with status {argument0} through the system-call boundary,                      {} handles open",
+                        process.id,
+                        process.name.as_str(),
+                        process.handles.len()
+                    );
+                }
                 None => kprintln!("[sys ] a kernel thread exited through the boundary"),
             }
             // Masked again on the way out of the kernel, which `exit` never
@@ -389,6 +406,7 @@ extern "sysv64" fn dispatch(
         Some(Call::NodeRead) => node_read(argument0, argument1, argument2),
         Some(Call::NodeWrite) => node_write(argument0, argument1, argument2),
         Some(Call::NodeSize) => node_size(argument0),
+        Some(Call::ProcessWait) => process_wait(argument0),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -1097,4 +1115,54 @@ fn copy_out(bytes: &[u8], pointer: u64, capacity: u64) -> u64 {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer as *mut u8, length);
     }
     bytes.len() as u64
+}
+
+// -- Processes -----------------------------------------------------------------
+
+/// [`Call::ProcessWait`]: block until a process ends, and take its status.
+///
+/// The handle is the authority. There is no call that waits on a process
+/// identifier, because an identifier is a number a program could guess and a
+/// handle is something it had to be given -- the same argument as everywhere
+/// else here, applied to the question "is it done yet".
+///
+/// A process that has already ended returns immediately, which is the case that
+/// matters most: a parent that reads the answer after the child has exited must
+/// get the answer and not wait forever for an event that has been and gone.
+///
+/// The status is whatever the process passed to [`Call::Exit`], and the kernel
+/// attaches no meaning to it. Zero conventionally means it worked, because that
+/// is what every program here writes, not because anything enforces it.
+fn process_wait(handle: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+    let completion = match process.handles.process(handle, crate::ipc::Rights::READ) {
+        Ok(completion) => completion,
+        Err(error) => return handle_error(error),
+    };
+
+    // The Arc is cloned out of the table above, so the wait below does not hold
+    // the handle table's lock -- which it must not, because waking this thread
+    // means the exiting process is running code that touches its own table, and
+    // a thread blocked holding a lock that a waker needs is a system that stops.
+    let status = completion.wait();
+
+    // A status is a small number and errors live at the top of the range. A
+    // process that returned one of those would be reported as an error to its
+    // parent, so it is clamped and the clamping is visible in the log rather
+    // than silent.
+    if status >= ERROR_BASE {
+        kprintln!(
+            "[sys ] process {} \"{}\" exited with {status:#x}, which is not a status a caller can be given",
+            completion.id,
+            completion.name.as_str()
+        );
+        return EINVAL;
+    }
+    status
 }

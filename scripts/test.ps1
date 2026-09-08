@@ -138,7 +138,7 @@ Invoke-Step 'boot test' {
         'syscall entry at',
         'hello from ring 3',
         'callee-saved registers survived',
-        'exited through the system-call boundary',
+        'through the system-call boundary',
         'interrupts taken from ring 3',
         'kernel address space rooted at',
         'process alpha kept its own memory',
@@ -161,11 +161,14 @@ Invoke-Step 'boot test' {
         'EFI system partition',
         'mounted at sector',
         'filesystem verified',
-        'the NexusFS on-disk format checks out',
+        'structural checks passed',
         'NexusFS verified',
         'the boot log has',
         'starts holding directory handle',
         'init: made a directory and a file',
+        'process lifetime verified',
+        'exited with status 0',
+        'the program it asked for finished, and said it worked',
         'loaded from BIN/INIT.ELF',
         'init: loaded from disk and running in ring 3',
         'init: clock, channel and handle checks all passed',
@@ -357,6 +360,21 @@ Invoke-Step 'boot test' {
     if ([int]$Matches[2] -ge [int]$Matches[1]) {
         throw "NexusFS says $($Matches[2]) of $($Matches[1]) blocks are free, which leaves nowhere for its own metadata"
     }
+
+    # Every process that ended has to have ended with a status somebody could
+    # have acted on. The failure this guards against is a program exiting with
+    # whatever was left in a register: it looks like a working system until a
+    # parent believes a garbage number means failure.
+    $statuses = [regex]::Matches($output, 'exited with status (\d+) through')
+    if ($statuses.Count -lt 1) {
+        throw 'no process reported the status it exited with'
+    }
+    foreach ($status in $statuses) {
+        if ([int64]$status.Groups[1].Value -ne 0) {
+            throw "a process exited with status $($status.Groups[1].Value)"
+        }
+    }
+    Write-Host "    $($statuses.Count) processes exited with a status of zero" -ForegroundColor DarkGray
 
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }

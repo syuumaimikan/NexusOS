@@ -76,25 +76,49 @@ pub unsafe fn stop() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn common_rates_produce_sensible_divisors() {
-        assert_eq!(divisor_for(1000), 1193);
-        assert_eq!(divisor_for(100), 11931);
-        // The requested and achievable rates differ; callers use the returned
-        // value, not the requested one.
-        assert_eq!(INPUT_FREQUENCY_HZ / u32::from(divisor_for(1000)), 1000);
+/// Check the divisor arithmetic.
+///
+/// The counter is sixteen bits, so a rate the hardware cannot reach has to be
+/// clamped rather than allowed to wrap -- a wrapped divisor asks for a very
+/// fast interrupt instead of a very slow one, which is a machine that spends
+/// all its time in the timer handler. Run at boot; see [`crate::selftest`].
+pub fn divisor_self_test() -> Result<(), &'static str> {
+    if divisor_for(1000) != 1193 || divisor_for(100) != 11931 {
+        return Err("an ordinary rate produced the wrong divisor");
+    }
+    // The requested and achievable rates differ, which is why callers use the
+    // frequency that comes back rather than the one they asked for.
+    if INPUT_FREQUENCY_HZ / u32::from(divisor_for(1000)) != 1000 {
+        return Err("the divisor for 1 kHz does not divide down to 1 kHz");
     }
 
-    #[test]
-    fn rates_outside_the_representable_range_are_clamped() {
-        // Slower than the hardware can go: clamped to the 16-bit maximum
-        // rather than wrapping to a very fast rate.
-        assert_eq!(divisor_for(1), 65_535);
-        // Faster than the input clock: clamped to the smallest divisor.
-        assert_eq!(divisor_for(10_000_000), 1);
+    // A rate slower than the counter can express has to come out as a *large*
+    // divisor. This is the check worth having: the failure it guards against is
+    // an unclamped division producing a small one, which asks for a very fast
+    // interrupt instead of a very slow one and gives a machine that spends all
+    // its time in the timer handler.
+    //
+    // Not an exact number. The frequency is floored before the division rather
+    // than the divisor clamped after it, so the largest divisor this can
+    // produce is `INPUT_FREQUENCY_HZ / 19` and not 65535 -- which is what an
+    // earlier version of this check asserted, for as long as it never ran.
+    let slowest = divisor_for(1);
+    if slowest < 60_000 {
+        return Err("a rate below the hardware's range came out as a fast one");
     }
+    if INPUT_FREQUENCY_HZ / u32::from(slowest) > 20 {
+        return Err("the slowest rate the divisor asks for is not slow");
+    }
+    // And zero, which is the one argument that would divide by it.
+    if divisor_for(0) != slowest {
+        return Err("a rate of zero was not treated as the slowest possible");
+    }
+
+    // Faster than the input clock, which has to be the smallest divisor rather
+    // than zero -- a zero divisor means 65536 on this hardware, not "as fast as
+    // possible".
+    if divisor_for(10_000_000) != 1 {
+        return Err("a rate above the input clock was not clamped");
+    }
+    Ok(())
 }

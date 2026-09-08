@@ -463,14 +463,49 @@ handle still names it: a handle carries an inode number, an inode number is not
 a reference, and freeing the inode would leave the handle pointing at a number
 the filesystem is free to give to the next file.
 
+And a program can now be waited for. Until this, a process could start another
+and talk to it and had no way to learn that it had finished or whether it had
+worked; the channel closing said the other end was gone, which is not the same
+claim. `Exit` takes a status, the spawn service replies with two handles rather
+than one -- a channel to talk to it and the process to wait for it -- and
+`ProcessWait` blocks until it ends and returns the number.
+
+The handle names a *completion* and not the process, and that is the whole
+design decision. A handle to the process would keep its address space alive for
+as long as anybody remembered it, so a parent that never closed one would be a
+memory leak shaped like politeness. A completion is an identifier, a name and an
+outcome; it outlives the process by design and costs nothing to keep.
+
+Waiting has two paths and only one of them is easy. `init` waits for the program
+it asked for, and by then that program has almost always exited already -- so
+what a boot exercises is a wait on something already finished, which returns
+without ever blocking. The other path is the one with the lost wake-up in it,
+and it gets its own self-test: a thread waits *first*, is checked to have left
+the run queues rather than spun, and only then is the completion finished. If
+the ending were published without waking the queue, or the waiter joined after
+the ending was published, that thread would wait forever and so would every
+program that ever waits for a child.
+
+Two flags rather than one, for the same reason. One claims the ending, so that
+exactly one caller ever stores a status; the other publishes it, so a waiter
+that sees the flag cannot read a status that has not been written yet.
+
+Six assembly programs had to be edited for this, and the edit is the point:
+`Exit` now reads `rdi`, and they had been written when it took no arguments, so
+they exited with whatever happened to be in that register. One of them reported
+a pointer as its status. The suite now requires every process in a boot to exit
+with zero, because a garbage status looks exactly like a working system until a
+parent believes it means failure.
+
 Outstanding: NexusFS has no journal, so a power failure between two writes can
 leave the bitmap saying a block is taken that no file points at -- space leaked,
 nothing corrupted, which is the right way round for the failure to be. No
 permissions, no timestamps beyond the tick a thing was made at, no partial
 writes and no seek, so a large file is read and written whole. The FAT32 reader
 still cannot write and skips long names. The block driver polls one request at a
-time and takes no interrupt. A program gets no arguments, and nothing says when
-one ended or how.
+time and takes no interrupt. A program gets no arguments, nothing can end a
+process but its own thread, and there is no way to wait for several things at
+once.
 
 ## Phase 8 — Drivers and user space ⬜
 

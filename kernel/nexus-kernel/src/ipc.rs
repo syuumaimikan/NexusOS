@@ -434,6 +434,12 @@ pub enum Object {
     /// nothing else: there is no call that takes a path. A file handle is the
     /// authority to read or write that one file.
     Node(Arc<crate::fs::store::Node>),
+    /// A process that was started, and what became of it.
+    ///
+    /// The completion rather than the process, so that remembering a program
+    /// that has finished costs a name and a number rather than the address
+    /// space it was running in.
+    Process(Arc<crate::process::Completion>),
 }
 
 impl Object {
@@ -450,6 +456,7 @@ impl Object {
                     "file"
                 }
             }
+            Self::Process(_) => "process",
         }
     }
 }
@@ -561,6 +568,23 @@ impl HandleTable {
         }
         match &handle.object {
             Object::Node(node) => Ok(Arc::clone(node)),
+            _ => Err(HandleError::WrongKind),
+        }
+    }
+
+    /// The process `id` names, if it names one and carries `needed`.
+    pub fn process(
+        &self,
+        id: u32,
+        needed: Rights,
+    ) -> Result<Arc<crate::process::Completion>, HandleError> {
+        let entries = self.entries.lock();
+        let handle = entries.get(&id).ok_or(HandleError::NotFound)?;
+        if !handle.rights.contains(needed) {
+            return Err(HandleError::Denied);
+        }
+        match &handle.object {
+            Object::Process(completion) => Ok(Arc::clone(completion)),
             _ => Err(HandleError::WrongKind),
         }
     }
