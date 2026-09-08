@@ -147,6 +147,9 @@ Invoke-Step 'boot test' {
         'EFI system partition',
         'mounted at sector',
         'filesystem verified',
+        'the NexusFS on-disk format checks out',
+        'NexusFS verified',
+        'the boot log has',
         'loaded from BIN/INIT.ELF',
         'init: loaded from disk and running in ring 3',
         'init: clock, channel and handle checks all passed',
@@ -323,6 +326,22 @@ Invoke-Step 'boot test' {
     if ([int]$Matches[1] -lt 1 -or [int]$Matches[2] -lt 3) {
         throw "the filesystem reader saw $($Matches[1]) partitions and $($Matches[2]) root entries"
     }
+    # NexusFS has to have been made or found, and to have come through its own
+    # exercise with the free-block count where it started. A write path that
+    # allocated a block and forgot it would pass every other check here.
+    if (-not ($output -match 'NexusFS (made|mounted) at sector (\d+): (\d+) MiB')) {
+        throw 'the kernel never reported its own filesystem'
+    }
+    if ([int]$Matches[3] -lt 1) {
+        throw "NexusFS came up with $($Matches[3]) MiB in it"
+    }
+    if (-not ($output -match 'NexusFS verified: made, written, read, emptied; (\d+) blocks, (\d+) free, nothing leaked')) {
+        throw 'NexusFS did not come through its own checks'
+    }
+    if ([int]$Matches[2] -ge [int]$Matches[1]) {
+        throw "NexusFS says $($Matches[2]) of $($Matches[1]) blocks are free, which leaves nowhere for its own metadata"
+    }
+
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }
 
@@ -331,6 +350,10 @@ Invoke-Step 'boot test' {
 
 Invoke-Step 'boot from the image' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-image.ps1')) 'image boot'
+}
+
+Invoke-Step 'persistence' {
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-persistence.ps1')) 'persistence tests'
 }
 
 Invoke-Step 'input' {

@@ -29,6 +29,7 @@ status.processors = プロセッサ
 status.switches = 切り替え
 status.timer = タイマー
 status.input = 入力
+status.storage = ストレージ
 status.language = 言語
 
 value.uptime = {seconds}.{millis} 秒
@@ -40,4 +41,5 @@ value.switches = {count} 回
 value.timer = {source} により {hz} Hz、{ticks} 回
 value.input_empty = キーを押してください (F1 で言語切り替え)
 value.input = {text}
+value.storage = 全 {total} MiB 中 {free} MiB 空き
 value.unavailable = 取得できません

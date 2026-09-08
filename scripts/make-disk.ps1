@@ -52,10 +52,24 @@ $TotalSectors = $SizeMiB * 1024 * 1024 / $SectorSize
 # the first one for fifteen years: it clears the GPT and aligns the filesystem
 # to any erase block a flash device is likely to have.
 $PartitionStart = 2048
+
+# Forty megabytes of it, which is what a FAT32 needs to be a FAT32: below 65525
+# clusters the specification says the volume is FAT16, and half-kilobyte
+# clusters is what keeps a sixty-four megabyte image above that line.
+$EspSectors = 40 * 1024 * 1024 / $SectorSize
+$PartitionEnd = $PartitionStart + $EspSectors - 1
+$PartitionSectors = $PartitionEnd - $PartitionStart + 1
+
+# And everything after it for NexusOS's own filesystem. Left as zeroes here:
+# the kernel formats it the first time it finds no superblock, which is what
+# makes "the system made its own filesystem" something that happens rather than
+# something the build script did on its behalf.
+#
 # The backup GPT needs the last sector for its header and the 32 before it for
 # its copy of the entries.
-$PartitionEnd = $TotalSectors - 34
-$PartitionSectors = $PartitionEnd - $PartitionStart + 1
+$NexusStart = $PartitionEnd + 1
+$NexusEnd = $TotalSectors - 34
+$NexusSectors = $NexusEnd - $NexusStart + 1
 
 $image = New-Object byte[] ($TotalSectors * $SectorSize)
 
@@ -387,7 +401,8 @@ Set-U32 -Offset ($mbr + 8) -Value 1
 Set-U32 -Offset ($mbr + 12) -Value ([uint32][math]::Min([long]($TotalSectors - 1), $Mask32))
 Set-U16 -Offset 510 -Value 0xAA55
 
-# The one partition entry: an EFI system partition covering the FAT32.
+# Two partition entries: the EFI system partition the firmware boots from, and
+# the one NexusOS keeps its own filesystem in.
 $EntryLba = 2
 $EntryCount = 128
 $EntrySize = 128
@@ -397,9 +412,16 @@ Clear-Range -Offset $entries -Length ($EntryCount * $EntrySize)
 # C12A7328-F81F-11D2-BA4B-00A0C93EC93B, in the mixed-endian form GPT uses.
 $EspType = [byte[]](0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
     0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B)
+# NexusOS's own partition type. Not registered anywhere and not meant to be:
+# a type GUID is an identifier, and this one says "the thing NexusFS lives in"
+# to the only system that needs to know.
+$NexusType = [byte[]](0x4E, 0x45, 0x58, 0x55, 0x53, 0x46, 0x53, 0x00,
+    0x00, 0x01, 0x4E, 0x45, 0x58, 0x55, 0x53, 0x00)
 # Fixed identifiers, so two builds of the same tree give the same image.
 $PartitionGuid = [byte[]](0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
     0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10)
+$NexusGuid = [byte[]](0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+    0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30)
 $DiskGuid = [byte[]](0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
     0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20)
 
@@ -410,6 +432,15 @@ Set-U64 -Offset ($entries + 40) -Value ([uint64]$PartitionEnd)
 Set-U64 -Offset ($entries + 48) -Value ([uint64]0)
 $name = [System.Text.Encoding]::Unicode.GetBytes('NexusOS System')
 Set-Bytes -Offset ($entries + 56) -Value $name
+
+$second = $entries + $EntrySize
+Set-Bytes -Offset $second -Value $NexusType
+Set-Bytes -Offset ($second + 16) -Value $NexusGuid
+Set-U64 -Offset ($second + 32) -Value ([uint64]$NexusStart)
+Set-U64 -Offset ($second + 40) -Value ([uint64]$NexusEnd)
+Set-U64 -Offset ($second + 48) -Value ([uint64]0)
+$nexusName = [System.Text.Encoding]::Unicode.GetBytes('NexusFS')
+Set-Bytes -Offset ($second + 56) -Value $nexusName
 
 $entriesCrc = Get-Crc32 -Data $image -Offset $entries -Length ($EntryCount * $EntrySize)
 
@@ -448,5 +479,5 @@ Write-GptHeader -Lba ($TotalSectors - 1) -Alternate 1 -EntriesLba $BackupEntries
 [System.IO.File]::WriteAllBytes($Output, $image)
 
 $used = ($script:NextCluster - 2) * $ClusterBytes
-Write-Host ("  disk       : {0} MiB, GPT + FAT32 ({1} clusters of {2} KiB, {3} KiB used)  -> {4}" -f `
-        $SizeMiB, $ClusterCount, ($ClusterBytes / 1024), ($used / 1024), (Split-Path -Leaf $Output))
+Write-Host ("  disk       : {0} MiB, GPT with FAT32 ({1} clusters, {2} KiB used) and {3} MiB for NexusFS  -> {4}" -f `
+        $SizeMiB, $ClusterCount, ($used / 1024), [int]($NexusSectors * $SectorSize / 1MB), (Split-Path -Leaf $Output))

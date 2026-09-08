@@ -560,6 +560,99 @@ fn self_test() {
     ipc_self_test();
     disk_self_test();
     filesystem_self_test();
+    nexusfs_self_test();
+}
+
+/// Bring up the system's own filesystem, and prove it works.
+///
+/// Two things at once, because they are the same thing: the filesystem is
+/// brought up by using it, and what proves it works is that the count of boots
+/// it keeps is right. On the first boot of a fresh disk that count is one and
+/// the partition was empty; on the second it is two, and the only place the one
+/// could have come from is the disk.
+fn nexusfs_self_test() {
+    use fs::store;
+
+    // The format, checked against itself first. It needs no disk, so a machine
+    // without one still runs it, and a failure here says the bug is in the
+    // encoding rather than in the driver underneath it.
+    match fs::nexusfs::format_self_test() {
+        Ok(()) => kprintln!("[test] the NexusFS on-disk format checks out"),
+        Err(what) => {
+            kprintln!("[test] FAILED: the NexusFS format: {what}");
+            return;
+        }
+    }
+
+    let mounted = match store::mount() {
+        Ok(mounted) => mounted,
+        Err(fs::store::StoreError::NoDisk) => {
+            kprintln!("[test] no disk attached; skipping NexusFS");
+            return;
+        }
+        Err(error) => {
+            kprintln!("[test] FAILED: could not bring up NexusFS: {error}");
+            return;
+        }
+    };
+
+    let (total, free) = store::space().unwrap_or((0, 0));
+    kprintln!(
+        "[fs  ] NexusFS {} at sector {}: {} MiB, {} MiB free, boot {}",
+        if mounted.formatted { "made" } else { "mounted" },
+        mounted.start_lba,
+        total / (1024 * 1024),
+        free / (1024 * 1024),
+        mounted.boots
+    );
+
+    match store::list("/") {
+        Ok(entries) => {
+            for entry in &entries {
+                kprintln!(
+                    "[fs  ]   /{}{} {} bytes",
+                    entry.name.as_str(),
+                    if entry.kind == fs::nexusfs::Kind::Directory {
+                        "/"
+                    } else {
+                        ""
+                    },
+                    entry.size
+                );
+            }
+        }
+        Err(error) => kprintln!("[test] FAILED: could not list the root: {error}"),
+    }
+
+    // The last line of the log the previous boot wrote, which is the shortest
+    // way to see that what came off the disk is what went onto it.
+    match store::boot_log() {
+        Ok(log) => {
+            let lines = log.lines().count();
+            if let Some(last) = log.lines().next_back() {
+                kprintln!("[fs  ] the boot log has {lines} lines, ending \"{last}\"");
+            }
+            // One line per boot, unless the log has been trimmed, so the
+            // count cannot exceed the boots and cannot be nothing: this boot
+            // wrote a line itself.
+            if lines == 0 || lines as u64 > mounted.boots {
+                kprintln!(
+                    "[test] FAILED: the log has {lines} lines on boot {}",
+                    mounted.boots
+                );
+                return;
+            }
+        }
+        Err(error) => {
+            kprintln!("[test] FAILED: could not read the boot log: {error}");
+            return;
+        }
+    }
+
+    match store::self_test() {
+        Ok(verdict) => kprintln!("[test] {verdict}"),
+        Err(error) => kprintln!("[test] FAILED: NexusFS: {error}"),
+    }
 }
 
 /// The file the filesystem test reads, and what it must contain.

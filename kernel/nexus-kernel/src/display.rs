@@ -20,7 +20,7 @@ use nexus_abi::FramebufferInfo;
 
 use crate::framebuffer::{font, Color, Framebuffer};
 use crate::sync::IrqSpinLock;
-use crate::{arch, i18n, input, kprintln, memory, sched};
+use crate::{arch, fs, i18n, input, kprintln, memory, sched};
 
 /// The framebuffer, once the kernel has adopted it.
 static DISPLAY: IrqSpinLock<Option<Framebuffer>> = IrqSpinLock::new(None);
@@ -332,7 +332,7 @@ static PAINTED_HEIGHT: IrqSpinLock<u32> = IrqSpinLock::new(0);
 static PAINTED_LOCALE: IrqSpinLock<usize> = IrqSpinLock::new(usize::MAX);
 
 /// Gather the current system state as translated label and value pairs.
-fn status_rows() -> [StatusRow; 9] {
+fn status_rows() -> [StatusRow; 10] {
     let uptime_ms = arch::time::uptime_ms();
     let scheduler = sched::stats();
     let heap = memory::heap::stats();
@@ -416,6 +416,22 @@ fn status_rows() -> [StatusRow; 9] {
                     ),
                 ],
             ),
+        },
+        // The filesystem the system keeps its own things in, which is on
+        // screen for the same reason memory is: it is a resource that runs out,
+        // and a number nobody can see is a number nobody notices moving.
+        StatusRow {
+            label: String::from(i18n::text("status.storage")),
+            value: match fs::store::space() {
+                Some((total, free)) => i18n::format(
+                    "value.storage",
+                    &[
+                        ("free", &(free / (1024 * 1024))),
+                        ("total", &(total / (1024 * 1024))),
+                    ],
+                ),
+                None => String::from(i18n::text("value.unavailable")),
+            },
         },
         StatusRow {
             label: String::from(i18n::text("status.language")),

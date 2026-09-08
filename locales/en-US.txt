@@ -29,6 +29,7 @@ status.processors = processors
 status.switches = switches
 status.timer = timer
 status.input = input
+status.storage = storage
 status.language = language
 
 value.uptime = {seconds}.{millis} s
@@ -40,4 +41,5 @@ value.switches = {count}
 value.timer = {hz} Hz via {source}, {ticks} ticks
 value.input_empty = press keys; F1 switches language
 value.input = {text}
+value.storage = {free} MiB free of {total} MiB
 value.unavailable = unavailable

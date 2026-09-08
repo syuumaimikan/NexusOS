@@ -390,9 +390,61 @@ on the other end, which takes that same lock. The machine ran every test
 correctly and then simply stopped. Threads are now taken out of the table under
 the lock and dropped outside it.
 
-Outstanding: the filesystem reader cannot write and skips long names. The block
-driver polls one request at a time and takes no interrupt. A program gets no
-arguments, and nothing says when one ended or how. NexusFS is not started.
+And now the system has a filesystem of its own. The disk carries a second
+partition, empty when the build writes it, with a type GUID that means NexusFS
+lives there. The first boot finds no superblock and formats it; every boot after
+that mounts what the first one made. That order is deliberate. A filesystem the
+build script laid out would prove the build script works; the thing worth
+proving is that the kernel can make a filesystem it can then read.
+
+The format is the plain one, chosen so that every part of it can be explained.
+Four-kilobyte blocks. A superblock saying where each region is, checksummed over
+every field that says where something is, so a half-written one says so instead
+of sending a reader to the wrong block. A bitmap of free blocks, with the
+metadata region and the bits past the end of the volume marked taken before the
+bitmap first reaches the disk. A table of 128-byte inodes. Directories are
+ordinary files whose contents happen to be a list of names.
+
+An inode carries eleven direct block numbers and one indirect, which puts the
+largest file at just over two megabytes. That is a small number and an honest
+one: a second level of indirection is four lines and would make it a gigabyte,
+and adding it before anything needs it would be adding a path nothing has ever
+walked. Files are read and written entire, for the same reason -- there is no
+buffer cache underneath, so a byte-at-a-time interface would be a byte-at-a-time
+disk.
+
+Two things are checked that a single boot cannot check. The first is leakage:
+the self-test records the free-block and free-inode counts, makes a directory, a
+small file, a file past the direct blocks with position-dependent contents,
+shrinks it, refuses a duplicate name, refuses a name with a separator, refuses
+removing a directory with something in it, refuses a file larger than the format
+can describe, deletes everything, and requires both counts to be exactly what
+they were. A write path that allocated a block and forgot it passes every other
+test ever written and fails that one.
+
+The second is persistence, which needs two boots and therefore its own test.
+The kernel keeps `/system/boots` and `/system/boot.log` and writes to both on
+every start. `scripts/test-persistence.ps1` makes a fresh disk, boots twice
+without rebuilding, and requires the first boot to *make* a filesystem and
+report boot 1 with one line in the log, and the second to *mount* one and report
+boot 2 with two. Reading a file back in the same boot proves the code agrees
+with itself; only the second boot proves anything reached the platter.
+
+Writing that test brought the two-bootable-disks trap back for a second visit --
+the new script built the data disk with the bootloader in it, the firmware
+preferred it, and all six injection tests began booting a kernel that was not
+the one under test. It is now a check rather than a thing to remember: attaching
+the data disk scans it for `BOOTX64.EFI` and refuses to start a machine that
+would have a choice.
+
+Outstanding: NexusFS has no journal, so a power failure between two writes can
+leave the bitmap saying a block is taken that no file points at -- space leaked,
+nothing corrupted, which is the right way round for the failure to be. No
+permissions, no timestamps beyond the tick a thing was made at, no partial
+writes, and no user-space access: nothing below the kernel can open a file yet.
+The FAT32 reader still cannot write and skips long names. The block driver polls
+one request at a time and takes no interrupt. A program gets no arguments, and
+nothing says when one ended or how.
 
 ## Phase 8 — Drivers and user space ⬜
 

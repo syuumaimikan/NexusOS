@@ -23,6 +23,38 @@ function Get-NexusDiskImage {
     return (Join-Path $BuildDir 'nexus-disk.img')
 }
 
+# Refuse a data disk the firmware could boot from.
+#
+# The rule above is easy to state and easy to break: `make-disk.ps1 -SourceDir`
+# copies the EFI system partition tree into the image, and an image with
+# `\EFI\BOOT\BOOTX64.EFI` in it is one the firmware will happily start. When
+# that happens nothing announces it -- the machine boots, the log looks
+# ordinary, and every test is quietly running a kernel staged at image-build
+# time instead of the one just compiled. It has cost two debugging sessions.
+#
+# So it is checked rather than remembered. The short name FAT32 stores is the
+# eleven bytes `BOOTX64 EFI`, and finding them anywhere in the image means a
+# directory entry names that file.
+function Assert-NotBootable {
+    param([Parameter(Mandatory = $true)][string]$Image)
+
+    $needle = [System.Text.Encoding]::ASCII.GetBytes('BOOTX64 EFI')
+    $bytes = [System.IO.File]::ReadAllBytes($Image)
+    $last = $bytes.Length - $needle.Length
+    for ($index = 0; $index -le $last; $index++) {
+        if ($bytes[$index] -ne $needle[0]) { continue }
+        $found = $true
+        for ($offset = 1; $offset -lt $needle.Length; $offset++) {
+            if ($bytes[$index + $offset] -ne $needle[$offset]) { $found = $false; break }
+        }
+        if ($found) {
+            throw ("$(Split-Path -Leaf $Image) contains EFI\BOOT\BOOTX64.EFI, so the firmware " +
+                'would have two disks to choose between and could boot the wrong kernel. ' +
+                'Build it with -ProgramDir, not -SourceDir.')
+        }
+    }
+}
+
 # The image the firmware boots from, when a run is about that.
 #
 # A separate file from the data disk, and the separation is the point. Both hold
@@ -95,6 +127,7 @@ function Get-NexusQemuArgs {
         # a great deal less code for a first block driver.
         $disk = Get-NexusDiskImage -BuildDir $BuildDir
         if (Test-Path $disk) {
+            Assert-NotBootable -Image $disk
             $arguments += @(
                 '-drive', "if=none,id=nexusdisk,format=raw,file=$disk",
                 '-device', 'virtio-blk-pci,drive=nexusdisk,disable-modern=on'
