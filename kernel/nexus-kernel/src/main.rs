@@ -25,8 +25,10 @@ mod drivers;
 mod framebuffer;
 mod i18n;
 mod input;
+mod ipc;
 mod memory;
 mod panic;
+mod process;
 mod sched;
 mod serial;
 mod sync;
@@ -332,7 +334,12 @@ fn monitor_thread(_argument: usize) {
 
         let (spaces, freed) = memory::address_space::statistics();
         if spaces > 0 {
-            kprintln!("[mon ] {spaces} address spaces created, {freed} freed");
+            let (started, ended) = process::statistics();
+            let (channels, sent, taken) = ipc::statistics();
+            kprintln!(
+                "[mon ] {started} processes started, {ended} ended |                  {spaces} address spaces created, {freed} freed"
+            );
+            kprintln!("[mon ] {channels} channels, {sent} messages sent, {taken} received");
         }
         let (calls, unknown) = arch::syscall::statistics();
         let (entered, returned) = arch::syscall::yield_statistics();
@@ -524,6 +531,161 @@ fn self_test() {
     heap_self_test();
     scheduler_self_test();
     tlb_self_test();
+    ipc_self_test();
+}
+
+/// State for the IPC self-test.
+mod ipc_test {
+    use alloc::sync::Arc;
+    use core::sync::atomic::AtomicU64;
+
+    use crate::ipc::Endpoint;
+    use crate::sync::IrqSpinLock;
+
+    /// The end the receiving thread reads from.
+    ///
+    /// A static because a thread entry point takes one `usize` and this is an
+    /// `Arc`; a table to index into would be the same thing with more parts.
+    pub static RECEIVER: IrqSpinLock<Option<Arc<Endpoint>>> = IrqSpinLock::new(None);
+
+    /// Set to the length of the message the receiver got.
+    pub static RECEIVED: AtomicU64 = AtomicU64::new(0);
+    /// Set when the receiver got a message whose contents were right.
+    pub static MATCHED: AtomicU64 = AtomicU64::new(0);
+    /// Set when the receiver was told the channel had closed instead.
+    pub static CLOSED: AtomicU64 = AtomicU64::new(0);
+}
+
+/// What the IPC self-test sends.
+const IPC_MESSAGE: &[u8] = b"a message that crossed a channel";
+
+/// A thread that blocks on a channel until a message arrives.
+fn ipc_test_receiver(_argument: usize) {
+    use core::sync::atomic::Ordering;
+
+    let endpoint = ipc_test::RECEIVER.lock().clone();
+    let Some(endpoint) = endpoint else {
+        return;
+    };
+
+    match endpoint.receive() {
+        Some(message) => {
+            ipc_test::RECEIVED.store(message.len() as u64, Ordering::Relaxed);
+            if message == IPC_MESSAGE {
+                ipc_test::MATCHED.store(1, Ordering::Relaxed);
+            }
+        }
+        None => {
+            ipc_test::CLOSED.store(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Exercise channels and handles.
+///
+/// Two claims are worth making and neither is obvious from the code. The first
+/// is that a thread waiting for a message *blocks* — that it leaves the run
+/// queues rather than spinning — which is checked by waiting for the scheduler
+/// to report it blocked before anything is sent. The second is that a right a
+/// handle does not carry is refused, which is the whole of what a capability is
+/// and is one missing check away from not being true.
+fn ipc_self_test() {
+    use core::sync::atomic::Ordering;
+
+    use ipc::{Endpoint, Object, Rights};
+
+    // --- a handle table, and the rights on it -------------------------------
+    let table = ipc::HandleTable::new();
+    let (held, _peer) = Endpoint::pair();
+    let handle = table.insert(Object::Channel(held), Rights::READ | Rights::CLOSE);
+
+    if table.rights(handle) != Ok(Rights::READ | Rights::CLOSE) {
+        kprintln!("[test] FAILED: a handle did not report the rights it was given");
+        return;
+    }
+    if table.channel(handle, Rights::WRITE).is_ok() {
+        kprintln!("[test] FAILED: a read-only handle was accepted for writing");
+        return;
+    }
+    if table.channel(handle, Rights::READ).is_err() {
+        kprintln!("[test] FAILED: a read handle was refused for reading");
+        return;
+    }
+    let described = table.describe();
+    if table.len() != 1 || described.len() != 1 || described[0].1 != "channel" {
+        kprintln!("[test] FAILED: the handle table does not describe its one handle");
+        return;
+    }
+    if table.close(handle).is_err() || table.rights(handle).is_ok() {
+        kprintln!("[test] FAILED: a closed handle is still usable");
+        return;
+    }
+
+    // --- a message across a channel, with the receiver blocked --------------
+    let (sender, receiver) = Endpoint::pair();
+    *ipc_test::RECEIVER.lock() = Some(receiver);
+
+    let before = sched::stats().blocked;
+    if sched::spawn(
+        "ipc-receiver",
+        sched::thread::Priority::Normal,
+        ipc_test_receiver,
+        0,
+    )
+    .is_err()
+    {
+        kprintln!("[test] FAILED: could not start the IPC receiver");
+        return;
+    }
+
+    // Wait for it to be *blocked*, not merely started. This is the claim: a
+    // thread waiting for a message is off every run queue, so it shows up in
+    // the scheduler's blocked count and nowhere else.
+    let deadline = arch::time::ticks() + 2000;
+    while sched::stats().blocked <= before && arch::time::ticks() < deadline {
+        sched::sleep_ms(1);
+    }
+    if sched::stats().blocked <= before {
+        kprintln!("[test] FAILED: the receiver never blocked; it is polling the channel");
+        return;
+    }
+    if sender.queued() != 0 {
+        kprintln!("[test] FAILED: a message appeared on the sending end");
+        return;
+    }
+
+    if let Err(error) = sender.send(IPC_MESSAGE) {
+        kprintln!("[test] FAILED: could not send on the channel: {error}");
+        return;
+    }
+
+    let deadline = arch::time::ticks() + 2000;
+    while ipc_test::RECEIVED.load(Ordering::Relaxed) == 0 && arch::time::ticks() < deadline {
+        sched::sleep_ms(1);
+    }
+
+    let received = ipc_test::RECEIVED.load(Ordering::Relaxed);
+    if received != IPC_MESSAGE.len() as u64 {
+        kprintln!(
+            "[test] FAILED: the receiver got {received} bytes, expected {}",
+            IPC_MESSAGE.len()
+        );
+        return;
+    }
+    if ipc_test::MATCHED.load(Ordering::Relaxed) != 1 {
+        kprintln!("[test] FAILED: the message arrived with the wrong contents");
+        return;
+    }
+    if ipc_test::CLOSED.load(Ordering::Relaxed) != 0 {
+        kprintln!("[test] FAILED: the receiver was told the channel had closed");
+        return;
+    }
+
+    let (channels, sent, taken) = ipc::statistics();
+    kprintln!(
+        "[test] IPC verified: the receiver blocked, then took {received} bytes across a channel \
+         ({channels} channels, {sent} sent, {taken} received)"
+    );
 }
 
 /// State for the TLB shootdown self-test.

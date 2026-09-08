@@ -241,6 +241,102 @@ nexus_user_isolation_end:
     options(att_syntax)
 );
 
+// The program `ipc` runs: a channel, end to end, from ring 3.
+//
+// It checks the three things a capability system has to get right and that no
+// amount of reading the kernel proves: a message written on one end comes out
+// of the other, a handle nobody was given is refused, and an end whose peer has
+// been closed reports that rather than swallowing the write.
+core::arch::global_asm!(
+    r#"
+    .section .rodata
+    .p2align 4
+    .global nexus_user_ipc_start
+    .global nexus_user_ipc_end
+nexus_user_ipc_start:
+    // Two handles come back packed into one word, the first in the high half.
+    // A call that returns two values otherwise needs a user buffer, which needs
+    // checking, for two integers.
+    movl $5, %eax                       // Call::ChannelCreate
+    syscall
+    movq %rax, %r15
+    movq %r15, %r12
+    shrq $32, %r12                      // the writing end
+    movl %r15d, %r13d                   // the reading end
+
+    // Write on one end.
+    movl $6, %eax                       // Call::ChannelWrite
+    movq %r12, %rdi
+    leaq 1f(%rip), %rsi
+    movq $(2f - 1f), %rdx
+    syscall
+    cmpq $(2f - 1f), %rax
+    jne 8f
+
+    // And read it out of the other, into this process's data page.
+    movl $7, %eax                       // Call::ChannelRead
+    movq %r13, %rdi
+    movabsq $0x600000, %rsi
+    movl $256, %edx
+    syscall
+    cmpq $(2f - 1f), %rax
+    jne 8f
+
+    // Say what came back, from the buffer rather than from the source, so the
+    // log shows what crossed the channel and not what was sent.
+    movl $1, %eax                       // Call::Log
+    movabsq $0x600000, %rdi
+    movq $(2f - 1f), %rsi
+    syscall
+
+    // A handle this process was never given must be refused. -3 is EBADF,
+    // which is u64::MAX - 2.
+    movl $9, %eax                       // Call::HandleRights
+    movq $9999, %rdi
+    syscall
+    cmpq $-3, %rax
+    jne 8f
+
+    // Closing the reading end drops the last reference to it, which is what
+    // the writing end sees as its peer going away.
+    movl $8, %eax                       // Call::HandleClose
+    movq %r13, %rdi
+    syscall
+    testq %rax, %rax
+    jnz 8f
+
+    movl $6, %eax                       // Call::ChannelWrite, again
+    movq %r12, %rdi
+    leaq 1f(%rip), %rsi
+    movq $(2f - 1f), %rdx
+    syscall
+    cmpq $-5, %rax                      // EPIPE, u64::MAX - 4
+    jne 8f
+
+    movl $1, %eax
+    leaq 2f(%rip), %rdi
+    movl $(3f - 2f), %esi
+    syscall
+    jmp 9f
+8:
+    movl $1, %eax
+    leaq 3f(%rip), %rdi
+    movl $(4f - 3f), %esi
+    syscall
+9:
+    movl $0, %eax                       // Call::Exit
+    syscall
+    ud2
+
+1:  .ascii "hello across a channel"
+2:  .ascii "channel round trip, bad handle and closed peer all behaved"
+3:  .ascii "FAILED: a channel system call did not behave as documented"
+4:
+nexus_user_ipc_end:
+"#,
+    options(att_syntax)
+);
+
 extern "C" {
     /// First byte of the program that exercises the system-call ABI.
     static nexus_user_abi_start: u8;
@@ -250,6 +346,10 @@ extern "C" {
     static nexus_user_isolation_start: u8;
     /// One past its last byte.
     static nexus_user_isolation_end: u8;
+    /// First byte of the program that exercises channels and handles.
+    static nexus_user_ipc_start: u8;
+    /// One past its last byte.
+    static nexus_user_ipc_end: u8;
 }
 
 /// Why user mode could not be brought up.
@@ -390,15 +490,13 @@ unsafe fn spawn_process(
 
     let root = space.root();
     let space = Arc::new(space);
-    sched::spawn_user(
-        name,
-        CODE_BASE,
-        STACK_TOP - INITIAL_STACK_OFFSET,
-        Arc::clone(&space),
-    )
-    .map_err(UserError::Spawn)?;
+    let process = crate::process::Process::new(name, Arc::clone(&space));
+    let id = process.id;
 
-    kprintln!("[user] process \"{name}\" in address space {root:#x}");
+    sched::spawn_user(name, CODE_BASE, STACK_TOP - INITIAL_STACK_OFFSET, process)
+        .map_err(UserError::Spawn)?;
+
+    kprintln!("[user] process {id} \"{name}\" in address space {root:#x}");
     Ok(space)
 }
 
@@ -479,10 +577,17 @@ pub unsafe fn start() -> Result<(), UserError> {
         core::ptr::addr_of!(nexus_user_isolation_start) as usize,
         core::ptr::addr_of!(nexus_user_isolation_end) as usize,
     );
+    let channels = (
+        core::ptr::addr_of!(nexus_user_ipc_start) as usize,
+        core::ptr::addr_of!(nexus_user_ipc_end) as usize,
+    );
 
     // SAFETY: the heap, the frame allocator and the scheduler are all running.
     let (alpha, beta) = unsafe {
         spawn_process("abi", abi, 0, None)?;
+
+        // A data page it uses as a receive buffer rather than as a message.
+        spawn_process("ipc", channels, 0, Some(&[0u8; 128]))?;
 
         // Two processes with identical virtual layouts and different contents.
         // Both write their own identifier to the same address, over and over,

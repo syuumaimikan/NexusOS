@@ -69,7 +69,9 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | Ring 3 | **DONE** | A user thread runs at CPL 3, preemptible, in its own pages |
 | System calls | **PARTIAL** | `syscall`/`sysret` entry, five calls; no handles or IPC |
 | Processes, address spaces | **DONE** | A page-table root per process; kernel upper half shared by pointer |
-| Handles, IPC, syscalls | **MISSING** | |
+| Handles, capabilities | **DONE** | Per-process table, rights checked on every use |
+| IPC | **PARTIAL** | Blocking message channels; no handle transfer, so no channel between processes |
+| Wait queues | **DONE** | Blocking with no lost wake-ups; the input thread no longer polls |
 
 ### Everything above the kernel
 
@@ -149,60 +151,65 @@ The build produces zero warnings and passes `clippy -D warnings`.
 
 These are real and are tracked, not hidden:
 
-1. **A process is an address space and a thread, and nothing else.** There is
-   no process object, no parent, no exit status, no way to create one from
-   inside the system. Every process NexusOS runs is one the kernel builds at
-   boot. That is the next thing handles and IPC are for.
-2. **No user memory copy helpers.** `Call::Log` validates its range and then
+1. **A handle cannot be passed to another process.** Both ends of a channel go
+   to whoever created it, which makes it a queue rather than a channel. Handle
+   transfer is the piece that turns this into inter-process communication, and
+   it is the next thing: everything else — the table, the rights, the blocking
+   receive, the closed-peer report — is already there and exercised.
+2. **A process has no parent, no exit status, and no way to be created from
+   inside the system.** Every process NexusOS runs is one the kernel builds at
+   boot. Creating one is a request to whoever is allowed to answer it, so it
+   wants handle transfer underneath it.
+3. **No user memory copy helpers.** `Call::Log` validates its range and then
    reads it directly. A user pointer that is unmapped faults in the kernel, on
    the kernel's stack, and is reported as a kernel fault; it should be turned
    into an error returned to the caller. That needs a fault handler that knows
    about a fixup table, which is its own piece of work.
-3. **The run queues are shared, not per-processor.** One lock covers the thread
+4. **The run queues are shared, not per-processor.** One lock covers the thread
    table and all four queues. That is correct and it is what makes every
    processor able to take work, but it is a point of contention that will matter
    once there are more processors or more threads than a desktop has today.
    Per-processor queues with balancing between them is the next step, and it
    wants contention to measure rather than to be guessed at.
-4. **No thread affinity.** A thread can be resumed on any processor, which is
+5. **No thread affinity.** A thread can be resumed on any processor, which is
    right for fairness and wrong for cache locality. There is nothing to measure
    it with yet.
-5. **Shootdowns are broadcast to every processor.** A processor that never
+6. **Shootdowns are broadcast to every processor.** A processor that never
    loaded the address space is interrupted anyway, because nothing tracks which
    spaces are live where. Correct, and more work than necessary now that there
    is more than one address space to be wrong about.
-6. **The framebuffer is mapped write-back, not write-combining.** Correct in
+7. **The framebuffer is mapped write-back, not write-combining.** Correct in
    QEMU, slow on real hardware. Needs PAT configuration.
-7. **Bootloader allocations are over-conservative.** Page tables, the handoff
+8. **Bootloader allocations are over-conservative.** Page tables, the handoff
    block and the kernel image are allocated as `RuntimeServicesData`, which the
    kernel treats as permanently reserved. This wastes on the order of 100 KiB.
-8. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
+9. **VVFAT, not a real disk image.** QEMU synthesises a FAT filesystem from a
    directory. Excellent for iteration, but it means NexusOS has never booted
    from a genuine partition table. A real GPT + FAT32 image builder is needed
    before any hardware test.
-9. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
-   automatically.
-10. **The heap never shrinks.** It grows on demand and keeps what it takes.
+10. **No CI.** `scripts/test.ps1` runs everything, but nothing runs it
+    automatically.
+11. **The heap never shrinks.** It grows on demand and keeps what it takes.
     Acceptable for a kernel of this size; worth revisiting when there are
     long-running workloads.
-11. **The kernel binary has no host test harness.** It is `no_main` with its own
+12. **The kernel binary has no host test harness.** It is `no_main` with its own
     panic handler, so tests written inside it would compile and never run. What
     can be checked statically is checked with const assertions; the rest is
     covered by boot-marker checks, fault injection and screenshots. Logic worth
     unit testing is moved into a library crate instead, which is why the
     allocators live in `nexus-mm`.
-12. **No ageing in the scheduler.** Strict priority means a busy high-priority
+13. **No ageing in the scheduler.** Strict priority means a busy high-priority
     thread starves everything below it. Deliberate for now, and it needs real
     workloads before it can be tuned honestly.
-13. **CJK glyphs depend on the build machine.** They are rasterised at build
+14. **CJK glyphs depend on the build machine.** They are rasterised at build
     time from an installed font, because bundling one would redistribute it.
     A machine without a suitable font still builds, but non-Latin text renders
     as placeholder boxes. See [i18n.md](i18n.md).
-14. **Input goes nowhere but the kernel.** Keys are decoded and acted on
+15. **Input goes nowhere but the kernel.** Keys are decoded and acted on
     inside the kernel because there is no focus, no window and no process to
     deliver them to. There is no IME either, so Japanese can be displayed but
     not typed.
-15. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
+16. **No text shaping.** Each glyph sits on a fixed grid: no vertical writing,
     no bidirectional text, no ligatures or combining marks.
 
 Resolved since the first audit: the missing IDT (Phase 2), the
@@ -216,7 +223,9 @@ all — a program now runs at ring 3, and the boot test fails unless an interrup
 was taken from it; the single address space, which is now one per process, with
 the boot test comparing the two processes' page tables and the injection suite
 building a kernel that shares a page between them; and a scheduler bug that lost
-about one thread per dozen boots, described below. Stale translations on the other
+about one thread per dozen boots, described below; and polling in the input
+thread, which now blocks on a wait queue -- 1766 context switches in ten seconds
+became 688. Stale translations on the other
 cores went with it: mapping changes are shot down across every processor, and a
 build that deliberately keeps the shootdown local is one of the injection tests,
 so the check that looks for staleness has been seen to fail when there is some.
@@ -254,9 +263,9 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **Handles and IPC**, where the capability model starts. Input needs it too:
-   a wait queue is what lets the input thread sleep until a key arrives instead
-   of polling fifty times a second.
+1. **Handle transfer**, which is what turns a channel with both ends in one
+   process into inter-process communication, and with it process creation from
+   user space.
 2. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
 3. **CI**, so the five test layers run on every change rather than on request.
 

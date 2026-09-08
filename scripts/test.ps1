@@ -122,13 +122,18 @@ Invoke-Step 'boot test' {
         'syscall entry at',
         'hello from ring 3',
         'callee-saved registers survived',
-        'thread exited through the system-call boundary',
+        'exited through the system-call boundary',
         'interrupts taken from ring 3',
         'kernel address space rooted at',
         'process alpha kept its own memory',
         'process beta kept its own memory',
         'address spaces created',
         'threads waiting for a key',
+        'IPC verified',
+        'hello across a channel',
+        'channel round trip, bad handle and closed peer all behaved',
+        'messages sent',
+        'processes started',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -205,6 +210,26 @@ Invoke-Step 'boot test' {
     }
     if ([int]$Matches[1] -lt 1) {
         throw 'nothing is waiting for a key'
+    }
+    # Every process that started has to have ended, and its address space with
+    # it. A process that leaked would look exactly like one that is still
+    # usefully running.
+    if (-not ($output -match '(\d+) processes started, (\d+) ended')) {
+        throw 'the kernel never reported what became of the processes'
+    }
+    if ([int]$Matches[1] -ne [int]$Matches[2]) {
+        throw "$($Matches[1]) processes started but only $($Matches[2]) ended"
+    }
+    # Messages sent must all have been received. A send that quietly went
+    # nowhere would still print the line above it.
+    if (-not ($output -match '(\d+) channels, (\d+) messages sent, (\d+) received')) {
+        throw 'the kernel never reported the channel traffic'
+    }
+    if ([int]$Matches[2] -lt 1) {
+        throw 'no message was ever sent across a channel'
+    }
+    if ([int]$Matches[2] -ne [int]$Matches[3]) {
+        throw "$($Matches[2]) messages were sent but $($Matches[3]) received"
     }
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }

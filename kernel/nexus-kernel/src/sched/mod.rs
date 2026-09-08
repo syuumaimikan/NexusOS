@@ -282,14 +282,14 @@ pub fn spawn_user(
     name: &str,
     entry: u64,
     stack_top: u64,
-    space: Arc<crate::memory::address_space::AddressSpace>,
+    process: Arc<crate::process::Process>,
 ) -> Result<ThreadId, SpawnError> {
     let id = {
         let mut scheduler = SCHEDULER.lock();
         let id = scheduler.create(name, Priority::Normal, user_trampoline, 0)?;
         if let Some(thread) = scheduler.threads.get_mut(&id) {
             thread.user_start = Some(UserStart { entry, stack_top });
-            thread.address_space = Some(space);
+            thread.process = Some(process);
         }
         scheduler.enqueue(id);
         id
@@ -322,6 +322,21 @@ fn user_trampoline(_argument: usize) {
     // half. This never returns, so nothing after it can observe a half-left
     // kernel.
     unsafe { crate::user::enter(start.entry, start.stack_top) }
+}
+
+/// The process the calling thread belongs to, if it is a user thread.
+///
+/// The one place a system call can find out what its caller is allowed to do,
+/// so it is here rather than reached for through the thread table by every
+/// caller that needs it.
+#[must_use]
+pub fn current_process() -> Option<Arc<crate::process::Process>> {
+    let current = current_id()?;
+    let scheduler = SCHEDULER.lock();
+    scheduler
+        .threads
+        .get(&current)
+        .and_then(|thread| thread.process.clone())
 }
 
 /// The thread running on this processor, if it has joined the scheduler.

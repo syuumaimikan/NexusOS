@@ -198,14 +198,14 @@ pub struct Thread {
     /// there are two values and a `ThreadEntry` takes one; inventing a table to
     /// index into would be the same thing with more moving parts.
     pub user_start: Option<UserStart>,
-    /// The address space this thread runs in, if it is not the kernel's.
+    /// The process this thread belongs to, if it is not a kernel thread.
     ///
-    /// Shared rather than owned: threads of one process run in one space, and
-    /// the space outlives whichever of them is reaped first. The last reference
-    /// going away is what frees the user half, and by then no processor can
-    /// still have it in `cr3` -- a thread has to be switched away from before
-    /// it can be reaped, and every switch sets `cr3`.
-    pub address_space: Option<Arc<crate::memory::address_space::AddressSpace>>,
+    /// Shared rather than owned: threads of one process run in one process, and
+    /// it outlives whichever of them is reaped first. The last reference going
+    /// away is what frees the address space, and by then no processor can still
+    /// have it in `cr3` -- a thread has to be switched away from before it can
+    /// be reaped, and every switch sets `cr3`.
+    pub process: Option<Arc<crate::process::Process>>,
     /// Remaining ticks in the current time slice.
     pub slice_remaining: u32,
     /// Total ticks this thread has been scheduled for.
@@ -259,7 +259,7 @@ impl Thread {
             stack: None,
             entry: None,
             user_start: None,
-            address_space: None,
+            process: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
             switches: 0,
@@ -291,7 +291,7 @@ impl Thread {
             stack: Some(stack),
             entry: Some((entry, argument)),
             user_start: None,
-            address_space: None,
+            process: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
             switches: 0,
@@ -347,7 +347,9 @@ impl Thread {
     /// Physical root of the page tables this thread runs on.
     #[must_use]
     pub fn page_table_root(&self) -> Option<u64> {
-        self.address_space.as_ref().map(|space| space.root())
+        self.process
+            .as_ref()
+            .map(|process| process.page_table_root())
     }
 
     /// Top of this thread's kernel stack, if it owns one.

@@ -221,11 +221,23 @@ pub enum Call {
     Yield = 3,
     /// The calling thread's identifier.
     ThreadId = 4,
+    /// Create a channel. Returns both handles packed into one word: the first
+    /// in the high half, the second in the low.
+    ChannelCreate = 5,
+    /// Write one message. `(handle, pointer, length)`.
+    ChannelWrite = 6,
+    /// Read one message, blocking until one arrives.
+    /// `(handle, pointer, capacity)`, returning the length.
+    ChannelRead = 7,
+    /// Close a handle. `(handle)`.
+    HandleClose = 8,
+    /// What a handle may be used for. `(handle)`, returning the rights bits.
+    HandleRights = 9,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 5;
+    pub const COUNT: usize = 10;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -235,15 +247,37 @@ impl Call {
             2 => Some(Self::Uptime),
             3 => Some(Self::Yield),
             4 => Some(Self::ThreadId),
+            5 => Some(Self::ChannelCreate),
+            6 => Some(Self::ChannelWrite),
+            7 => Some(Self::ChannelRead),
+            8 => Some(Self::HandleClose),
+            9 => Some(Self::HandleRights),
             _ => None,
         }
     }
 }
 
+/// Errors are returned in `rax` as values close to the top of the range.
+///
+/// Not a separate register or a sign convention: a call that can return a
+/// length and an error needs one word to carry both, and lengths are bounded by
+/// [`crate::ipc::MAX_MESSAGE`] while these are not reachable by any of them.
 /// Returned by a call that names a number the kernel does not implement.
 pub const ENOSYS: u64 = u64::MAX;
 /// Returned by a call whose arguments do not survive checking.
 pub const EINVAL: u64 = u64::MAX - 1;
+/// No such handle in the calling process.
+pub const EBADF: u64 = u64::MAX - 2;
+/// The handle does not carry the right the call needs.
+pub const EPERM: u64 = u64::MAX - 3;
+/// The other end of the channel is gone.
+pub const EPIPE: u64 = u64::MAX - 4;
+/// The receiving end is full; try again once it has been drained.
+pub const EAGAIN: u64 = u64::MAX - 5;
+/// The message is longer than a channel will carry.
+pub const EMSGSIZE: u64 = u64::MAX - 6;
+/// The caller is not a user process, so it has no handle table.
+pub const ENOPROC: u64 = u64::MAX - 7;
 
 /// Longest string [`Call::Log`] will accept.
 ///
@@ -260,7 +294,7 @@ extern "sysv64" fn dispatch(
     number: u64,
     argument0: u64,
     argument1: u64,
-    _argument2: u64,
+    argument2: u64,
     _argument3: u64,
     _argument4: u64,
 ) -> u64 {
@@ -271,7 +305,15 @@ extern "sysv64" fn dispatch(
 
     let result = match Call::from_number(number) {
         Some(Call::Exit) => {
-            kprintln!("[sys ] thread exited through the system-call boundary");
+            match crate::sched::current_process() {
+                Some(process) => kprintln!(
+                    "[sys ] process {} \"{}\" exited through the system-call boundary,                      {} handles open",
+                    process.id,
+                    process.name.as_str(),
+                    process.handles.len()
+                ),
+                None => kprintln!("[sys ] a kernel thread exited through the boundary"),
+            }
             // Masked again on the way out of the kernel, which `exit` never
             // takes -- it does not return.
             super::interrupts::disable();
@@ -286,6 +328,11 @@ extern "sysv64" fn dispatch(
             0
         }
         Some(Call::ThreadId) => percpu::current_thread(),
+        Some(Call::ChannelCreate) => channel_create(),
+        Some(Call::ChannelWrite) => channel_write(argument0, argument1, argument2),
+        Some(Call::ChannelRead) => channel_read(argument0, argument1, argument2),
+        Some(Call::HandleClose) => handle_close(argument0),
+        Some(Call::HandleRights) => handle_rights(argument0),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -326,6 +373,174 @@ fn log(pointer: u64, length: u64) -> u64 {
 
     kprintln!("[user] {text}");
     length
+}
+
+/// A user range, checked before the kernel will look at it.
+///
+/// Every byte of this came from ring 3, so nothing about it is assumed: the
+/// length is bounded, the range must not wrap, and it must lie wholly below
+/// [`USER_SPACE_END`](nexus_abi::layout::USER_SPACE_END) so that a user pointer
+/// can never name kernel memory. What is *not* checked is whether the range is
+/// mapped -- that is the caller's own page fault, and treating it as one is
+/// deliberate until there is a fixup table to turn it into an error return.
+fn user_range(pointer: u64, length: u64, limit: u64) -> Option<(u64, usize)> {
+    if length == 0 || length > limit {
+        return None;
+    }
+    let end = pointer.checked_add(length)?;
+    if end > nexus_abi::layout::USER_SPACE_END {
+        return None;
+    }
+    Some((pointer, length as usize))
+}
+
+/// The calling process's handle table, or an error for a kernel thread.
+fn caller() -> Result<alloc::sync::Arc<crate::process::Process>, u64> {
+    crate::sched::current_process().ok_or(ENOPROC)
+}
+
+/// Turn a handle-table failure into the value the caller sees.
+fn handle_error(error: crate::ipc::HandleError) -> u64 {
+    match error {
+        crate::ipc::HandleError::NotFound => EBADF,
+        crate::ipc::HandleError::Denied => EPERM,
+    }
+}
+
+/// [`Call::ChannelCreate`]: a connected pair, one handle each.
+///
+/// Both handles go to the caller, which is the only thing that can happen while
+/// there is no way to pass a handle to another process. That is the next piece:
+/// a channel with both ends in one process is a queue, and it becomes a channel
+/// when one end can be given away.
+fn channel_create() -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+
+    let (first, second) = crate::ipc::Endpoint::pair();
+    let a = process
+        .handles
+        .insert(crate::ipc::Object::Channel(first), crate::ipc::Rights::ALL);
+    let b = process
+        .handles
+        .insert(crate::ipc::Object::Channel(second), crate::ipc::Rights::ALL);
+
+    // Two 32-bit handles in one 64-bit result. A call that returns two values
+    // otherwise needs a user buffer, which needs checking, for two integers.
+    (u64::from(a) << 32) | u64::from(b)
+}
+
+/// [`Call::ChannelWrite`]: send one message.
+fn channel_write(handle: u64, pointer: u64, length: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+    let Some((pointer, length)) = user_range(pointer, length, crate::ipc::MAX_MESSAGE as u64)
+    else {
+        return EMSGSIZE;
+    };
+
+    let endpoint = match process.handles.channel(handle, crate::ipc::Rights::WRITE) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return handle_error(error),
+    };
+
+    // SAFETY: the range was checked to lie inside the user half, which this
+    // thread's address space maps, and its length is bounded.
+    let message = unsafe { core::slice::from_raw_parts(pointer as *const u8, length) };
+
+    match endpoint.send(message) {
+        Ok(written) => written as u64,
+        Err(crate::ipc::ChannelError::TooLong) => EMSGSIZE,
+        Err(crate::ipc::ChannelError::Full) => EAGAIN,
+        Err(crate::ipc::ChannelError::PeerClosed) => EPIPE,
+    }
+}
+
+/// [`Call::ChannelRead`]: take one message, blocking until there is one.
+///
+/// Blocking is the point. A thread waiting for a message is off every run queue
+/// and costs nothing until one arrives, which is what makes a message-passing
+/// system usable as the way processes wait for each other rather than something
+/// to poll around.
+fn channel_read(handle: u64, pointer: u64, capacity: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+    let Some((pointer, capacity)) = user_range(pointer, capacity, crate::ipc::MAX_MESSAGE as u64)
+    else {
+        return EINVAL;
+    };
+
+    let endpoint = match process.handles.channel(handle, crate::ipc::Rights::READ) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return handle_error(error),
+    };
+
+    let Some(message) = endpoint.receive() else {
+        return EPIPE;
+    };
+    if message.len() > capacity {
+        // The message is gone either way -- a channel delivers whole messages,
+        // and putting it back would let a reader with a small buffer block the
+        // queue for everyone behind it. Saying so is better than truncating
+        // silently.
+        return EMSGSIZE;
+    }
+
+    // SAFETY: the range was checked as above, and it is at least as long as the
+    // message.
+    unsafe {
+        core::ptr::copy_nonoverlapping(message.as_ptr(), pointer as *mut u8, message.len());
+    }
+    message.len() as u64
+}
+
+/// [`Call::HandleClose`]: give up a handle.
+fn handle_close(handle: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+
+    match process.handles.rights(handle) {
+        Ok(rights) if !rights.contains(crate::ipc::Rights::CLOSE) => return EPERM,
+        Ok(_) => {}
+        Err(error) => return handle_error(error),
+    }
+
+    match process.handles.close(handle) {
+        Ok(()) => 0,
+        Err(error) => handle_error(error),
+    }
+}
+
+/// [`Call::HandleRights`]: what a handle may be used for.
+fn handle_rights(handle: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+    match process.handles.rights(handle) {
+        Ok(rights) => u64::from(rights.bits()),
+        Err(error) => handle_error(error),
+    }
 }
 
 /// Read a model-specific register.

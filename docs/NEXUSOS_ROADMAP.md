@@ -186,17 +186,47 @@ Verified from outside: `scripts/test-input.ps1` types through QEMU's monitor and
 checks the guest reports back the word that was typed and the language change.
 Nothing internal can prove an input path; only driving it from outside can.
 
-Outstanding: the input thread polls, because sleeping until a key arrives needs
-the wait queues that come with Phase 6. There is no focus, no delivery to a
-process, and no mouse. Keys are acted on by the kernel itself, which is where a
-window server will take over.
+The input thread no longer polls: it blocks on a wait queue that the keyboard
+interrupt wakes. At ten seconds of uptime with the same keystrokes, that took
+the system from 1766 context switches to 688.
 
-## Phase 6 — Handles, IPC, system calls ⬜
+Outstanding: there is no focus, no delivery to a process, and no mouse. Keys are
+acted on by the kernel itself, which is where a window server will take over.
+
+## Phase 6 — Handles, IPC, system calls 🚧
 
 - Handle table with per-handle rights, the root of the capability model
 - Channels, shared memory, events, semaphores, mutexes
 - The Nexus system-call ABI
 - Zero-copy message passing
+
+Delivered: wait queues, a handle table with per-handle rights, message
+channels, and ten system calls.
+
+A handle is an index into a table that belongs to one process, and holding it is
+the authority — there is no way to name a channel a process was not handed, so
+there is no ambient check to forget. The rights beside it say what may be done,
+so the same object can be given to one process to read and another to write.
+Both compatibility layers will be tables above this one rather than a second
+idea of authority inside the kernel.
+
+A channel is two endpoints, each with an inbox; writing to one appends to the
+*other* and wakes whoever waits there. Messages are whole, because a byte stream
+pushes framing into every user of it. An endpoint holds its peer weakly, which
+is what makes "the other end has gone" something the kernel states rather than
+something a caller times out on.
+
+Both halves are exercised from both sides. A kernel self-test starts a thread on
+a channel and waits for the *scheduler* to report it blocked before sending
+anything — a receiver that polled would never appear in that count — then checks
+the bytes that came out. A user program creates a channel from ring 3, writes,
+reads it back, is refused a handle it was never given, and is told the peer has
+closed after closing it.
+
+Outstanding: a handle cannot be passed to another process, so both ends stay
+where they were created. That is what turns this from a queue into inter-process
+communication, and it is next. Shared memory, events and semaphores are not
+started.
 
 ## Phase 7 — Storage and NexusFS ⬜
 
