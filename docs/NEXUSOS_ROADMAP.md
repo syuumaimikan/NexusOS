@@ -285,9 +285,22 @@ given two bootable disks leaves the firmware to choose between them, and it
 chose the one whose kernel was older -- which made every fault-injection build
 boot a binary that was not the one under test, and every result mean nothing.
 
-Outstanding: nothing *in the kernel* reads a partition table or a filesystem, so
-it sees sectors and not files. The driver polls one request at a time and takes no
-interrupt. NexusFS is not started.
+And the kernel reads both for itself. The GPT is checked rather than trusted --
+the header's own checksum and the one over the entry array are both verified,
+because a partition table is the one structure where believing a corrupt value
+means writing to the wrong part of a disk. FAT32 follows: the boot parameter
+block, cluster chains through the allocation table, directories as runs of
+32-byte entries, and files by path.
+
+The test reads three files and refuses a fourth. One in the root; one a
+directory down, so that walking a path is exercised rather than merely compiled;
+one longer than a cluster with position-dependent contents, so that clusters
+stitched together in the wrong order fail rather than being the right length;
+and a name that does not exist, which has to come back as an error rather than
+as whatever was next in the directory.
+
+Outstanding: the reader cannot write and skips long names. The driver polls one
+request at a time and takes no interrupt. NexusFS is not started.
 
 ## Phase 8 — Drivers and user space ⬜
 
