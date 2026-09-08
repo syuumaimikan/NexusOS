@@ -124,6 +124,10 @@ Invoke-Step 'boot test' {
         'callee-saved registers survived',
         'thread exited through the system-call boundary',
         'interrupts taken from ring 3',
+        'kernel address space rooted at',
+        'process alpha kept its own memory',
+        'process beta kept its own memory',
+        'address spaces created',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -167,10 +171,24 @@ Invoke-Step 'boot test' {
         throw 'no interrupt ever arrived from ring 3, so nothing ran at user privilege'
     }
     # A user program that reported a failure across the boundary is a failure.
-    if ($output -match '\[user\][^
-]*FAILED[^
-]*') {
+    if ($output -match '\[user\][^\r\n]*FAILED[^\r\n]*') {
         throw "the user program reported: $($Matches[0])"
+    }
+    # Two processes must map the same user address to different frames. This is
+    # the kernel's own view of the page tables, so unlike what the programs
+    # report it cannot come out right by a lucky interleaving.
+    if (-not ($output -match 'alpha and beta both map [^,]+, to (\S+) and (\S+)')) {
+        throw "the kernel never compared the two processes' mappings"
+    }
+    if ($Matches[1] -eq $Matches[2]) {
+        throw "alpha and beta share the frame at $($Matches[1])"
+    }
+    # Every address space a process was given has to come back when it exits.
+    if (-not ($output -match '(\d+) address spaces created, (\d+) freed')) {
+        throw 'the kernel never reported what became of the address spaces'
+    }
+    if ([int]$Matches[1] -ne [int]$Matches[2]) {
+        throw "$($Matches[1]) address spaces were created but only $($Matches[2]) freed"
     }
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }

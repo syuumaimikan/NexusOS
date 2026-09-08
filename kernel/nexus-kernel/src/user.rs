@@ -1,46 +1,53 @@
-//! Ring 3.
+//! Ring 3, and the processes that run there.
 //!
-//! The first code NexusOS runs that the kernel does not trust. It is small on
-//! purpose: the point of this module is not what the program does but that the
-//! boundary around it is real — its pages are the only ones it can reach, its
-//! stack cannot be executed, its code cannot be written, and the only way back
-//! into the kernel is [`syscall`](crate::arch::syscall).
+//! The first code NexusOS runs that the kernel does not trust. The programs are
+//! small on purpose: the point of this module is not what they do but that the
+//! boundary around them is real. Each has an address space of its own, pages it
+//! cannot write, a stack it cannot execute, and one way back into the kernel.
 //!
-//! # Why the program is copied rather than mapped where it lies
+//! # What each program is for
 //!
-//! It is assembled into the kernel image like everything else, and the obvious
-//! thing would be to add a user mapping over the frames it already occupies.
-//! That would hand ring 3 whatever else shares those pages — the kernel is not
-//! laid out so that this blob has any to itself — so instead it is copied into
-//! a frame allocated for it. The frame holds nothing else by construction, and
-//! the check is a comparison rather than an argument about the linker.
+//! `abi` exercises the system-call interface: it makes every call the kernel
+//! implements, asks for one it does not, and checks that a callee-saved
+//! register survived the round trip.
 //!
-//! # What is not here yet
-//!
-//! One address space, shared with the kernel: the user mappings are added to
-//! the same page tables, protected by the `USER` bit rather than by being
-//! absent. That is enough for the boundary to be enforced and not enough to be
-//! called isolation — a separate `cr3` per process comes with processes, and
-//! with it the page-table lifetime and TLB work that make address spaces cost
-//! something. Nothing above this line depends on which of the two it is.
+//! `alpha` and `beta` run the *same* program at the *same* virtual addresses in
+//! different address spaces. Each writes its own identifier to one address over
+//! and over and reads it back. Two processes that shared a page would clobber
+//! one another within the first few iterations, so the check passing is a
+//! statement about isolation rather than about two programs being able to run.
+
+use alloc::sync::Arc;
 
 use nexus_abi::layout;
 
 use crate::arch::gdt;
-use crate::memory::paging;
+use crate::memory::{address_space, paging};
 use crate::{kprintln, memory, sched};
 
-/// Where the user program is mapped.
+/// Where a user program is mapped.
 ///
 /// Four megabytes in: low enough to be obviously user space, high enough that a
-/// null dereference in ring 3 is nowhere near it.
+/// null dereference in ring 3 is nowhere near it. The same in every process, on
+/// purpose -- identical layouts are what make the isolation test mean something.
 const CODE_BASE: u64 = 0x0000_0000_0040_0000;
+
+/// The page a program keeps its own data in.
+const DATA_BASE: u64 = 0x0000_0000_0060_0000;
 
 /// One page below the top of the user stack region.
 const STACK_TOP: u64 = 0x0000_0000_0080_0000;
 
+/// How far below [`STACK_TOP`] a process starts.
+///
+/// Sixteen rather than eight so the initial stack pointer keeps the alignment
+/// compiled code will expect once these programs are written in something other
+/// than assembly.
+const INITIAL_STACK_OFFSET: u64 = 16;
+
 const _: () = {
     assert!(CODE_BASE < layout::USER_SPACE_END);
+    assert!(DATA_BASE < layout::USER_SPACE_END);
     assert!(STACK_TOP < layout::USER_SPACE_END);
 };
 
@@ -54,9 +61,9 @@ core::arch::global_asm!(
     r#"
     .section .rodata
     .p2align 4
-    .global nexus_user_program_start
-    .global nexus_user_program_end
-nexus_user_program_start:
+    .global nexus_user_abi_start
+    .global nexus_user_abi_end
+nexus_user_abi_start:
     // Greet the kernel across the boundary. The message address is formed with
     // `lea` off `rip` rather than written absolutely: the program is assembled
     // into the kernel image and runs from a different virtual address, so only
@@ -122,7 +129,7 @@ nexus_user_program_start:
 2:  .ascii "made six system calls; callee-saved registers survived"
 3:  .ascii "FAILED: a callee-saved register did not survive a system call"
 4:
-nexus_user_program_end:
+nexus_user_abi_end:
 "#,
     options(att_syntax)
 );
@@ -139,9 +146,9 @@ core::arch::global_asm!(
     r#"
     .section .rodata
     .p2align 4
-    .global nexus_user_program_start
-    .global nexus_user_program_end
-nexus_user_program_start:
+    .global nexus_user_abi_start
+    .global nexus_user_abi_end
+nexus_user_abi_start:
     movl $1, %eax                       // Call::Log
     leaq 1f(%rip), %rdi
     movl $(2f - 1f), %esi
@@ -166,25 +173,94 @@ nexus_user_program_start:
 1:  .ascii "about to read kernel memory from ring 3"
 2:  .ascii "FAILED: ring 3 read kernel memory and was allowed to"
 3:
-nexus_user_program_end:
+nexus_user_abi_end:
+"#,
+    options(att_syntax)
+);
+
+// The program `alpha` and `beta` both run.
+//
+// Its data page is an interface with the kernel, and the layout is the whole of
+// it: eight bytes of identifier, eight the program writes and reads back, eight
+// of message length, then the message. Nothing is passed in registers, because
+// nothing needs to be -- a process that can see its own page has everything.
+core::arch::global_asm!(
+    r#"
+    .section .rodata
+    .p2align 4
+    .global nexus_user_isolation_start
+    .global nexus_user_isolation_end
+nexus_user_isolation_start:
+    // The identifier comes off this process's own stack, which the kernel
+    // seeded before entering ring 3. Not from the data page: that is the page
+    // under test, and a test whose subject also supplies the expected answer
+    // cannot fail -- two processes sharing it would read the same identifier,
+    // write the same value, and congratulate each other.
+    movq (%rsp), %r12
+    movabsq $0x600000, %r13             // the data page
+    movl $200, %r14d                    // rounds to run
+
+2:
+    movq %r12, 8(%r13)                  // claim the word
+
+    // Spin long enough that the other process is scheduled in between. Without
+    // this the two might never interleave, and a test that cannot fail is not
+    // a test.
+    movl $200000, %ecx
+1:
+    dec %ecx
+    jnz 1b
+
+    movq 8(%r13), %rax                  // and read it back
+    cmpq %r12, %rax
+    jne 3f
+    dec %r14d
+    jnz 2b
+
+    // Survived every round. Report using the message from this process's own
+    // page, which is how the log shows which process is speaking.
+    movl $1, %eax                       // Call::Log
+    leaq 24(%r13), %rdi
+    movq 16(%r13), %rsi
+    syscall
+    jmp 4f
+3:
+    movl $1, %eax
+    leaq 5f(%rip), %rdi
+    movl $(6f - 5f), %esi
+    syscall
+4:
+    movl $0, %eax                       // Call::Exit
+    syscall
+    ud2
+
+5:  .ascii "FAILED: another process wrote into this one's memory"
+6:
+nexus_user_isolation_end:
 "#,
     options(att_syntax)
 );
 
 extern "C" {
-    /// First byte of the user program.
-    static nexus_user_program_start: u8;
+    /// First byte of the program that exercises the system-call ABI.
+    static nexus_user_abi_start: u8;
     /// One past its last byte.
-    static nexus_user_program_end: u8;
+    static nexus_user_abi_end: u8;
+    /// First byte of the program that guards its own memory.
+    static nexus_user_isolation_start: u8;
+    /// One past its last byte.
+    static nexus_user_isolation_end: u8;
 }
 
 /// Why user mode could not be brought up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserError {
-    /// No frame for the program or its stack.
+    /// No frame for a program, its stack or its data.
     OutOfMemory,
-    /// The program does not fit the single page it is given.
+    /// A program does not fit the single page it is given.
     TooLarge(usize),
+    /// An address space could not be created.
+    Space(address_space::SpaceError),
     /// A mapping could not be created.
     Map(paging::MapError),
     /// The thread could not be started.
@@ -194,68 +270,258 @@ pub enum UserError {
 impl core::fmt::Display for UserError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::OutOfMemory => f.write_str("out of memory for the user program"),
+            Self::OutOfMemory => f.write_str("out of memory for a user process"),
             Self::TooLarge(size) => write!(f, "the user program is {size} bytes, more than a page"),
+            Self::Space(error) => write!(f, "could not create an address space: {error}"),
             Self::Map(error) => write!(f, "could not map user memory: {error:?}"),
             Self::Spawn(error) => write!(f, "could not start the user thread: {error}"),
         }
     }
 }
 
-/// Map the user program and its stack, then start a thread that runs it.
+/// One page of a program, copied out of the kernel image.
+///
+/// Copied rather than mapped where it lies: the blob is assembled into the
+/// kernel image like everything else, and adding a user mapping over the frames
+/// it already occupies would hand ring 3 whatever else shares those pages. A
+/// frame allocated for it holds nothing else by construction, which is a fact
+/// rather than an argument about the linker.
 ///
 /// # Safety
 ///
-/// Call once, with the heap and the scheduler running.
-pub unsafe fn start() -> Result<(), UserError> {
-    let start = core::ptr::addr_of!(nexus_user_program_start) as usize;
-    let end = core::ptr::addr_of!(nexus_user_program_end) as usize;
+/// `start` and `end` must bound a blob inside this image.
+unsafe fn copy_program(start: usize, end: usize) -> Result<u64, UserError> {
     let size = end - start;
     if size > layout::PAGE_SIZE as usize {
         return Err(UserError::TooLarge(size));
     }
 
-    let code_frame = memory::allocate_frame().ok_or(UserError::OutOfMemory)?;
-    let stack_frame = memory::allocate_frame().ok_or(UserError::OutOfMemory)?;
-
-    // Copied through the direct map, which is where a frame is reachable before
-    // it has a mapping of its own. The rest of the page is zeroed so that a
-    // program that runs off its own end meets `add [rax], al` and faults,
-    // rather than executing whatever the frame held last.
+    let frame = memory::allocate_frame().ok_or(UserError::OutOfMemory)?;
     // SAFETY: the frame was just allocated, so nothing else refers to it, and
-    // the source is this image's own read-only data.
+    // the source is this image's own read-only data. The rest of the page is
+    // zeroed so a program that runs off its own end meets `add [rax], al` and
+    // faults, rather than executing whatever the frame held last.
     unsafe {
-        let destination = layout::phys_to_virt(code_frame) as *mut u8;
+        let destination = layout::phys_to_virt(frame) as *mut u8;
         core::ptr::write_bytes(destination, 0, layout::PAGE_SIZE as usize);
         core::ptr::copy_nonoverlapping(start as *const u8, destination, size);
+    }
+    Ok(frame)
+}
+
+/// Allocate a zeroed frame for user data.
+fn zeroed_frame() -> Result<u64, UserError> {
+    let frame = memory::allocate_frame().ok_or(UserError::OutOfMemory)?;
+    // SAFETY: just allocated, so nothing else refers to it.
+    unsafe {
         core::ptr::write_bytes(
-            layout::phys_to_virt(stack_frame) as *mut u8,
+            layout::phys_to_virt(frame) as *mut u8,
             0,
             layout::PAGE_SIZE as usize,
         );
     }
+    Ok(frame)
+}
 
-    // Read-only and executable. Nothing in ring 3 may write its own code, which
-    // is the one protection the kernel gets for free here and would have to
-    // work to give up.
-    // SAFETY: the frames are owned here and the addresses are in the user half,
-    // which nothing else maps.
+/// Build a process around `program` and start its thread.
+///
+/// `data` is the contents of the page at [`DATA_BASE`], or nothing if the
+/// program does not use one.
+///
+/// # Safety
+///
+/// Call with the heap, the frame allocator and the scheduler running.
+unsafe fn spawn_process(
+    name: &str,
+    program: (usize, usize),
+    identifier: u64,
+    data: Option<&[u8]>,
+) -> Result<Arc<address_space::AddressSpace>, UserError> {
+    let space = address_space::AddressSpace::new().map_err(UserError::Space)?;
+
+    // SAFETY: the bounds come from this image's own symbols.
+    let code = unsafe { copy_program(program.0, program.1) }?;
+    let stack = zeroed_frame()?;
+
+    // The identifier goes at the very top of the stack, where the program finds
+    // it under its initial `rsp`. A stack is the one page a process cannot be
+    // sharing with another and still be running at all, which is what makes it
+    // the right place for the one value the isolation test must not have in
+    // common.
+    // SAFETY: the frame was just allocated and is reachable through the direct
+    // map; the offset is inside it.
     unsafe {
-        paging::map_page(CODE_BASE, code_frame, paging::USER).map_err(UserError::Map)?;
-        paging::map_page(
-            STACK_TOP - layout::PAGE_SIZE,
-            stack_frame,
-            paging::USER | paging::WRITABLE | paging::NO_EXECUTE,
-        )
-        .map_err(UserError::Map)?;
+        let top = layout::phys_to_virt(stack) + layout::PAGE_SIZE;
+        core::ptr::write_volatile((top - INITIAL_STACK_OFFSET) as *mut u64, identifier);
     }
 
-    kprintln!(
-        "[user] {size} bytes of program at {CODE_BASE:#x}, stack at {:#x}",
-        STACK_TOP - layout::PAGE_SIZE
+    // Read-only and executable. Nothing in ring 3 may write its own code, which
+    // is the one protection that costs nothing here and would take work to
+    // give up.
+    //
+    // SAFETY: the frames are owned by this process and the addresses are in the
+    // user half, which nothing else maps in this space.
+    unsafe {
+        space
+            .map(CODE_BASE, code, paging::USER)
+            .map_err(UserError::Map)?;
+        space
+            .map(
+                STACK_TOP - layout::PAGE_SIZE,
+                stack,
+                paging::USER | paging::WRITABLE | paging::NO_EXECUTE,
+            )
+            .map_err(UserError::Map)?;
+    }
+
+    if let Some(contents) = data {
+        let frame = data_frame(contents)?;
+        // SAFETY: as above.
+        unsafe {
+            space
+                .map(
+                    DATA_BASE,
+                    frame,
+                    paging::USER | paging::WRITABLE | paging::NO_EXECUTE,
+                )
+                .map_err(UserError::Map)?;
+        }
+    }
+
+    let root = space.root();
+    let space = Arc::new(space);
+    sched::spawn_user(
+        name,
+        CODE_BASE,
+        STACK_TOP - INITIAL_STACK_OFFSET,
+        Arc::clone(&space),
+    )
+    .map_err(UserError::Spawn)?;
+
+    kprintln!("[user] process \"{name}\" in address space {root:#x}");
+    Ok(space)
+}
+
+/// The one data frame every process gets in the shared-page injection build.
+#[cfg(feature = "inject-shared-user-page")]
+static SHARED_DATA_FRAME: crate::sync::IrqSpinLock<Option<u64>> =
+    crate::sync::IrqSpinLock::new(None);
+
+/// Fill a frame with a program's data page.
+///
+/// In the shared-page injection build every process is handed the *same* frame,
+/// which is what having no address-space separation would look like from inside
+/// a program. See the feature's note in Cargo.toml.
+#[cfg(feature = "inject-shared-user-page")]
+fn data_frame(contents: &[u8]) -> Result<u64, UserError> {
+    let mut slot = SHARED_DATA_FRAME.lock();
+    let frame = match *slot {
+        Some(frame) => frame,
+        None => {
+            let frame = zeroed_frame()?;
+            *slot = Some(frame);
+            frame
+        }
+    };
+    // SAFETY: the frame is reachable through the direct map and the length is
+    // bounded by the callers that build these.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            contents.as_ptr(),
+            layout::phys_to_virt(frame) as *mut u8,
+            contents.len().min(layout::PAGE_SIZE as usize),
+        );
+    }
+    Ok(frame)
+}
+
+/// Fill a frame with a program's data page.
+#[cfg(not(feature = "inject-shared-user-page"))]
+fn data_frame(contents: &[u8]) -> Result<u64, UserError> {
+    let frame = zeroed_frame()?;
+    // SAFETY: just allocated, and the length is checked against the page size
+    // by the callers that build these.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            contents.as_ptr(),
+            layout::phys_to_virt(frame) as *mut u8,
+            contents.len().min(layout::PAGE_SIZE as usize),
+        );
+    }
+    Ok(frame)
+}
+
+/// Lay out the data page the isolation program expects.
+///
+/// Eight unused bytes, eight of scratch for the program to write into and read
+/// back, eight of message length, and then the message. The program never
+/// learns any of this from the kernel at run time; the layout *is* the
+/// interface. The identifier is deliberately not here — it goes on the stack,
+/// so that it stays private even when this page does not.
+fn isolation_data(message: &str) -> [u8; 128] {
+    let mut page = [0u8; 128];
+    page[16..24].copy_from_slice(&(message.len() as u64).to_le_bytes());
+    page[24..24 + message.len()].copy_from_slice(message.as_bytes());
+    page
+}
+
+/// Bring up user mode: one process per program, each in its own address space.
+///
+/// # Safety
+///
+/// Call once, with the heap and the scheduler running.
+pub unsafe fn start() -> Result<(), UserError> {
+    let abi = (
+        core::ptr::addr_of!(nexus_user_abi_start) as usize,
+        core::ptr::addr_of!(nexus_user_abi_end) as usize,
+    );
+    let isolation = (
+        core::ptr::addr_of!(nexus_user_isolation_start) as usize,
+        core::ptr::addr_of!(nexus_user_isolation_end) as usize,
     );
 
-    sched::spawn_user("user", CODE_BASE, STACK_TOP).map_err(UserError::Spawn)?;
+    // SAFETY: the heap, the frame allocator and the scheduler are all running.
+    let (alpha, beta) = unsafe {
+        spawn_process("abi", abi, 0, None)?;
+
+        // Two processes with identical virtual layouts and different contents.
+        // Both write their own identifier to the same address, over and over,
+        // and check it back. If they shared a page the check would fail almost
+        // at once, which is what makes this a test of isolation and not of
+        // whether two programs can run.
+        (
+            spawn_process(
+                "alpha",
+                isolation,
+                1,
+                Some(&isolation_data("process alpha kept its own memory")),
+            )?,
+            spawn_process(
+                "beta",
+                isolation,
+                2,
+                Some(&isolation_data("process beta kept its own memory")),
+            )?,
+        )
+    };
+
+    // The same claim the two programs will make about themselves, checked from
+    // the other side of the boundary before either of them has run. The
+    // programs can only report what they observe; the page tables can be asked
+    // directly, and if these ever agreed the user-side test would be watching
+    // for something that had already happened.
+    match (alpha.translate(DATA_BASE), beta.translate(DATA_BASE)) {
+        (Some(first), Some(second)) if first != second => kprintln!(
+            "[user] alpha and beta both map {DATA_BASE:#x}, to {first:#x} and {second:#x}"
+        ),
+        (Some(first), Some(_)) => kprintln!(
+            "[user] FAILED: alpha and beta both map {DATA_BASE:#x} to {first:#x}, the same frame"
+        ),
+        _ => kprintln!("[user] FAILED: a process has no data page at {DATA_BASE:#x}"),
+    }
+
+    let (created, destroyed) = address_space::statistics();
+    kprintln!("[user] {created} address spaces created, {destroyed} destroyed");
     Ok(())
 }
 

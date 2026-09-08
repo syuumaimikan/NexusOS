@@ -6,6 +6,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 
 use nexus_abi::layout;
 
@@ -188,12 +189,28 @@ pub struct Thread {
     /// there are two values and a `ThreadEntry` takes one; inventing a table to
     /// index into would be the same thing with more moving parts.
     pub user_start: Option<UserStart>,
+    /// The address space this thread runs in, if it is not the kernel's.
+    ///
+    /// Shared rather than owned: threads of one process run in one space, and
+    /// the space outlives whichever of them is reaped first. The last reference
+    /// going away is what frees the user half, and by then no processor can
+    /// still have it in `cr3` -- a thread has to be switched away from before
+    /// it can be reaped, and every switch sets `cr3`.
+    pub address_space: Option<Arc<crate::memory::address_space::AddressSpace>>,
     /// Remaining ticks in the current time slice.
     pub slice_remaining: u32,
     /// Total ticks this thread has been scheduled for.
     pub ticks_run: u64,
     /// How many times it has been switched to.
     pub switches: u64,
+    /// Whether this thread is a processor's idle thread.
+    ///
+    /// Idle threads are reached through per-processor state rather than a run
+    /// queue, so they are the one kind of thread that is `Ready` and correctly
+    /// on no queue. Recorded rather than inferred: the boot processor's idle
+    /// thread owns a stack and the others do not, so every guess about what an
+    /// idle thread looks like has been wrong.
+    pub is_idle: bool,
     /// Set while this thread has left the scheduler's hands but is still
     /// executing on its own stack.
     ///
@@ -233,9 +250,11 @@ impl Thread {
             stack: None,
             entry: None,
             user_start: None,
+            address_space: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
             switches: 0,
+            is_idle: false,
             switching_out: false,
         })
     }
@@ -263,9 +282,11 @@ impl Thread {
             stack: Some(stack),
             entry: Some((entry, argument)),
             user_start: None,
+            address_space: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
             switches: 0,
+            is_idle: false,
             switching_out: false,
         }))
     }
@@ -312,6 +333,12 @@ impl Thread {
 
             flags_slot
         }
+    }
+
+    /// Physical root of the page tables this thread runs on.
+    #[must_use]
+    pub fn page_table_root(&self) -> Option<u64> {
+        self.address_space.as_ref().map(|space| space.root())
     }
 
     /// Top of this thread's kernel stack, if it owns one.

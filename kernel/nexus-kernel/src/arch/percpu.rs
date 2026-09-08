@@ -188,9 +188,22 @@ pub fn take_previous() -> Option<u64> {
 }
 
 /// Note that `id` is leaving this processor and still has to be released.
+///
+/// The slot holds at most one thread. Overwriting an occupied one loses that
+/// thread silently -- it stays ready, on no run queue, and never runs again --
+/// so the case is asserted rather than trusted. It has happened, when a new
+/// thread began with interrupts already enabled and was preempted before it
+/// could release its predecessor.
 pub fn set_previous(id: u64) {
     // SAFETY: as above.
-    unsafe { (*this()).previous = id };
+    unsafe {
+        debug_assert_eq!(
+            (*this()).previous,
+            NO_THREAD,
+            "a thread was still awaiting release when another switched away"
+        );
+        (*this()).previous = id;
+    }
 }
 
 /// Whether the thread running here should be preempted.

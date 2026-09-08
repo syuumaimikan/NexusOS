@@ -70,6 +70,19 @@ const FMASK: u64 = {
 static CALLS: AtomicU64 = AtomicU64::new(0);
 /// System calls that named a number the kernel does not implement.
 static UNKNOWN: AtomicU64 = AtomicU64::new(0);
+/// Yields begun and yields returned from, counted rather than logged: printing
+/// inside the path being investigated changes the timing that produces it.
+static YIELD_ENTERED: AtomicU64 = AtomicU64::new(0);
+static YIELD_RETURNED: AtomicU64 = AtomicU64::new(0);
+
+/// Yields begun and yields returned from.
+#[must_use]
+pub fn yield_statistics() -> (u64, u64) {
+    (
+        YIELD_ENTERED.load(Ordering::Relaxed),
+        YIELD_RETURNED.load(Ordering::Relaxed),
+    )
+}
 
 /// Enable `syscall` on this processor.
 ///
@@ -132,11 +145,26 @@ nexus_syscall_entry:
     mov gs:[{user_rsp}], rsp
     mov rsp, gs:[{kernel_rsp}]
 
+    // Move the caller's stack pointer off the per-CPU slot and onto this
+    // thread's own stack, immediately.
+    //
+    // The slot is scratch for exactly the two instructions above, where there
+    // was nowhere else to put it. It cannot be where the value *lives*: a
+    // system call may block, and a thread that blocks can be resumed on a
+    // different processor, whose slot holds some other thread's stack pointer
+    // or nothing at all. Leaving it there was a bug that only appeared when a
+    // call both blocked and migrated.
+    push qword ptr gs:[{user_rsp}]
+
     // `sysretq` needs these two back exactly as the instruction left them.
     // They are pushed rather than kept in registers because the dispatcher is
     // ordinary Rust and may use any caller-saved register it likes.
     push rcx
     push r11
+
+    // Three pushes leave the stack eight bytes out of the alignment the C ABI
+    // requires at a `call`. One more restores it.
+    sub rsp, 8
 
     // Shuffle the system-call registers into the C argument registers, right
     // to left so that nothing is overwritten before it is read.
@@ -149,14 +177,15 @@ nexus_syscall_entry:
     call {dispatch}
 
     // The result is already in rax, which is where the caller wants it.
+    add rsp, 8
     pop r11
     pop rcx
 
-    // Back onto the user stack, and back to the user's GS, with interrupts
-    // still masked: an interrupt between these two would arrive with the
-    // kernel's GS active and a user stack pointer, and the entry guard would
-    // swap the wrong way.
-    mov rsp, gs:[{user_rsp}]
+    // Back onto the user stack -- this thread's, taken from this thread's
+    // stack -- and back to the user's GS, with interrupts still masked: an
+    // interrupt between these two would arrive with the kernel's GS active and
+    // a user stack pointer, and the entry guard would swap the wrong way.
+    pop rsp
     swapgs
     sysretq
 "#,
@@ -251,7 +280,9 @@ extern "sysv64" fn dispatch(
         Some(Call::Log) => log(argument0, argument1),
         Some(Call::Uptime) => super::time::uptime_ms(),
         Some(Call::Yield) => {
+            YIELD_ENTERED.fetch_add(1, Ordering::Relaxed);
             crate::sched::yield_now();
+            YIELD_RETURNED.fetch_add(1, Ordering::Relaxed);
             0
         }
         Some(Call::ThreadId) => percpu::current_thread(),

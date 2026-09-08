@@ -96,6 +96,26 @@ $Cases = @(
         Reject = @(
             'FAILED: ring 3 read kernel memory'
         )
+    },
+    # And the same discipline for the address spaces. Two processes reporting
+    # that nobody wrote into their memory means nothing unless the report can
+    # come out the other way; this build hands them one page between them, which
+    # is what having no separation would look like from inside a program.
+    @{
+        Name = 'two processes sharing one page'
+        Feature = 'inject-shared-user-page'
+        Processors = 4
+        Expect = @(
+            # The kernel side, which is a fact about the page tables and so is
+            # the same every run.
+            'FAILED: alpha and beta both map',
+            'the same frame',
+            # And the user side. Only one of the two has to notice: each
+            # process sees corruption when the other's write lands between its
+            # own write and its read, and which one that happens to is a race.
+            # Requiring both to report would be requiring a coin to land twice.
+            "FAILED: another process wrote into this one's memory"
+        )
     }
 )
 

@@ -33,7 +33,7 @@ pub const GLOBAL: u64 = 1 << 8;
 pub const NO_EXECUTE: u64 = 1 << 63;
 
 /// Bits of an entry holding the physical frame address.
-const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+pub(super) const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// Why a mapping operation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +68,22 @@ impl core::fmt::Display for MapError {
 /// # Safety
 ///
 /// `table` must be a live page table reachable through the direct map.
+pub(super) unsafe fn read_table_entry(table: u64, index: usize) -> u64 {
+    // SAFETY: upheld by the caller.
+    unsafe { read_entry(table, index) }
+}
+
+/// Write one entry of the page table at physical address `table`.
+///
+/// # Safety
+///
+/// See [`read_table_entry`], and the value must be a well-formed entry for the
+/// level `table` sits at.
+pub(super) unsafe fn write_table_entry(table: u64, index: usize, value: u64) {
+    // SAFETY: upheld by the caller.
+    unsafe { write_entry(table, index, value) };
+}
+
 unsafe fn read_entry(table: u64, index: usize) -> u64 {
     let pointer = layout::phys_to_virt(table) as *const u64;
     // SAFETY: upheld by the caller; `index` is masked to 0..512 by callers.
@@ -203,8 +219,23 @@ unsafe fn walk_to_page_table(
 /// caller is entitled to define. Creating a second mapping for a frame that is
 /// already mapped elsewhere aliases it, which is the caller's responsibility.
 pub unsafe fn map_page(virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
-    let root = active_root();
-    // SAFETY: `root` is the live root table; the direct map covers it.
+    // SAFETY: upheld by the caller.
+    unsafe { map_page_in(active_root(), virt, phys, flags) }
+}
+
+/// Map `virt` in the address space rooted at `root`.
+///
+/// The shootdown is conditional on `root` being the one this processor is
+/// running in. A space that is not active anywhere has no cached translations
+/// to invalidate, and interrupting every processor to tell it about an address
+/// space it has never loaded is pure cost. Comparing against `cr3` here rather
+/// than making the caller decide means the correct answer is the default one.
+///
+/// # Safety
+///
+/// See [`map_page`], and `root` must be a live root page table.
+pub unsafe fn map_page_in(root: u64, virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
+    // SAFETY: `root` is a live root table; the direct map covers it.
     let table = unsafe { walk_to_page_table(root, virt, true, flags & USER != 0)? };
     let index = index_for(virt, 3);
 
@@ -218,7 +249,10 @@ pub unsafe fn map_page(virt: u64, phys: u64, flags: u64) -> Result<(), MapError>
 
     // A previously absent translation can still be cached as such on some
     // processors, so the flush is not optional.
-    flush(virt);
+    if root == active_root() {
+        // SAFETY: the entry already holds the new mapping.
+        unsafe { crate::arch::tlb::shoot_down(virt, 1) };
+    }
     Ok(())
 }
 
@@ -358,7 +392,13 @@ pub unsafe fn unmap_range(virt: u64, pages: u64) -> u64 {
 /// the direct map rather than failing on it.
 #[must_use]
 pub fn translate(virt: u64) -> Option<u64> {
-    let mut table = active_root();
+    translate_in(active_root(), virt)
+}
+
+/// Look up `virt` in the address space rooted at `root`.
+#[must_use]
+pub fn translate_in(root: u64, virt: u64) -> Option<u64> {
+    let mut table = root;
 
     for level in 0..4 {
         let index = index_for(virt, level);

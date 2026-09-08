@@ -39,3 +39,8 @@ inject-no-shootdown = []
 # program shows the boundary can be crossed; only an access that must fail shows
 # the boundary is there.
 inject-user-violation = []
+
+# Gives the two isolation processes the same data frame, which is what having no
+# address-space separation would look like. The programs check that nobody else
+# writes into their memory; this is how that check is shown to be able to fail.
+inject-shared-user-page = []

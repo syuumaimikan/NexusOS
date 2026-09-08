@@ -56,6 +56,7 @@ pub mod thread;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
+use alloc::sync::Arc;
 
 use crate::arch::{self, interrupts, percpu, time};
 use crate::kprintln;
@@ -174,7 +175,11 @@ pub unsafe fn init() -> Result<(), SpawnError> {
         // The idle thread is created before anything else can block, because
         // the first moment every other thread is asleep is the moment it is
         // needed.
-        scheduler.create("idle-cpu0", Priority::Background, idle_entry, 0)?
+        let idle = scheduler.create("idle-cpu0", Priority::Background, idle_entry, 0)?;
+        if let Some(thread) = scheduler.threads.get_mut(&idle) {
+            thread.is_idle = true;
+        }
+        idle
     };
 
     percpu::set_current_thread(0);
@@ -205,7 +210,11 @@ pub fn run_idle_on_this_processor(cpu_index: usize) -> ! {
 
     let id = {
         let mut scheduler = SCHEDULER.lock();
-        scheduler.adopt(&format!("idle-cpu{cpu_index}"), Priority::Background)
+        let id = scheduler.adopt(&format!("idle-cpu{cpu_index}"), Priority::Background);
+        if let Some(thread) = scheduler.threads.get_mut(&id) {
+            thread.is_idle = true;
+        }
+        id
     };
 
     percpu::set_current_thread(id.0);
@@ -268,12 +277,18 @@ pub fn spawn(
 /// The thread starts in the kernel like any other and leaves for user mode as
 /// its first act, because something has to set up the transition and only code
 /// already running on the thread's own kernel stack can.
-pub fn spawn_user(name: &str, entry: u64, stack_top: u64) -> Result<ThreadId, SpawnError> {
+pub fn spawn_user(
+    name: &str,
+    entry: u64,
+    stack_top: u64,
+    space: Arc<crate::memory::address_space::AddressSpace>,
+) -> Result<ThreadId, SpawnError> {
     let id = {
         let mut scheduler = SCHEDULER.lock();
         let id = scheduler.create(name, Priority::Normal, user_trampoline, 0)?;
         if let Some(thread) = scheduler.threads.get_mut(&id) {
             thread.user_start = Some(UserStart { entry, stack_top });
+            thread.address_space = Some(space);
         }
         scheduler.enqueue(id);
         id
@@ -328,8 +343,15 @@ pub fn current_id() -> Option<ThreadId> {
 /// when it comes back.
 extern "sysv64" fn thread_trampoline() -> ! {
     // A first run arrives here instead of returning from `context_switch`, so
-    // this is where the thread it displaced gets released.
+    // this is where the thread it displaced gets released. Interrupts are still
+    // masked, exactly as they are at the same point on the ordinary path, so
+    // nothing can schedule again before the hand-off is complete.
     finish_switch();
+
+    // And now the thread is a thread like any other, which means preemptible.
+    // The ordinary path re-enables on the way out of `without_interrupts`;
+    // there is no such caller here, so it happens explicitly.
+    interrupts::enable();
 
     let (entry, argument) = {
         let scheduler = SCHEDULER.lock();
@@ -578,7 +600,7 @@ pub fn schedule() {
                 &mut thread.stack_pointer as *mut u64
             };
 
-            let (incoming_stack, incoming_kernel_stack) = {
+            let (incoming_stack, incoming_kernel_stack, incoming_root) = {
                 let thread = scheduler
                     .threads
                     .get_mut(&next)
@@ -586,7 +608,11 @@ pub fn schedule() {
                 thread.state = ThreadState::Running;
                 thread.slice_remaining = TIME_SLICE_TICKS;
                 thread.switches += 1;
-                (thread.stack_pointer, thread.kernel_stack_top())
+                (
+                    thread.stack_pointer,
+                    thread.kernel_stack_top(),
+                    thread.page_table_root(),
+                )
             };
 
             // Where the processor lands when it comes back from ring 3, by
@@ -604,6 +630,21 @@ pub fn schedule() {
             // SAFETY: `kernel_stack` is the top of a mapped stack, and only this
             // processor writes its own TSS.
             unsafe { arch::gdt::set_kernel_stack(percpu::cpu_index() as usize, kernel_stack) };
+
+            // The incoming thread's address space, or the kernel's when it
+            // has none. Always set, never left alone: a processor that kept the
+            // previous thread's `cr3` would be running kernel code in a space
+            // that is about to be freed, and would see the wrong user memory
+            // the moment it looked at any.
+            //
+            // `activate_root` skips the write when it is already right, which
+            // matters: writing `cr3` discards every non-global translation, so
+            // doing it on switches that stay inside one space would throw away
+            // a working set for nothing.
+            let root = incoming_root.unwrap_or_else(crate::memory::address_space::kernel_root);
+            // SAFETY: every space maps the whole kernel upper half, which is
+            // where this code and its stack live.
+            unsafe { crate::memory::address_space::activate_root(root) };
 
             percpu::set_current_thread(next.0);
             scheduler.context_switches += 1;
@@ -690,6 +731,56 @@ pub fn stats() -> SchedulerStats {
         running,
         context_switches: scheduler.context_switches,
     }
+}
+
+/// Check the invariant that binds thread state to the run queues.
+///
+/// A thread whose state is [`ThreadState::Ready`] must be on a run queue,
+/// unless it is a processor's idle thread, which is reached by a different
+/// route entirely. A `Ready` thread that is on no queue is invisible to the
+/// scheduler: it is not running, nothing will ever pick it, and nothing else
+/// about the system looks wrong. That failure has been seen once and not
+/// reproduced, so this is a permanent check rather than a temporary one.
+///
+/// Returns the number of threads in that state, and reports them.
+pub fn check_run_queues() -> usize {
+    let scheduler = SCHEDULER.lock();
+
+    let queued: usize = scheduler.ready.iter().map(VecDeque::len).sum();
+    let ready: usize = scheduler
+        .threads
+        .values()
+        .filter(|thread| thread.state == ThreadState::Ready)
+        .count();
+
+    // Idle threads sit in `Ready` while their processor runs something else,
+    // and are deliberately never queued.
+    let idle_ready = scheduler
+        .threads
+        .values()
+        .filter(|thread| thread.state == ThreadState::Ready && thread.is_idle)
+        .count();
+
+    let expected = ready.saturating_sub(idle_ready);
+    if expected == queued {
+        return 0;
+    }
+
+    kprintln!("[sched] INVARIANT: {expected} threads are ready but {queued} are queued");
+    for thread in scheduler.threads.values() {
+        if thread.state == ThreadState::Ready {
+            kprintln!(
+                "[sched]   {} {:<16} {:?} ready, {} ticks, {} switches, switching_out {}",
+                thread.id,
+                thread.name.as_str(),
+                thread.priority,
+                thread.ticks_run,
+                thread.switches,
+                thread.switching_out
+            );
+        }
+    }
+    expected.abs_diff(queued)
 }
 
 /// Print a line per thread, for diagnostics.

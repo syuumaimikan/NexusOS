@@ -68,7 +68,7 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | MSI, MSI-X | **MISSING** | No PCI enumeration yet, so nothing to target |
 | Ring 3 | **DONE** | A user thread runs at CPL 3, preemptible, in its own pages |
 | System calls | **PARTIAL** | `syscall`/`sysret` entry, five calls; no handles or IPC |
-| Processes, address spaces | **MISSING** | One address space; ring 3 is separated by the user bit, not by `cr3` |
+| Processes, address spaces | **DONE** | A page-table root per process; kernel upper half shared by pointer |
 | Handles, IPC, syscalls | **MISSING** | |
 
 ### Everything above the kernel
@@ -149,13 +149,10 @@ The build produces zero warnings and passes `clippy -D warnings`.
 
 These are real and are tracked, not hidden:
 
-1. **One address space.** The user mappings live in the kernel's own page
-   tables and are kept apart by the `USER` bit rather than by being absent.
-   That is enough for the boundary to be enforced — a build that reads kernel
-   memory from ring 3 is an injection test, and it faults — and it is not
-   isolation: two user programs would share everything. A `cr3` per process is
-   what makes "process" mean something, and it brings page-table lifetime and
-   the TLB work that goes with it.
+1. **A process is an address space and a thread, and nothing else.** There is
+   no process object, no parent, no exit status, no way to create one from
+   inside the system. Every process NexusOS runs is one the kernel builds at
+   boot. That is the next thing handles and IPC are for.
 2. **No user memory copy helpers.** `Call::Log` validates its range and then
    reads it directly. A user pointer that is unmapped faults in the kernel, on
    the kernel's stack, and is reported as a kernel fault; it should be turned
@@ -171,10 +168,9 @@ These are real and are tracked, not hidden:
    right for fairness and wrong for cache locality. There is nothing to measure
    it with yet.
 5. **Shootdowns are broadcast to every processor.** A processor that never
-   touched the address is interrupted anyway, because nothing tracks which
-   address spaces are live where. There is one address space, so today the
-   broadcast is also the correct set; tracking becomes worth it when there are
-   processes.
+   loaded the address space is interrupted anyway, because nothing tracks which
+   spaces are live where. Correct, and more work than necessary now that there
+   is more than one address space to be wrong about.
 6. **The framebuffer is mapped write-back, not write-combining.** Correct in
    QEMU, slow on real hardware. Needs PAT configuration.
 7. **Bootloader allocations are over-conservative.** Page tables, the handoff
@@ -215,9 +211,12 @@ image on the ESP, which was costing megabytes of boot-time reads for a
 hundred-kilobyte load, the two scripts that staged that ESP differently, so
 whichever ran last decided what the next boot would load, and the
 single-processor scheduler: every processor now runs threads, and the boot test
-fails if the workers all land on one of them; and the absence of any user mode
-at all — a program now runs at ring 3, and the boot test fails unless an
-interrupt was taken from it. Stale translations on the other
+fails if the workers all land on one of them; the absence of any user mode at
+all — a program now runs at ring 3, and the boot test fails unless an interrupt
+was taken from it; the single address space, which is now one per process, with
+the boot test comparing the two processes' page tables and the injection suite
+building a kernel that shares a page between them; and a scheduler bug that lost
+about one thread per dozen boots, described below. Stale translations on the other
 cores went with it: mapping changes are shot down across every processor, and a
 build that deliberately keeps the shootdown local is one of the injection tests,
 so the check that looks for staleness has been seen to fail when there is some.
@@ -255,13 +254,10 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **A separate address space per process**, which is what turns a thread that
-   happens to run at ring 3 into something isolated, and what the word
-   "process" is currently borrowing credit for.
-2. **Handles and IPC**, where the capability model starts. Input needs it too:
+1. **Handles and IPC**, where the capability model starts. Input needs it too:
    a wait queue is what lets the input thread sleep until a key arrives instead
    of polling fifty times a second.
-3. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
-4. **CI**, so the five test layers run on every change rather than on request.
+2. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
+3. **CI**, so the five test layers run on every change rather than on request.
 
 See [NEXUSOS_ROADMAP.md](NEXUSOS_ROADMAP.md) for the full sequence.

@@ -145,9 +145,33 @@ from ring 3 — system calls alone would not prove user privilege, since `syscal
 is legal from ring 0 — and an injection build reads kernel memory from ring 3 to
 show the boundary keeps something out rather than merely being crossable.
 
-Still outstanding: per-processor run queues, thread affinity, and address-space
-separation. There is one address space; ring 3 is kept apart by the user bit
-rather than by `cr3`, so "process" is not yet a word this kernel has earned.
+Address spaces followed. Each process has a page-table root of its own; the
+kernel's upper half is shared by copying the top-level entries, so a kernel
+mapping made later appears in every space at once, and the entries are all
+created up front so that they never change afterwards. The scheduler loads the
+incoming thread's root on every switch, skipping the write when it is already
+right — writing `cr3` discards every non-global translation, so doing it
+needlessly would throw away a working set.
+
+The proof is on both sides of the boundary. The kernel compares the two
+processes' page tables and reports the different frames one address maps to,
+which is a fact rather than an interleaving; the two programs write their own
+identifier to that address and read it back two hundred times, which would
+collide within a few rounds if the page were shared. An injection build gives
+them one page between them, so the second check is known to be able to fail.
+
+Finding that took a scheduler bug with it. A newly created thread started with
+its interrupt flag already set, so it could be preempted in the handful of
+instructions between being switched to and releasing the thread it displaced —
+and the displaced thread was then left ready, on no run queue, never to run
+again. About one boot in a dozen lost a thread that way. New threads now start
+with interrupts masked and enable them once the hand-off is done, the hand-off
+slot asserts that it is not being overwritten, and the monitor checks every five
+seconds that no thread is ready and unqueued.
+
+Still outstanding: per-processor run queues, thread affinity, and a process
+object worth the name — there is no parent, no exit status, and no way to create
+one from inside the system.
 
 ## Input 🚧
 

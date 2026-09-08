@@ -145,6 +145,17 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     unsafe { memory::paging::tear_down_identity_map() };
     kprintln!("[mem ] identity map torn down; low addresses now fault");
 
+    // Adopt the running page tables as the kernel's own, and fill in every
+    // upper-half top-level entry. Both have to happen before any process
+    // exists: a new address space copies those entries, and copying is only
+    // sound if they never change afterwards.
+    // SAFETY: called once, on the boot processor, with the frame allocator
+    // running and no address space yet created.
+    if let Err(error) = unsafe { memory::address_space::init() } {
+        kprintln!("FATAL: could not adopt the kernel address space: {error:?}");
+        arch::halt_forever();
+    }
+
     // ACPI and the local APIC. Both wait until here: the APIC's registers sit
     // far above RAM, so reaching them needs the virtual memory manager, and
     // calibrating its timer needs the PIT still ticking with interrupts on.
@@ -308,7 +319,19 @@ fn monitor_thread(_argument: usize) {
         // Interrupts taken from ring 3 are the evidence that user code ran at
         // user privilege and was preemptible while it did. System calls alone
         // would not say either: `syscall` is legal from ring 0 too.
+        // Cheap, and it is the one invariant whose violation is silent: a
+        // ready thread that is on no queue simply never runs again.
+        sched::check_run_queues();
+
+        let (spaces, freed) = memory::address_space::statistics();
+        if spaces > 0 {
+            kprintln!("[mon ] {spaces} address spaces created, {freed} freed");
+        }
         let (calls, unknown) = arch::syscall::statistics();
+        let (entered, returned) = arch::syscall::yield_statistics();
+        if entered != returned {
+            kprintln!("[mon ] {entered} yields begun, {returned} returned");
+        }
         let from_user = arch::idt::entries_from_user();
         kprintln!(
             "[mon ] {calls} system calls ({unknown} unimplemented),              {from_user} interrupts taken from ring 3"
@@ -763,13 +786,25 @@ const WORKER_COUNT: u64 = 4;
 fn self_test_worker(argument: usize) {
     use core::sync::atomic::Ordering;
 
-    for _ in 0..WORKER_ITERATIONS {
+    for iteration in 0..WORKER_ITERATIONS {
         sched_test::WORK_DONE.fetch_add(1, Ordering::Relaxed);
         // Sampled every iteration, not once: a thread can be preempted and
         // resumed on a different processor, and both are worth recording.
         sched_test::WORKER_PROCESSORS.fetch_or(1 << arch::percpu::cpu_index(), Ordering::Relaxed);
         if argument % 2 == 0 {
             sched::yield_now();
+        }
+        // Sleep occasionally, so the work outlasts the time it takes the other
+        // processors to hear about it.
+        //
+        // Without this the test was a race it sometimes lost: a request to
+        // reschedule is noticed at the next timer tick, up to a millisecond
+        // away, and five hundred iterations of an atomic increment are over
+        // long before that. All four workers finishing on the processor that
+        // started them was not a scheduler failure, it was the test measuring
+        // wake-up latency and calling it distribution.
+        if iteration % 100 == 99 {
+            sched::sleep_ms(1);
         }
     }
     sched_test::WORKERS_FINISHED.fetch_add(1, Ordering::Relaxed);
@@ -832,7 +867,14 @@ fn scheduler_self_test() {
     let finished = sched_test::WORKERS_FINISHED.load(Ordering::Relaxed);
     let work = sched_test::WORK_DONE.load(Ordering::Relaxed);
     if finished != WORKER_COUNT {
-        kprintln!("[test] FAILED: only {finished} of {WORKER_COUNT} workers finished");
+        // A failing test that only says it failed is a test that has to be
+        // reproduced before it can be read. Say what was seen.
+        kprintln!(
+            "[test] FAILED: only {finished} of {WORKER_COUNT} workers finished              ({work} of {} iterations done, {} ticks elapsed of 5000)",
+            WORKER_COUNT * WORKER_ITERATIONS,
+            arch::time::ticks() + 5000 - deadline
+        );
+        sched::dump_threads();
         return;
     }
     if work != WORKER_COUNT * WORKER_ITERATIONS {
@@ -848,12 +890,17 @@ fn scheduler_self_test() {
     let used = processors.count_ones();
     let online = arch::smp::processor_count();
     if online > 1 && used < 2 {
+        // Reported and carried on. An early return here once hid the TLB
+        // shootdown test entirely, so a flake in one check read as a missing
+        // marker in another.
         kprintln!(
             "[test] FAILED: {online} processors are online but every worker ran on one of them"
         );
-        return;
+    } else {
+        kprintln!(
+            "[test] work was spread across {used} of {online} processors (mask {processors:#x})"
+        );
     }
-    kprintln!("[test] work was spread across {used} of {online} processors (mask {processors:#x})");
 
     // Now the real question: can a thread that never yields be preempted?
     kprintln!("[test] starting a thread that never yields, at equal priority");
