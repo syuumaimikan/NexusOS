@@ -134,6 +134,10 @@ Invoke-Step 'boot test' {
         'channel round trip, bad handle and closed peer all behaved',
         'messages sent',
         'processes started',
+        'starts holding handle',
+        'a request from the client process',
+        'an answer from the server process',
+        'server: the client closed the channel',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -230,6 +234,22 @@ Invoke-Step 'boot test' {
     }
     if ([int]$Matches[2] -ne [int]$Matches[3]) {
         throw "$($Matches[2]) messages were sent but $($Matches[3]) received"
+    }
+    # The conversation has to have gone the way a conversation goes. Both lines
+    # being present says two processes logged something; the order says the
+    # request reached the server before the answer reached the client, which is
+    # the only reading that is a round trip rather than two monologues.
+    $request = $output.IndexOf('a request from the client process')
+    $answer = $output.IndexOf('an answer from the server process')
+    $closed = $output.IndexOf('server: the client closed the channel')
+    if ($request -lt 0 -or $answer -lt 0 -or $closed -lt 0) {
+        throw 'the client and server did not complete their exchange'
+    }
+    if ($answer -lt $request) {
+        throw 'the server answered before the request arrived'
+    }
+    if ($closed -lt $answer) {
+        throw 'the server saw the channel close before it had answered'
     }
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }

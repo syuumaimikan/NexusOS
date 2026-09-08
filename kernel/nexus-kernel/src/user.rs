@@ -22,6 +22,7 @@ use alloc::sync::Arc;
 use nexus_abi::layout;
 
 use crate::arch::gdt;
+use crate::ipc;
 use crate::memory::{address_space, paging};
 use crate::{kprintln, memory, sched};
 
@@ -337,6 +338,123 @@ nexus_user_ipc_end:
     options(att_syntax)
 );
 
+// The two programs that talk to each other.
+//
+// Both are given one end of a channel by the kernel before they start, as
+// handle 1 -- the first thing in an empty table. Neither can name the other,
+// and neither needs to: the authority to talk is the handle itself.
+//
+// The client asks once and reads the answer. The server answers whatever
+// arrives until the channel closes, which is what tells it the client has gone;
+// nothing polls and nothing times out.
+core::arch::global_asm!(
+    r#"
+    .section .rodata
+    .p2align 4
+    .global nexus_user_client_start
+    .global nexus_user_client_end
+nexus_user_client_start:
+    movl $6, %eax                       // Call::ChannelWrite
+    movl $1, %edi
+    leaq 1f(%rip), %rsi
+    movq $(2f - 1f), %rdx
+    syscall
+    cmpq $(2f - 1f), %rax
+    jne 8f
+
+    // Blocks until the server answers. The thread is off every run queue while
+    // it waits, which is the point of the whole arrangement.
+    movl $7, %eax                       // Call::ChannelRead
+    movl $1, %edi
+    movabsq $0x600000, %rsi
+    movl $256, %edx
+    syscall
+    // Errors come back near the top of the range, so the sign bit separates
+    // them from any length a channel will carry.
+    testq %rax, %rax
+    js 8f
+    movq %rax, %r12
+
+    movl $1, %eax                       // Call::Log
+    movabsq $0x600000, %rdi
+    movq %r12, %rsi
+    syscall
+
+    // Closing now, rather than letting the process teardown do it, is what
+    // lets the server find out promptly instead of at the next reaping.
+    movl $8, %eax                       // Call::HandleClose
+    movl $1, %edi
+    syscall
+    jmp 9f
+8:
+    movl $1, %eax
+    leaq 2f(%rip), %rdi
+    movl $(3f - 2f), %esi
+    syscall
+9:
+    movl $0, %eax                       // Call::Exit
+    syscall
+    ud2
+
+1:  .ascii "a request from the client process"
+2:  .ascii "FAILED: the client could not talk to the server"
+3:
+nexus_user_client_end:
+
+    .global nexus_user_server_start
+    .global nexus_user_server_end
+    .p2align 4
+nexus_user_server_start:
+2:
+    movl $7, %eax                       // Call::ChannelRead
+    movl $1, %edi
+    movabsq $0x600000, %rsi
+    movl $256, %edx
+    syscall
+    cmpq $-5, %rax                      // EPIPE: the client has gone
+    je 7f
+    testq %rax, %rax
+    js 8f
+    movq %rax, %r12
+
+    movl $1, %eax                       // Call::Log
+    movabsq $0x600000, %rdi
+    movq %r12, %rsi
+    syscall
+
+    movl $6, %eax                       // Call::ChannelWrite
+    movl $1, %edi
+    leaq 1f(%rip), %rsi
+    movq $(3f - 1f), %rdx
+    syscall
+    testq %rax, %rax
+    js 8f
+    jmp 2b
+7:
+    movl $1, %eax
+    leaq 3f(%rip), %rdi
+    movl $(4f - 3f), %esi
+    syscall
+    jmp 9f
+8:
+    movl $1, %eax
+    leaq 4f(%rip), %rdi
+    movl $(5f - 4f), %esi
+    syscall
+9:
+    movl $0, %eax                       // Call::Exit
+    syscall
+    ud2
+
+1:  .ascii "an answer from the server process"
+3:  .ascii "server: the client closed the channel, so there is nothing left to answer"
+4:  .ascii "FAILED: the server got an error it did not expect"
+5:
+nexus_user_server_end:
+"#,
+    options(att_syntax)
+);
+
 extern "C" {
     /// First byte of the program that exercises the system-call ABI.
     static nexus_user_abi_start: u8;
@@ -350,6 +468,14 @@ extern "C" {
     static nexus_user_ipc_start: u8;
     /// One past its last byte.
     static nexus_user_ipc_end: u8;
+    /// First byte of the program that asks a question of another process.
+    static nexus_user_client_start: u8;
+    /// One past its last byte.
+    static nexus_user_client_end: u8;
+    /// First byte of the program that answers one.
+    static nexus_user_server_start: u8;
+    /// One past its last byte.
+    static nexus_user_server_end: u8;
 }
 
 /// Why user mode could not be brought up.
@@ -436,6 +562,7 @@ unsafe fn spawn_process(
     program: (usize, usize),
     identifier: u64,
     data: Option<&[u8]>,
+    endowment: Option<(ipc::Object, ipc::Rights)>,
 ) -> Result<Arc<address_space::AddressSpace>, UserError> {
     let space = address_space::AddressSpace::new().map_err(UserError::Space)?;
 
@@ -492,6 +619,15 @@ unsafe fn spawn_process(
     let space = Arc::new(space);
     let process = crate::process::Process::new(name, Arc::clone(&space));
     let id = process.id;
+
+    // Whatever the kernel decided this process may reach, handed over before it
+    // runs. A process starts with exactly the authority it was given and no way
+    // to ask for more, which is the whole of what a capability system means at
+    // the moment a process begins.
+    if let Some((object, rights)) = endowment {
+        let handle = process.handles.insert(object, rights);
+        kprintln!("[user] process {id} \"{name}\" starts holding handle {handle}");
+    }
 
     sched::spawn_user(name, CODE_BASE, STACK_TOP - INITIAL_STACK_OFFSET, process)
         .map_err(UserError::Spawn)?;
@@ -581,13 +717,40 @@ pub unsafe fn start() -> Result<(), UserError> {
         core::ptr::addr_of!(nexus_user_ipc_start) as usize,
         core::ptr::addr_of!(nexus_user_ipc_end) as usize,
     );
+    let client = (
+        core::ptr::addr_of!(nexus_user_client_start) as usize,
+        core::ptr::addr_of!(nexus_user_client_end) as usize,
+    );
+    let server = (
+        core::ptr::addr_of!(nexus_user_server_start) as usize,
+        core::ptr::addr_of!(nexus_user_server_end) as usize,
+    );
 
     // SAFETY: the heap, the frame allocator and the scheduler are all running.
     let (alpha, beta) = unsafe {
-        spawn_process("abi", abi, 0, None)?;
+        spawn_process("abi", abi, 0, None, None)?;
 
         // A data page it uses as a receive buffer rather than as a message.
-        spawn_process("ipc", channels, 0, Some(&[0u8; 128]))?;
+        spawn_process("ipc", channels, 0, Some(&[0u8; 128]), None)?;
+
+        // Two processes that can only reach each other, and only through the
+        // one thing the kernel handed each of them. Neither can name the
+        // other; the handle is the introduction and the authority at once.
+        let (to_server, to_client) = ipc::Endpoint::pair();
+        spawn_process(
+            "server",
+            server,
+            0,
+            Some(&[0u8; 128]),
+            Some((ipc::Object::Channel(to_client), ipc::Rights::ALL)),
+        )?;
+        spawn_process(
+            "client",
+            client,
+            0,
+            Some(&[0u8; 128]),
+            Some((ipc::Object::Channel(to_server), ipc::Rights::ALL)),
+        )?;
 
         // Two processes with identical virtual layouts and different contents.
         // Both write their own identifier to the same address, over and over,
@@ -600,12 +763,14 @@ pub unsafe fn start() -> Result<(), UserError> {
                 isolation,
                 1,
                 Some(&isolation_data("process alpha kept its own memory")),
+                None,
             )?,
             spawn_process(
                 "beta",
                 isolation,
                 2,
                 Some(&isolation_data("process beta kept its own memory")),
+                None,
             )?,
         )
     };

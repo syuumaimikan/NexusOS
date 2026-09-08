@@ -223,10 +223,18 @@ the bytes that came out. A user program creates a channel from ring 3, writes,
 reads it back, is refused a handle it was never given, and is told the peer has
 closed after closing it.
 
-Outstanding: a handle cannot be passed to another process, so both ends stay
-where they were created. That is what turns this from a queue into inter-process
-communication, and it is next. Shared memory, events and semaphores are not
-started.
+Two processes talk. The kernel creates a channel and gives one end to each
+before either starts, so neither can name the other and neither needs to — the
+handle is the introduction and the authority at once. The client asks once and
+blocks for the answer; the server answers whatever arrives until the channel
+closes, which is how it learns the client has gone. Nothing polls and nothing
+times out. The boot test checks the order as well as the presence: a request
+that arrived after its answer would be two monologues rather than a round trip.
+
+Outstanding: a handle cannot be carried in a message, so a process can only use
+channels it was given at birth — it cannot introduce two others, hand out a
+second channel, or ask for one. That is next. Shared memory, events and
+semaphores are not started.
 
 ## Phase 7 — Storage and NexusFS ⬜
 
