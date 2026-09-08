@@ -295,8 +295,8 @@ extern "sysv64" fn dispatch(
     argument0: u64,
     argument1: u64,
     argument2: u64,
-    _argument3: u64,
-    _argument4: u64,
+    argument3: u64,
+    argument4: u64,
 ) -> u64 {
     // The stub arrives with interrupts masked, because until it had switched
     // stacks there was nowhere safe to take one. There is now.
@@ -329,8 +329,12 @@ extern "sysv64" fn dispatch(
         }
         Some(Call::ThreadId) => percpu::current_thread(),
         Some(Call::ChannelCreate) => channel_create(),
-        Some(Call::ChannelWrite) => channel_write(argument0, argument1, argument2),
-        Some(Call::ChannelRead) => channel_read(argument0, argument1, argument2),
+        Some(Call::ChannelWrite) => {
+            channel_write(argument0, argument1, argument2, argument3, argument4)
+        }
+        Some(Call::ChannelRead) => {
+            channel_read(argument0, argument1, argument2, argument3, argument4)
+        }
         Some(Call::HandleClose) => handle_close(argument0),
         Some(Call::HandleRights) => handle_rights(argument0),
         None => {
@@ -432,8 +436,20 @@ fn channel_create() -> u64 {
     (u64::from(a) << 32) | u64::from(b)
 }
 
-/// [`Call::ChannelWrite`]: send one message.
-fn channel_write(handle: u64, pointer: u64, length: u64) -> u64 {
+/// [`Call::ChannelWrite`]: send one message, and any handles with it.
+///
+/// The handles are *moved*: they leave the sender's table at the moment the
+/// message is built, so there is never an instant where both processes hold
+/// one. A send that fails after they have been taken puts them back, because
+/// dropping authority on the floor because a queue was full would be a leak the
+/// caller could not have avoided.
+fn channel_write(
+    handle: u64,
+    pointer: u64,
+    length: u64,
+    handles_pointer: u64,
+    handle_count: u64,
+) -> u64 {
     let process = match caller() {
         Ok(process) => process,
         Err(error) => return error,
@@ -451,16 +467,70 @@ fn channel_write(handle: u64, pointer: u64, length: u64) -> u64 {
         Err(error) => return handle_error(error),
     };
 
+    let passed = match take_handles(&process, handles_pointer, handle_count) {
+        Ok(handles) => handles,
+        Err(error) => return error,
+    };
+
     // SAFETY: the range was checked to lie inside the user half, which this
     // thread's address space maps, and its length is bounded.
     let message = unsafe { core::slice::from_raw_parts(pointer as *const u8, length) };
 
-    match endpoint.send(message) {
+    match endpoint.send(message, passed) {
         Ok(written) => written as u64,
         Err(crate::ipc::ChannelError::TooLong) => EMSGSIZE,
+        Err(crate::ipc::ChannelError::TooManyHandles) => EINVAL,
         Err(crate::ipc::ChannelError::Full) => EAGAIN,
         Err(crate::ipc::ChannelError::PeerClosed) => EPIPE,
     }
+}
+
+/// Take the handles a `channel_write` names out of the caller's table.
+///
+/// Every one of them needs the transfer right, and the whole set is taken or
+/// none of it: a partial transfer would leave the caller having given away some
+/// of what it named and been refused the rest, with no way to find out which.
+fn take_handles(
+    process: &crate::process::Process,
+    pointer: u64,
+    count: u64,
+) -> Result<alloc::vec::Vec<crate::ipc::Handle>, u64> {
+    if count == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    if count > crate::ipc::MAX_HANDLES as u64 {
+        return Err(EINVAL);
+    }
+
+    let bytes = count * 4;
+    let Some((pointer, _)) = user_range(pointer, bytes, bytes) else {
+        return Err(EINVAL);
+    };
+    // Alignment is checked rather than assumed: the pointer came from ring 3.
+    if pointer % 4 != 0 {
+        return Err(EINVAL);
+    }
+
+    // SAFETY: the range was checked to lie inside the user half and to be
+    // aligned, and a `u32` has no invalid bit patterns.
+    let named =
+        unsafe { core::slice::from_raw_parts(pointer as *const u32, count as usize) }.to_vec();
+
+    let mut taken = alloc::vec::Vec::new();
+    for id in named {
+        match process.handles.take(id, crate::ipc::Rights::TRANSFER) {
+            Ok(handle) => taken.push(handle),
+            Err(error) => {
+                // Put back everything already taken, so a bad handle partway
+                // through the list costs the caller nothing.
+                for handle in taken {
+                    process.handles.restore(handle);
+                }
+                return Err(handle_error(error));
+            }
+        }
+    }
+    Ok(taken)
 }
 
 /// [`Call::ChannelRead`]: take one message, blocking until there is one.
@@ -469,7 +539,13 @@ fn channel_write(handle: u64, pointer: u64, length: u64) -> u64 {
 /// and costs nothing until one arrives, which is what makes a message-passing
 /// system usable as the way processes wait for each other rather than something
 /// to poll around.
-fn channel_read(handle: u64, pointer: u64, capacity: u64) -> u64 {
+fn channel_read(
+    handle: u64,
+    pointer: u64,
+    capacity: u64,
+    handles_pointer: u64,
+    handle_capacity: u64,
+) -> u64 {
     let process = match caller() {
         Ok(process) => process,
         Err(error) => return error,
@@ -490,20 +566,47 @@ fn channel_read(handle: u64, pointer: u64, capacity: u64) -> u64 {
     let Some(message) = endpoint.receive() else {
         return EPIPE;
     };
-    if message.len() > capacity {
+    if message.bytes.len() > capacity || message.handles.len() > handle_capacity as usize {
         // The message is gone either way -- a channel delivers whole messages,
         // and putting it back would let a reader with a small buffer block the
         // queue for everyone behind it. Saying so is better than truncating
-        // silently.
+        // silently, and any handles go down with it rather than being stranded
+        // in a message nobody will read.
         return EMSGSIZE;
     }
 
     // SAFETY: the range was checked as above, and it is at least as long as the
     // message.
     unsafe {
-        core::ptr::copy_nonoverlapping(message.as_ptr(), pointer as *mut u8, message.len());
+        core::ptr::copy_nonoverlapping(
+            message.bytes.as_ptr(),
+            pointer as *mut u8,
+            message.bytes.len(),
+        );
     }
-    message.len() as u64
+
+    let count = message.handles.len();
+    if count > 0 {
+        let bytes = count as u64 * 4;
+        let Some((handles_pointer, _)) = user_range(handles_pointer, bytes, bytes) else {
+            return EINVAL;
+        };
+        if handles_pointer % 4 != 0 {
+            return EINVAL;
+        }
+        for (index, handle) in message.handles.into_iter().enumerate() {
+            let id = process.handles.restore(handle);
+            // SAFETY: the range was checked and is long enough for `count`
+            // identifiers.
+            unsafe {
+                core::ptr::write((handles_pointer as *mut u32).add(index), id);
+            }
+        }
+    }
+
+    // Two answers in one word again: how many handles arrived, and how many
+    // bytes. A length is bounded by `MAX_MESSAGE`, so the high half is free.
+    ((count as u64) << 32) | message.bytes.len() as u64
 }
 
 /// [`Call::HandleClose`]: give up a handle.

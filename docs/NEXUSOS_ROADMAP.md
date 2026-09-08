@@ -231,10 +231,18 @@ closes, which is how it learns the client has gone. Nothing polls and nothing
 times out. The boot test checks the order as well as the presence: a request
 that arrived after its answer would be two monologues rather than a round trip.
 
-Outstanding: a handle cannot be carried in a message, so a process can only use
-channels it was given at birth — it cannot introduce two others, hand out a
-second channel, or ask for one. That is next. Shared memory, events and
-semaphores are not started.
+And a handle can be carried in a message, which is what makes the whole thing a
+capability system rather than a pair of pipes. The client makes a second channel
+and sends one end of it down the first; everything after that happens somewhere
+the kernel never arranged. Handles move rather than copy — they leave the
+sender's table at the moment the message is built, so there is no instant where
+both processes hold one — and a send that fails after taking them puts them
+back, because losing authority to a full queue would be a leak the caller could
+not have avoided. Passing one on needs a right of its own, so a process can be
+given something it may use and may not delegate.
+
+Outstanding: shared memory, events and semaphores. A channel copies its message
+twice, which is right for a request and wrong for a framebuffer.
 
 ## Phase 7 — Storage and NexusFS ⬜
 

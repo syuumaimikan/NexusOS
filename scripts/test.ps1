@@ -135,9 +135,10 @@ Invoke-Step 'boot test' {
         'messages sent',
         'processes started',
         'starts holding handle',
-        'a request from the client process',
-        'an answer from the server process',
-        'server: the client closed the channel',
+        'here is a channel of my own',
+        'a request from the client, on the channel it passed over',
+        'an answer from the server, on the channel it was handed',
+        'server: the passed channel closed',
         'early initialisation complete',
         'boot thread retiring',
         'display adopted',
@@ -239,9 +240,13 @@ Invoke-Step 'boot test' {
     # being present says two processes logged something; the order says the
     # request reached the server before the answer reached the client, which is
     # the only reading that is a round trip rather than two monologues.
-    $request = $output.IndexOf('a request from the client process')
-    $answer = $output.IndexOf('an answer from the server process')
-    $closed = $output.IndexOf('server: the client closed the channel')
+    $handed = $output.IndexOf('here is a channel of my own')
+    $request = $output.IndexOf('a request from the client, on the channel it passed over')
+    $answer = $output.IndexOf('an answer from the server, on the channel it was handed')
+    $closed = $output.IndexOf('server: the passed channel closed')
+    if ($handed -lt 0 -or $request -lt $handed) {
+        throw 'the server was not handed a channel before it was used'
+    }
     if ($request -lt 0 -or $answer -lt 0 -or $closed -lt 0) {
         throw 'the client and server did not complete their exchange'
     }

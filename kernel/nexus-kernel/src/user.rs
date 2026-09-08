@@ -265,11 +265,15 @@ nexus_user_ipc_start:
     shrq $32, %r12                      // the writing end
     movl %r15d, %r13d                   // the reading end
 
-    // Write on one end.
+    // Write on one end. The last two arguments say "no handles"; they are
+    // registers like any other, so they are cleared rather than left to hold
+    // whatever the previous call did.
     movl $6, %eax                       // Call::ChannelWrite
     movq %r12, %rdi
     leaq 1f(%rip), %rsi
     movq $(2f - 1f), %rdx
+    xorl %r10d, %r10d
+    xorl %r8d, %r8d
     syscall
     cmpq $(2f - 1f), %rax
     jne 8f
@@ -279,6 +283,8 @@ nexus_user_ipc_start:
     movq %r13, %rdi
     movabsq $0x600000, %rsi
     movl $256, %edx
+    xorl %r10d, %r10d
+    xorl %r8d, %r8d
     syscall
     cmpq $(2f - 1f), %rax
     jne 8f
@@ -310,6 +316,8 @@ nexus_user_ipc_start:
     movq %r12, %rdi
     leaq 1f(%rip), %rsi
     movq $(2f - 1f), %rdx
+    xorl %r10d, %r10d
+    xorl %r8d, %r8d
     syscall
     cmpq $-5, %rax                      // EPIPE, u64::MAX - 4
     jne 8f
@@ -344,9 +352,14 @@ nexus_user_ipc_end:
 // handle 1 -- the first thing in an empty table. Neither can name the other,
 // and neither needs to: the authority to talk is the handle itself.
 //
-// The client asks once and reads the answer. The server answers whatever
-// arrives until the channel closes, which is what tells it the client has gone;
-// nothing polls and nothing times out.
+// What they do with it is the point. The client makes a *second* channel and
+// sends one end of it down the first, so the conversation continues somewhere
+// the kernel never arranged. That is what a handle in a message buys: a process
+// can hand on authority it holds, and two processes can end up connected by
+// something neither of them was born with.
+//
+// The handle array lives in the data page rather than in `.rodata`, because the
+// kernel has to read the numbers out of writable memory the program filled in.
 core::arch::global_asm!(
     r#"
     .section .rodata
@@ -354,20 +367,47 @@ core::arch::global_asm!(
     .global nexus_user_client_start
     .global nexus_user_client_end
 nexus_user_client_start:
+    // A channel of its own. The high half of the result is one end, the low
+    // half the other.
+    movl $5, %eax                       // Call::ChannelCreate
+    syscall
+    movq %rax, %r15
+    movq %r15, %r14
+    shrq $32, %r14                      // the end to keep
+    movl %r15d, %r13d                   // the end to give away
+
+    // Hand that end to the server, with a note saying what it is.
+    movabsq $0x600100, %rbx
+    movl %r13d, (%rbx)
     movl $6, %eax                       // Call::ChannelWrite
     movl $1, %edi
     leaq 1f(%rip), %rsi
     movq $(2f - 1f), %rdx
+    movq %rbx, %r10                     // the handles to send
+    movl $1, %r8d
     syscall
-    cmpq $(2f - 1f), %rax
-    jne 8f
+    testq %rax, %rax
+    js 8f
+
+    // And now talk on the new channel, which the kernel never introduced.
+    movl $6, %eax
+    movq %r14, %rdi
+    leaq 2f(%rip), %rsi
+    movq $(3f - 2f), %rdx
+    xorl %r10d, %r10d
+    xorl %r8d, %r8d
+    syscall
+    testq %rax, %rax
+    js 8f
 
     // Blocks until the server answers. The thread is off every run queue while
     // it waits, which is the point of the whole arrangement.
     movl $7, %eax                       // Call::ChannelRead
-    movl $1, %edi
+    movq %r14, %rdi
     movabsq $0x600000, %rsi
     movl $256, %edx
+    xorl %r10d, %r10d
+    xorl %r8d, %r8d
     syscall
     // Errors come back near the top of the range, so the sign bit separates
     // them from any length a channel will carry.
@@ -383,49 +423,84 @@ nexus_user_client_start:
     // Closing now, rather than letting the process teardown do it, is what
     // lets the server find out promptly instead of at the next reaping.
     movl $8, %eax                       // Call::HandleClose
+    movq %r14, %rdi
+    syscall
+    movl $8, %eax
     movl $1, %edi
     syscall
     jmp 9f
 8:
     movl $1, %eax
-    leaq 2f(%rip), %rdi
-    movl $(3f - 2f), %esi
+    leaq 3f(%rip), %rdi
+    movl $(4f - 3f), %esi
     syscall
 9:
     movl $0, %eax                       // Call::Exit
     syscall
     ud2
 
-1:  .ascii "a request from the client process"
-2:  .ascii "FAILED: the client could not talk to the server"
-3:
+1:  .ascii "here is a channel of my own"
+2:  .ascii "a request from the client, on the channel it passed over"
+3:  .ascii "FAILED: the client could not talk to the server"
+4:
 nexus_user_client_end:
 
     .global nexus_user_server_start
     .global nexus_user_server_end
     .p2align 4
 nexus_user_server_start:
-2:
+    movabsq $0x600100, %rbx
+
+    // Wait for an introduction: a message carrying a handle to talk on.
     movl $7, %eax                       // Call::ChannelRead
     movl $1, %edi
     movabsq $0x600000, %rsi
     movl $256, %edx
+    movq %rbx, %r10                     // where the handles should land
+    movl $4, %r8d
+    syscall
+    testq %rax, %rax
+    js 8f
+    movq %rax, %r12
+    movl %eax, %r15d                    // the length, in the low half
+    shrq $32, %r12                      // the handle count, in the high half
+    cmpq $1, %r12
+    jne 8f
+
+    movl $1, %eax                       // Call::Log
+    movabsq $0x600000, %rdi
+    movq %r15, %rsi
+    syscall
+
+    movl (%rbx), %r13d                  // the handle that arrived
+
+    // Everything after this happens on a channel the kernel never gave either
+    // of them.
+2:
+    movl $7, %eax
+    movq %r13, %rdi
+    movabsq $0x600000, %rsi
+    movl $256, %edx
+    xorl %r10d, %r10d
+    xorl %r8d, %r8d
     syscall
     cmpq $-5, %rax                      // EPIPE: the client has gone
     je 7f
     testq %rax, %rax
     js 8f
-    movq %rax, %r12
+    movq %rax, %r14
 
-    movl $1, %eax                       // Call::Log
+    movl $1, %eax
     movabsq $0x600000, %rdi
-    movq %r12, %rsi
+    movq %r14, %rsi
     syscall
 
     movl $6, %eax                       // Call::ChannelWrite
-    movl $1, %edi
+    movq %r13, %rdi
     leaq 1f(%rip), %rsi
     movq $(3f - 1f), %rdx
+    xorl %r10d, %r10d
+    xorl %r8d, %r8d
     syscall
     testq %rax, %rax
     js 8f
@@ -446,8 +521,8 @@ nexus_user_server_start:
     syscall
     ud2
 
-1:  .ascii "an answer from the server process"
-3:  .ascii "server: the client closed the channel, so there is nothing left to answer"
+1:  .ascii "an answer from the server, on the channel it was handed"
+3:  .ascii "server: the passed channel closed, so there is nothing left to answer"
 4:  .ascii "FAILED: the server got an error it did not expect"
 5:
 nexus_user_server_end:

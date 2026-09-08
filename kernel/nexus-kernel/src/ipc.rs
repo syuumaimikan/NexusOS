@@ -66,8 +66,14 @@ impl Rights {
     pub const WRITE: Self = Self(1 << 1);
     /// Close the handle.
     pub const CLOSE: Self = Self(1 << 2);
+    /// Pass the handle along a channel to another process.
+    ///
+    /// Separate from the rest because it is a different kind of authority: a
+    /// process can be given something it may use and may not hand on, which is
+    /// the difference between lending a capability and delegating it.
+    pub const TRANSFER: Self = Self(1 << 3);
     /// Everything a freshly created endpoint carries.
-    pub const ALL: Self = Self(0b111);
+    pub const ALL: Self = Self(0b1111);
 
     /// Whether every right in `other` is present.
     #[must_use]
@@ -90,8 +96,27 @@ impl core::ops::BitOr for Rights {
     }
 }
 
+/// Handles one message may carry.
+///
+/// A small bound, and a real one: each handle in a message is authority in
+/// flight, and a message that could carry an unbounded number of them would let
+/// a sender make the receiving table grow without the receiver agreeing to it.
+pub const MAX_HANDLES: usize = 4;
+
 /// One message in flight.
-type Message = Vec<u8>;
+///
+/// Bytes and handles together, because they have to arrive together: a message
+/// saying "here is the thing" and the thing itself are one fact, and delivering
+/// them separately would put the ordering problem into every user of a channel.
+pub struct Message {
+    pub bytes: Vec<u8>,
+    /// Handles the sender gave up and the receiver has not yet taken.
+    ///
+    /// Owned by the message while it is in flight. A message that is never read
+    /// takes them down with it, which is what closes the leak where a process
+    /// gives away its last reference to something and then nobody reads it.
+    pub handles: Vec<Handle>,
+}
 
 /// One end of a channel.
 pub struct Endpoint {
@@ -109,6 +134,8 @@ pub struct Endpoint {
 pub enum ChannelError {
     /// The message is longer than [`MAX_MESSAGE`].
     TooLong,
+    /// The message carries more handles than [`MAX_HANDLES`].
+    TooManyHandles,
     /// The peer's inbox is full.
     Full,
     /// The other end has been closed.
@@ -119,6 +146,7 @@ impl core::fmt::Display for ChannelError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::TooLong => "the message is too long",
+            Self::TooManyHandles => "the message carries too many handles",
             Self::Full => "the receiving end is full",
             Self::PeerClosed => "the other end of the channel is closed",
         })
@@ -156,9 +184,12 @@ impl Endpoint {
     /// Writing puts the message on the *other* end, which is what makes a
     /// channel a channel rather than a shared queue: a process cannot read back
     /// what it wrote.
-    pub fn send(&self, message: &[u8]) -> Result<usize, ChannelError> {
+    pub fn send(&self, message: &[u8], handles: Vec<Handle>) -> Result<usize, ChannelError> {
         if message.len() > MAX_MESSAGE {
             return Err(ChannelError::TooLong);
+        }
+        if handles.len() > MAX_HANDLES {
+            return Err(ChannelError::TooManyHandles);
         }
 
         let Some(peer) = self.peer.lock().upgrade() else {
@@ -170,7 +201,10 @@ impl Endpoint {
             if inbox.len() >= MAX_QUEUED {
                 return Err(ChannelError::Full);
             }
-            inbox.push_back(message.to_vec());
+            inbox.push_back(Message {
+                bytes: message.to_vec(),
+                handles,
+            });
         }
 
         // Outside the inbox lock, and after the push, so a thread this wakes
@@ -332,6 +366,33 @@ impl HandleTable {
             .get(&id)
             .map(|handle| handle.rights)
             .ok_or(HandleError::NotFound)
+    }
+
+    /// Remove `id` and return it, for handing to someone else.
+    ///
+    /// Moving, not copying. The sender gives it up at the moment the message is
+    /// built, so there is never an instant where two processes both hold it and
+    /// the transfer could be observed half-done.
+    pub fn take(&self, id: u32, needed: Rights) -> Result<Handle, HandleError> {
+        let mut entries = self.entries.lock();
+        let handle = entries.get(&id).ok_or(HandleError::NotFound)?;
+        if !handle.rights.contains(needed) {
+            return Err(HandleError::Denied);
+        }
+        Ok(entries.remove(&id).expect("the handle was just found"))
+    }
+
+    /// Put a handle into this table, returning the number it now answers to.
+    ///
+    /// Used both for a handle arriving in a message and for one handed back
+    /// after a send that could not be completed. The number is always a new
+    /// one: a handle that left and came back is not the same handle, and
+    /// reusing its old number would name it to a caller that had already been
+    /// told it was gone.
+    pub fn restore(&self, handle: Handle) -> u32 {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        self.entries.lock().insert(id, handle);
+        id
     }
 
     /// Drop `id`, releasing its reference to the object.

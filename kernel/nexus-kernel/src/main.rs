@@ -570,8 +570,8 @@ fn ipc_test_receiver(_argument: usize) {
 
     match endpoint.receive() {
         Some(message) => {
-            ipc_test::RECEIVED.store(message.len() as u64, Ordering::Relaxed);
-            if message == IPC_MESSAGE {
+            ipc_test::RECEIVED.store(message.bytes.len() as u64, Ordering::Relaxed);
+            if message.bytes == IPC_MESSAGE {
                 ipc_test::MATCHED.store(1, Ordering::Relaxed);
             }
         }
@@ -654,7 +654,7 @@ fn ipc_self_test() {
         return;
     }
 
-    if let Err(error) = sender.send(IPC_MESSAGE) {
+    if let Err(error) = sender.send(IPC_MESSAGE, alloc::vec::Vec::new()) {
         kprintln!("[test] FAILED: could not send on the channel: {error}");
         return;
     }

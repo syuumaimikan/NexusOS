@@ -70,7 +70,7 @@ Legend: **DONE** works and is verified · **PARTIAL** real but incomplete ·
 | System calls | **PARTIAL** | `syscall`/`sysret` entry, five calls; no handles or IPC |
 | Processes, address spaces | **DONE** | A page-table root per process; kernel upper half shared by pointer |
 | Handles, capabilities | **DONE** | Per-process table, rights checked on every use |
-| IPC | **PARTIAL** | Blocking channels between processes; no handle transfer, so no channel a process can hand on |
+| IPC | **DONE** | Blocking channels, handles carried in messages, rights checked on transfer |
 | Wait queues | **DONE** | Blocking with no lost wake-ups; the input thread no longer polls |
 
 ### Everything above the kernel
@@ -151,12 +151,11 @@ The build produces zero warnings and passes `clippy -D warnings`.
 
 These are real and are tracked, not hidden:
 
-1. **A handle cannot be passed along a channel.** Two processes can talk, but
-   only over a channel the kernel gave them before either started. A process
-   cannot introduce two others, cannot hand out a second channel, and cannot
-   ask for one. Carrying handles in a message is the piece that closes that,
-   and it is the next thing: everything under it — the table, the rights, the
-   blocking receive, the closed-peer report — is there and exercised.
+1. **No shared memory, events or semaphores.** A channel copies its message
+   twice, once out of the sender and once into the receiver, which is right for
+   a request and wrong for a framebuffer. Shared memory with a handle to it is
+   the next object kind, and the compositor will need it before anything else
+   does.
 2. **A process has no parent, no exit status, and no way to be created from
    inside the system.** Every process NexusOS runs is one the kernel builds at
    boot. Creating one is a request to whoever is allowed to answer it, so it
@@ -264,8 +263,9 @@ testing possible.
 
 In order, and for the reason given:
 
-1. **Handles carried in messages**, which is what lets a process hand on
-   authority it holds, and with it process creation from user space.
+1. **Process creation from user space**, which is now a request a process can
+   make over a channel to whoever is allowed to answer it, rather than a system
+   call that trusts the asker.
 2. **A real GPT + FAT32 disk image**, before any attempt to boot hardware.
 3. **CI**, so the five test layers run on every change rather than on request.
 
