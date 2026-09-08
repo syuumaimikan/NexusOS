@@ -15,6 +15,8 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::sched::wait::WaitQueue;
+
 /// A mutual-exclusion lock that spins rather than blocking.
 ///
 /// # Interrupt safety
@@ -196,5 +198,114 @@ impl<T> Drop for IrqSpinLockGuard<'_, T> {
         if self.restore_interrupts {
             crate::arch::interrupts::enable();
         }
+    }
+}
+
+/// A lock a thread may hold while it sleeps.
+///
+/// Both spinlocks above are wrong for anything that waits on a device. A
+/// spinlock is held with the processor spinning, and [`IrqSpinLock`] is held
+/// with interrupts *off*; a thread that blocks while holding one leaves every
+/// other processor spinning on a lock whose owner is asleep, and leaves that
+/// processor unable to take the very interrupt that would wake it. It is a
+/// whole-machine hang, and it is what happened the day the disk driver stopped
+/// spinning for completions and started blocking: the filesystem's own lock was
+/// an `IrqSpinLock`, held across every read, and the moment a read could sleep
+/// the system stopped.
+///
+/// So this one waits by blocking. A thread that finds it held leaves the run
+/// queues and is woken when the holder releases it, which is the only kind of
+/// lock that may be held across anything slow.
+///
+/// # What it is not
+///
+/// Not reentrant, not fair, and not usable from an interrupt handler -- a
+/// handler cannot block, so it cannot wait for one of these. It is for the
+/// things that take milliseconds: a disk, a filesystem, a device that answers
+/// when it is ready.
+pub struct SleepLock<T> {
+    held: AtomicBool,
+    waiters: WaitQueue,
+    value: UnsafeCell<T>,
+}
+
+// SAFETY: the lock is what serialises access to the value, and only one thread
+// holds it at a time.
+unsafe impl<T: Send> Sync for SleepLock<T> {}
+// SAFETY: as above.
+unsafe impl<T: Send> Send for SleepLock<T> {}
+
+impl<T> SleepLock<T> {
+    /// A new lock, unheld.
+    pub const fn new(value: T) -> Self {
+        Self {
+            held: AtomicBool::new(false),
+            waiters: WaitQueue::new(),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// Take it, blocking until it is free.
+    pub fn lock(&self) -> SleepLockGuard<'_, T> {
+        loop {
+            // Read before the attempt, so a release that lands in between is
+            // seen as a change rather than slept through. The counter is the
+            // whole of what makes testing the condition outside the queue's
+            // lock safe; see [`WaitQueue`].
+            let seen = self.waiters.generation();
+            if !self.held.swap(true, Ordering::Acquire) {
+                return SleepLockGuard { lock: self };
+            }
+
+            if crate::sched::current_id().is_none() {
+                // Before the scheduler exists there is nothing to block and
+                // nobody else to run, so this can only be the boot thread
+                // finding a lock it left held, which is a bug elsewhere.
+                core::hint::spin_loop();
+                continue;
+            }
+            self.waiters.wait_if_unchanged(seen);
+        }
+    }
+
+    /// Take it if it is free, without waiting.
+    pub fn try_lock(&self) -> Option<SleepLockGuard<'_, T>> {
+        if self.held.swap(true, Ordering::Acquire) {
+            None
+        } else {
+            Some(SleepLockGuard { lock: self })
+        }
+    }
+}
+
+/// What holding a [`SleepLock`] gives you.
+pub struct SleepLockGuard<'a, T> {
+    lock: &'a SleepLock<T>,
+}
+
+impl<T> Deref for SleepLockGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: holding the guard means holding the lock, and the lock is
+        // what makes this the only reference.
+        unsafe { &*self.lock.value.get() }
+    }
+}
+
+impl<T> DerefMut for SleepLockGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as above.
+        unsafe { &mut *self.lock.value.get() }
+    }
+}
+
+impl<T> Drop for SleepLockGuard<'_, T> {
+    fn drop(&mut self) {
+        self.lock.held.store(false, Ordering::Release);
+        // One, not all. Only one of them can take it, and waking the rest to
+        // find it gone is a thundering herd for no benefit -- each release
+        // wakes exactly one more.
+        self.lock.waiters.wake_one();
     }
 }

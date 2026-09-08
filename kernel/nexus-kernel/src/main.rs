@@ -165,19 +165,21 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // far above RAM, so reaching them needs the virtual memory manager, and
     // calibrating its timer needs the PIT still ticking with interrupts on.
     // SAFETY: called once, with the direct map covering the firmware tables.
-    match unsafe { acpi::init(boot_info.acpi_rsdp) } {
+    let acpi_info = match unsafe { acpi::init(boot_info.acpi_rsdp) } {
         Ok(info) => {
             acpi::report(&info);
             adopt_local_apic(&info);
             bring_up_device_interrupts(&info);
             start_other_processors(&info);
+            Some(info)
         }
         Err(error) => {
             // Not fatal. The PIT keeps the system ticking on one processor;
             // what is lost is SMP, MSI and per-core timers.
             kprintln!("[acpi] {error}; continuing on the legacy timer");
+            None
         }
-    }
+    };
 
     // What the machine has. Everything that is not on the processor is behind
     // PCI, so this is the first thing the kernel does that is about the machine
@@ -192,6 +194,12 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // SAFETY: called once, after enumeration, with the allocators running.
     if let Err(error) = unsafe { drivers::virtio_blk::init(&devices) } {
         kprintln!("[blk ] no block device: {error}");
+    } else if let Some(info) = acpi_info.as_ref() {
+        // After the device exists, and not with the keyboard: the disk is found
+        // by enumerating PCI, which happens later than the interrupt controller
+        // comes up. Routing a pin for a device that is not there yet routes
+        // nothing, which is what this did on its first attempt.
+        bring_up_disk_interrupt(info);
     }
 
     // The display comes up only now, after the heap: translated strings are
@@ -363,9 +371,11 @@ fn monitor_thread(_argument: usize) {
         );
             if drivers::virtio_blk::is_present() {
                 let (read, wrote) = drivers::virtio_blk::statistics();
+                let (raised, blocking) = drivers::virtio_blk::interrupt_statistics();
                 kprintln!(
-                    "[mon ] disk {} sectors, {read} read, {wrote} written",
-                    drivers::virtio_blk::capacity()
+                    "[mon ] disk {} sectors, {read} read, {wrote} written,              {raised} interrupts, requests {}",
+                    drivers::virtio_blk::capacity(),
+                    if blocking { "block" } else { "spin" }
                 );
             }
         }
@@ -485,6 +495,63 @@ fn bring_up_device_interrupts(info: &acpi::AcpiInfo) {
             Err(error) => kprintln!("[input] could not route the keyboard: {error}"),
         }
     }
+}
+
+/// Route the disk's interrupt, and let the driver decide whether to trust it.
+///
+/// The routing is the easy half. The half that matters is that the driver does
+/// not switch to blocking because a routing call returned `Ok` -- it makes one
+/// request the old way, spinning, and switches only if its handler actually
+/// ran. A driver that trusted the routing would hang the machine on the first
+/// firmware that had wired the pin somewhere else, and it would look like a
+/// disk that stopped answering rather than like an interrupt that never came.
+fn bring_up_disk_interrupt(info: &acpi::AcpiInfo) {
+    let Some(irq) = drivers::virtio_blk::interrupt_line() else {
+        return;
+    };
+    let gsi = info.global_system_interrupt_for(irq);
+    if info.route(gsi).is_none() {
+        kprintln!("[blk ] no I/O APIC serves global interrupt {gsi}; the disk will spin");
+        return;
+    }
+
+    // PCI interrupts are level triggered and active low. That is the bus, not a
+    // guess: a pin programmed as edge triggered would deliver the first
+    // interrupt and then never another, because the device holds the line down
+    // until it is acknowledged.
+    let (active_low, level) = info.override_for(irq).map_or((true, true), |entry| {
+        (entry.is_active_low(), entry.is_level_triggered())
+    });
+
+    // SAFETY: a handler for the vector was registered when the IDT was built.
+    match unsafe {
+        arch::ioapic::route(
+            gsi,
+            arch::interrupts::DISK_VECTOR,
+            arch::apic::local_id(),
+            active_low,
+            level,
+        )
+    } {
+        Ok(()) => kprintln!(
+            "[blk ] disk on IRQ {irq} (global interrupt {gsi}) routed to vector {}",
+            arch::interrupts::DISK_VECTOR
+        ),
+        Err(error) => {
+            kprintln!("[blk ] could not route the disk: {error}; requests will spin");
+            return;
+        }
+    }
+
+    // One request, made the old way, to find out whether the interrupt arrives
+    // at all. Sector zero, read and discarded: it is the protective master boot
+    // record, it is always there, and nothing is changed by reading it.
+    let mut scratch = [0u8; drivers::virtio_blk::SECTOR_SIZE];
+    if let Err(error) = drivers::virtio_blk::read_sector(0, &mut scratch) {
+        kprintln!("[blk ] the disk did not answer a first request: {error}");
+        return;
+    }
+    drivers::virtio_blk::adopt_interrupt();
 }
 
 /// Start the processors ACPI reported, other than this one.

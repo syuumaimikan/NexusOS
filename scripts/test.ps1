@@ -157,6 +157,7 @@ Invoke-Step 'boot test' {
         'server: the passed channel closed',
         'devices',
         'virtio disk at',
+        'requests now block instead of spinning',
         'disk verified',
         'EFI system partition',
         'mounted at sector',
@@ -359,6 +360,20 @@ Invoke-Step 'boot test' {
     if ([int]$Matches[2] -lt 1 -or [int]$Matches[3] -lt 1) {
         throw 'the disk was found but never read or written'
     }
+    # And it did so by taking its interrupt rather than by spinning. A driver
+    # that fell back is still correct, which is why the fallback exists -- but
+    # on this machine the interrupt works, so a boot that spins is a boot where
+    # something stopped working.
+    if (-not ($output -match 'disk \d+ sectors, (\d+) read, (\d+) written,\s+(\d+) interrupts, requests (block|spin)')) {
+        throw 'the kernel never reported how the disk waits'
+    }
+    if ($Matches[4] -ne 'block') {
+        throw 'the disk fell back to spinning for completions'
+    }
+    if ([int]$Matches[3] -lt 1) {
+        throw 'the disk never raised an interrupt'
+    }
+    Write-Host "    the disk raised $($Matches[3]) interrupts and never spun for one" -ForegroundColor DarkGray
     # The filesystem reader has to have walked a path and followed a chain, not
     # merely opened something in the root. The count of root entries is what
     # says the directory walk saw the whole directory.

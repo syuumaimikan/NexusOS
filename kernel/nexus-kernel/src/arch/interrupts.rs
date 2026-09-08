@@ -19,6 +19,12 @@ pub const APIC_TIMER_VECTOR: u8 = super::idt::IRQ_BASE + 16;
 /// unrouted before this can be used.
 pub const KEYBOARD_VECTOR: u8 = super::idt::IRQ_BASE + 17;
 
+/// Vector the disk is routed to through the I/O APIC.
+///
+/// Above the keyboard, for no reason but that it was added later: the two are
+/// independent and the numbers only have to differ.
+pub const DISK_VECTOR: u8 = super::idt::IRQ_BASE + 18;
+
 /// Vector the local APIC reports spurious interrupts on.
 ///
 /// The architecture requires the low four bits to be set on some older
@@ -212,6 +218,24 @@ extern "x86-interrupt" fn keyboard_interrupt(frame: InterruptStackFrame) {
     }
 }
 
+/// The disk's interrupt.
+///
+/// Acknowledges at the device -- which is a register read, and the only thing
+/// that stops a level-triggered line raising again immediately -- and wakes
+/// whoever was waiting for the request to finish. The waiting thread does the
+/// rest: an interrupt handler runs with interrupts masked on this processor,
+/// and copying half a kilobyte out of a scratch page is not its work.
+extern "x86-interrupt" fn disk_interrupt(frame: InterruptStackFrame) {
+    // Entered from ring 3 as readily as from the kernel, and a device
+    // interrupt is the likeliest of all of them to land on user code.
+    let _gs = super::idt::KernelGs::enter(&frame);
+    // SAFETY: called only as the handler for this vector.
+    unsafe {
+        crate::drivers::virtio_blk::on_interrupt();
+        apic::end_of_interrupt();
+    }
+}
+
 /// The local APIC's spurious interrupt.
 ///
 /// Counted, never acknowledged: the APIC raises no in-service bit for it, so an
@@ -288,6 +312,7 @@ pub unsafe fn init(timer_hz: u32) {
         // reachable-but-unhandled during the handover.
         idt.set_handler(APIC_TIMER_VECTOR, apic_timer_interrupt as *const ());
         idt.set_handler(KEYBOARD_VECTOR, keyboard_interrupt as *const ());
+        idt.set_handler(DISK_VECTOR, disk_interrupt as *const ());
         idt.set_handler(SPURIOUS_VECTOR, apic_spurious_interrupt as *const ());
         idt.set_handler(TLB_SHOOTDOWN_VECTOR, tlb_shootdown_interrupt as *const ());
 

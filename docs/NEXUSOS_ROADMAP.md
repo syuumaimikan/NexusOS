@@ -542,9 +542,45 @@ leave the bitmap saying a block is taken that no file points at -- space leaked,
 nothing corrupted, which is the right way round for the failure to be. No
 permissions, no timestamps beyond the tick a thing was made at, no partial
 writes and no seek, so a large file is read and written whole. The FAT32 reader
-still cannot write and skips long names. The block driver polls one request at a
-time and takes no interrupt. A program gets no arguments, and nothing can end a
-process but its own thread.
+still cannot write and skips long names. The block driver serves one request at
+a time. A program gets no arguments, and nothing can end a process but its own
+thread.
+
+### The disk takes its interrupt
+
+A request is submitted and the thread that made it *blocks*; the device's
+interrupt wakes it. Before this it spun -- holding a processor for the whole of
+a request, which on real hardware is the whole of a seek.
+
+The driver proves the interrupt before relying on it. The first request of the
+system's life is made the old way, spinning, and only if the handler is seen to
+have run does the driver switch to blocking. A driver that trusted a routing
+call returning `Ok` would hang on the first firmware that had wired the pin
+elsewhere, and it would look like a disk that stopped answering rather than like
+an interrupt that never came. Which mode it settled into is printed, and the
+suite requires it to be the blocking one -- the fallback is there to be correct,
+not to be used.
+
+Two things had to be got right and one of them was got wrong first. The routing
+had to happen after PCI enumeration rather than beside the keyboard's, because
+a pin routed for a device that does not exist yet routes nothing. And the
+*filesystem's own lock* was an `IrqSpinLock`, held across every read.
+
+That second one is the interesting failure. While the disk spun, holding an
+interrupt-safe spinlock across a read was merely wasteful. The moment a read
+could sleep it became a whole-machine hang: a thread asleep with interrupts off
+on its processor, every other processor spinning on a lock whose owner is
+waiting for the very interrupt that would wake it. It did not fail every time --
+it needed a second thread to touch the filesystem in the window -- which is
+exactly the kind of bug that gets committed. It failed twice in a row in the
+suite, differently each time, which is what said it was a hang and not a flaky
+assertion.
+
+So there is a third kind of lock now. [`SleepLock`] is held by blocking rather
+than by spinning, which makes it the only kind that may be held across anything
+slow. The volume is behind one. The status panel reads it with `try_lock` and
+takes "no answer just now" for an answer, because a panel that waited for the
+disk would stop redrawing the clock every time something touched a file.
 
 ## Phase 8 — Drivers and user space 🚧
 

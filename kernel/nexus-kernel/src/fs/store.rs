@@ -39,7 +39,7 @@ use alloc::vec::Vec;
 use super::gpt;
 use super::nexusfs::{FsError, Kind, Volume, MAX_FILE};
 use crate::drivers::virtio_blk;
-use crate::sync::IrqSpinLock;
+use crate::sync::{IrqSpinLock, SleepLock};
 
 /// The partition type that means NexusFS.
 ///
@@ -98,7 +98,13 @@ impl From<FsError> for StoreError {
 }
 
 /// The volume the system has mounted, once it has one.
-static VOLUME: IrqSpinLock<Option<Volume>> = IrqSpinLock::new(None);
+///
+/// A sleeping lock and not a spinning one, because it is held across disk
+/// reads and a disk read blocks. An `IrqSpinLock` here means a thread asleep
+/// with interrupts off on its processor and every other processor spinning on
+/// a lock whose owner is waiting for the very interrupt that would wake it --
+/// which is not a slow system, it is a stopped one.
+static VOLUME: SleepLock<Option<Volume>> = SleepLock::new(None);
 
 /// What came of bringing the filesystem up.
 #[derive(Debug, Clone, Copy)]
@@ -137,9 +143,14 @@ pub fn mount() -> Result<Mounted, StoreError> {
 }
 
 /// Blocks and free blocks, turned into bytes, if there is a volume.
+///
+/// Never waits. This is what the status panel reads, and a panel that blocked
+/// behind a disk read would stop redrawing the clock every time something
+/// touched a file -- so a volume that is busy reads as "no answer just now"
+/// rather than as a reason to stop painting the screen.
 #[must_use]
 pub fn space() -> Option<(u64, u64)> {
-    let volume = VOLUME.lock();
+    let volume = VOLUME.try_lock()?;
     let volume = volume.as_ref()?;
     let (total, free) = volume.space();
     let size = volume.block_size() as u64;

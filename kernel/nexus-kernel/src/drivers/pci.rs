@@ -115,6 +115,12 @@ pub struct Device {
     /// Subsystem device identifier, which is how a virtio device says what it
     /// is when its device identifier is a transitional one.
     pub subsystem: u16,
+    /// The legacy interrupt line firmware connected it to, or `0xFF` for none.
+    ///
+    /// Firmware's answer and not the device's: the number means whichever input
+    /// of the interrupt controller this device's pin was wired to, which is a
+    /// fact about the board and not about the card.
+    pub interrupt_line: u8,
 }
 
 impl Device {
@@ -278,6 +284,15 @@ unsafe fn probe(address: Address) -> Option<Device> {
         0
     };
 
+    // The interrupt line is the low byte of the last register in a type-zero
+    // header. A bridge does not have one, so it reads as "connected to nothing".
+    // SAFETY: as above.
+    let interrupt_line = if (header >> 16) as u8 & 0x7F == 0 {
+        (unsafe { read_config(address, 0x3C) }) as u8
+    } else {
+        0xFF
+    };
+
     Some(Device {
         address,
         vendor,
@@ -287,6 +302,7 @@ unsafe fn probe(address: Address) -> Option<Device> {
         interface: (classes >> 8) as u8,
         header_type: (header >> 16) as u8,
         subsystem,
+        interrupt_line,
     })
 }
 

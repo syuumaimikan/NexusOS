@@ -23,16 +23,25 @@
 //! for the device to report on — and submitting it is appending the head of
 //! that chain to the available ring and poking a port.
 //!
-//! # Polling, for now
+//! # Waiting
 //!
-//! Completion is waited for by reading the used ring rather than by taking the
-//! device's interrupt. That is the wrong shape for a system that cares about
-//! power, and it is the right shape for the first driver: an interrupt-driven
-//! request needs the completion to hand a waiting thread back its buffer, which
-//! needs the block layer that does not exist yet. The wait is bounded and
-//! reports rather than hanging, which is the part that matters either way.
+//! A request is submitted, and then the thread that made it *blocks*. The
+//! device's interrupt is what wakes it. Between the two the thread is not on a
+//! run queue, does not take a time slice, and does not appear in a scheduling
+//! decision — where before it spun, holding a processor for the whole of a
+//! seek on real hardware.
+//!
+//! The driver proves the interrupt before it relies on it. The first request
+//! of the system's life is made the old way, spinning, and afterwards the
+//! driver checks whether its interrupt handler ran at all. Only then does it
+//! switch to blocking. A driver that assumed a routed interrupt would arrive
+//! would hang the machine on the first firmware that routed it somewhere else,
+//! and the failure would look like a disk that stopped answering.
+//!
+//! Falling back is not shameful and it is not silent: which mode the driver
+//! settled into is printed at bring-up.
 
-use core::sync::atomic::{fence, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 
 use nexus_abi::layout;
 
@@ -40,6 +49,7 @@ use crate::arch::io::{inl, inw, outb, outl, outw};
 use crate::drivers::pci::{BaseAddress, Device};
 use crate::kprintln;
 use crate::memory;
+use crate::sched::wait::WaitQueue;
 use crate::sync::IrqSpinLock;
 
 /// Every virtio device answers to this vendor.
@@ -63,6 +73,8 @@ mod register {
     pub const QUEUE_NOTIFY: u16 = 0x10;
     /// How far through bring-up the driver has got.
     pub const DEVICE_STATUS: u16 = 0x12;
+    /// Why the device raised an interrupt. Reading it acknowledges.
+    pub const ISR: u16 = 0x13;
     /// First byte of the device's own configuration.
     pub const CONFIG: u16 = 0x14;
 }
@@ -165,6 +177,7 @@ impl core::fmt::Display for BlockError {
 const MAX_QUEUE: u16 = 256;
 
 /// A ready device.
+#[derive(Clone, Copy)]
 struct Disk {
     /// Base of the port window.
     port: u16,
@@ -187,6 +200,31 @@ unsafe impl Send for Disk {}
 
 /// The one disk, once it has been found.
 static DISK: IrqSpinLock<Option<Disk>> = IrqSpinLock::new(None);
+
+/// Whether a request is in flight.
+///
+/// There is one scratch page and one descriptor chain, so there is one request
+/// at a time. This is the gate, and it is a *sleeping* one: a thread that finds
+/// the driver busy blocks rather than spins, because the thing it would be
+/// spinning on is a disk.
+static BUSY: AtomicBool = AtomicBool::new(false);
+/// Threads waiting for the gate.
+static FREE: WaitQueue = WaitQueue::new();
+/// Threads waiting for the device to finish.
+static DONE: WaitQueue = WaitQueue::new();
+
+/// Interrupts the device has raised.
+///
+/// Counted rather than merely observed, because the count is what says the
+/// interrupt is really arriving: a driver that switched to blocking on the
+/// strength of a routing call returning `Ok` would hang on the first machine
+/// where the routing was wrong.
+static INTERRUPTS: AtomicU64 = AtomicU64::new(0);
+/// Whether requests wait by blocking. False until the interrupt has proved
+/// itself once.
+static BLOCKING: AtomicBool = AtomicBool::new(false);
+/// The interrupt line firmware assigned the device, for whoever routes it.
+static INTERRUPT_LINE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Sectors read and written, for diagnostics.
 static SECTORS_READ: AtomicU64 = AtomicU64::new(0);
@@ -297,6 +335,8 @@ pub unsafe fn init(devices: &[Device]) -> Result<u64, BlockError> {
             used_offset,
         });
 
+        INTERRUPT_LINE.store(u64::from(device.interrupt_line), Ordering::Release);
+
         kprintln!(
             "[blk ] virtio disk at {}: {} sectors ({} MiB), queue of {}, features {offered:#010x}",
             device.address,
@@ -383,8 +423,51 @@ const COMPLETION_SPINS: u32 = 50_000_000;
 
 /// Do one request, in whichever direction.
 fn transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
-    let mut guard = DISK.lock();
-    let disk = guard.as_mut().ok_or(BlockError::NoDevice)?;
+    // One request at a time, and the waiting for a turn is done by blocking
+    // wherever there is a scheduler to block under. Held across the whole
+    // request, so the scratch page and the descriptor chain belong to this
+    // caller until it is finished with them.
+    acquire();
+    let result = one_transfer(kind, sector, buffer);
+    release();
+    result
+}
+
+/// Take the driver, blocking until it is free.
+fn acquire() {
+    loop {
+        // Read before the attempt, so a release that happens in between is seen
+        // as a change and not slept through.
+        let seen = FREE.generation();
+        if !BUSY.swap(true, Ordering::Acquire) {
+            return;
+        }
+        if crate::sched::current_id().is_none() {
+            // No scheduler yet, so nothing to block: this is the boot thread
+            // before the scheduler exists, and there is nobody else to run.
+            core::hint::spin_loop();
+            continue;
+        }
+        FREE.wait_if_unchanged(seen);
+    }
+}
+
+/// Give it back.
+fn release() {
+    BUSY.store(false, Ordering::Release);
+    FREE.wake_one();
+}
+
+/// One request, with the gate already held.
+fn one_transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+    // A copy rather than the lock. Every field is a plain number that never
+    // changes after bring-up, and holding an interrupt-safe lock across the
+    // wait below would be holding it across a context switch -- which is a
+    // processor spinning on a lock whose owner is asleep.
+    let disk = {
+        let guard = DISK.lock();
+        *guard.as_ref().ok_or(BlockError::NoDevice)?
+    };
 
     if sector >= disk.capacity {
         return Err(BlockError::OutOfRange);
@@ -401,7 +484,8 @@ fn transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockError>
     let status_physical = disk.scratch_physical + 1024;
 
     // SAFETY: the scratch page is mapped through the direct map, owned by this
-    // driver, and large enough for all three.
+    // driver, and large enough for all three. The gate above makes this caller
+    // the only one touching it.
     unsafe {
         (scratch as *mut RequestHeader).write_volatile(RequestHeader {
             kind,
@@ -428,9 +512,11 @@ fn transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockError>
         0
     };
 
+    let used = (queue + disk.used_offset as u64) as *const u16;
+
     // SAFETY: the queue is mapped through the direct map and is large enough
     // for the descriptors this writes, which is checked at bring-up.
-    unsafe {
+    let before = unsafe {
         let descriptors = queue as *mut Descriptor;
         descriptors.write_volatile(Descriptor {
             address: header_physical,
@@ -466,19 +552,23 @@ fn transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockError>
         available.add(1).write_volatile(index.wrapping_add(1));
         fence(Ordering::SeqCst);
 
-        let used = (queue + disk.used_offset as u64) as *const u16;
         let before = used.add(1).read_volatile();
 
-        outw(disk.port + register::QUEUE_NOTIFY, 0);
+        // Read *before* the notify. The device may complete and its interrupt
+        // may run before this line returns, and a waiter that read the counter
+        // afterwards would miss the wake-up that had already happened.
+        let generation = DONE.generation();
 
-        let mut spins = 0u32;
-        while used.add(1).read_volatile() == before {
-            spins += 1;
-            if spins >= COMPLETION_SPINS {
-                return Err(BlockError::Timeout);
-            }
-            core::hint::spin_loop();
-        }
+        outw(disk.port + register::QUEUE_NOTIFY, 0);
+        (before, generation)
+    };
+
+    let (before, generation) = before;
+    wait_for_completion(used, before, generation)?;
+
+    // SAFETY: the device has published a used entry, so it has finished with
+    // the scratch page, and the gate means nobody else has started with it.
+    unsafe {
         fence(Ordering::SeqCst);
 
         let status = status_slot(scratch).read_volatile();
@@ -496,6 +586,105 @@ fn transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockError>
     }
 
     Ok(())
+}
+
+/// Wait for the device to publish a used entry past `before`.
+///
+/// Blocking where the interrupt has proved itself, spinning where it has not.
+/// The spin is bounded and reports rather than hanging; the block cannot be
+/// bounded the same way and does not need to be, because it is only ever
+/// entered once an interrupt has been seen to arrive.
+fn wait_for_completion(used: *const u16, before: u16, generation: u64) -> Result<(), BlockError> {
+    if BLOCKING.load(Ordering::Relaxed) && crate::sched::current_id().is_some() {
+        let mut generation = generation;
+        loop {
+            // SAFETY: the used ring is mapped through the direct map and this
+            // is its index field, written by the device and read here.
+            if unsafe { used.add(1).read_volatile() } != before {
+                return Ok(());
+            }
+            DONE.wait_if_unchanged(generation);
+            generation = DONE.generation();
+        }
+    }
+
+    let mut spins = 0u32;
+    loop {
+        // SAFETY: as above.
+        if unsafe { used.add(1).read_volatile() } != before {
+            return Ok(());
+        }
+        spins += 1;
+        if spins >= COMPLETION_SPINS {
+            return Err(BlockError::Timeout);
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// The device has finished something.
+///
+/// Reading the interrupt status register is what acknowledges it at the device,
+/// and it has to happen whether or not anybody is waiting: a level-triggered
+/// line that is never acknowledged is an interrupt storm.
+///
+/// # Safety
+///
+/// Call only as the handler for this device's vector.
+pub unsafe fn on_interrupt() {
+    INTERRUPTS.fetch_add(1, Ordering::Relaxed);
+
+    let port = {
+        let guard = DISK.lock();
+        match guard.as_ref() {
+            Some(disk) => disk.port,
+            None => return,
+        }
+    };
+
+    // SAFETY: the window belongs to this device, and reading this register is
+    // how the protocol says to acknowledge.
+    let _reason = unsafe { crate::arch::io::inb(port + register::ISR) };
+
+    // Everyone, not one. There is a single request in flight, so there is at
+    // most one thread to wake -- but a spurious wake costs a re-read of a
+    // counter, and a lost one costs a disk that stopped answering.
+    DONE.wake_all();
+}
+
+/// Whether the device's interrupt has been seen to work.
+///
+/// Called after the first request. Until this says yes, every request spins.
+pub fn adopt_interrupt() {
+    if INTERRUPTS.load(Ordering::Relaxed) == 0 {
+        kprintln!(
+            "[blk ] no interrupt arrived from the disk; requests will spin \
+             (correct, and it costs a processor for the length of every one)"
+        );
+        return;
+    }
+    BLOCKING.store(true, Ordering::Release);
+    kprintln!("[blk ] the disk raised its interrupt; requests now block instead of spinning");
+}
+
+/// The interrupt line firmware gave the device, if there is one.
+#[must_use]
+pub fn interrupt_line() -> Option<u8> {
+    match INTERRUPT_LINE.load(Ordering::Acquire) {
+        u64::MAX => None,
+        // 0xFF is what a device reports when firmware connected it to nothing.
+        0xFF => None,
+        line => u8::try_from(line).ok(),
+    }
+}
+
+/// Interrupts the disk has raised, and whether requests block.
+#[must_use]
+pub fn interrupt_statistics() -> (u64, bool) {
+    (
+        INTERRUPTS.load(Ordering::Relaxed),
+        BLOCKING.load(Ordering::Relaxed),
+    )
 }
 
 /// Where the status byte lives inside the scratch page.
