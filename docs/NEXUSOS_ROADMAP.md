@@ -1097,10 +1097,56 @@ rather than repainting from nothing, state that invalidates only what changed,
 theming, animation, accessibility, and DPI scaling -- and "GPU-accelerated"
 waits on a display driver, which is Phase 9's remaining half.
 
-## Phase 11 — Nexus Desktop ⬜
+## Phase 11 — Nexus Desktop 🚧
 
 Dock, launcher, workspaces, snap layouts, Mission Control, notifications,
 settings, files, terminal, search.
+
+The dock and the launcher are real, and they are a *program*: `nexus-shell`,
+which the compositor starts last and hands the strip along the bottom of the
+screen.
+
+**Why it is not part of the compositor.** The compositor owns the framebuffer.
+Everything it decides is therefore something no other program can check or
+replace, and a bug in it is pixels anywhere on screen. A dock is policy — what
+the strip looks like, what a click in it means, which programs are worth
+starting — and policy in the one program that owns the display is the same
+mistake as policy in the kernel, one layer up. So the desktop is a client: one
+surface, one channel, no handle to a window, no way to reach the display, and
+no idea where its own strip is on it.
+
+**What it is given that other clients are not** is a list. The compositor sends
+the state of every window slot whenever it changes — gone, shown, put away,
+focused — and the desktop sends back three commands: show a slot, hide a slot,
+or start a program. Every one names a slot the compositor already has and is
+checked there; the desktop cannot name a window that does not exist and cannot
+ask for anything else.
+
+**A click now crosses three processes.** The kernel's mouse driver decodes a
+packet and sends it; the compositor turns relative movement into a position,
+finds it is inside the reserved strip, and passes on *where inside the strip*
+it landed — not where on the screen, which would be telling a client where its
+own surface is; the desktop decides that point was a tab and asks for the
+window. The compositor checks the slot and does it.
+
+**Starting a program** is the same path with one more step. Until this phase
+every process on the machine was started at boot or by another program deciding
+to. Pressing the button on the strip is a person starting one: the desktop asks,
+the compositor finds an empty slot, makes a surface, asks the spawn service, and
+watches the new client's channel and process — all while the machine goes on
+compositing.
+
+**The strip is in the interface language.** The translations moved out of the
+kernel into `shared/nexus-i18n`, next to the font, so the kernel's panel and the
+desktop's dock read the same table. Which language that is comes from the kernel
+— F1 is acted on there — as a message on the key channel, forwarded by the
+compositor to the one program that draws words. A desktop counting F1 presses of
+its own would agree with the panel exactly until it missed one.
+
+What the phase still means: workspaces, snap layouts, Mission Control,
+notifications, a settings program, a file manager, a terminal and search. Each
+of them is now an ordinary program rather than a change to the compositor, which
+is the point of having done this part first.
 
 ## Phase 12 — Networking ⬜
 

@@ -103,6 +103,10 @@ $ClientElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-client
 $StagedClient = Publish-Program -Elf $ClientElf -ProgramDir $ProgramDir -Name 'client.elf'
 $clientSize = [math]::Round((Get-Item $StagedClient).Length / 1KB, 1)
 
+$ShellElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-shell"
+$StagedShell = Publish-Program -Elf $ShellElf -ProgramDir $ProgramDir -Name 'shell.elf'
+$shellSize = [math]::Round((Get-Item $StagedShell).Length / 1KB, 1)
+
 $IdleElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-idle"
 $StagedIdle = Publish-Program -Elf $IdleElf -ProgramDir $ProgramDir -Name 'idle.elf'
 $idleSize = [math]::Round((Get-Item $StagedIdle).Length / 1KB, 1)
@@ -138,6 +142,7 @@ Write-Host "  init       : $initSize KiB  -> BIN\INIT.ELF on the disk"
 Write-Host "  hello      : $helloSize KiB  -> BIN\HELLO.ELF on the disk"
 Write-Host "  compositor : $compositorSize KiB  -> BIN\COMP.ELF on the disk"
 Write-Host "  client     : $clientSize KiB  -> BIN\CLIENT.ELF on the disk"
+Write-Host "  shell      : $shellSize KiB  -> BIN\SHELL.ELF on the disk"
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''

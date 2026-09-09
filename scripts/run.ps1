@@ -22,11 +22,22 @@
 
 .PARAMETER Gdb
     Start with a GDB stub on :1234 and wait for a debugger to attach.
+
+.PARAMETER Until
+    Stop as soon as this text appears in the serial log, instead of running for
+    the whole timeout. -Timeout then means how long to wait for it.
+
+    How long a boot takes is a property of the host, not of the system under
+    test: four emulated processors share one real one, and a debug build under
+    dynamic translation runs at a fraction of wall-clock speed that changes with
+    whatever else the machine is doing. Waiting for what the run is *for* keeps
+    that out of the result.
 #>
 [CmdletBinding()]
 param(
     [switch]$Headless,
     [int]$Timeout = 20,
+    [string]$Until = '',
     [string]$Memory = '1G',
     [switch]$Release,
     [switch]$Gdb
@@ -99,9 +110,25 @@ Write-Host "==> Booting NexusOS in QEMU (serial -> $SerialLog)" -ForegroundColor
 
 if ($Headless) {
     $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
-    $exited = $process.WaitForExit($Timeout * 1000)
-    if (-not $exited) {
-        Write-Host "==> Timeout after $Timeout s; stopping QEMU" -ForegroundColor Yellow
+    $exited = $false
+    if ($Until) {
+        for ($waited = 0; $waited -lt $Timeout; $waited++) {
+            if ($process.WaitForExit(1000)) { $exited = $true; break }
+            if (Test-Path $SerialLog) {
+                $sofar = (Get-Content $SerialLog -Raw -Encoding UTF8) -replace "`0", ''
+                if ($sofar.Contains($Until)) {
+                    Write-Host "==> Saw '$Until' after $waited s; stopping QEMU" -ForegroundColor Cyan
+                    break
+                }
+            }
+        }
+    } else {
+        $exited = $process.WaitForExit($Timeout * 1000)
+    }
+    if (-not $exited -and -not $process.HasExited) {
+        if (-not $Until) {
+            Write-Host "==> Timeout after $Timeout s; stopping QEMU" -ForegroundColor Yellow
+        }
         try { $process.Kill() } catch { }
         $process.WaitForExit(5000) | Out-Null
     }

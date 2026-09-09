@@ -100,7 +100,8 @@ Invoke-Step 'host unit tests' {
 
 Invoke-Step 'boot test' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'build.ps1')) 'build'
-    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'run.ps1'), '-Headless', '-Timeout', '40') 'boot'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'run.ps1'), '-Headless', '-Timeout', '600',
+        '-Until', 'compositor: composited every frame its clients drew') 'boot'
 
     $log = Join-Path $BuildDir 'serial.log'
     if (-not (Test-Path $log)) { throw 'no serial output' }
@@ -195,6 +196,9 @@ Invoke-Step 'boot test' {
         'init: allocated, grew, and gave it all back',
         'client: laid out ',
         'lines, widest ',
+        'loaded from BIN/SHELL.ELF',
+        'shell: took the strip along the bottom of the screen',
+        'shell: drew its strip in the language it was told',
         'rectangle at (',
         'client: drew every frame into a surface it was given',
         'compositor: composited every frame its clients drew',

@@ -43,3 +43,8 @@ value.input_empty = press keys; F1 switches language
 value.input = {text}
 value.storage = {free} MiB free of {total} MiB
 value.unavailable = unavailable
+
+shell.launch = Open
+shell.window = Window {number}
+shell.hidden = {number} away
+shell.none = nothing running

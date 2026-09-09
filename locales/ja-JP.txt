@@ -43,3 +43,8 @@ value.input_empty = キーを押してください (F1 で言語切り替え)
 value.input = {text}
 value.storage = 全 {total} MiB 中 {free} MiB 空き
 value.unavailable = 取得できません
+
+shell.launch = 開く
+shell.window = ウィンドウ {number}
+shell.hidden = {number} をしまいました
+shell.none = 実行中のものはありません

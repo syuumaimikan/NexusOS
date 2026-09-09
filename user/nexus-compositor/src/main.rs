@@ -126,6 +126,9 @@ const POINTER: Handle = Handle(4);
 /// left with a bit for which of its two things became ready.
 const KEY_KEYBOARD: u64 = 0xFFFF;
 const KEY_POINTER: u64 = 0xFFFE;
+/// And the desktop's, whose channel and process are watched like a client's.
+const KEY_SHELL: u64 = 0xFFFD;
+const KEY_SHELL_ENDED: u64 = 0xFFFC;
 
 /// The pointer, and what it is over.
 ///
@@ -195,8 +198,43 @@ mod pointer {
 /// someone typed into a window.
 mod key {
     pub const TAB: u8 = 5;
+    /// Not a key: the interface language changed, and this is what to.
+    ///
+    /// Passed to the desktop, which draws text, and to nobody else. It arrives
+    /// on the key channel because that is where the kernel says it, and it is
+    /// the one thing on that channel this program forwards somewhere other than
+    /// to whoever has focus.
+    pub const LANGUAGE: u8 = 7;
     /// Bytes one key takes.
     pub const SIZE: usize = 5;
+}
+
+/// What this program and the desktop say to each other.
+///
+/// The desktop is a client with a list: it is told which windows exist and what
+/// state each is in, and it says what should happen to them. It cannot do any
+/// of it itself -- it has no handle to a window, no way to reach the display,
+/// and no idea where its own strip is.
+mod desk {
+    /// Here is every window and what state it is in.
+    pub const WINDOWS: &[u8] = b"win";
+    /// Somebody clicked in the strip, at these coordinates within it.
+    pub const CLICK: &[u8] = b"clk";
+    /// The interface language is now this.
+    pub const LANGUAGE: &[u8] = b"lng";
+
+    /// Bring this window back and give it focus.
+    pub const SHOW: &[u8] = b"show";
+    /// Put this window away.
+    pub const HIDE: &[u8] = b"hide";
+    /// Start another program.
+    pub const OPEN: &[u8] = b"open";
+
+    /// What state a window can be in, as the desktop is told it.
+    pub const GONE: u8 = 0;
+    pub const SHOWN: u8 = 1;
+    pub const AWAY: u8 = 2;
+    pub const FOCUSED: u8 = 3;
 }
 
 /// Where this program maps the framebuffer.
@@ -213,8 +251,23 @@ const MAX_SURFACE: usize = SURFACE_STRIDE / 2;
 
 /// The program this one gives surfaces to.
 const CLIENT: &[u8] = b"BIN/CLIENT.ELF";
-/// How many of them.
-const CLIENTS: usize = 2;
+/// The program that draws the strip along the bottom and says what a click in
+/// it means.
+const SHELL: &[u8] = b"BIN/SHELL.ELF";
+/// How many windows there can be at once.
+///
+/// A fixed number of slots rather than a list, because every one of them is a
+/// megabyte of address space set aside for a surface and an entry in a wait
+/// set: a compositor that grew both without a bound would be a compositor a
+/// client could exhaust by asking for windows.
+const CLIENTS: usize = 4;
+/// How many are started at boot.
+///
+/// The rest are empty until somebody presses the button on the desktop. Two,
+/// because two is what it takes to show that keys reach one window and not the
+/// other, and a machine that filled its screen before anyone touched it would
+/// have nothing left to launch into.
+const STARTED: usize = 2;
 /// Pixels between two tiles, and around them.
 const GAP: u32 = 8;
 /// How tall a window's title bar is.
@@ -226,11 +279,13 @@ const GAP: u32 = 8;
 const TITLE: u32 = 14;
 /// How large the corner is that resizes a window.
 const GRIP: u32 = 12;
-/// How tall the strip of tabs along the bottom is.
+/// How tall the strip along the bottom is.
 ///
 /// Reserved: windows are laid out and clamped above it, so the one place that
-/// brings a minimised window back cannot be covered by another window.
-const TASKBAR: u32 = 16;
+/// brings a minimised window back cannot be covered by another window. Tall
+/// enough for a line of text, because what is in it is drawn by a program with
+/// a font and not by this one with rectangles.
+const TASKBAR: u32 = 24;
 
 /// The smallest a window may be made.
 ///
@@ -307,15 +362,17 @@ impl Tile {
         self.contains(x, y) && y < self.y + TITLE
     }
 
-    /// Where this window's tab sits in the strip along the bottom.
-    ///
-    /// By index, so a tab does not move when another window is minimised or
-    /// brought back. A tab that shuffled sideways under the pointer would be a
-    /// tab somebody clicked and missed.
-    fn tab(index: usize, screen: &Screen) -> (u32, u32, u32, u32) {
-        let width = (screen.width / CLIENTS as u32).saturating_sub(GAP);
-        let x = screen.x + GAP / 2 + index as u32 * (width + GAP);
-        (x, screen.taskbar_y() + 2, width, TASKBAR - 4)
+    /// What to tell the desktop about this window.
+    fn state(&self, focused: bool) -> u8 {
+        if !self.live {
+            desk::GONE
+        } else if self.minimised {
+            desk::AWAY
+        } else if focused {
+            desk::FOCUSED
+        } else {
+            desk::SHOWN
+        }
     }
 
     /// Whether a point is in the corner that resizes.
@@ -349,7 +406,7 @@ extern "C" fn main() -> ! {
     // Two tiles side by side, with a gap around and between them. Laid out
     // before any client exists, because a client is told the size of its
     // surface and cannot be told twice.
-    let tile_width = (screen.width - GAP * (CLIENTS as u32 + 1)) / CLIENTS as u32;
+    let tile_width = (screen.width - GAP * (STARTED as u32 + 1)) / STARTED as u32;
     let tile_height = screen.usable_height() - GAP * 2;
     if tile_width == 0 || tile_height == 0 {
         failed("compositor: FAILED: the rectangle it was given is too small to divide");
@@ -357,16 +414,37 @@ extern "C" fn main() -> ! {
     }
 
     let mut tiles: [Option<Tile>; CLIENTS] = [const { None }; CLIENTS];
-    for index in 0..CLIENTS {
+    for (index, slot) in tiles.iter_mut().enumerate().take(STARTED) {
         let x = screen.x + GAP + (tile_width + GAP) * index as u32;
         let y = screen.y + GAP;
         match start_client(index, x, y, tile_width, tile_height) {
-            Some(tile) => tiles[index] = Some(tile),
+            Some(tile) => *slot = Some(tile),
             None => finish(),
         }
     }
 
-    serve(&screen, &mut tiles);
+    // And the desktop, which gets the strip. Started last, so that the first
+    // list of windows it is sent describes something that already exists --
+    // a dock drawn before there was anything to put in it would show an empty
+    // machine for as long as it took the first client to appear.
+    let shell = start_program(
+        SHELL,
+        CLIENTS,
+        screen.x,
+        screen.taskbar_y(),
+        screen.width,
+        TASKBAR,
+        CLIENTS as u32,
+    );
+    let mut shell = match shell {
+        Some(shell) => Some(shell),
+        None => {
+            failed("compositor: FAILED: the desktop would not start");
+            finish();
+        }
+    };
+
+    serve(&screen, &mut tiles, &mut shell);
     finish()
 }
 
@@ -438,6 +516,36 @@ fn take_the_display() -> Option<Screen> {
 /// the memory away — and the client ending would free the frames out from under
 /// this program's own mapping of them.
 fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option<Tile> {
+    // A different tint per client, so two tiles that are the same colour mean
+    // one buffer reached both and not that compositing worked.
+    start_program(
+        CLIENT,
+        index,
+        x,
+        y,
+        width,
+        height,
+        0x40u32 + index as u32 * 0x70,
+    )
+}
+
+/// Start a program, make it a surface, and give it one end of the memory.
+///
+/// The same path for a client and for the desktop, because the desktop *is* a
+/// client: one surface, one channel, no handle to anything else. What differs
+/// is only which program is started and what the third number in its first
+/// message means -- a tint for a client, a count of window slots for the
+/// desktop.
+#[allow(clippy::too_many_arguments)]
+fn start_program(
+    program: &[u8],
+    index: usize,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    third: u32,
+) -> Option<Tile> {
     let bytes = width as usize * height as usize * 4;
     if bytes > MAX_SURFACE {
         failed("compositor: FAILED: a tile is larger than the space set aside for it");
@@ -456,7 +564,7 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
 
     // Ask for the program. There is no call that starts one: there is a
     // channel, and holding an end of it is the authority to ask.
-    if nexus_user::send(SPAWNER, CLIENT, &[]).is_err() {
+    if nexus_user::send(SPAWNER, program, &[]).is_err() {
         failed("compositor: FAILED: could not reach the spawn service");
         return None;
     }
@@ -496,9 +604,7 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
     let mut message = [0u8; 16];
     message[0..4].copy_from_slice(&width.to_le_bytes());
     message[4..8].copy_from_slice(&height.to_le_bytes());
-    // A different tint per client, so two tiles that are the same colour mean
-    // one buffer reached both and not that compositing worked.
-    message[8..12].copy_from_slice(&(0x40u32 + index as u32 * 0x70).to_le_bytes());
+    message[8..12].copy_from_slice(&third.to_le_bytes());
     // And which client it is, only so that it can say so. A client has no use
     // for the number beyond naming itself in a log -- it cannot address another
     // client, and there is nothing for it to index into.
@@ -530,7 +636,7 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
 /// One wait over every client's channel and every client's process. A client
 /// saying it has drawn and a client dying arrive the same way, which is the
 /// only arrangement in which neither can be starved by the other.
-fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
+fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Option<Tile>) {
     let Ok(set) = nexus_user::wait_set() else {
         failed("compositor: FAILED: could not make a wait set");
         return;
@@ -545,6 +651,15 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
             || nexus_user::watch(set, tile.process, process_key(index)).is_err()
         {
             failed("compositor: FAILED: could not watch a client");
+            return;
+        }
+    }
+
+    if let Some(shell) = shell {
+        if nexus_user::watch(set, shell.channel, KEY_SHELL).is_err()
+            || nexus_user::watch(set, shell.process, KEY_SHELL_ENDED).is_err()
+        {
+            failed("compositor: FAILED: could not watch the desktop");
             return;
         }
     }
@@ -581,17 +696,29 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
     // Back to front. Windows can overlap now, so there has to be an order, and
     // a click raises what was clicked.
     let mut order: [usize; CLIENTS] = core::array::from_fn(|index| index);
+    // How many programs the desktop has asked to start, and how many of its
+    // commands changed a window.
+    let mut opened = 0u32;
+    let mut commanded = 0u32;
+    // What the desktop was last told, so it is told again only when it differs.
+    // Seeded with a state no window can be in, so the first list always goes.
+    let mut reported = [u8::MAX; CLIENTS];
 
-    repaint(screen, tiles, &order, focus, &mut cursor, pointing);
+    announce(shell, tiles, focus, &mut reported);
+    repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
 
     // Bounded, so a client that neither draws nor dies cannot hang the machine.
     // The bound is generous: it is a backstop and not a schedule.
-    for _ in 0..256 {
-        if ended == CLIENTS {
+    for _ in 0..1024 {
+        // Every window that ever existed has ended. Not a count against
+        // `CLIENTS`, because most of the slots are empty until somebody starts
+        // something into one, and a compositor waiting for four deaths out of
+        // two clients would wait forever.
+        if ended > 0 && tiles.iter().flatten().all(|tile| !tile.live) {
             break;
         }
 
-        let mut keys = [0u64; CLIENTS * 2];
+        let mut keys = [0u64; CLIENTS * 2 + 2];
         let Ok(count) = nexus_user::wait_any(set, &mut keys) else {
             failed("compositor: FAILED: could not wait on its clients");
             return;
@@ -602,10 +729,11 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
 
         for key in &keys[..count] {
             if *key == KEY_KEYBOARD {
-                match read_key(set, tiles, &mut focus) {
+                match read_key(set, tiles, shell, &mut focus) {
                     Some(sent) => {
                         forwarded += sent;
-                        repaint(screen, tiles, &order, focus, &mut cursor, pointing);
+                        announce(shell, tiles, focus, &mut reported);
+                        repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
                     }
                     None => return,
                 }
@@ -613,13 +741,55 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
             }
 
             if *key == KEY_POINTER {
-                match read_pointer(screen, set, tiles, &mut cursor, &mut focus, &mut order) {
+                match read_pointer(
+                    screen,
+                    set,
+                    tiles,
+                    shell,
+                    &mut cursor,
+                    &mut focus,
+                    &mut order,
+                ) {
                     Some(_) => {
                         moved += 1;
-                        repaint(screen, tiles, &order, focus, &mut cursor, pointing);
+                        announce(shell, tiles, focus, &mut reported);
+                        repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
                     }
                     None => return,
                 }
+                continue;
+            }
+
+            // The desktop, which is a client with a list rather than a window.
+            if *key == KEY_SHELL {
+                match read_shell(screen, set, tiles, shell, &mut focus, &mut order) {
+                    Some(Asked::Nothing) => {}
+                    Some(Asked::Drew) => composited += 1,
+                    Some(Asked::Changed) => commanded += 1,
+                    Some(Asked::Opened) => {
+                        commanded += 1;
+                        opened += 1;
+                    }
+                    None => return,
+                }
+                announce(shell, tiles, focus, &mut reported);
+                repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
+                continue;
+            }
+
+            if *key == KEY_SHELL_ENDED {
+                // The desktop has gone. The windows have not, and a compositor
+                // that stopped with them on screen would be throwing away
+                // everything that still works because the dock died.
+                nexus_user::unwatch(set, KEY_SHELL_ENDED).ok();
+                nexus_user::unwatch(set, KEY_SHELL).ok();
+                if let Some(gone) = shell.take() {
+                    nexus_user::close(gone.surface).ok();
+                    nexus_user::close(gone.channel).ok();
+                    nexus_user::close(gone.process).ok();
+                }
+                nexus_user::log("compositor: the desktop ended; its strip is empty").ok();
+                repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
                 continue;
             }
 
@@ -647,7 +817,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
                             // which is ordinary and not a failure.
                             stop_listening(set, tile, index);
                         }
-                        repaint(screen, tiles, &order, focus, &mut cursor, pointing);
+                        repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
                     }
                     Err(_) => stop_listening(set, tile, index),
                 }
@@ -660,12 +830,13 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
                 }
                 nexus_user::unwatch(set, *key).ok();
                 nexus_user::unwatch(set, channel_key(index)).ok();
-                repaint(screen, tiles, &order, focus, &mut cursor, pointing);
+                announce(shell, tiles, focus, &mut reported);
+                repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
             }
         }
     }
 
-    for tile in tiles.iter().flatten() {
+    for tile in tiles.iter().flatten().chain(shell.iter()) {
         nexus_user::close(tile.surface).ok();
         nexus_user::close(tile.channel).ok();
         nexus_user::close(tile.process).ok();
@@ -683,6 +854,178 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
     if forwarded > 0 {
         nexus_user::log("compositor: routed keys to the client that had focus").ok();
     }
+    if commanded > 0 {
+        nexus_user::log("compositor: did what the desktop asked of a window").ok();
+    }
+    if opened > 0 {
+        nexus_user::log("compositor: started a program because the desktop asked").ok();
+    }
+}
+
+/// What reading from the desktop turned out to be.
+enum Asked {
+    /// Nothing this program has to act on.
+    Nothing,
+    /// It drew its strip.
+    Drew,
+    /// It asked for something and a window changed.
+    Changed,
+    /// It asked for a program and one was started.
+    Opened,
+}
+
+/// Tell the desktop which windows exist and what state each is in.
+///
+/// Sent on every change rather than asked for, because the desktop has no way
+/// to ask: it holds one channel and no handle to a window. It is also what
+/// keeps the strip honest -- a dock that drew what it last *asked* for would
+/// show a window it wanted raised as raised whether or not it was.
+fn announce(
+    shell: &mut Option<Tile>,
+    tiles: &[Option<Tile>; CLIENTS],
+    focus: usize,
+    last: &mut [u8; CLIENTS],
+) {
+    let mut states = [desk::GONE; CLIENTS];
+    for (index, tile) in tiles.iter().enumerate() {
+        states[index] = match tile {
+            Some(tile) => tile.state(index == focus),
+            None => desk::GONE,
+        };
+    }
+    // Only when it has changed. Every pointer movement passes through here, and
+    // a desktop told the same thing sixty times a second would redraw its strip
+    // sixty times a second to show something that did not move -- which is the
+    // cost this whole arrangement is supposed to avoid, moved one process along.
+    if states == *last {
+        return;
+    }
+    *last = states;
+
+    let Some(shell) = shell else { return };
+    let mut message = [0u8; desk::WINDOWS.len() + CLIENTS];
+    message[..desk::WINDOWS.len()].copy_from_slice(desk::WINDOWS);
+    message[desk::WINDOWS.len()..].copy_from_slice(&states);
+    // A failure means the desktop has gone, which its process key will say.
+    nexus_user::send(shell.channel, &message, &[]).ok();
+}
+
+/// Read whatever the desktop said, and do it.
+///
+/// This is the one place a program other than this one decides what happens to
+/// a window. It is deliberately narrow: three commands, each naming a slot this
+/// program already has, and every one of them checked here. The desktop cannot
+/// name a window that does not exist, cannot reach one it was not told about,
+/// and cannot ask for anything but these three things.
+fn read_shell(
+    screen: &Screen,
+    set: Handle,
+    tiles: &mut [Option<Tile>; CLIENTS],
+    shell: &mut Option<Tile>,
+    focus: &mut usize,
+    order: &mut [usize; CLIENTS],
+) -> Option<Asked> {
+    let Some(desktop) = shell else {
+        return Some(Asked::Nothing);
+    };
+
+    let mut message = [0u8; 32];
+    let mut none = [Handle(0); 1];
+    let Ok(received) = nexus_user::receive(desktop.channel, &mut message, &mut none) else {
+        nexus_user::unwatch(set, KEY_SHELL).ok();
+        return Some(Asked::Nothing);
+    };
+    let message = &message[..received.bytes];
+
+    if message == b"damaged" {
+        desktop.frames += 1;
+        // Answered, so the desktop knows its strip is free again. The same
+        // handshake every client gets, for the same reason: without it the
+        // strip would be redrawn while this program was still reading it.
+        if nexus_user::send(desktop.channel, b"shown", &[]).is_err() {
+            nexus_user::unwatch(set, KEY_SHELL).ok();
+        }
+        return Some(Asked::Drew);
+    }
+
+    if message == desk::OPEN {
+        return open_window(screen, set, tiles, focus, order);
+    }
+
+    if message.len() >= 8 && (message.starts_with(desk::SHOW) || message.starts_with(desk::HIDE)) {
+        let slot = read_u32(message, 4) as usize;
+        let show = message.starts_with(desk::SHOW);
+        // Checked rather than trusted. The desktop is a program like any other,
+        // and one that named a slot out of range would be indexing this
+        // program's array from outside it.
+        let Some(Some(tile)) = tiles.get_mut(slot) else {
+            return Some(Asked::Nothing);
+        };
+        if !tile.live {
+            return Some(Asked::Nothing);
+        }
+        tile.minimised = !show;
+        if show {
+            raise(order, slot);
+            *focus = slot;
+            nexus_user::log("compositor: brought a window back because the desktop asked").ok();
+        } else {
+            nexus_user::log("compositor: put a window away because the desktop asked").ok();
+        }
+        return Some(Asked::Changed);
+    }
+
+    Some(Asked::Nothing)
+}
+
+/// Start a program into an empty slot, because the desktop asked.
+///
+/// A slot whose client has ended is not reused: its surface is still mapped
+/// where the new one would go, and unmapping it to make room is work with
+/// nothing behind it while there are slots that were never used at all.
+fn open_window(
+    screen: &Screen,
+    set: Handle,
+    tiles: &mut [Option<Tile>; CLIENTS],
+    focus: &mut usize,
+    order: &mut [usize; CLIENTS],
+) -> Option<Asked> {
+    let Some(slot) = tiles.iter().position(Option::is_none) else {
+        nexus_user::log("compositor: the desktop asked for a window and there was no room").ok();
+        return Some(Asked::Nothing);
+    };
+
+    // Offset from the ones before it, so a new window is visibly a new window
+    // and not one exactly covering another.
+    let step = slot as u32 * 12;
+    let width = (screen.width / 2).min(screen.width.saturating_sub(step + GAP * 2));
+    let height =
+        (screen.usable_height() / 2).min(screen.usable_height().saturating_sub(step + GAP * 2));
+    if width < MIN_SIZE || height < MIN_SIZE {
+        return Some(Asked::Nothing);
+    }
+
+    // Reported by `start_client` if it fails; a compositor that stopped because
+    // a program would not start would be a compositor a missing file could take
+    // the screen away with.
+    let tile = start_client(
+        slot,
+        screen.x + GAP + step,
+        screen.y + GAP + step,
+        width,
+        height,
+    )?;
+    if nexus_user::watch(set, tile.channel, channel_key(slot)).is_err()
+        || nexus_user::watch(set, tile.process, process_key(slot)).is_err()
+    {
+        failed("compositor: FAILED: could not watch a window it had just started");
+        return None;
+    }
+    tiles[slot] = Some(tile);
+    raise(order, slot);
+    *focus = slot;
+    nexus_user::log("compositor: started a window because someone pressed the desktop").ok();
+    Some(Asked::Opened)
 }
 
 /// Read whatever the keyboard sent and decide who it is for.
@@ -696,7 +1039,12 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
 ///
 /// Returns how many keys were passed on, or `None` if something went wrong
 /// badly enough to stop.
-fn read_key(set: Handle, tiles: &mut [Option<Tile>; CLIENTS], focus: &mut usize) -> Option<u32> {
+fn read_key(
+    set: Handle,
+    tiles: &mut [Option<Tile>; CLIENTS],
+    shell: &mut Option<Tile>,
+    focus: &mut usize,
+) -> Option<u32> {
     let mut message = [0u8; 32];
     let mut none = [Handle(0); 1];
     let Ok(received) = nexus_user::receive(KEYS, &mut message, &mut none) else {
@@ -708,6 +1056,20 @@ fn read_key(set: Handle, tiles: &mut [Option<Tile>; CLIENTS], focus: &mut usize)
     if received.bytes < key::SIZE {
         failed("compositor: FAILED: a key arrived in the wrong shape");
         return None;
+    }
+
+    // Not a key at all: the kernel saying what the interface language is now.
+    // It goes to the desktop, which draws words, and to nobody else -- a client
+    // drawing a gradient has nothing to do with it, and forwarding it as though
+    // it were a keystroke would put a byte nobody expects into every window.
+    if message[0] == key::LANGUAGE {
+        if let Some(shell) = shell {
+            let mut forward = [0u8; desk::LANGUAGE.len() + 4];
+            forward[..desk::LANGUAGE.len()].copy_from_slice(desk::LANGUAGE);
+            forward[desk::LANGUAGE.len()..].copy_from_slice(&message[1..5]);
+            nexus_user::send(shell.channel, &forward, &[]).ok();
+        }
+        return Some(0);
     }
 
     if message[0] == key::TAB {
@@ -761,6 +1123,7 @@ fn read_pointer(
     screen: &Screen,
     set: Handle,
     tiles: &mut [Option<Tile>; CLIENTS],
+    shell: &mut Option<Tile>,
     cursor: &mut Pointer,
     focus: &mut usize,
     order: &mut [usize; CLIENTS],
@@ -820,26 +1183,28 @@ fn read_pointer(
     }
     cursor.other_held = put_away;
 
-    // A tab brings its window back. Checked before the windows are, because a
-    // tab is in the strip they cannot reach and nothing else can be there.
-    if pressed && !cursor.held {
-        for index in 0..CLIENTS {
-            let (tx, ty, tw, th) = Tile::tab(index, screen);
-            if cursor.x < tx || cursor.x >= tx + tw || cursor.y < ty || cursor.y >= ty + th {
-                continue;
-            }
-            let Some(Some(tile)) = tiles.get_mut(index) else {
-                continue;
-            };
-            if tile.live && tile.minimised {
-                tile.minimised = false;
-                raise(order, index);
-                *focus = index;
-                nexus_user::log("compositor: brought a window back from its tab").ok();
-                cursor.held = true;
-                return Some(0);
+    // A press in the strip belongs to the desktop, and this program does not
+    // decide what it means. It passes on where the press landed, in coordinates
+    // inside the strip -- because that is the only rectangle the desktop knows
+    // about, and telling it a screen position would be telling it where its own
+    // surface is, which is exactly what a client must not be able to learn.
+    //
+    // Checked before the windows are: windows are clamped above the strip, so
+    // nothing else can be there.
+    if pressed && !cursor.held && cursor.y >= screen.taskbar_y() {
+        cursor.held = true;
+        if let Some(shell) = shell {
+            let mut message = [0u8; desk::CLICK.len() + 8];
+            message[..desk::CLICK.len()].copy_from_slice(desk::CLICK);
+            let local_x = cursor.x - screen.x;
+            let local_y = cursor.y - screen.taskbar_y();
+            message[3..7].copy_from_slice(&local_x.to_le_bytes());
+            message[7..11].copy_from_slice(&local_y.to_le_bytes());
+            if nexus_user::send(shell.channel, &message, &[]).is_ok() {
+                nexus_user::log("compositor: a press in the strip went to the desktop").ok();
             }
         }
+        return Some(0);
     }
 
     if pressed && !cursor.held {
@@ -1093,6 +1458,7 @@ fn clamp(value: i64, low: u32, high: u32) -> u32 {
 fn repaint(
     screen: &Screen,
     tiles: &[Option<Tile>; CLIENTS],
+    shell: &Option<Tile>,
     order: &[usize; CLIENTS],
     focus: usize,
     cursor: &mut Pointer,
@@ -1124,31 +1490,23 @@ fn repaint(
         outline(screen, tile, index == focus);
     }
 
-    // The strip, last of the windows and before the pointer. A tab for every
-    // live window, so that one which has been put away has somewhere to be
-    // clicked and one which has not shows where it would go.
-    fill(
-        screen,
-        screen.x,
-        screen.taskbar_y(),
-        screen.width,
-        TASKBAR,
-        0x0006_0D1A,
-    );
-    for (index, tile) in tiles.iter().enumerate() {
-        let Some(tile) = tile else { continue };
-        if !tile.live {
-            continue;
-        }
-        let (x, y, width, height) = Tile::tab(index, screen);
-        let colour = if tile.minimised {
-            0x0027_6DA8
-        } else if index == focus {
-            0x0019_3350
-        } else {
-            0x0011_1E30
-        };
-        fill(screen, x, y, width, height, colour);
+    // The strip, last of the windows and before the pointer. Composited from
+    // the desktop's surface, exactly as a window is: this program does not know
+    // what is drawn in there, and the moment it did it would be a compositor
+    // deciding what a dock looks like.
+    match shell {
+        Some(shell) => composite(screen, shell),
+        // Nothing has it. Filled rather than left as it was, because the strip
+        // is reserved space and the last thing drawn in it is not the truth
+        // about a machine whose desktop has ended.
+        None => fill(
+            screen,
+            screen.x,
+            screen.taskbar_y(),
+            screen.width,
+            TASKBAR,
+            0x0006_0D1A,
+        ),
     }
 
     if pointing {

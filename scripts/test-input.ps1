@@ -18,7 +18,7 @@
 #>
 [CmdletBinding()]
 param(
-    [int]$Timeout = 30
+    [int]$Timeout = 120
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,18 +66,25 @@ $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -Pass
 $Keys = @('n', 'e', 'x', 'tab', 'u', 's', 'f1')
 
 try {
-    # Let the system finish booting and start its input thread before typing.
-    Write-Host '==> Waiting for the input thread' -ForegroundColor Cyan
+    # Let the system finish booting before typing. Not merely the input thread:
+    # there has to be something for the keys and the clicks to *reach*, and the
+    # desktop is the last thing to appear -- the compositor starts its windows
+    # first and gives it the strip afterwards. Waiting for a marker rather than
+    # for a number of seconds is what keeps this from being a test that passes
+    # on a fast host and fails on a busy one; four emulated processors on one
+    # real one do not run at any fixed fraction of wall-clock time.
+    Write-Host '==> Waiting for the desktop' -ForegroundColor Cyan
     $ready = $false
     for ($waited = 0; $waited -lt $Timeout; $waited++) {
         Start-Sleep -Seconds 1
         if ($process.HasExited) { throw "QEMU exited early with code $($process.ExitCode)" }
         if (Test-Path $SerialLog) {
             $sofar = (Get-Content $SerialLog -Raw -Encoding UTF8) -replace "`0", ''
-            if ($sofar.Contains('input thread')) { $ready = $true; break }
+            if ($sofar.Contains('input thread') -and
+                $sofar.Contains('shell: took the strip')) { $ready = $true; break }
         }
     }
-    if (-not $ready) { throw 'the input thread never started' }
+    if (-not $ready) { throw 'the desktop never appeared' }
 
     Write-Host "==> Sending keys: $($Keys -join ' ')" -ForegroundColor Cyan
     $client = New-Object System.Net.Sockets.TcpClient('127.0.0.1', $MonitorPort)
@@ -150,11 +157,11 @@ try {
             $writer.WriteLine('mouse_move 40 40')
             Start-Sleep -Milliseconds 40
         }
-        # And back up out of the strip of tabs along the bottom. The pointer can
-        # go further down than a window can, because the strip is reserved --
-        # so driving into the corner lands below the window rather than in its
-        # grip, and this is the ten pixels back up.
-        $writer.WriteLine('mouse_move 0 -10')
+        # And back up out of the strip along the bottom. The pointer can go
+        # further down than a window can, because the strip is reserved -- so
+        # driving into the corner lands in the strip rather than in the window's
+        # grip, and this is the height of the strip back up.
+        $writer.WriteLine('mouse_move 0 -18')
         Start-Sleep -Milliseconds 80
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 150
@@ -188,16 +195,21 @@ try {
         $writer.WriteLine('mouse_button 0')
         Start-Sleep -Milliseconds 200
 
-        # Its tab is in the strip along the very bottom, in the *left-hand* half:
-        # the window that was dragged, resized and put away is the first one,
-        # and a tab sits at its window's index so that it does not move when
-        # another window is minimised. Bottom-left corner, then a little right,
-        # because the tabs are inset from the edge by half a gap.
+        # Its tab is in the strip along the very bottom, which now belongs to
+        # the desktop: the compositor no longer knows what a tab is. It reports
+        # where the press landed inside the strip, the desktop decides that was
+        # a tab, and it asks for the window back. Three processes for one click,
+        # and the point is that the middle one is replaceable.
+        #
+        # Bottom-left corner, where the pointer clamps, then right past the
+        # button that starts a program -- seventy-two pixels of it, plus the
+        # gaps -- and into the first window's tab.
+        Write-Host '==> Bringing a window back from the desktop' -ForegroundColor Cyan
         foreach ($step in 1..10) {
             $writer.WriteLine('mouse_move -40 40')
             Start-Sleep -Milliseconds 40
         }
-        foreach ($step in 1..4) {
+        foreach ($step in 1..8) {
             $writer.WriteLine('mouse_move 15 0')
             Start-Sleep -Milliseconds 40
         }
@@ -205,10 +217,65 @@ try {
         Start-Sleep -Milliseconds 200
         $writer.WriteLine('mouse_button 0')
         Start-Sleep -Milliseconds 300
+
+        # And back left onto the button that starts a program. Nothing on this
+        # machine could do that before: every process that has ever run was
+        # started at boot or by another program deciding to. This is a person
+        # pressing something.
+        Write-Host '==> Starting a program from the desktop' -ForegroundColor Cyan
+        foreach ($step in 1..6) {
+            $writer.WriteLine('mouse_move -15 0')
+            Start-Sleep -Milliseconds 40
+        }
+        $writer.WriteLine('mouse_button 1')
+        Start-Sleep -Milliseconds 250
+        $writer.WriteLine('mouse_button 0')
+
+        # Starting a program means reading an ELF off the disk and building an
+        # address space for it, which is not instant on an emulated machine.
+        # Waited for rather than slept through, for the same reason as the
+        # report below: how long it takes is a property of the host.
+        for ($waited = 0; $waited -lt 60; $waited++) {
+            Start-Sleep -Seconds 1
+            if ($process.HasExited) { break }
+            if (Test-Path $SerialLog) {
+                $sofar = (Get-Content $SerialLog -Raw -Encoding UTF8) -replace "`0", ''
+                if ($sofar.Contains('started a window because someone pressed')) { break }
+            }
+        }
         # Wait for the monitor thread's next report, which is what carries the
         # keyboard figures and the decoded line into the serial log. It runs
-        # every five seconds, so this has to outlast one full period.
-        Start-Sleep -Seconds 7
+        # every five seconds of *guest* time, which is not wall-clock time: this
+        # machine emulates four processors on one, and there is a compositor, a
+        # desktop and three clients on it by the end.
+        #
+        # So this waits for the report itself rather than for a number of
+        # seconds. A fixed sleep here is a test that passes on an idle host and
+        # fails on a busy one, which is the worst kind: it fails for a reason
+        # that has nothing to do with the system under test.
+        Write-Host '==> Waiting for the report that carries the figures' -ForegroundColor Cyan
+        $reported = $false
+        for ($waited = 0; $waited -lt 90; $waited++) {
+            Start-Sleep -Seconds 1
+            if ($process.HasExited) { break }
+            if (Test-Path $SerialLog) {
+                $sofar = (Get-Content $SerialLog -Raw -Encoding UTF8) -replace "`0", ''
+                $seen = [regex]::Matches($sofar, 'keyboard: (\d+) scancodes')
+                $felt = [regex]::Matches($sofar, 'pointer (\d+) packets')
+                # Both, because the keys were sent long before the pointer was
+                # moved: a report carrying fourteen scancodes and no packets is
+                # one written while the mouse was still being dragged.
+                if ($seen.Count -gt 0 -and $felt.Count -gt 0 -and
+                    [int]$seen[$seen.Count - 1].Groups[1].Value -ge 14 -and
+                    [int]$felt[$felt.Count - 1].Groups[1].Value -ge 5) {
+                    $reported = $true
+                    break
+                }
+            }
+        }
+        if (-not $reported) {
+            Write-Host '    the monitor never reported the keyboard' -ForegroundColor Yellow
+        }
         $writer.WriteLine('quit')
         Start-Sleep -Milliseconds 500
     } finally {
@@ -230,10 +297,14 @@ $failures = @()
 if (-not $output.Contains('routed to vector')) {
     $failures += 'the keyboard was never routed to a vector'
 }
-if (-not ($output -match 'keyboard: (\d+) scancodes')) {
+# The *last* report, not the first: the monitor writes one every five seconds
+# and the earliest of them was written before anything had been typed. Reading
+# that one is how a run that sent fourteen scancodes comes to report four.
+$reports = [regex]::Matches($output, 'keyboard: (\d+) scancodes')
+if ($reports.Count -eq 0) {
     $failures += 'no scancodes were received'
 } else {
-    $scancodes = [int]$Matches[1]
+    $scancodes = [int]$reports[$reports.Count - 1].Groups[1].Value
     # Seven keys, each a press and a release, so at least fourteen.
     if ($scancodes -lt 14) {
         $failures += "only $scancodes scancodes arrived; expected at least 14"
@@ -286,15 +357,19 @@ if ($first -gt 3 -or $second -gt 2) {
 
 # The pointer. Packets rather than bytes, because three bytes that never became
 # a packet is a driver that is reading the stream and not understanding it.
-if (-not ($output -match 'pointer (\d+) packets from (\d+) bytes,\s+(\d+) resynchronised, (\d+) overflowed')) {
+$pointers = [regex]::Matches(
+    $output,
+    'pointer (\d+) packets from (\d+) bytes,\s+(\d+) resynchronised, (\d+) overflowed')
+if ($pointers.Count -eq 0) {
     $failures += 'the kernel never reported what the pointer did'
 } else {
-    $packets = [int]$Matches[1]
-    $desynchronised = [int]$Matches[3]
+    $last = $pointers[$pointers.Count - 1]
+    $packets = [int]$last.Groups[1].Value
+    $desynchronised = [int]$last.Groups[3].Value
     if ($packets -lt 5) {
         $failures += "only $packets pointer packets arrived"
     } else {
-        Write-Host "    ok   $packets pointer packets decoded from $($Matches[2]) bytes" -ForegroundColor DarkGray
+        Write-Host "    ok   $packets pointer packets decoded from $($last.Groups[2].Value) bytes" -ForegroundColor DarkGray
     }
     # A packet stream that had to resynchronise is one where a byte went to the
     # wrong driver: the keyboard and the mouse share a controller, and only one
@@ -349,10 +424,49 @@ if ($output.Contains('compositor: put a window away, leaving its tab')) {
 } else {
     $failures += 'no window was ever put away'
 }
-if ($output.Contains('compositor: brought a window back from its tab')) {
-    Write-Host '    ok   and brought back from its tab' -ForegroundColor DarkGray
+# Bringing it back is now three processes rather than one. The compositor knows
+# only that a button went down at a point inside the strip; the desktop decides
+# that point was a tab and asks for the window; the compositor checks the slot
+# it named and does it. Every step is required, because a chain that works with
+# a step missing is a chain where that step is decoration.
+if ($output.Contains('compositor: a press in the strip went to the desktop')) {
+    Write-Host '    ok   a press in the strip was passed to the desktop' -ForegroundColor DarkGray
+} else {
+    $failures += 'a press in the strip never reached the desktop'
+}
+if ($output.Contains('shell: turned a click in the strip into a command')) {
+    Write-Host '    ok   the desktop turned it into a command' -ForegroundColor DarkGray
+} else {
+    $failures += 'the desktop never turned a click into a command'
+}
+if ($output.Contains('compositor: brought a window back because the desktop asked')) {
+    Write-Host '    ok   and the window came back' -ForegroundColor DarkGray
 } else {
     $failures += 'a window that was put away could not be brought back'
+}
+
+# And starting one. Everything that has ever run on this machine was started at
+# boot or by a program that decided to; this is a person pressing a button, and
+# the whole path from the press to a process in ring 3 is new.
+if ($output.Contains('shell: asked for a program to be started')) {
+    Write-Host '    ok   the desktop asked for a program' -ForegroundColor DarkGray
+} else {
+    $failures += 'pressing the desktop never asked for a program'
+}
+if ($output.Contains('compositor: started a window because someone pressed the desktop')) {
+    Write-Host '    ok   and a window was started for it' -ForegroundColor DarkGray
+} else {
+    $failures += 'pressing the desktop started no window'
+}
+
+# The desktop draws words, so it has to be told which language they are in. It
+# is told by the kernel, through the compositor, because the kernel is where F1
+# is acted on -- and a desktop counting keys of its own would agree with the
+# kernel's panel only until it missed one.
+if ($output.Contains('shell: drew its strip in the language it was told')) {
+    Write-Host '    ok   the desktop drew its strip in the language it was told' -ForegroundColor DarkGray
+} else {
+    $failures += 'the desktop was never told what language to draw in'
 }
 
 # F1 is a distinct key, and acting on it says the decoded key reached something

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "shared/nexus-abi",
     "shared/nexus-font",
+    "shared/nexus-i18n",
     "boot/nexus-boot",
     "kernel/nexus-mm",
     "kernel/nexus-kernel",
@@ -12,6 +13,7 @@ members = [
     "user/nexus-hello",
     "user/nexus-compositor",
     "user/nexus-client",
+    "user/nexus-shell",
     "user/nexus-idle",
 ]
 

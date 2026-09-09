@@ -40,6 +40,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-i18n"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-idle"
 version = "0.1.0"
 dependencies = [
@@ -59,6 +63,7 @@ version = "0.1.0"
 dependencies = [
  "nexus-abi",
  "nexus-font",
+ "nexus-i18n",
  "nexus-mm",
 ]
 
@@ -67,6 +72,15 @@ name = "nexus-mm"
 version = "0.1.0"
 dependencies = [
  "nexus-abi",
+]
+
+[[package]]
+name = "nexus-shell"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-ui",
+ "nexus-user",
 ]
 
 [[package]]

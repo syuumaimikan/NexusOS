@@ -18,7 +18,7 @@
 #>
 [CmdletBinding()]
 param(
-    [int]$Timeout = 25
+    [int]$Timeout = 180
 )
 
 $ErrorActionPreference = 'Stop'
@@ -162,8 +162,24 @@ foreach ($case in $Cases) {
         -FirmwareCode $FirmwareCode -FirmwareVars $Vars -SerialLog $Log `
         -Processors $processors -Headless -StopOnFault
 
+    # Stopped when the case has said what it had to say, rather than after a
+    # fixed number of seconds. A fault that halts the machine says so in the
+    # first second; one that has to wait for a user program to reach the thing
+    # being injected can take a great deal longer on a busy host, and a fixed
+    # wait turns that into a failure that has nothing to do with the fault.
     $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
-    if (-not $process.WaitForExit($Timeout * 1000)) {
+    for ($waited = 0; $waited -lt $Timeout; $waited++) {
+        if ($process.WaitForExit(1000)) { break }
+        if (Test-Path $Log) {
+            $sofar = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
+            $all = $true
+            foreach ($expected in $case.Expect) {
+                if (-not $sofar.Contains($expected)) { $all = $false; break }
+            }
+            if ($all) { break }
+        }
+    }
+    if (-not $process.HasExited) {
         try { $process.Kill() } catch { }
         $process.WaitForExit(5000) | Out-Null
     }

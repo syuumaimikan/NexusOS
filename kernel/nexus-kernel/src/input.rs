@@ -58,6 +58,20 @@ static ROUTE: crate::sync::IrqSpinLock<Option<alloc::sync::Arc<crate::ipc::Endpo
 /// Send a copy of every key down `endpoint` from now on.
 pub fn route_to(endpoint: alloc::sync::Arc<crate::ipc::Endpoint>) {
     *ROUTE.lock() = Some(endpoint);
+    // What the language is, before anything has changed it. A program that
+    // waited for a change would draw its first frame in whatever it guessed.
+    announce_language();
+}
+
+/// Say what the interface language is now.
+fn announce_language() {
+    let Some(endpoint) = ROUTE.lock().clone() else {
+        return;
+    };
+    let mut message = [0u8; wire::SIZE];
+    message[0] = wire::LANGUAGE;
+    message[1..5].copy_from_slice(&(i18n::current_index() as u32).to_le_bytes());
+    endpoint.send(&message, alloc::vec::Vec::new()).ok();
 }
 
 /// What a key looks like on the wire.
@@ -74,6 +88,13 @@ pub mod wire {
     pub const ESCAPE: u8 = 4;
     pub const TAB: u8 = 5;
     pub const FUNCTION: u8 = 6;
+    /// Not a key: the interface language, as an index into the locale table.
+    ///
+    /// Sent when routing begins and again whenever it changes, so that a
+    /// program showing translated text switches with the kernel's own panel
+    /// rather than keeping its own count of how many times F1 has been pressed.
+    /// Two counters would agree until the first key one of them missed.
+    pub const LANGUAGE: u8 = 7;
     /// Bytes one key takes.
     pub const SIZE: usize = 5;
 }
@@ -134,6 +155,7 @@ fn handle(key: Key) {
         Key::Function(1) => {
             let locale = i18n::next_locale();
             kprintln!("[input] F1: interface language is now {}", locale.tag);
+            announce_language();
         }
         Key::Function(number) => {
             kprintln!("[input] F{number} is not bound to anything yet");

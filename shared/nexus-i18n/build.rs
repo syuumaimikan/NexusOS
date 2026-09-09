@@ -1,20 +1,21 @@
 //! Build script: turns `locales/*.txt` into compiled-in string tables.
 //!
 //! The glyphs those strings need are rasterised by `shared/nexus-font`, which
-//! reads the same files: the face and the strings have to cover the same set,
-//! and the face is wanted by programs as well as by the kernel.
+//! reads the same files: the face and the strings have to cover the same set.
 //!
-//! The kernel has no filesystem yet, so translations cannot be loaded at
-//! runtime; they are compiled in. Keeping them in data files anyway is what
-//! [§77 of the specification] asks for and what makes adding a language a
-//! matter of adding a file rather than editing the kernel.
+//! There is no filesystem read here: translations are compiled in. The kernel
+//! could load them now -- it has a filesystem -- but a kernel that cannot name
+//! a disk error until it has read the disk is a kernel with a hole in its
+//! first minute, and programs start before any of them has opened a file.
+//! Keeping them in data files anyway is what [§77 of the specification]
+//! asks for and what makes adding a language a matter of adding a file.
 //!
 //! Two invariants are enforced here rather than discovered at runtime:
 //!
 //! * every locale must define exactly the same keys, so a missing translation
 //!   is a build error and never a blank label on screen;
-//! * the keys are emitted sorted, so the kernel can look one up with a binary
-//!   search and no allocation.
+//! * the keys are emitted sorted, so a lookup is a binary search and no
+//!   allocation.
 //!
 //! [§77 of the specification]: ../../docs/NEXUSOS_ROADMAP.md
 
@@ -23,7 +24,6 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Width and height of a full-width glyph cell, in pixels.
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let repo_root = manifest.parent().unwrap().parent().unwrap();
