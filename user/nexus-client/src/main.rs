@@ -14,11 +14,17 @@
 //!
 //! # What it is told
 //!
-//! One message: the width and height of its surface and a number to shade it
-//! by, as three little-endian 32-bit values, and a handle to the memory. The
-//! surface is tightly packed — width times four bytes per row, no padding —
+//! One message to begin with: the width and height of its surface and a number
+//! to shade it by, as little-endian 32-bit values, and a handle to the memory.
+//! The surface is tightly packed — width times four bytes per row, no padding —
 //! because it is memory made for this and not a window onto hardware someone
 //! else chose the shape of.
+//!
+//! And then, possibly, again. A surface can be *replaced*: the compositor sends
+//! a new size and a new handle, and this program unmaps what it had and maps
+//! what it was given. It still does not know why, or where the thing is, or
+//! whether anyone can see it. A client that had to be told why its window
+//! changed size would be a client that knew it had a window.
 
 #![no_std]
 #![no_main]
@@ -39,6 +45,14 @@ mod key {
     /// Bytes one key takes.
     pub const SIZE: usize = 5;
 }
+
+/// What the compositor says when a frame is on screen.
+const SHOWN: &[u8] = b"shown";
+/// What it says when the surface has been replaced.
+///
+/// Distinguished by its first bytes rather than by its length, because a length
+/// is a thing two messages can share by accident and a word is not.
+const RESIZED: &[u8] = b"size";
 
 /// Where this program maps its surface. Its own choice, as every mapping is.
 const SURFACE_AT: usize = 0x0000_0000_1000_0000;
@@ -97,13 +111,13 @@ extern "C" fn main() -> ! {
         finish();
     }
 
-    let width = read_u32(&buffer, 0);
-    let height = read_u32(&buffer, 4);
+    let mut width = read_u32(&buffer, 0);
+    let mut height = read_u32(&buffer, 4);
     let tint = read_u32(&buffer, 8);
     // Only so that this program can name itself in a log. It cannot address
     // another client and there is nothing for it to index into.
     WHICH.store(read_u32(&buffer, 12), core::sync::atomic::Ordering::Relaxed);
-    let surface = handles[0];
+    let mut surface = handles[0];
 
     let Ok(mapped) = nexus_user::memory_map(surface, SURFACE_AT, true) else {
         failed("client: FAILED: could not map its surface");
@@ -119,6 +133,7 @@ extern "C" fn main() -> ! {
         failed("client: FAILED: the surface is smaller than the size it was given");
         finish();
     }
+    let mut resizes = 0u32;
 
     for frame in 0..FRAMES {
         draw(width, height, tint, frame);
@@ -137,15 +152,42 @@ extern "C" fn main() -> ! {
         // for. A client that assumed the next message was its acknowledgement
         // would treat the first keystroke as one and then run a frame ahead.
         loop {
-            let mut reply = [0u8; 16];
-            let mut none = [Handle(0); 1];
-            let Ok(received) = nexus_user::receive(COMPOSITOR, &mut reply, &mut none) else {
+            let mut reply = [0u8; 32];
+            let mut incoming = [Handle(0); 1];
+            let Ok(received) = nexus_user::receive(COMPOSITOR, &mut reply, &mut incoming) else {
                 failed("client: FAILED: the compositor stopped answering");
                 finish();
             };
             if &reply[..received.bytes] == SHOWN {
                 break;
             }
+
+            // A new surface. The old one is unmapped before the new one is
+            // mapped, because they go to the same address -- which is the whole
+            // point of being able to unmap: a program that had to put each new
+            // surface somewhere else would run out of address space rather than
+            // out of memory.
+            if received.bytes >= 12 && &reply[..4] == RESIZED && received.handles == 1 {
+                nexus_user::memory_unmap(surface, SURFACE_AT).ok();
+                nexus_user::close(surface).ok();
+                surface = incoming[0];
+                width = read_u32(&reply, 4);
+                height = read_u32(&reply, 8);
+                let Ok(mapped) = nexus_user::memory_map(surface, SURFACE_AT, true) else {
+                    failed("client: FAILED: could not map the surface it was given");
+                    finish();
+                };
+                if (width as usize) * (height as usize) * 4 > mapped {
+                    failed("client: FAILED: the new surface is smaller than its size");
+                    finish();
+                }
+                resizes += 1;
+                if resizes == 1 {
+                    nexus_user::log("client: took a new surface and kept drawing").ok();
+                }
+                continue;
+            }
+
             if received.bytes >= key::SIZE {
                 heard(&reply[..received.bytes]);
             }
@@ -157,9 +199,6 @@ extern "C" fn main() -> ! {
     nexus_user::log("client: drew every frame into a surface it was given").ok();
     finish()
 }
-
-/// What the compositor says when a frame is on screen.
-const SHOWN: &[u8] = b"shown";
 
 /// Note a key that was sent to this program.
 ///

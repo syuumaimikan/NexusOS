@@ -64,11 +64,27 @@
 //! in it, and getting that right needs the damage arithmetic that this does not
 //! have and does not yet need. The rectangle is ninety thousand pixels.
 //!
+//! # Resizing
+//!
+//! A window has a grip in its bottom-right corner, and dragging it makes the
+//! window bigger or smaller. That needs a *new surface*: a client's surface is
+//! tightly packed, so its size is its shape, and there is no changing one
+//! without replacing the other. So the compositor makes a new memory object,
+//! copies across what still fits, hands the client a handle to it, and unmaps
+//! and drops the old one.
+//!
+//! The client is told a size and given a handle and nothing else. It is not
+//! told why, or where the window is, or that anyone can see it -- a client that
+//! had to be told why its window changed size would be a client that knew it
+//! had a window.
+//!
+//! Copying across what still fits is not necessary and it is what keeps a
+//! resize from flashing: without it the window is blank until the client draws
+//! its next frame, which at two frames a second is half a second of black.
+//!
 //! # What it is not
 //!
-//! No resizing, no minimising, no window that is not a rectangle. A window's
-//! size is fixed when its client is told what surface it has, and telling a
-//! client its surface has changed is a protocol this does not have.
+//! No minimising, and no window that is not a rectangle.
 
 #![no_std]
 #![no_main]
@@ -118,9 +134,19 @@ struct Pointer {
     dragging: Option<Drag>,
 }
 
-/// A window being carried.
+/// What dragging is doing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Doing {
+    /// Carrying the window.
+    Moving,
+    /// Changing its size from the bottom-right corner.
+    Resizing,
+}
+
+/// A window being carried or resized.
 struct Drag {
     tile: usize,
+    doing: Doing,
     grab_x: u32,
     grab_y: u32,
     /// Whether this drag has already said so.
@@ -156,8 +182,13 @@ mod key {
 const FRAMEBUFFER_AT: usize = 0x0000_0000_2000_0000;
 /// Where it maps the first client surface; the second goes a stride further on.
 const SURFACES_AT: usize = 0x0000_0000_3000_0000;
-/// Address space set aside per surface, which bounds how large a tile may be.
+/// Address space set aside per surface.
+///
+/// Twice what one surface may be, because a resize has the old and the new
+/// mapped at once for the length of the copy between them.
 const SURFACE_STRIDE: usize = 0x0010_0000;
+/// The largest a surface may be, which is what bounds how large a window is.
+const MAX_SURFACE: usize = SURFACE_STRIDE / 2;
 
 /// The program this one gives surfaces to.
 const CLIENT: &[u8] = b"BIN/CLIENT.ELF";
@@ -172,6 +203,15 @@ const GAP: u32 = 8;
 /// different sizes, which is a second rectangle to keep in step for the sake of
 /// fourteen pixels a client was going to fill with its own border anyway.
 const TITLE: u32 = 14;
+/// How large the corner is that resizes a window.
+const GRIP: u32 = 12;
+/// The smallest a window may be made.
+///
+/// Small enough to be a real constraint and large enough that a window can
+/// still be grabbed: below the height of a title bar plus a grip there would be
+/// nothing left to take hold of, and a window that cannot be picked up cannot
+/// be made bigger again.
+const MIN_SIZE: u32 = 48;
 
 /// The background of the rectangle this program owns.
 ///
@@ -224,6 +264,16 @@ impl Tile {
     /// Whether a point is in the strip that can be taken hold of.
     fn title_contains(&self, x: u32, y: u32) -> bool {
         self.contains(x, y) && y < self.y + TITLE
+    }
+
+    /// Whether a point is in the corner that resizes.
+    ///
+    /// Checked before the title bar is, because on a window small enough for
+    /// the two to overlap the grip is the one that has to win: a window can
+    /// always be moved by the rest of its bar, and a window too small to resize
+    /// is a window that can never be made bigger.
+    fn grip_contains(&self, x: u32, y: u32) -> bool {
+        self.contains(x, y) && x + GRIP >= self.x + self.width && y + GRIP >= self.y + self.height
     }
 }
 
@@ -337,7 +387,7 @@ fn take_the_display() -> Option<Screen> {
 /// this program's own mapping of them.
 fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option<Tile> {
     let bytes = width as usize * height as usize * 4;
-    if bytes > SURFACE_STRIDE {
+    if bytes > MAX_SURFACE {
         failed("compositor: FAILED: a tile is larger than the space set aside for it");
         return None;
     }
@@ -710,9 +760,20 @@ fn read_pointer(
                 continue;
             }
 
-            if tile.title_contains(cursor.x, cursor.y) {
+            if tile.grip_contains(cursor.x, cursor.y) {
                 cursor.dragging = Some(Drag {
                     tile: index,
+                    doing: Doing::Resizing,
+                    // How far the pointer is from the corner it is dragging, so
+                    // the corner follows the pointer rather than jumping to it.
+                    grab_x: (tile.x + tile.width).saturating_sub(cursor.x),
+                    grab_y: (tile.y + tile.height).saturating_sub(cursor.y),
+                    announced: false,
+                });
+            } else if tile.title_contains(cursor.x, cursor.y) {
+                cursor.dragging = Some(Drag {
+                    tile: index,
+                    doing: Doing::Moving,
                     grab_x: cursor.x - tile.x,
                     grab_y: cursor.y - tile.y,
                     announced: false,
@@ -738,28 +799,167 @@ fn read_pointer(
     }
 
     if let Some(drag) = &mut cursor.dragging {
-        if let Some(Some(tile)) = tiles.get_mut(drag.tile) {
-            // Where the window would go if the point that was grabbed stayed
-            // under the pointer -- clamped so no part of it leaves the
-            // rectangle this program owns.
-            let wanted_x = i64::from(cursor.x) - i64::from(drag.grab_x);
-            let wanted_y = i64::from(cursor.y) - i64::from(drag.grab_y);
-            let moved_x = clamp(wanted_x, screen.x, screen.x + screen.width - tile.width);
-            let moved_y = clamp(wanted_y, screen.y, screen.y + screen.height - tile.height);
-            if moved_x != tile.x || moved_y != tile.y {
-                tile.x = moved_x;
-                tile.y = moved_y;
-                carried = 1;
-                if !drag.announced {
-                    drag.announced = true;
-                    nexus_user::log("compositor: carried a window by its title bar").ok();
+        let index = drag.tile;
+        let doing = drag.doing;
+        let (grab_x, grab_y) = (drag.grab_x, drag.grab_y);
+        let announced = drag.announced;
+        let mut announce = None;
+
+        if let Some(Some(tile)) = tiles.get_mut(index) {
+            match doing {
+                Doing::Moving => {
+                    // Where the window would go if the point that was grabbed
+                    // stayed under the pointer -- clamped so no part of it
+                    // leaves the rectangle this program owns.
+                    let wanted_x = i64::from(cursor.x) - i64::from(grab_x);
+                    let wanted_y = i64::from(cursor.y) - i64::from(grab_y);
+                    let moved_x = clamp(wanted_x, screen.x, screen.x + screen.width - tile.width);
+                    let moved_y = clamp(wanted_y, screen.y, screen.y + screen.height - tile.height);
+                    if moved_x != tile.x || moved_y != tile.y {
+                        tile.x = moved_x;
+                        tile.y = moved_y;
+                        carried = 1;
+                        if !announced {
+                            announce = Some("compositor: carried a window by its title bar");
+                        }
+                    }
+                }
+                Doing::Resizing => {
+                    // The far corner follows the pointer; the near one stays.
+                    let corner_x = i64::from(cursor.x) + i64::from(grab_x);
+                    let corner_y = i64::from(cursor.y) + i64::from(grab_y);
+                    let wanted_width = clamp(
+                        corner_x - i64::from(tile.x),
+                        MIN_SIZE,
+                        screen.x + screen.width - tile.x,
+                    );
+                    let wanted_height = clamp(
+                        corner_y - i64::from(tile.y),
+                        MIN_SIZE,
+                        screen.y + screen.height - tile.y,
+                    );
+
+                    if wanted_width != tile.width || wanted_height != tile.height {
+                        match resize(index, tile, wanted_width, wanted_height) {
+                            Ok(()) => {
+                                carried = 1;
+                                if !announced {
+                                    announce = Some("compositor: resized a window by its corner");
+                                }
+                            }
+                            // A resize that could not be done leaves the window
+                            // as it was, which is what a client that is still
+                            // drawing into its old surface needs.
+                            Err(()) => return None,
+                        }
+                    }
                 }
             }
+        }
+
+        if let Some(text) = announce {
+            drag.announced = true;
+            nexus_user::log(text).ok();
         }
     }
 
     cursor.held = pressed;
     Some(carried)
+}
+
+/// Give a window a new surface of a new size.
+///
+/// A surface is tightly packed, so its size *is* its shape: there is no
+/// changing one without replacing the other. So a new memory object is made,
+/// what still fits is copied across, the client is handed a handle to it, and
+/// the old one is unmapped and dropped.
+///
+/// The copy is not necessary and it is what keeps a resize from flashing.
+/// Without it the window is blank until the client's next frame, which at two
+/// frames a second is half a second of black.
+///
+/// `Err` means the client has gone or the memory could not be had, and the
+/// window is left exactly as it was -- which is what a client still drawing
+/// into its old surface needs.
+fn resize(index: usize, tile: &mut Tile, width: u32, height: u32) -> Result<(), ()> {
+    let bytes = width as usize * height as usize * 4;
+    if bytes > MAX_SURFACE {
+        // Larger than the space set aside per surface. Refused rather than
+        // clamped, because a window that quietly stopped growing would be a
+        // window whose size did not match what its client was told.
+        return Ok(());
+    }
+
+    let Ok(fresh) = nexus_user::memory_create(bytes) else {
+        return Ok(());
+    };
+    // Two surfaces are mapped at once for the length of the copy, which is why
+    // the space set aside per surface is twice what one needs.
+    let staging = SURFACES_AT + index * SURFACE_STRIDE + SURFACE_STRIDE / 2;
+    if nexus_user::memory_map(fresh, staging, true).is_err() {
+        nexus_user::close(fresh).ok();
+        return Ok(());
+    }
+
+    // What still fits, row by row. The two are packed to different widths, so
+    // there is no copying them as one run.
+    let keep_width = width.min(tile.width) as usize;
+    let keep_height = height.min(tile.height) as usize;
+    for row in 0..keep_height {
+        let from = tile.mapped_at + row * tile.width as usize * 4;
+        let to = staging + row * width as usize * 4;
+        for column in 0..keep_width {
+            // SAFETY: both surfaces are mapped and writable here, and the
+            // offsets are inside the smaller of the two in each direction.
+            unsafe {
+                let pixel = core::ptr::read_volatile((from + column * 4) as *const u32);
+                core::ptr::write_volatile((to + column * 4) as *mut u32, pixel);
+            }
+        }
+    }
+
+    // The client's copy, before the old one goes: a handle moves when it
+    // crosses a channel, so this has to be a duplicate, and it needs transfer
+    // because crossing is the one thing it is for.
+    let Ok(theirs) = nexus_user::duplicate(
+        fresh,
+        nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+    ) else {
+        nexus_user::memory_unmap(fresh, staging).ok();
+        nexus_user::close(fresh).ok();
+        return Ok(());
+    };
+
+    let mut message = [0u8; 12];
+    message[0..4].copy_from_slice(b"size");
+    message[4..8].copy_from_slice(&width.to_le_bytes());
+    message[8..12].copy_from_slice(&height.to_le_bytes());
+    if nexus_user::send(tile.channel, &message, &[theirs]).is_err() {
+        // The client has gone. Its window goes with it, and the surface just
+        // made goes back rather than being left mapped.
+        nexus_user::memory_unmap(fresh, staging).ok();
+        nexus_user::close(fresh).ok();
+        return Err(());
+    }
+
+    // And out with the old. Unmapped from both places and closed, so the object
+    // dies with the last handle to it -- which is this one, since the client
+    // closes its own on the way past.
+    nexus_user::memory_unmap(tile.surface, tile.mapped_at).ok();
+    nexus_user::close(tile.surface).ok();
+
+    // The new one moves to where the old one was, so that every other part of
+    // this program goes on reading a surface from one place.
+    nexus_user::memory_unmap(fresh, staging).ok();
+    if nexus_user::memory_map(fresh, tile.mapped_at, true).is_err() {
+        nexus_user::close(fresh).ok();
+        return Err(());
+    }
+
+    tile.surface = fresh;
+    tile.width = width;
+    tile.height = height;
+    Ok(())
 }
 
 /// Bring a window to the front of the order.
@@ -821,11 +1021,33 @@ fn repaint(
         }
         composite(screen, tile);
         title_bar(screen, tile, index == focus);
+        grip(screen, tile, index == focus);
         outline(screen, tile, index == focus);
     }
 
     if pointing {
         draw_cursor(screen, cursor);
+    }
+}
+
+/// Draw the corner that resizes a window.
+///
+/// Three short diagonals, which is what a grip has looked like for thirty
+/// years. Visible for the same reason the title bar is: a corner that resizes
+/// and does not say so is a corner nobody grabs, and one that is grabbed by
+/// accident is worse.
+fn grip(screen: &Screen, tile: &Tile, focused: bool) {
+    let colour = if focused { 0x0088_B4E8 } else { 0x0038_4A60 };
+    for line in 1..4u32 {
+        let inset = line * 3;
+        if inset + 1 >= tile.width || inset + 1 >= tile.height {
+            break;
+        }
+        for step in 0..inset {
+            let x = tile.x + tile.width - 1 - step;
+            let y = tile.y + tile.height - 1 - (inset - 1 - step);
+            fill(screen, x, y, 1, 1, colour);
+        }
     }
 }
 

@@ -129,15 +129,35 @@ try {
         }
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 150
-        # Rightwards and down, with the button held. There is far more room to
-        # the right than below -- a window can only fall eight pixels before it
-        # reaches the bottom of the rectangle the compositor owns.
-        foreach ($step in 1..10) {
-            $writer.WriteLine('mouse_move 6 4')
-            Start-Sleep -Milliseconds 60
+        # Rightwards and down, far enough that both the window and the pointer
+        # run into the far corner of the rectangle the compositor owns. Both
+        # clamp there, which is the point: after this the window is at a
+        # position this script knows without having tracked every step, and the
+        # pointer is sitting in its resize grip.
+        foreach ($step in 1..15) {
+            $writer.WriteLine('mouse_move 20 20')
+            Start-Sleep -Milliseconds 50
         }
         $writer.WriteLine('mouse_button 0')
         Start-Sleep -Milliseconds 200
+
+        # And resize it. The window is now hard against the far corner, so its
+        # grip is in the last twelve pixels of the rectangle -- and driving the
+        # pointer into that corner puts it there without this script having to
+        # track where either of them ended up.
+        Write-Host '==> Resizing a window by its corner' -ForegroundColor Cyan
+        foreach ($step in 1..10) {
+            $writer.WriteLine('mouse_move 40 40')
+            Start-Sleep -Milliseconds 40
+        }
+        $writer.WriteLine('mouse_button 1')
+        Start-Sleep -Milliseconds 150
+        foreach ($step in 1..12) {
+            $writer.WriteLine('mouse_move -6 -5')
+            Start-Sleep -Milliseconds 60
+        }
+        $writer.WriteLine('mouse_button 0')
+        Start-Sleep -Milliseconds 400
         # Wait for the monitor thread's next report, which is what carries the
         # keyboard figures and the decoded line into the serial log. It runs
         # every five seconds, so this has to outlast one full period.
@@ -255,6 +275,22 @@ if ($output.Contains('compositor: carried a window by its title bar')) {
     Write-Host '    ok   a window was carried by its title bar' -ForegroundColor DarkGray
 } else {
     $failures += 'the pointer never carried a window'
+}
+
+# And the resize. A window's surface is tightly packed, so its size is its
+# shape: changing one means replacing the other, and the client has to take the
+# new one and keep drawing. Both halves are checked, because a compositor that
+# resized a window whose client never noticed would be compositing from a
+# surface nobody was drawing into.
+if ($output.Contains('compositor: resized a window by its corner')) {
+    Write-Host '    ok   a window was resized by its corner' -ForegroundColor DarkGray
+} else {
+    $failures += 'the pointer never resized a window'
+}
+if ($output.Contains('client: took a new surface and kept drawing')) {
+    Write-Host '    ok   the client took the new surface and went on drawing' -ForegroundColor DarkGray
+} else {
+    $failures += 'the client never took the surface it was given'
 }
 
 # F1 is a distinct key, and acting on it says the decoded key reached something

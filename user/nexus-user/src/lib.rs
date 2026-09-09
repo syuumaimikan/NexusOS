@@ -129,6 +129,7 @@ enum Call {
     HandleDuplicate = 25,
     Sleep = 26,
     ProcessKill = 27,
+    MemoryUnmap = 28,
 }
 
 /// Make a system call.
@@ -341,6 +342,33 @@ pub fn memory_map(handle: Handle, address: usize, writable: bool) -> Result<usiz
             u64::from(handle.0),
             address as u64,
             u64::from(writable),
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|bytes| bytes as usize)
+}
+
+/// Take a memory object out of this process's address space.
+///
+/// What a program needs to map something *else* where it was. Without it an
+/// address, once used, is used forever: a program handed a replacement for
+/// something it already maps would have to put the new one somewhere else and
+/// leak the old address, which is how a window resized often enough runs out of
+/// address space rather than out of memory.
+///
+/// The handle says what to unmap. The frames are not freed -- they belong to
+/// the object, which is still alive as long as anybody holds a handle to it.
+pub fn memory_unmap(handle: Handle, address: usize) -> Result<usize, Error> {
+    // SAFETY: the kernel checks the address against this process's own space;
+    // nothing is dereferenced here.
+    let result = unsafe {
+        syscall(
+            Call::MemoryUnmap,
+            u64::from(handle.0),
+            address as u64,
+            0,
             0,
             0,
             0,

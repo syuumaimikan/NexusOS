@@ -856,9 +856,39 @@ the compositor negates it again on the way to a position. All three are correct
 and they are in three different places, which is why the first drag went
 confidently in the wrong direction.
 
-Outstanding here: no resizing, no minimising, no window that is not a rectangle.
-A window's size is fixed when its client is told what surface it has, and
-telling a client its surface has changed is a protocol this does not have.
+### Windows that resize
+
+A window has a grip in its bottom-right corner, and dragging it changes the
+size. A surface is tightly packed, so its size *is* its shape -- there is no
+changing one without replacing the other. So the compositor makes a new memory
+object, copies across what still fits, hands the client a handle to it, and
+unmaps and drops the old one.
+
+That needed the one primitive nothing had asked for yet: **unmapping**. Without
+it an address, once used, is used forever, and a program handed a replacement
+for something it already maps would have to put the new one somewhere else and
+leak the old address -- which is how a window resized often enough runs out of
+address space rather than out of memory. The handle says *what* to unmap,
+because the frames belong to the object and not to the space, and the pages are
+checked against it before any of them is removed: an address that happens to be
+mapped to something else is not this object.
+
+The client is told a size and given a handle and nothing else. Not why, not
+where the window is, not that anybody can see it -- a client that had to be told
+why its window changed size would be a client that knew it had a window.
+
+The copy across is not necessary and it is what keeps a resize from flashing:
+without it the window is blank until the client's next frame, which at two
+frames a second is half a second of black. It is also the harder direction that
+the test drives, shrinking rather than growing, because padding a larger surface
+leaves zeroes and cropping has to get the row stride right on both sides at
+once.
+
+The grip is checked before the title bar, because on a window small enough for
+the two to overlap the grip has to win: a window can always be moved by the rest
+of its bar, and a window too small to resize can never be made bigger.
+
+Outstanding here: no minimising, and no window that is not a rectangle.
 
 
 

@@ -180,6 +180,22 @@ impl AddressSpace {
         unsafe { paging::map_page_in(self.root, virt, phys, flags) }
     }
 
+    /// Take a page out of this space.
+    ///
+    /// Returns the frame it held. The caller decides what becomes of it: a page
+    /// carrying the `SHARED` bit belongs to a memory object rather than to this
+    /// space, and freeing it here would take it from everyone else mapping it.
+    ///
+    /// # Safety
+    ///
+    /// Nothing may still be using the address, and the caller must know whether
+    /// the frame is this space's to free.
+    pub unsafe fn unmap(&self, virt: u64) -> Result<u64, paging::MapError> {
+        debug_assert!(virt < layout::USER_SPACE_END);
+        // SAFETY: upheld by the caller.
+        unsafe { paging::unmap_page_in(self.root, virt) }
+    }
+
     /// What `virt` translates to in this space, if anything.
     #[must_use]
     pub fn translate(&self, virt: u64) -> Option<u64> {

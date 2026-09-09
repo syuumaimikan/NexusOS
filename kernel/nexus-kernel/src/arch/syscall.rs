@@ -275,11 +275,14 @@ pub enum Call {
     Sleep = 26,
     /// Ask a process to stop. `(handle)`.
     ProcessKill = 27,
+    /// Take a memory object out of this process's address space.
+    /// `(handle, address)`.
+    MemoryUnmap = 28,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 28;
+    pub const COUNT: usize = 29;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -312,6 +315,7 @@ impl Call {
             25 => Some(Self::HandleDuplicate),
             26 => Some(Self::Sleep),
             27 => Some(Self::ProcessKill),
+            28 => Some(Self::MemoryUnmap),
             _ => None,
         }
     }
@@ -443,6 +447,7 @@ extern "sysv64" fn dispatch(
         Some(Call::HandleDuplicate) => handle_duplicate(argument0, argument1),
         Some(Call::Sleep) => sleep(argument0),
         Some(Call::ProcessKill) => process_kill(argument0),
+        Some(Call::MemoryUnmap) => memory_unmap(argument0, argument1),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -1436,4 +1441,68 @@ fn process_kill(handle: u64) -> u64 {
         );
     }
     0
+}
+
+/// [`Call::MemoryUnmap`]: take a memory object out of this address space.
+///
+/// What a program needs to map something *else* where it was. Without it an
+/// address, once used, is used forever -- and a program handed a replacement
+/// for something it already maps has to put the new one somewhere else and
+/// leak the old address, which is how a window that is resized often runs out
+/// of address space rather than out of memory.
+///
+/// The handle says *what* to unmap, and it has to: the frames belong to the
+/// object rather than to this space, and unmapping the wrong number of pages
+/// would leave part of it mapped or take a page out from under whatever was
+/// next. The frames are not freed -- they belong to the object, which is still
+/// alive as long as somebody holds a handle to it.
+fn memory_unmap(handle: u64, address: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+    let memory = match process.handles.memory(handle, crate::ipc::Rights::READ) {
+        Ok(memory) => memory,
+        Err(error) => return handle_error(error),
+    };
+
+    if !address.is_multiple_of(nexus_abi::layout::PAGE_SIZE) || address == 0 {
+        return EINVAL;
+    }
+    let bytes = memory.pages() as u64 * nexus_abi::layout::PAGE_SIZE;
+    let Some(end) = address.checked_add(bytes) else {
+        return EINVAL;
+    };
+    if end > nexus_abi::layout::USER_SPACE_END {
+        return EINVAL;
+    }
+
+    // Every page has to be one this object is actually mapped at, checked
+    // before any of them is removed. An address that happens to be mapped to
+    // something else is not this object, and unmapping it would be unmapping
+    // whatever the caller really had there.
+    for index in 0..memory.pages() {
+        let virt = address + index as u64 * nexus_abi::layout::PAGE_SIZE;
+        let Some(frame) = memory.frame(index) else {
+            return EINVAL;
+        };
+        if process.address_space.translate(virt) != Some(frame) {
+            return EINVAL;
+        }
+    }
+
+    for index in 0..memory.pages() {
+        let virt = address + index as u64 * nexus_abi::layout::PAGE_SIZE;
+        // SAFETY: checked above to be exactly this object's pages in this
+        // process's own space. The frame is not freed: it belongs to the
+        // object, which outlives this mapping.
+        unsafe {
+            let _ = process.address_space.unmap(virt);
+        }
+    }
+
+    bytes
 }
