@@ -29,15 +29,39 @@
 //! side, so the interface stays the small honest one until there is a journal
 //! and the cache can hold writes back.
 //!
+//! # The journal
+//!
+//! An operation touches several blocks and has to be all or none of them.
+//! Making a file writes an inode, a directory, a bitmap and a superblock; a
+//! power failure between any two of them used to leave the filesystem saying
+//! something that was not true.
+//!
+//! So metadata is written twice. Every block an operation changes goes to a
+//! reserved run near the front of the partition, then a descriptor naming them
+//! all goes down with a checksum over itself, and only then are the blocks
+//! written where they belong. The descriptor is erased once they are.
+//!
+//! That makes every crash recoverable and every recovery the same act:
+//!
+//! * before the descriptor — its checksum fails, nothing is replayed, and the
+//!   operation simply never happened;
+//! * after the descriptor, part-way through writing the blocks home — the next
+//!   mount finds it and finishes the job;
+//! * after the blocks are home but before the descriptor is erased — the next
+//!   mount writes the same blocks again, which changes nothing, because
+//!   replaying is idempotent by construction.
+//!
+//! File *contents* are not journalled. A two-megabyte file would need a
+//! two-megabyte journal to protect a write nobody promised was atomic, and the
+//! data is written before the metadata that points at it, so a failure leaves
+//! the old file rather than a new one full of someone else's blocks.
+//!
 //! # What it does not do yet
 //!
-//! No journal, so a power failure between two writes can leave the bitmap
-//! saying a block is taken that no file points at. That leaks space and does not
-//! corrupt anything, which is the right way round for the failure to be, but it
-//! is a failure and it is written down rather than glossed. No permissions, no
-//! timestamps beyond the tick a thing was made at, no links beyond the one a
-//! directory entry is.
+//! No permissions, no timestamps beyond the tick a thing was made at, no links
+//! beyond the one a directory entry is.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -52,7 +76,26 @@ const SECTORS_PER_BLOCK: u64 = (BLOCK_SIZE / SECTOR_SIZE) as u64;
 /// What a NexusFS superblock says it is.
 const MAGIC: &[u8; 8] = b"NEXUSFS\0";
 /// The only version this understands.
-const VERSION: u32 = 1;
+///
+/// Two, because version one had no journal and its regions start in different
+/// places. A reader that took a version-one superblock for this one would find
+/// the inode table where the journal is.
+const VERSION: u32 = 2;
+
+/// What a journal descriptor says it is.
+const JOURNAL_MAGIC: &[u8; 8] = b"NEXUSJRN";
+
+/// Blocks reserved for the journal.
+///
+/// One for the descriptor and the rest for the blocks it describes, so an
+/// operation may touch a hundred and twenty-seven of them. That is far more
+/// than any operation here does -- making a file touches four -- and the
+/// margin is the point: a transaction that will not fit is refused, and a
+/// refusal is only acceptable if it cannot happen for anything ordinary.
+const JOURNAL_BLOCKS: u64 = 128;
+
+/// Blocks one transaction may carry.
+const MAX_JOURNALLED: usize = (JOURNAL_BLOCKS - 1) as usize;
 
 /// Bytes in an inode.
 const INODE_SIZE: usize = 128;
@@ -191,6 +234,8 @@ impl core::fmt::Display for FsError {
 struct Superblock {
     total_blocks: u64,
     inode_count: u64,
+    journal_start: u64,
+    journal_blocks: u64,
     bitmap_start: u64,
     bitmap_blocks: u64,
     inode_start: u64,
@@ -207,6 +252,8 @@ mod field {
     pub const BLOCK_SIZE: usize = 12;
     pub const TOTAL_BLOCKS: usize = 16;
     pub const INODE_COUNT: usize = 24;
+    pub const JOURNAL_START: usize = 88;
+    pub const JOURNAL_BLOCKS: usize = 96;
     pub const BITMAP_START: usize = 32;
     pub const BITMAP_BLOCKS: usize = 40;
     pub const INODE_START: usize = 48;
@@ -215,7 +262,11 @@ mod field {
     pub const FREE_BLOCKS: usize = 72;
     pub const FREE_INODES: usize = 80;
     /// Everything above this is what the checksum covers.
-    pub const CHECKSUM: usize = 96;
+    ///
+    /// Moved out to make room for the journal's two fields, which is why the
+    /// version had to go up: a version-one superblock has its checksum where
+    /// this one has a block number.
+    pub const CHECKSUM: usize = 104;
 }
 
 /// What an inode holds, unpacked.
@@ -287,6 +338,15 @@ pub struct Volume {
     /// First sector of the partition; every block number is relative to it.
     start_lba: u64,
     superblock: Superblock,
+    /// Blocks an operation has changed but not yet committed.
+    ///
+    /// `None` outside a transaction, when a write goes straight to its block.
+    /// `Some` inside one, when it is held here instead -- and read back from
+    /// here too, so that an operation reading a block it has already changed
+    /// sees its own change and not what is still on the disk.
+    pending: Option<Vec<(u64, Box<[u8; BLOCK_SIZE]>)>>,
+    /// Which transaction this will be, for the descriptor and the log.
+    sequence: u64,
 }
 
 /// One entry of a directory.
@@ -326,18 +386,30 @@ impl Volume {
         let inode_blocks = inode_count.div_ceil(INODES_PER_BLOCK as u64);
         let bitmap_blocks = total_blocks.div_ceil(BLOCK_SIZE as u64 * 8);
 
-        let bitmap_start = 1;
+        // The journal comes first, right after the superblock, so that finding
+        // it needs only the two fields that say where it is -- which matters
+        // because recovery runs before anything else is trusted.
+        let journal_start = 1;
+        let bitmap_start = journal_start + JOURNAL_BLOCKS;
         let inode_start = bitmap_start + bitmap_blocks;
         let data_start = inode_start + inode_blocks;
         if data_start + 1 >= total_blocks {
             return Err(FsError::TooSmall);
         }
 
-        let volume = Self {
+        let mut volume = Self {
             start_lba,
+            // Formatting is not journalled. There is nothing to protect: a
+            // failure part-way through leaves a partition with no valid
+            // superblock, which is a partition that has no filesystem on it --
+            // exactly what it was before.
+            pending: None,
+            sequence: 0,
             superblock: Superblock {
                 total_blocks,
                 inode_count,
+                journal_start,
+                journal_blocks: JOURNAL_BLOCKS,
                 bitmap_start,
                 bitmap_blocks,
                 inode_start,
@@ -349,9 +421,12 @@ impl Volume {
             },
         };
 
-        // The inode table, zeroed, which is what makes every inode in it free.
+        // The journal and the inode table, zeroed. A zeroed inode table is a
+        // table of free inodes; a zeroed journal is one with nothing to replay,
+        // which is what a fresh filesystem must look like or the first mount
+        // would try to finish an operation from whatever was on the disk.
         let empty = [0u8; BLOCK_SIZE];
-        for block in inode_start..data_start {
+        for block in journal_start..data_start {
             volume.write_block(block, &empty)?;
         }
 
@@ -421,6 +496,8 @@ impl Volume {
         let superblock = Superblock {
             total_blocks: read_u64(&block, field::TOTAL_BLOCKS),
             inode_count: read_u64(&block, field::INODE_COUNT),
+            journal_start: read_u64(&block, field::JOURNAL_START),
+            journal_blocks: read_u64(&block, field::JOURNAL_BLOCKS),
             bitmap_start: read_u64(&block, field::BITMAP_START),
             bitmap_blocks: read_u64(&block, field::BITMAP_BLOCKS),
             inode_start: read_u64(&block, field::INODE_START),
@@ -433,7 +510,9 @@ impl Volume {
         // The regions have to be in order, inside the volume, and large enough
         // for what they claim to describe. A checksum says the bytes are the
         // ones that were written; this says the writer was not confused.
-        let ordered = superblock.bitmap_start == 1
+        let ordered = superblock.journal_start == 1
+            && superblock.journal_blocks >= 2
+            && superblock.bitmap_start == superblock.journal_start + superblock.journal_blocks
             && superblock.inode_start == superblock.bitmap_start + superblock.bitmap_blocks
             && superblock.data_start == superblock.inode_start + superblock.inode_blocks
             && superblock.data_start < superblock.total_blocks;
@@ -446,10 +525,33 @@ impl Volume {
             return Err(FsError::BadGeometry);
         }
 
-        Ok(Self {
+        let mut volume = Self {
             start_lba,
             superblock,
-        })
+            pending: None,
+            sequence: 0,
+        };
+
+        // Before anything else reads a block. A mount that served a request
+        // from a filesystem with an unfinished operation still in the journal
+        // would be serving a half-applied one.
+        match volume.recover()? {
+            0 => {}
+            blocks => {
+                crate::kprintln!(
+                    "[fs  ] finished an operation the last boot did not: {blocks} blocks replayed"
+                );
+                // The superblock may have been one of them, so it is read
+                // again rather than kept: the copy in hand is from before the
+                // replay and would have the old free counts.
+                let mut fresh = [0u8; BLOCK_SIZE];
+                read_block_at(start_lba, 0, &mut fresh)?;
+                volume.superblock.free_blocks = read_u64(&fresh, field::FREE_BLOCKS);
+                volume.superblock.free_inodes = read_u64(&fresh, field::FREE_INODES);
+            }
+        }
+
+        Ok(volume)
     }
 
     /// Mount the filesystem there, or make one if there is none.
@@ -562,7 +664,7 @@ impl Volume {
         if parent.kind != Kind::Directory {
             return Err(FsError::WrongKind);
         }
-        let mut contents = self.read_inode_data(&parent)?;
+        let contents = self.read_inode_data(&parent)?;
         if parse_directory(&contents)?
             .iter()
             .any(|(_, existing, _)| existing == name)
@@ -570,15 +672,35 @@ impl Volume {
             return Err(FsError::Exists);
         }
 
+        // One transaction. Making a file changes an inode, a directory, a
+        // bitmap and a superblock, and a filesystem in which some of those
+        // happened is a filesystem that is wrong -- so either all of them
+        // survive a power failure or none of them do.
+        self.begin();
+        match self.create_within(directory, name, kind, contents) {
+            Ok(number) => {
+                self.commit()?;
+                Ok(number)
+            }
+            Err(error) => {
+                // Nothing reached the disk, so there is nothing to undo.
+                self.abandon();
+                Err(error)
+            }
+        }
+    }
+
+    /// The body of [`create`](Self::create), inside a transaction.
+    fn create_within(
+        &mut self,
+        directory: u32,
+        name: &str,
+        kind: Kind,
+        mut contents: Vec<u8>,
+    ) -> Result<u32, FsError> {
         let number = self.allocate_inode(kind)?;
         contents.extend_from_slice(&encode_entry(number, name, kind));
-        // If the directory cannot be grown, the inode just taken is given back,
-        // so a full disk costs nothing rather than leaking an inode per attempt.
-        if let Err(error) = self.write_inode_data(directory, &contents) {
-            self.free_inode(number).ok();
-            return Err(error);
-        }
-
+        self.write_inode_data(directory, &contents, true)?;
         self.write_superblock()?;
         Ok(number)
     }
@@ -618,8 +740,29 @@ impl Volume {
                 rebuilt.extend_from_slice(&encode_entry(*inode, existing, *kind));
             }
         }
-        self.write_inode_data(directory, &rebuilt)?;
 
+        // One transaction, for the same reason as making one: a filesystem in
+        // which the name is gone but the blocks are still taken is wrong, and
+        // so is one in which the blocks are free but the name still points at
+        // them. The second is the dangerous half.
+        self.begin();
+        match self.unlink_within(directory, number, &rebuilt) {
+            Ok(()) => self.commit(),
+            Err(error) => {
+                self.abandon();
+                Err(error)
+            }
+        }
+    }
+
+    /// The body of [`unlink`](Self::unlink), inside a transaction.
+    fn unlink_within(
+        &mut self,
+        directory: u32,
+        number: u32,
+        rebuilt: &[u8],
+    ) -> Result<(), FsError> {
+        self.write_inode_data(directory, rebuilt, true)?;
         self.truncate(number)?;
         self.free_inode(number)?;
         self.write_superblock()
@@ -642,8 +785,28 @@ impl Volume {
         if existing.kind != Kind::File {
             return Err(FsError::WrongKind);
         }
-        self.write_inode_data(inode, data)?;
-        self.write_superblock()
+
+        // The contents are written outside the transaction and the metadata
+        // inside it. A two-megabyte file would need a two-megabyte journal to
+        // protect a write nobody promised was atomic; what the journal is for
+        // here is the inode and the bitmap, so that a failure leaves the old
+        // file rather than a new one pointing at blocks that were never
+        // written.
+        self.begin();
+        match self.write_inode_data(inode, data, false) {
+            Ok(()) => {
+                let result = self.write_superblock();
+                if result.is_err() {
+                    self.abandon();
+                    return result;
+                }
+                self.commit()
+            }
+            Err(error) => {
+                self.abandon();
+                Err(error)
+            }
+        }
     }
 
     /// What a name is, without reading it.
@@ -671,7 +834,12 @@ impl Volume {
     ///
     /// Blocks are taken before anything is written, so a write that will not fit
     /// changes nothing at all rather than half of a file.
-    fn write_inode_data(&mut self, number: u32, data: &[u8]) -> Result<(), FsError> {
+    fn write_inode_data(
+        &mut self,
+        number: u32,
+        data: &[u8],
+        journal_contents: bool,
+    ) -> Result<(), FsError> {
         if data.len() > MAX_FILE {
             return Err(FsError::TooLarge);
         }
@@ -721,7 +889,14 @@ impl Volume {
             let mut buffer = [0u8; BLOCK_SIZE];
             let end = (offset + BLOCK_SIZE).min(data.len());
             buffer[..end - offset].copy_from_slice(&data[offset..end]);
-            self.write_block(*block, &buffer)?;
+            // A directory's contents are metadata and go through the journal;
+            // a file's are not and go straight down, before the metadata that
+            // will point at them.
+            if journal_contents {
+                self.write_block(*block, &buffer)?;
+            } else {
+                self.write_block_now(*block, &buffer)?;
+            }
         }
 
         // A file small enough to fit in its direct blocks does not need an
@@ -786,7 +961,7 @@ impl Volume {
     }
 
     /// Point an inode at exactly these blocks.
-    fn set_block_list(&self, inode: &mut Inode, blocks: &[u64]) -> Result<(), FsError> {
+    fn set_block_list(&mut self, inode: &mut Inode, blocks: &[u64]) -> Result<(), FsError> {
         if blocks.len() > MAX_BLOCKS {
             return Err(FsError::TooLarge);
         }
@@ -855,7 +1030,7 @@ impl Volume {
         Ok(inode)
     }
 
-    fn write_inode(&self, number: u32, inode: &Inode) -> Result<(), FsError> {
+    fn write_inode(&mut self, number: u32, inode: &Inode) -> Result<(), FsError> {
         let (block, offset) = self.inode_place(number)?;
         let mut buffer = [0u8; BLOCK_SIZE];
         self.read_block(block, &mut buffer)?;
@@ -953,7 +1128,7 @@ impl Volume {
     }
 
     /// Set or clear one bit of the allocation bitmap.
-    fn set_block_used(&self, number: u64, used: bool) -> Result<(), FsError> {
+    fn set_block_used(&mut self, number: u64, used: bool) -> Result<(), FsError> {
         let bit = number as usize % (BLOCK_SIZE * 8);
         let block = self.superblock.bitmap_start + number / (BLOCK_SIZE as u64 * 8);
         let mut buffer = [0u8; BLOCK_SIZE];
@@ -964,17 +1139,305 @@ impl Volume {
 
     // -- The disk -----------------------------------------------------------
 
+    /// Read a block, seeing anything this transaction has already changed.
+    ///
+    /// The pending list is consulted first. Without that, an operation that
+    /// changes a block and then reads it again -- which every bitmap update
+    /// does -- would read what is still on the disk and undo itself.
     fn read_block(&self, block: u64, buffer: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
+        if let Some(pending) = &self.pending {
+            if let Some((_, data)) = pending.iter().rev().find(|(number, _)| *number == block) {
+                buffer.copy_from_slice(&data[..]);
+                return Ok(());
+            }
+        }
         read_block_at(self.start_lba, block, buffer)
     }
 
-    fn write_block(&self, block: u64, buffer: &[u8; BLOCK_SIZE]) -> Result<(), FsError> {
-        // Through the cache, which writes it to the disk and then remembers it.
-        // Write-*through*, not write-back: everything this filesystem claims
-        // about surviving a power failure is an argument about the order writes
-        // reach the platter, and a cache that held them would reorder them.
+    /// Change a block, as part of a transaction if one is open.
+    ///
+    /// Inside a transaction the change is held rather than written, so that
+    /// nothing reaches the disk until the whole operation can be replayed from
+    /// the journal. Outside one it goes straight down, which is what file
+    /// contents and the journal's own blocks do.
+    fn write_block(&mut self, block: u64, buffer: &[u8; BLOCK_SIZE]) -> Result<(), FsError> {
+        if let Some(pending) = &mut self.pending {
+            if pending.len() >= MAX_JOURNALLED {
+                return Err(FsError::TooLarge);
+            }
+            // Replacing rather than appending, so a block changed twice in one
+            // operation is journalled once and applied once.
+            if let Some((_, data)) = pending.iter_mut().find(|(number, _)| *number == block) {
+                data.copy_from_slice(&buffer[..]);
+            } else {
+                pending.push((block, Box::new(*buffer)));
+            }
+            return Ok(());
+        }
+        self.write_block_now(block, buffer)
+    }
+
+    /// Change a block on the disk, transaction or no transaction.
+    ///
+    /// Through the cache, which writes it to the disk and then remembers it.
+    /// Write-*through*, not write-back: the journal below orders its own
+    /// writes, and a cache that held them would reorder them out from under it.
+    fn write_block_now(&self, block: u64, buffer: &[u8; BLOCK_SIZE]) -> Result<(), FsError> {
         super::cache::write(self.start_lba + block * SECTORS_PER_BLOCK, buffer)
             .map_err(FsError::Disk)
+    }
+
+    // -- The journal --------------------------------------------------------
+
+    /// Start collecting an operation's changes.
+    ///
+    /// Nested calls are not an error and not a nesting: an operation that
+    /// begins inside another joins it, so the two commit together. Nothing here
+    /// does that today, and getting it silently wrong later would be a
+    /// half-written filesystem.
+    fn begin(&mut self) {
+        if self.pending.is_none() {
+            self.pending = Some(Vec::new());
+        }
+    }
+
+    /// Throw away an operation's changes.
+    ///
+    /// For a failure part-way through. Nothing has reached the disk, so there
+    /// is nothing to undo -- which is the whole reason for holding them.
+    fn abandon(&mut self) {
+        self.pending = None;
+    }
+
+    /// Write the operation down, then carry it out.
+    ///
+    /// The order is the guarantee, and every step of it matters. The blocks go
+    /// to the journal first, so they exist somewhere before anything is
+    /// overwritten. The descriptor goes down second, with a checksum over
+    /// itself, and that write is the commit: before it the operation did not
+    /// happen, after it the operation will happen even if the machine stops.
+    /// Then the blocks go where they belong, and only then is the descriptor
+    /// erased.
+    ///
+    /// It relies on the driver underneath issuing one request at a time and
+    /// waiting for each, which it does -- so the writes reach the device in
+    /// this order. Whether the *host* then reorders them onto real hardware is
+    /// beyond this without negotiating a flush, and that is a gap worth naming
+    /// rather than a guarantee worth pretending to.
+    fn commit(&mut self) -> Result<(), FsError> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.journal(&pending)?;
+        self.apply(&pending)
+    }
+
+    /// Write the operation down. Everything after this is repeatable.
+    fn journal(&mut self, pending: &[(u64, Box<[u8; BLOCK_SIZE]>)]) -> Result<(), FsError> {
+        if pending.len() > MAX_JOURNALLED {
+            return Err(FsError::TooLarge);
+        }
+
+        let journal = self.superblock.journal_start;
+        self.sequence += 1;
+
+        // The blocks first, so they exist somewhere before anything is
+        // overwritten.
+        for (index, (_, data)) in pending.iter().enumerate() {
+            self.write_block_now(journal + 1 + index as u64, data)?;
+        }
+
+        // Then the descriptor, and *that write is the commit*: before it the
+        // operation did not happen, after it the operation will happen even if
+        // the machine stops here.
+        let mut descriptor = [0u8; BLOCK_SIZE];
+        descriptor[..8].copy_from_slice(JOURNAL_MAGIC);
+        write_u64(&mut descriptor, 8, self.sequence);
+        write_u32(&mut descriptor, 16, pending.len() as u32);
+        for (index, (block, _)) in pending.iter().enumerate() {
+            write_u64(&mut descriptor, 24 + index * 8, *block);
+        }
+        let checksum = crc32(&descriptor[..BLOCK_SIZE - 4]);
+        write_u32(&mut descriptor, BLOCK_SIZE - 4, checksum);
+        self.write_block_now(journal, &descriptor)
+    }
+
+    /// Carry the operation out, and erase the record of it.
+    fn apply(&mut self, pending: &[(u64, Box<[u8; BLOCK_SIZE]>)]) -> Result<(), FsError> {
+        for (block, data) in pending {
+            self.write_block_now(*block, data)?;
+        }
+
+        // Erased last. A failure before this leaves a descriptor that will be
+        // replayed, which writes the same blocks again and changes nothing.
+        self.write_block_now(self.superblock.journal_start, &[0u8; BLOCK_SIZE])
+    }
+
+    // -- Proving recovery ---------------------------------------------------
+
+    /// Leave the filesystem exactly as a power failure after a commit would.
+    ///
+    /// The transaction is written to the journal and then nothing happens: the
+    /// blocks are not written home and the descriptor is not erased. The disk
+    /// is now in the state the recovery path exists for.
+    ///
+    /// It is here because there is no other way to test that path. Recovery
+    /// cannot be proved by reading it, and the state it recovers from cannot be
+    /// produced by a machine that is working -- so the machine is given a way
+    /// to stop half way on purpose. Nothing calls it but the test below.
+    fn commit_and_stop(&mut self) -> Result<(), FsError> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.journal(&pending)
+    }
+
+    /// Crash between a commit and its writes, then mount and check.
+    ///
+    /// The claim is the one the journal exists to make: an operation that was
+    /// committed but not carried out is carried out by the next mount, and one
+    /// that was not committed leaves no trace. Both halves are checked, because
+    /// a recovery that replayed everything it found would be as wrong as one
+    /// that replayed nothing -- it would finish operations that never happened.
+    ///
+    /// Returns what it did, for the log.
+    pub fn journal_self_test(&mut self) -> Result<String, FsError> {
+        const NAME: &str = "journal-test";
+        const BEFORE: &[u8] = b"the contents before the crash";
+        const AFTER: &[u8] = b"the contents the journal was holding";
+
+        // A file whose contents are known, written the ordinary way.
+        if self.lookup(ROOT, NAME).is_ok() {
+            self.unlink(ROOT, NAME)?;
+        }
+        let file = self.create(ROOT, NAME, Kind::File)?;
+        self.write(file, BEFORE)?;
+        if self.read(file)? != BEFORE {
+            return Err(FsError::Corrupt);
+        }
+
+        // -- A transaction that commits and then stops ----------------------
+
+        self.begin();
+        self.write_inode_data(file, AFTER, true)?;
+        self.commit_and_stop()?;
+
+        // Nothing has been written home, so a reader that ignored the journal
+        // still sees the old contents. Checked from a *fresh* mount whose
+        // recovery is skipped, because this volume's own cache of the
+        // superblock would otherwise answer for the disk.
+        let unrecovered = Self {
+            start_lba: self.start_lba,
+            superblock: self.superblock,
+            pending: None,
+            sequence: self.sequence,
+        };
+        if unrecovered.read(file)? != BEFORE {
+            return Err(FsError::Corrupt);
+        }
+        drop(unrecovered);
+
+        // -- And a mount, which is where recovery happens -------------------
+
+        let mut recovered = Self::mount(self.start_lba)?;
+        if recovered.read(file)? != AFTER {
+            return Err(FsError::Corrupt);
+        }
+
+        // Mounting again must find nothing left to do. A descriptor that
+        // survived its own replay would be replayed on every mount forever,
+        // overwriting whatever those blocks had become in the meantime.
+        let again = Self::mount(self.start_lba)?;
+        let mut descriptor = [0u8; BLOCK_SIZE];
+        read_block_at(
+            self.start_lba,
+            again.superblock.journal_start,
+            &mut descriptor,
+        )?;
+        if descriptor[..8] == *JOURNAL_MAGIC {
+            return Err(FsError::Corrupt);
+        }
+        drop(again);
+
+        // -- A transaction that never commits -------------------------------
+
+        // Abandoned rather than committed, so nothing was written down. The
+        // file must be exactly as the replay left it: an operation that did not
+        // commit did not happen.
+        recovered.begin();
+        recovered.write_inode_data(file, b"never committed", true)?;
+        recovered.abandon();
+        let after_abandon = Self::mount(self.start_lba)?;
+        if after_abandon.read(file)? != AFTER {
+            return Err(FsError::Corrupt);
+        }
+        drop(after_abandon);
+
+        recovered.unlink(ROOT, NAME)?;
+
+        // This volume's superblock is now behind the disk's, because the
+        // recovery and the unlink happened through other handles on the same
+        // filesystem. Taking the disk's is the only honest thing to do.
+        *self = Self::mount(self.start_lba)?;
+
+        Ok(String::from(
+            "journal verified: a commit without its writes was replayed by the next mount, \
+             a second mount found nothing left to do, and an abandoned transaction left no trace",
+        ))
+    }
+
+    /// Finish anything the last mount of this filesystem did not.
+    ///
+    /// Returns how many blocks were replayed. A descriptor whose checksum does
+    /// not match is a descriptor that was being written when the machine
+    /// stopped, and it names an operation that had not committed -- so it is
+    /// erased rather than acted on.
+    fn recover(&mut self) -> Result<usize, FsError> {
+        let journal = self.superblock.journal_start;
+        let mut descriptor = [0u8; BLOCK_SIZE];
+        read_block_at(self.start_lba, journal, &mut descriptor)?;
+
+        if &descriptor[..8] != JOURNAL_MAGIC {
+            return Ok(0);
+        }
+        let stated = read_u32(&descriptor, BLOCK_SIZE - 4);
+        if crc32(&descriptor[..BLOCK_SIZE - 4]) != stated {
+            // Torn. Erase it, because leaving it would mean checksumming it
+            // again on every mount forever.
+            self.write_block_now(journal, &[0u8; BLOCK_SIZE])?;
+            return Ok(0);
+        }
+
+        let sequence = read_u64(&descriptor, 8);
+        let count = read_u32(&descriptor, 16) as usize;
+        if count == 0 || count > MAX_JOURNALLED {
+            self.write_block_now(journal, &[0u8; BLOCK_SIZE])?;
+            return Ok(0);
+        }
+
+        let mut block = [0u8; BLOCK_SIZE];
+        for index in 0..count {
+            let target = read_u64(&descriptor, 24 + index * 8);
+            // A target outside the filesystem means the descriptor is not what
+            // it claims however well it checksums, and writing there would be
+            // taking a corrupt disk and making it worse.
+            if target >= self.superblock.total_blocks {
+                self.write_block_now(journal, &[0u8; BLOCK_SIZE])?;
+                return Err(FsError::BadBlock(target));
+            }
+            read_block_at(self.start_lba, journal + 1 + index as u64, &mut block)?;
+            self.write_block_now(target, &block)?;
+        }
+
+        self.write_block_now(journal, &[0u8; BLOCK_SIZE])?;
+        self.sequence = sequence;
+        Ok(count)
     }
 
     /// Put the superblock back, with the free counts as they now stand.
@@ -982,7 +1445,7 @@ impl Volume {
     /// Written as a table so that a field cannot be given the wrong offset by
     /// the two lines being edited apart, and so that the checksum is taken over
     /// exactly the bytes the fields were written into.
-    fn write_superblock(&self) -> Result<(), FsError> {
+    fn write_superblock(&mut self) -> Result<(), FsError> {
         let sb = &self.superblock;
         let mut block = [0u8; BLOCK_SIZE];
         block[field::MAGIC..field::MAGIC + 8].copy_from_slice(MAGIC);
@@ -992,6 +1455,8 @@ impl Volume {
         for (offset, value) in [
             (field::TOTAL_BLOCKS, sb.total_blocks),
             (field::INODE_COUNT, sb.inode_count),
+            (field::JOURNAL_START, sb.journal_start),
+            (field::JOURNAL_BLOCKS, sb.journal_blocks),
             (field::BITMAP_START, sb.bitmap_start),
             (field::BITMAP_BLOCKS, sb.bitmap_blocks),
             (field::INODE_START, sb.inode_start),

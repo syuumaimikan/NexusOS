@@ -165,6 +165,8 @@ Invoke-Step 'boot test' {
         'filesystem verified',
         'structural checks passed',
         'NexusFS verified',
+        'journal verified',
+        'finished an operation the last boot did not',
         'the boot log has',
         'starts holding directory handle',
         'init: made a directory and a file',

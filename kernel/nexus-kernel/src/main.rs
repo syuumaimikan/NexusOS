@@ -720,6 +720,11 @@ fn nexusfs_self_test() {
         Ok(verdict) => kprintln!("[test] {verdict}"),
         Err(error) => kprintln!("[test] FAILED: NexusFS: {error}"),
     }
+
+    match store::journal_self_test() {
+        Ok(verdict) => kprintln!("[test] {verdict}"),
+        Err(error) => kprintln!("[test] FAILED: the journal: {error}"),
+    }
 }
 
 /// The file the filesystem test reads, and what it must contain.

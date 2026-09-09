@@ -1,6 +1,6 @@
 # NexusFS — the on-disk format
 
-Version 1. This document is the format; `kernel/nexus-kernel/src/fs/nexusfs.rs`
+Version 2. This document is the format; `kernel/nexus-kernel/src/fs/nexusfs.rs`
 is one implementation of it, and where the two disagree the disk is right.
 
 Everything is little-endian. Every offset is in bytes from the start of the
@@ -46,12 +46,17 @@ code that would write file data to block 0 has a bug rather than a small file.
 | Region | Blocks | Contents |
 |--------|--------|----------|
 | superblock | 1, at block 0 | where everything else is |
-| block bitmap | `bitmap_blocks`, from block 1 | one bit per block of the volume |
+| journal | `journal_blocks` (128), from block 1 | operations not yet carried out |
+| block bitmap | `bitmap_blocks` | one bit per block of the volume |
 | inode table | `inode_blocks` | `inode_count` inodes of 128 bytes |
 | data | the rest | file and directory contents |
 
-The regions are contiguous and in that order. `mount` checks this rather than
-assuming it: `bitmap_start == 1`, `inode_start == bitmap_start +
+The regions are contiguous and in that order. The journal comes first because
+finding it needs only the two fields that say where it is, and recovery runs
+before anything else on the disk is trusted.
+
+`mount` checks the layout rather than assuming it: `journal_start == 1`,
+`bitmap_start == journal_start + journal_blocks`, `inode_start == bitmap_start +
 bitmap_blocks`, `data_start == inode_start + inode_blocks`, `data_start <
 total_blocks`, each region large enough for what it claims to describe, and
 neither free count larger than its total. A checksum says the bytes are the ones
@@ -80,14 +85,20 @@ At block 0. Only the two free counts ever change after `format`.
 | 64 | 8 | `data_start` |
 | 72 | 8 | `free_blocks` |
 | 80 | 8 | `free_inodes` |
-| 88 | 8 | reserved, zero |
-| 96 | 4 | CRC-32 of bytes 0..96 |
-| 100 | 3996 | reserved, zero |
+| 88 | 8 | `journal_start` |
+| 96 | 8 | `journal_blocks` |
+| 104 | 4 | CRC-32 of bytes 0..104 |
+| 108 | 3988 | reserved, zero |
 
 The checksum is the ordinary reflected CRC-32 with polynomial `0xEDB88320`, the
 same one GPT uses, and it covers every field that says where something is. It is
 written last during `format`, so a partition either holds a filesystem or does
 not; there is no half-formatted state a reader would accept.
+
+Version 2 rather than 1 because the journal's two fields took the word the
+checksum used to sit in, and moved every region after it. A reader that took a
+version-one superblock for this one would find the inode table where the journal
+is, which is why the version is checked before anything else in it is believed.
 
 A missing magic is *not formatted*, which is a thing to create. A bad checksum
 is *damage*, which is a thing to report. Only the first leads to a format:
@@ -137,6 +148,60 @@ allocated when a file first grows past eleven blocks and freed when it shrinks
 back, cleared from the inode before it is freed so that no inode ever points at
 a block the bitmap calls free.
 
+## The journal
+
+An operation touches several blocks and has to be all or none of them. Making a
+file writes an inode, a directory, a bitmap and a superblock; a power failure
+between any two of them leaves the filesystem saying something that is not true.
+
+So metadata is written twice. The blocks an operation changes go to the journal
+first; then a descriptor naming them all goes down with a checksum over itself;
+then the blocks are written where they belong; then the descriptor is erased.
+
+The descriptor is one block:
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 8 | magic, `NEXUSJRN` |
+| 8 | 8 | sequence number |
+| 16 | 4 | how many blocks follow |
+| 20 | 4 | reserved, zero |
+| 24 | 8 × *count* | the block each journalled block belongs to |
+| 4092 | 4 | CRC-32 of bytes 0..4092 |
+
+The blocks themselves are at `journal_start + 1` onwards, in the same order. A
+transaction may carry `journal_blocks - 1` = 127 blocks; making a file touches
+four, and the margin is the point — a transaction that will not fit is refused,
+and a refusal is only acceptable if it cannot happen for anything ordinary.
+
+**Writing the descriptor is the commit.** Before it the operation did not
+happen; after it the operation will happen even if the machine stops. That gives
+three crashes and one recovery:
+
+* before the descriptor — its checksum fails, nothing is replayed, and the
+  operation simply never happened;
+* after the descriptor, part-way through writing the blocks home — the next
+  mount finds it and finishes the job;
+* after the blocks are home but before the descriptor is erased — the next mount
+  writes the same blocks again, which changes nothing, because replaying is
+  idempotent by construction.
+
+A descriptor naming a block outside the filesystem is refused however well it
+checksums: writing there would take a corrupt disk and make it worse.
+
+**File contents are not journalled.** A two-megabyte file would need a
+two-megabyte journal to protect a write nobody promised was atomic. Contents go
+down first and the metadata pointing at them second, so a failure leaves the old
+file rather than a new one pointing at blocks that were never written. Directory
+contents *are* journalled, because a directory is metadata whatever it is stored
+in.
+
+**What this rests on.** The block driver issues one request at a time and waits
+for each to complete, so writes reach the *device* in the order above. Whether
+the host or the drive then reorders them onto the platter is beyond this without
+negotiating a flush, and that is a gap worth naming rather than a guarantee
+worth pretending to.
+
 ## Directories
 
 An ordinary file whose contents are entries packed end to end with no padding
@@ -185,10 +250,8 @@ changes them.
 
 ## What it does not do
 
-**No journal.** A power failure between two writes can leave the bitmap saying a
-block is taken that no file points at. That leaks space and corrupts nothing,
-which is the right way round for the failure to be, and it is written down here
-rather than glossed. There is no `fsck` yet either, so the space stays leaked.
+**No `fsck`.** Recovery finishes an interrupted operation; nothing looks for
+damage that predates it, and nothing reclaims space leaked by an older kernel.
 
 **No permissions, no ownership, no hard links.** `links` exists in the inode and
 is always 1.
@@ -276,6 +339,20 @@ makes its own directory (or opens it, on a later boot), reads what the previous
 boot left, writes a file, reads it back through the same handle, and then checks
 the refusals — a buffer too small, a name with a separator in it, a name that is
 not there, and removing a file that is still open.
+
+`Volume::journal_self_test` crashes the filesystem on purpose. It writes a
+transaction to the journal and then stops — no blocks written home, no
+descriptor erased — which is exactly the state a power failure after a commit
+leaves. Then it mounts, and requires the new contents to be there; mounts again,
+and requires nothing left to replay; and abandons a transaction without
+committing it, and requires that one to have left no trace. Both halves matter:
+a recovery that replayed everything it found would be as wrong as one that
+replayed nothing, because it would finish operations that never happened.
+
+That test exists because the recovery path cannot be proved by reading it, and
+the state it recovers from cannot be produced by a machine that is working. So
+the machine is given one way to stop half way on purpose, and nothing but the
+test uses it.
 
 `scripts/test-persistence.ps1` boots twice on the same image without rebuilding.
 The first boot must *make* the filesystem and report boot 1 with one line in

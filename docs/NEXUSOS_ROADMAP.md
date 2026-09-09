@@ -537,14 +537,60 @@ is much easier to lose than one a single blocking receive depends on, because
 there is always another message coming on a channel and there is not always
 another client.
 
-Outstanding: NexusFS has no journal, so a power failure between two writes can
-leave the bitmap saying a block is taken that no file points at -- space leaked,
-nothing corrupted, which is the right way round for the failure to be. No
-permissions, no timestamps beyond the tick a thing was made at, no partial
-writes and no seek, so a large file is read and written whole. The FAT32 reader
-still cannot write and skips long names. The block driver serves one request at
-a time. A program gets no arguments, and nothing can end a process but its own
-thread.
+Outstanding: NexusFS has no `fsck` -- recovery finishes an interrupted
+operation, and nothing looks for damage that predates it. No permissions, no
+timestamps beyond the tick a thing was made at, no partial writes and no seek,
+so a large file is read and written whole. The FAT32 reader still cannot write
+and skips long names. The block driver serves one request at a time, which is
+what the journal's ordering currently rests on. Nothing can end a process but
+its own thread.
+
+### A journal
+
+An operation touches several blocks and has to be all or none of them. Making a
+file writes an inode, a directory, a bitmap and a superblock, and a power
+failure between any two of them left the filesystem saying something that was
+not true. This was the outstanding item on this phase from the day NexusFS
+landed.
+
+Metadata is written twice now. The blocks an operation changes go to a reserved
+run near the front of the partition; then a descriptor naming them all goes down
+with a checksum over itself; then the blocks are written where they belong; then
+the descriptor is erased. Writing the descriptor *is* the commit — before it the
+operation did not happen, after it the operation will happen even if the machine
+stops.
+
+That leaves three crashes and one recovery. Before the descriptor, its checksum
+fails and nothing is replayed, so the operation never happened. After it and
+part-way home, the next mount finishes the job. After the blocks are home but
+before the descriptor is erased, the next mount writes the same blocks again,
+which changes nothing — replaying is idempotent by construction, which is why
+recovery needs no notion of how far it got last time.
+
+File contents are not journalled: a two-megabyte file would need a
+two-megabyte journal to protect a write nobody promised was atomic. Contents go
+down first and the metadata pointing at them second, so a failure leaves the old
+file rather than a new one pointing at blocks that were never written.
+
+The layout changed to make room, so the format is version 2 and version 1 is
+refused rather than misread — a version-one superblock has its checksum where
+this one has a block number, and a reader that ignored the version would find
+the inode table where the journal is.
+
+**The test crashes it on purpose.** Recovery cannot be proved by reading it, and
+the state it recovers from cannot be produced by a machine that is working. So
+the filesystem has exactly one way to stop half way — write the transaction and
+return without carrying it out — and nothing but the test uses it. The test then
+mounts and requires the new contents to be there, mounts again and requires
+nothing left to replay, and abandons a transaction without committing it and
+requires that one to have left no trace. Both halves matter: a recovery that
+replayed everything it found would be as wrong as one that replayed nothing,
+because it would finish operations that never happened.
+
+What it rests on is worth naming. The block driver issues one request at a time
+and waits for each, so writes reach the *device* in the order above. Whether the
+host or the drive then reorders them onto the platter is beyond this without
+negotiating a flush, and that is a gap rather than a guarantee.
 
 ### A block cache
 

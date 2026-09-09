@@ -363,6 +363,18 @@ pub fn self_test() -> Result<String, StoreError> {
     ))
 }
 
+/// Crash the filesystem between a commit and its writes, and check it recovers.
+///
+/// Separate from the test above because it is a different kind of claim. That
+/// one says the filesystem does what it is asked; this one says it survives not
+/// being allowed to finish -- which cannot be shown by using it correctly, only
+/// by stopping it half way on purpose.
+pub fn journal_self_test() -> Result<String, StoreError> {
+    let mut guard = VOLUME.lock();
+    let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
+    Ok(volume.journal_self_test()?)
+}
+
 /// Remove a name and everything under it.
 fn remove_tree(volume: &mut Volume, parent: u32, name: &str) -> Result<(), FsError> {
     let entry = volume.lookup(parent, name)?;
