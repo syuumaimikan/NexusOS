@@ -107,6 +107,18 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+/// Where this program's allocations come from.
+///
+/// It went the whole of its life without one: a compositor moves pixels and
+/// never needed a string it had not been given. What it needs one for now is
+/// arithmetic it has to report -- how much of the display each repaint actually
+/// touched -- and a number that cannot be printed is a measurement nobody can
+/// check.
+#[global_allocator]
+static ALLOCATOR: nexus_user::heap::Allocator = nexus_user::heap::Allocator;
+
 use core::panic::PanicInfo;
 
 use nexus_user::Handle;
@@ -302,6 +314,163 @@ const MIN_SIZE: u32 = 48;
 /// the kernel draws -- which is the coupling this whole arrangement removes.
 const BACKGROUND: u32 = 0x0009_1428;
 
+/// A rectangle of the display, in screen coordinates.
+///
+/// Held as edges rather than as a position and a size, because every operation
+/// on it is a comparison of edges and an origin-plus-extent form spends its
+/// life adding the two back together.
+#[derive(Clone, Copy)]
+struct Region {
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+}
+
+impl Region {
+    /// Nothing.
+    const fn nothing() -> Self {
+        Self {
+            left: u32::MAX,
+            top: u32::MAX,
+            right: 0,
+            bottom: 0,
+        }
+    }
+
+    /// A rectangle from a corner and a size.
+    const fn of(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            left: x,
+            top: y,
+            right: x + width,
+            bottom: y + height,
+        }
+    }
+
+    /// Whether there is anything in it.
+    const fn is_empty(self) -> bool {
+        self.right <= self.left || self.bottom <= self.top
+    }
+
+    /// The smallest rectangle holding both.
+    ///
+    /// A union of rectangles is not a rectangle, and this is the bounding box
+    /// rather than the union: two windows at opposite corners give a damage
+    /// region covering the whole screen. That is the approximation this
+    /// compositor makes, and it is worth naming -- a list of disjoint
+    /// rectangles would repaint less and is a great deal more arithmetic to get
+    /// right. What it buys as it stands is the common case: one window
+    /// redrawing while nothing else moves.
+    const fn union(self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        Self {
+            left: if self.left < other.left {
+                self.left
+            } else {
+                other.left
+            },
+            top: if self.top < other.top {
+                self.top
+            } else {
+                other.top
+            },
+            right: if self.right > other.right {
+                self.right
+            } else {
+                other.right
+            },
+            bottom: if self.bottom > other.bottom {
+                self.bottom
+            } else {
+                other.bottom
+            },
+        }
+    }
+
+    /// How many pixels it covers.
+    const fn area(self) -> u32 {
+        if self.is_empty() {
+            0
+        } else {
+            (self.right - self.left) * (self.bottom - self.top)
+        }
+    }
+}
+
+/// The whole of the rectangle this program owns.
+fn everything(screen: &Screen) -> Region {
+    Region::of(screen.x, screen.y, screen.width, screen.height)
+}
+
+/// The strip along the bottom.
+fn strip(screen: &Screen) -> Region {
+    Region::of(screen.x, screen.taskbar_y(), screen.width, TASKBAR)
+}
+
+/// Where a window is.
+fn region_of(tile: &Tile) -> Region {
+    Region::of(tile.x, tile.y, tile.width, tile.height)
+}
+
+/// Repaints performed, and how many pixels they were asked to cover.
+///
+/// The second is what damage tracking is about: before it, every repaint was
+/// the whole rectangle whatever had changed.
+static REPAINTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DAMAGED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The rectangle drawing is currently confined to.
+///
+/// A property of the repaint in progress, and there is exactly one at a time
+/// because there is one thread. Kept here rather than threaded through every
+/// drawing call because the alternative is an extra parameter on `fill`,
+/// `composite`, and every decoration that calls them -- which is a lot of
+/// places to get right for something that is the same value in all of them.
+mod clip {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static LEFT: AtomicU32 = AtomicU32::new(0);
+    static TOP: AtomicU32 = AtomicU32::new(0);
+    static RIGHT: AtomicU32 = AtomicU32::new(u32::MAX);
+    static BOTTOM: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// Pixels actually written, which is what damage tracking is for.
+    static WRITTEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+    /// Confine drawing to this rectangle until the next call.
+    pub fn set(region: super::Region) {
+        LEFT.store(region.left, Ordering::Relaxed);
+        TOP.store(region.top, Ordering::Relaxed);
+        RIGHT.store(region.right, Ordering::Relaxed);
+        BOTTOM.store(region.bottom, Ordering::Relaxed);
+    }
+
+    /// What it is now.
+    pub fn current() -> (u32, u32, u32, u32) {
+        (
+            LEFT.load(Ordering::Relaxed),
+            TOP.load(Ordering::Relaxed),
+            RIGHT.load(Ordering::Relaxed),
+            BOTTOM.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Note pixels written.
+    pub fn wrote(count: u64) {
+        WRITTEN.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// How many have been written altogether.
+    pub fn written() -> u64 {
+        WRITTEN.load(Ordering::Relaxed)
+    }
+}
+
 /// What the kernel says about the display.
 struct Screen {
     x: u32,
@@ -399,6 +568,12 @@ pub extern "C" fn _start() -> ! {
 }
 
 extern "C" fn main() -> ! {
+    // Before anything allocates, which here is only the report at the end.
+    if !nexus_user::heap::init(nexus_user::heap::DEFAULT_SIZE) {
+        failed("compositor: FAILED: could not get a heap");
+        finish();
+    }
+
     let Some(screen) = take_the_display() else {
         finish();
     };
@@ -705,7 +880,16 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
     let mut reported = [u8::MAX; CLIENTS];
 
     announce(shell, tiles, focus, &mut reported);
-    repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
+    repaint(
+        screen,
+        tiles,
+        shell,
+        &order,
+        focus,
+        &mut cursor,
+        pointing,
+        everything(screen),
+    );
 
     // Bounded, so a client that neither draws nor dies cannot hang the machine.
     // The bound is generous: it is a backstop and not a schedule.
@@ -733,7 +917,18 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                     Some(sent) => {
                         forwarded += sent;
                         announce(shell, tiles, focus, &mut reported);
-                        repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
+                        // Everything, because a key may have moved the focus,
+                        // and a focus ring is on two windows at once.
+                        repaint(
+                            screen,
+                            tiles,
+                            shell,
+                            &order,
+                            focus,
+                            &mut cursor,
+                            pointing,
+                            everything(screen),
+                        );
                     }
                     None => return,
                 }
@@ -750,10 +945,22 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                     &mut focus,
                     &mut order,
                 ) {
-                    Some(_) => {
+                    // What the pointer says it changed. A movement with no
+                    // button held changes nothing but the pointer itself, and
+                    // that is the overwhelming majority of what a mouse sends.
+                    Some(moved_damage) => {
                         moved += 1;
                         announce(shell, tiles, focus, &mut reported);
-                        repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
+                        repaint(
+                            screen,
+                            tiles,
+                            shell,
+                            &order,
+                            focus,
+                            &mut cursor,
+                            pointing,
+                            moved_damage,
+                        );
                     }
                     None => return,
                 }
@@ -762,18 +969,36 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
 
             // The desktop, which is a client with a list rather than a window.
             if *key == KEY_SHELL {
-                match read_shell(screen, set, tiles, shell, &mut focus, &mut order) {
-                    Some(Asked::Nothing) => {}
-                    Some(Asked::Drew) => composited += 1,
-                    Some(Asked::Changed) => commanded += 1,
+                // Its own frames touch the strip and nothing else; its
+                // commands move windows, which is everything.
+                let asked = match read_shell(screen, set, tiles, shell, &mut focus, &mut order) {
+                    Some(Asked::Nothing) => Region::nothing(),
+                    Some(Asked::Drew) => {
+                        composited += 1;
+                        strip(screen)
+                    }
+                    Some(Asked::Changed) => {
+                        commanded += 1;
+                        everything(screen)
+                    }
                     Some(Asked::Opened) => {
                         commanded += 1;
                         opened += 1;
+                        everything(screen)
                     }
                     None => return,
-                }
+                };
                 announce(shell, tiles, focus, &mut reported);
-                repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
+                repaint(
+                    screen,
+                    tiles,
+                    shell,
+                    &order,
+                    focus,
+                    &mut cursor,
+                    pointing,
+                    asked,
+                );
                 continue;
             }
 
@@ -789,7 +1014,16 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                     nexus_user::close(gone.process).ok();
                 }
                 nexus_user::log("compositor: the desktop ended; its strip is empty").ok();
-                repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
+                repaint(
+                    screen,
+                    tiles,
+                    shell,
+                    &order,
+                    focus,
+                    &mut cursor,
+                    pointing,
+                    strip(screen),
+                );
                 continue;
             }
 
@@ -817,7 +1051,20 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                             // which is ordinary and not a failure.
                             stop_listening(set, tile, index);
                         }
-                        repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
+                        // That window and no other. This is what damage
+                        // tracking exists for: a client redrawing twice a
+                        // second used to cost the whole display every time.
+                        let drawn = region_of(tile);
+                        repaint(
+                            screen,
+                            tiles,
+                            shell,
+                            &order,
+                            focus,
+                            &mut cursor,
+                            pointing,
+                            drawn,
+                        );
                     }
                     Err(_) => stop_listening(set, tile, index),
                 }
@@ -831,7 +1078,18 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                 nexus_user::unwatch(set, *key).ok();
                 nexus_user::unwatch(set, channel_key(index)).ok();
                 announce(shell, tiles, focus, &mut reported);
-                repaint(screen, tiles, shell, &order, focus, &mut cursor, pointing);
+                // Everything: its window goes, and what was behind it has to
+                // come back.
+                repaint(
+                    screen,
+                    tiles,
+                    shell,
+                    &order,
+                    focus,
+                    &mut cursor,
+                    pointing,
+                    everything(screen),
+                );
             }
         }
     }
@@ -847,6 +1105,18 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
         failed("compositor: FAILED: no client ever drew anything");
         return;
     }
+
+    // What damage tracking bought, in the only terms that mean anything: how
+    // many pixels were repainted, against how many a repaint of the whole
+    // rectangle each time would have cost.
+    let repaints = REPAINTS.load(core::sync::atomic::Ordering::Relaxed);
+    let damaged = DAMAGED.load(core::sync::atomic::Ordering::Relaxed);
+    let whole = u64::from(screen.width) * u64::from(screen.height) * repaints.max(1);
+    nexus_user::log(&alloc::format!(
+        "compositor: {repaints} repaints covered {damaged} pixels of a possible {whole},          {} written",
+        clip::written()
+    ))
+    .ok();
     nexus_user::log("compositor: composited every frame its clients drew").ok();
     if moved > 0 {
         nexus_user::log("compositor: moved a pointer of its own across the display").ok();
@@ -1118,7 +1388,9 @@ fn read_key(
 /// also picks it up. Both are policy this program owns: the kernel knows a
 /// button went down and has no idea what it went down on.
 ///
-/// Returns 1 if a window was carried this step, 0 otherwise, or `None` to stop.
+/// Returns what changed on screen, or `None` to stop. The pointer's own
+/// rectangle is not included: every repaint covers that anyway, because the
+/// pixels underneath it have to be repainted before it is drawn again.
 fn read_pointer(
     screen: &Screen,
     set: Handle,
@@ -1127,13 +1399,13 @@ fn read_pointer(
     cursor: &mut Pointer,
     focus: &mut usize,
     order: &mut [usize; CLIENTS],
-) -> Option<u32> {
+) -> Option<Region> {
     let mut message = [0u8; 32];
     let mut none = [Handle(0); 1];
     let Ok(received) = nexus_user::receive(POINTER, &mut message, &mut none) else {
         // The kernel has stopped sending; there is still a screen to composite.
         nexus_user::unwatch(set, KEY_POINTER).ok();
-        return Some(0);
+        return Some(Region::nothing());
     };
     if received.bytes < pointer::SIZE {
         failed("compositor: FAILED: a pointer movement arrived in the wrong shape");
@@ -1163,7 +1435,9 @@ fn read_pointer(
 
     let pressed = buttons & pointer::LEFT != 0;
     let put_away = buttons & pointer::RIGHT != 0;
-    let mut carried = 0;
+    // Nothing, until something is found to have changed. A bare movement is by
+    // far the commonest thing a mouse sends and it changes no window at all.
+    let mut damage = Region::nothing();
 
     // The right button on a title bar puts a window away. Checked before the
     // left button's business, because the two are different acts and a window
@@ -1176,6 +1450,8 @@ fn read_pointer(
             if tile.live && !tile.minimised && tile.title_contains(cursor.x, cursor.y) {
                 tile.minimised = true;
                 cursor.dragging = None;
+                // Where it was, so that what was behind it comes back.
+                damage = damage.union(region_of(tile));
                 nexus_user::log("compositor: put a window away, leaving its tab").ok();
                 break;
             }
@@ -1204,7 +1480,9 @@ fn read_pointer(
                 nexus_user::log("compositor: a press in the strip went to the desktop").ok();
             }
         }
-        return Some(0);
+        // Nothing yet: what a press in the strip changes is decided by the
+        // desktop, and arrives as a command.
+        return Some(Region::nothing());
     }
 
     if pressed && !cursor.held {
@@ -1240,6 +1518,9 @@ fn read_pointer(
                 });
             }
 
+            // Raising changes what covers what, and the ring moves off
+            // whatever had it. Both are everything.
+            damage = everything(screen);
             raise(order, index);
             if *focus != index {
                 *focus = index;
@@ -1280,9 +1561,13 @@ fn read_pointer(
                         screen.taskbar_y().saturating_sub(tile.height),
                     );
                     if moved_x != tile.x || moved_y != tile.y {
+                        // Where it was and where it went. Not the whole screen:
+                        // a window being dragged across a display is the one
+                        // case where the difference is worth having.
+                        damage = damage.union(region_of(tile));
                         tile.x = moved_x;
                         tile.y = moved_y;
-                        carried = 1;
+                        damage = damage.union(region_of(tile));
                         if !announced {
                             announce = Some("compositor: carried a window by its title bar");
                         }
@@ -1304,9 +1589,10 @@ fn read_pointer(
                     );
 
                     if wanted_width != tile.width || wanted_height != tile.height {
+                        let before = region_of(tile);
                         match resize(index, tile, wanted_width, wanted_height) {
                             Ok(()) => {
-                                carried = 1;
+                                damage = damage.union(before).union(region_of(tile));
                                 if !announced {
                                     announce = Some("compositor: resized a window by its corner");
                                 }
@@ -1328,7 +1614,7 @@ fn read_pointer(
     }
 
     cursor.held = pressed;
-    Some(carried)
+    Some(damage)
 }
 
 /// Give a window a new surface of a new size.
@@ -1455,6 +1741,7 @@ fn clamp(value: i64, low: u32, high: u32) -> u32 {
 /// a compositor that repainted only the damaged window would leave a hole in
 /// whatever was above it, and getting that right needs damage arithmetic this
 /// does not have and does not yet need.
+#[allow(clippy::too_many_arguments)]
 fn repaint(
     screen: &Screen,
     tiles: &[Option<Tile>; CLIENTS],
@@ -1463,7 +1750,32 @@ fn repaint(
     focus: usize,
     cursor: &mut Pointer,
     pointing: bool,
+    damage: Region,
 ) {
+    // Everything still happens -- the background, every window back to front,
+    // the decorations, the strip -- and every one of them is clipped to the
+    // damage. That is what makes this correct rather than merely fast: a
+    // compositor that repainted only the window that changed would leave a hole
+    // in whatever was above it, and getting *that* right needs the arithmetic
+    // this deliberately does not have. Drawing the whole scene into a small
+    // rectangle costs the rectangle, not the scene.
+    //
+    // The pointer's rectangle is always part of the damage, so the pixels it
+    // covers are freshly painted before it is drawn again. Without that, the
+    // saved pixels underneath it would be saved from a framebuffer that already
+    // had a pointer in it, and the pointer would smear.
+    let damage = damage.union(Region::of(cursor.x, cursor.y, CURSOR as u32, CURSOR as u32));
+    let damage = damage.union(Region::nothing()); // keep the bounds sane
+    if damage.is_empty() {
+        return;
+    }
+    clip::set(damage);
+    REPAINTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    DAMAGED.fetch_add(
+        u64::from(damage.area()),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+
     // The saved pixels are from before this repaint and mean nothing after it,
     // so the cursor is forgotten rather than restored.
     cursor.drawn = None;
@@ -1537,10 +1849,22 @@ fn grip(screen: &Screen, tile: &Tile, focused: bool) {
 
 /// Fill a rectangle with one colour.
 fn fill(screen: &Screen, x: u32, y: u32, width: u32, height: u32, colour: u32) {
-    for row in 0..height {
+    // Clipped here rather than at every call site. Every decoration this
+    // program draws goes through this function, so one comparison here is what
+    // makes the whole of a repaint respect the damage rectangle.
+    let (left, top, right, bottom) = clip::current();
+    let x0 = x.max(left);
+    let y0 = y.max(top);
+    let x1 = (x + width).min(right);
+    let y1 = (y + height).min(bottom);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+
+    for row in y0..y1 {
         let destination =
-            FRAMEBUFFER_AT + (((y + row) as usize * screen.stride as usize) + x as usize) * 4;
-        for column in 0..width as usize {
+            FRAMEBUFFER_AT + ((row as usize * screen.stride as usize) + x0 as usize) * 4;
+        for column in 0..(x1 - x0) as usize {
             // SAFETY: the framebuffer is mapped writable, and the rectangle was
             // checked against the screen when the display was taken.
             unsafe {
@@ -1548,6 +1872,7 @@ fn fill(screen: &Screen, x: u32, y: u32, width: u32, height: u32, colour: u32) {
             }
         }
     }
+    clip::wrote(u64::from(x1 - x0) * u64::from(y1 - y0));
 }
 
 /// Draw a window's title bar.
@@ -1636,12 +1961,25 @@ fn process_key(index: usize) -> u64 {
 /// not: the display's scanlines are as long as the hardware says, which is not
 /// always as long as the picture.
 fn composite(screen: &Screen, tile: &Tile) {
-    for row in 0..tile.height {
-        let source = tile.mapped_at + (row as usize * tile.width as usize) * 4;
-        let destination = FRAMEBUFFER_AT
-            + (((tile.y + row) as usize * screen.stride as usize) + tile.x as usize) * 4;
+    // The same clip, applied to the copy. What is not damaged is not copied,
+    // which is where nearly all of the saving is: a window is tens of thousands
+    // of pixels and the thing that changed is usually one of them.
+    let (left, top, right, bottom) = clip::current();
+    let x0 = tile.x.max(left);
+    let y0 = tile.y.max(top);
+    let x1 = (tile.x + tile.width).min(right);
+    let y1 = (tile.y + tile.height).min(bottom);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
 
-        for column in 0..tile.width as usize {
+    for row in y0..y1 {
+        let source = tile.mapped_at
+            + (((row - tile.y) as usize * tile.width as usize) + (x0 - tile.x) as usize) * 4;
+        let destination =
+            FRAMEBUFFER_AT + ((row as usize * screen.stride as usize) + x0 as usize) * 4;
+
+        for column in 0..(x1 - x0) as usize {
             // SAFETY: both mappings are live and writable, the source offset is
             // inside a surface of `width * height * 4` bytes, and the
             // destination was checked against the screen when the display was
@@ -1652,6 +1990,7 @@ fn composite(screen: &Screen, tile: &Tile) {
             }
         }
     }
+    clip::wrote(u64::from(x1 - x0) * u64::from(y1 - y0));
 }
 
 /// Draw the pointer, saving what it covers.

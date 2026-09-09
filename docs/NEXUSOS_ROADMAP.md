@@ -1036,11 +1036,34 @@ client and not the others.
 
 What this phase still means, now that the shape exists:
 
-**Damage tracking.** The compositor repaints its whole rectangle on every
-change. That is ninety thousand pixels and it is what makes overlap simply
-work; on a full screen at sixty frames a second it would be two hundred million
-pixels a second, and the arithmetic that avoids it -- which parts of which
-windows are actually covered -- is the real content of this item.
+**Damage tracking — done.** The compositor used to repaint its whole rectangle
+on every change. Now every event says what it changed and the repaint is clipped
+to it:
+
+```
+[user] compositor: 55 repaints covered 2321280 pixels of a possible 5068800
+```
+
+What makes this correct rather than merely fast is that *everything* still
+happens on every repaint — the background, every window back to front, every
+decoration, the strip — and every one of them is clipped. A compositor that
+repainted only the window that changed would leave a hole in whatever was above
+it, and getting that right needs the arithmetic this deliberately does not have.
+Drawing the whole scene into a small rectangle costs the rectangle, not the
+scene.
+
+The damage is a single bounding box rather than a list of disjoint rectangles,
+which is worth naming as the approximation it is: two windows redrawing at
+opposite corners damage everything between them. What it buys is the common
+case, which is one window redrawing while nothing else moves — a client at two
+frames a second used to cost the whole display twice a second and now costs its
+own window.
+
+Two things are always in the damage regardless. The pointer's rectangle, because
+the pixels underneath it have to be freshly painted before it is drawn again or
+the saved pixels are saved from a framebuffer that already has a pointer in it.
+And anything that changes stacking or focus, because a focus ring is on two
+windows at once and raising a window changes what covers what.
 
 **Frame scheduling.** Clients draw when they feel like it and the compositor
 composites when they say so. There is no vertical blank, no deadline, and
