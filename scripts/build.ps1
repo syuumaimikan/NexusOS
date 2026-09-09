@@ -152,9 +152,22 @@ A second file, so that the entry table has to be walked rather than guessed.
 '@, $utf8)
 
 $Package = Join-Path $ProgramDir 'demo.nex'
-& $PackExe $Package 'demo' '1.0.0' "demo/hello.txt=$greeting" "demo/notes.txt=$notes"
+$SigningKey = Join-Path $RepoRoot 'keys\development.key'
+& $PackExe $Package $SigningKey 'demo' '1.0.0' "demo/hello.txt=$greeting" "demo/notes.txt=$notes"
 if ($LASTEXITCODE -ne 0) { throw 'could not pack the package' }
 $packageSize = [math]::Round((Get-Item $Package).Length / 1KB, 1)
+
+# And a second package that is the first one with a byte changed after it was
+# signed. Nothing about it is special: it is what a package looks like when
+# somebody with no key alters it in transit, and the machine has to refuse it.
+# A system that only ever sees packages that are correct is a system whose
+# checking has never been exercised.
+$Tampered = Join-Path $ProgramDir 'bad.nex'
+$bytes = [System.IO.File]::ReadAllBytes($Package)
+# The last byte, which is inside the payload rather than the header -- so what
+# the machine notices is the content of a file, not a field it parses.
+$bytes[$bytes.Length - 1] = $bytes[$bytes.Length - 1] -bxor 0x01
+[System.IO.File]::WriteAllBytes($Tampered, $bytes)
 
 # The disk the kernel drives. Data only, with nothing to boot from: a machine
 # given two bootable disks leaves the firmware to choose between them, and it
@@ -189,7 +202,8 @@ Write-Host "  compositor : $compositorSize KiB  -> BIN\COMP.ELF on the disk"
 Write-Host "  client     : $clientSize KiB  -> BIN\CLIENT.ELF on the disk"
 Write-Host "  shell      : $shellSize KiB  -> BIN\SHELL.ELF on the disk"
 Write-Host "  installer  : $installSize KiB  -> BIN\INST.ELF on the disk"
-Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk"
+Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
+Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''

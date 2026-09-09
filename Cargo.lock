@@ -29,6 +29,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-crypto"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-font"
 version = "0.1.0"
 
@@ -91,12 +95,16 @@ version = "0.1.0"
 name = "nexus-pack"
 version = "0.1.0"
 dependencies = [
+ "nexus-crypto",
  "nexus-pkg",
 ]
 
 [[package]]
 name = "nexus-pkg"
 version = "0.1.0"
+dependencies = [
+ "nexus-crypto",
+]
 
 [[package]]
 name = "nexus-shell"

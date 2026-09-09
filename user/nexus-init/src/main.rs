@@ -566,12 +566,29 @@ const ROOT: nexus_user::Handle = nexus_user::Handle(2);
 /// cross a channel: sending the only one would leave this program with no
 /// filesystem for the rest of the boot.
 fn install_a_package() {
+    // The good one, which must install.
+    if !ask_to_install(b"PKG/DEMO.NEX", true) {
+        return;
+    }
+    read_what_was_installed();
+
+    // And one that has been altered since it was signed, which must not. This
+    // is the half that matters: a machine that installs what it is given proves
+    // nothing about its checking, and the only way to know a refusal works is
+    // to be refused.
+    if ask_to_install(b"PKG/BAD.NEX", false) {
+        nexus_user::log("init: a package altered after signing was refused").ok();
+    }
+}
+
+/// Start the installer, hand it the filesystem, and say whether it did what was
+/// expected of it.
+fn ask_to_install(package: &[u8], expected: bool) -> bool {
     const INSTALLER: &[u8] = b"BIN/INST.ELF";
-    const PACKAGE: &[u8] = b"PKG/DEMO.NEX";
 
     if nexus_user::send(SPAWNER, INSTALLER, &[]).is_err() {
         failed("init: FAILED: could not reach the spawn service");
-        return;
+        return false;
     }
     let mut buffer = [0u8; 64];
     let mut handles = [nexus_user::Handle(0); 2];
@@ -579,14 +596,14 @@ fn install_a_package() {
         Ok(received) => received,
         Err(_) => {
             failed("init: FAILED: the spawn service did not answer");
-            return;
+            return false;
         }
     };
     if received.handles != 2 {
         let text = core::str::from_utf8(&buffer[..received.bytes]).unwrap_or("<not text>");
         nexus_user::log(text).ok();
         failed("init: FAILED: the installer did not start");
-        return;
+        return false;
     }
     let child = handles[0];
     let process = handles[1];
@@ -600,29 +617,51 @@ fn install_a_package() {
         nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
     ) else {
         failed("init: FAILED: could not duplicate the root directory");
-        return;
+        return false;
     };
 
-    if nexus_user::send(child, PACKAGE, &[theirs]).is_err() {
+    if nexus_user::send(child, package, &[theirs]).is_err() {
         failed("init: FAILED: could not tell the installer what to install");
-        return;
+        return false;
     }
 
-    match nexus_user::wait(process) {
-        Ok(nexus_user::Ending::Exited(0)) => {
-            nexus_user::log("init: the installer finished, and said it worked").ok();
-        }
-        Ok(_) => failed("init: FAILED: the installer reported a problem"),
-        Err(_) => failed("init: FAILED: could not wait for the installer"),
-    }
-
+    // Three answers: nought worked, one refused the package, anything else
+    // broke. A test that only asked whether the installer failed would pass on
+    // an installer that crashed before it ever looked at the signature.
+    let ending = nexus_user::wait(process);
+    let worked = matches!(ending, Ok(nexus_user::Ending::Exited(0)));
+    let refused = matches!(ending, Ok(nexus_user::Ending::Exited(1)));
     nexus_user::close(child).ok();
     nexus_user::close(process).ok();
 
-    // And read one of the installed files back, from this program's own handle
-    // rather than the installer's. What that checks is not the installer's
-    // report -- it is that the bytes are on the disk where a different process
-    // with a different handle can find them.
+    if expected && !worked {
+        failed("init: FAILED: the installer reported a problem");
+        return false;
+    }
+    if !expected {
+        if worked {
+            // Worse than a failed install: the machine accepted something it
+            // had every means to know was wrong.
+            failed("init: FAILED: a package altered after signing was installed anyway");
+            return false;
+        }
+        if !refused {
+            failed("init: FAILED: the installer broke rather than refusing the package");
+            return false;
+        }
+    }
+    if expected {
+        nexus_user::log("init: the installer finished, and said it worked").ok();
+    }
+    true
+}
+
+/// Read one of the installed files back, through this program's own handle.
+///
+/// Not the installer's. What that checks is not the installer's report -- it is
+/// that the bytes are on the disk where a different process with a different
+/// handle can find them.
+fn read_what_was_installed() {
     let Ok(directory) = nexus_user::open(ROOT, "demo") else {
         failed("init: FAILED: the package's directory is not there");
         return;

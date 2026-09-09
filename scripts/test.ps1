@@ -76,7 +76,7 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
 
         # And the kernel, which needs its own target and core rebuilt for it,
         # and so was left out until it had accumulated a dozen findings nobody
@@ -194,7 +194,9 @@ Invoke-Step 'boot test' {
         'hello: read the shared page and wrote back into it',
         'init: the other process wrote into memory we both map',
         'placed on the store from the image',
-        'install: demo 1.0.0, 2 files, verified before anything was written',
+        'install: demo 1.0.0, 2 files, signed by the key this machine trusts',
+        "install: refused PKG/BAD.NEX: the package's signature is not from a trusted key",
+        'init: a package altered after signing was refused',
         'install: the package is on the filesystem',
         'init: the installer finished, and said it worked',
         'init: read a file that arrived inside a package',
@@ -449,16 +451,28 @@ Invoke-Step 'boot test' {
     # have acted on. The failure this guards against is a program exiting with
     # whatever was left in a register: it looks like a working system until a
     # parent believes a garbage number means failure.
+    #
+    # One process is expected to exit non-zero: the installer, when it is handed
+    # the package that was altered after signing. Refusing it *is* the test, so
+    # the check is that exactly one process said so and it said 1 -- which is
+    # what this system's installer means by "refused", as against 2 for "broke".
+    # A run where nothing refused, or where two things did, is a run where
+    # something happened that nobody arranged.
     $statuses = [regex]::Matches($output, 'exited with status (\d+) through')
     if ($statuses.Count -lt 1) {
         throw 'no process reported the status it exited with'
     }
+    $refusals = 0
     foreach ($status in $statuses) {
-        if ([int64]$status.Groups[1].Value -ne 0) {
-            throw "a process exited with status $($status.Groups[1].Value)"
-        }
+        $value = [int64]$status.Groups[1].Value
+        if ($value -eq 0) { continue }
+        if ($value -eq 1) { $refusals++; continue }
+        throw "a process exited with status $value"
     }
-    Write-Host "    $($statuses.Count) processes exited with a status of zero" -ForegroundColor DarkGray
+    if ($refusals -ne 1) {
+        throw "expected exactly one refusal, saw $refusals"
+    }
+    Write-Host "    $($statuses.Count) processes ended: $($statuses.Count - 1) with zero, one refusing a forged package" -ForegroundColor DarkGray
 
     $banners = ([regex]::Matches($output, 'NexusOS bootloader')).Count
     if ($banners -gt 1) { throw "the machine reset ($banners boots seen)" }

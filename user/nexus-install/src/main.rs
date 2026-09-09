@@ -55,6 +55,9 @@ const PARENT: Handle = Handle(1);
 /// puts back during a rollback.
 const HEAP: usize = 512 * 1024;
 
+// The key this installer trusts, generated from `keys/development.pub`.
+include!(concat!(env!("OUT_DIR"), "/trusted_key.rs"));
+
 /// The suffix a saved copy gets while an install is in progress.
 ///
 /// Beside the file rather than in a directory of its own, because a rollback
@@ -104,26 +107,57 @@ extern "C" fn main() -> ! {
             nexus_user::log(&report).ok();
             nexus_user::log("install: the package is on the filesystem").ok();
         }
-        Err(why) => {
+        // Refusing a package is this program working, not this program
+        // failing, and it says so in different words. A log line that read the
+        // same either way would make a machine that correctly rejected a forged
+        // package indistinguishable from one that had broken.
+        Err(Trouble::Refused(why)) => {
+            REFUSED.store(true, core::sync::atomic::Ordering::Relaxed);
+            nexus_user::log(&format!("install: refused {path}: {why}")).ok();
+        }
+        Err(Trouble::Broken(why)) => {
             failed(&format!("install: FAILED: {why}"));
         }
     }
     finish()
 }
 
+/// What went wrong, and whose fault it was.
+///
+/// The distinction is not pedantry. One of these means the package should not
+/// be installed and the machine is fine; the other means the machine could not
+/// install a package it had no reason to reject. Reporting them the same way
+/// would make a correct refusal look like a fault.
+enum Trouble {
+    /// The package is not acceptable.
+    Refused(String),
+    /// Something that should have worked did not.
+    Broken(String),
+}
+
 /// Read a package, check it, write it, and check what was written.
-fn install(root: Handle, path: &str) -> Result<String, String> {
-    let bytes = read_whole(root, path)?;
+fn install(root: Handle, path: &str) -> Result<String, Trouble> {
+    let bytes = read_whole(root, path).map_err(Trouble::Broken)?;
 
-    let package = Package::open(&bytes).map_err(|error| format!("{path}: {error}"))?;
+    let package =
+        Package::open(&bytes).map_err(|error| Trouble::Refused(alloc::format!("{error}")))?;
+
+    // The signature first, and then everything the package says about itself.
+    // An unsigned package is refused as unsigned rather than as broken: nobody
+    // claimed anything about it, which is a different thing to report than a
+    // claim that does not hold.
     package
-        .verify()
-        .map_err(|error| format!("{path}: {error}"))?;
+        .verify_signed_by(&TRUSTED_KEY)
+        .map_err(|error| Trouble::Refused(alloc::format!("{error}")))?;
 
-    let name = package.name().map_err(|error| format!("{error}"))?;
-    let release = package.release().map_err(|error| format!("{error}"))?;
+    let name = package
+        .name()
+        .map_err(|error| Trouble::Refused(alloc::format!("{error}")))?;
+    let release = package
+        .release()
+        .map_err(|error| Trouble::Refused(alloc::format!("{error}")))?;
     nexus_user::log(&format!(
-        "install: {name} {release}, {} files, verified before anything was written",
+        "install: {name} {release}, {} files, signed by the key this machine trusts",
         package.len()
     ))
     .ok();
@@ -136,17 +170,21 @@ fn install(root: Handle, path: &str) -> Result<String, String> {
         let Some(entry) = package.entry(index) else {
             break;
         };
-        let target = entry.name().map_err(|error| format!("{error}"))?;
-        let contents = package
-            .contents(&entry)
-            .ok_or_else(|| String::from("an entry runs past the end of the package"))?;
+        let target = entry
+            .name()
+            .map_err(|error| Trouble::Refused(alloc::format!("{error}")))?;
+        let contents = package.contents(&entry).ok_or_else(|| {
+            Trouble::Refused(String::from("an entry runs past the end of the package"))
+        })?;
 
         if let Err(why) = place(root, target, contents, &mut done) {
             // Everything back the way it was, and then the failure. The order
             // is deliberate: a rollback that reported before it had finished
             // would be a machine claiming to be consistent while it is not.
             let undone = rewind(root, &mut done);
-            return Err(format!("{why}; rolled back {undone} changes"));
+            return Err(Trouble::Broken(format!(
+                "{why}; rolled back {undone} changes"
+            )));
         }
     }
 
@@ -345,12 +383,21 @@ fn read_whole(root: Handle, path: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Whether anything has gone wrong, for the status this program exits with.
+/// Whether something broke, for the status this program exits with.
 static FAILED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Whether a package was refused, which is a different answer.
+static REFUSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Say what happened and stop. Never returns.
+///
+/// Three answers rather than two: it worked, it refused, or it broke. Whoever
+/// asked for the install has to be able to tell the last two apart -- a
+/// refusal is an answer about the package and a fault is an answer about the
+/// machine.
 fn finish() -> ! {
     if FAILED.load(core::sync::atomic::Ordering::Relaxed) {
+        nexus_user::exit_with(2)
+    } else if REFUSED.load(core::sync::atomic::Ordering::Relaxed) {
         nexus_user::exit_with(1)
     } else {
         nexus_user::exit()

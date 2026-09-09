@@ -96,6 +96,10 @@ pub enum Error {
     FileCorrupt,
     /// A name or path with no terminator, or one that is not text.
     BadName,
+    /// Nobody signed it.
+    Unsigned,
+    /// Somebody signed it, and not with the key this machine trusts.
+    Forged,
 }
 
 impl core::fmt::Display for Error {
@@ -108,6 +112,8 @@ impl core::fmt::Display for Error {
             Self::Corrupt => "the package's digest does not match",
             Self::FileCorrupt => "a file in the package does not match its digest",
             Self::BadName => "a name in the package is not usable",
+            Self::Unsigned => "the package is not signed",
+            Self::Forged => "the package's signature is not from a trusted key",
         };
         formatter.write_str(text)
     }
@@ -306,6 +312,34 @@ impl<'a> Package<'a> {
         digest_of(self.bytes)
     }
 
+    /// Check the package *and* that it was signed by the key given.
+    ///
+    /// The order is deliberate: the signature is checked first, because
+    /// everything else is a statement the package makes about itself and the
+    /// signature is the only statement somebody else makes about the package.
+    /// Hashing every file in something nobody vouched for is work done on
+    /// behalf of whoever sent it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsigned`] if the package carries no signature, [`Error::Forged`]
+    /// if it carries one that does not check, and then whatever [`Package::verify`]
+    /// finds.
+    pub fn verify_signed_by(&self, public: &[u8; 32]) -> Result<(), Error> {
+        let signature = self.signature();
+        if is_unsigned(&signature) {
+            return Err(Error::Unsigned);
+        }
+        // Against the digest the package *has*, not the one it claims: a
+        // signature over a stated digest that nothing checks would be a
+        // signature over a number an attacker chose.
+        let computed = self.compute_digest();
+        if !nexus_crypto::verify(public, &computed, &signature) {
+            return Err(Error::Forged);
+        }
+        self.verify()
+    }
+
     /// Check that the package is what it says it is.
     ///
     /// # Errors
@@ -325,6 +359,40 @@ impl<'a> Package<'a> {
         }
         Ok(())
     }
+}
+
+/// Sign a package in place.
+///
+/// What is signed is the package's digest, not the package: Ed25519 hashes what
+/// it is given anyway, and signing the digest means the signature covers
+/// exactly what the digest covers -- which is everything except the digest and
+/// signature fields themselves.
+///
+/// The digest is recomputed here rather than read out of the header, so a
+/// package whose digest field was wrong cannot be signed into looking right.
+///
+/// # Errors
+///
+/// If the bytes are too short to be a package.
+pub fn sign(bytes: &mut [u8], secret: &[u8; 32]) -> Result<(), Error> {
+    if bytes.len() < HEADER {
+        return Err(Error::Truncated);
+    }
+    let whole = digest_of(bytes);
+    bytes[at::DIGEST..at::DIGEST + DIGEST].copy_from_slice(&whole);
+    let signature = nexus_crypto::sign(secret, &whole);
+    bytes[at::SIGNATURE..at::SIGNATURE + 64].copy_from_slice(&signature);
+    Ok(())
+}
+
+/// Whether a package carries no signature at all.
+///
+/// An all-zero field. Distinguished from a signature that does not check,
+/// because the two are different failures: one package was never signed and the
+/// other is claiming to be something it is not.
+#[must_use]
+pub fn is_unsigned(signature: &[u8; 64]) -> bool {
+    signature.iter().all(|byte| *byte == 0)
 }
 
 /// Hash a package's bytes the way its digest field is defined.
@@ -559,5 +627,75 @@ mod tests {
             bytes[index] ^= 0xA5;
         }
         assert_eq!(digest_of(&bytes), before);
+    }
+
+    /// A key that exists only in this test file.
+    const TEST_SECRET: [u8; 32] = [
+        0x4c, 0xcd, 0x08, 0x9b, 0x28, 0xff, 0x96, 0xda, 0x9d, 0xb6, 0xc3, 0x46, 0xec, 0x11, 0x4e,
+        0x0f, 0x5b, 0x8a, 0x31, 0x9f, 0x35, 0xab, 0xa6, 0x24, 0xda, 0x8c, 0xf6, 0xed, 0x4f, 0xb8,
+        0xa6, 0xfb,
+    ];
+
+    #[test]
+    fn a_signed_package_verifies_under_its_key() {
+        let mut bytes = sample();
+        sign(&mut bytes, &TEST_SECRET).unwrap();
+        let public = nexus_crypto::public_key(&TEST_SECRET);
+        let package = Package::open(&bytes).unwrap();
+        package.verify_signed_by(&public).unwrap();
+    }
+
+    #[test]
+    fn an_unsigned_package_is_refused_as_unsigned() {
+        let bytes = sample();
+        let public = nexus_crypto::public_key(&TEST_SECRET);
+        let package = Package::open(&bytes).unwrap();
+        // Not "corrupt" and not "forged": nobody claimed anything about it, and
+        // that is a different thing to report.
+        assert_eq!(package.verify_signed_by(&public), Err(Error::Unsigned));
+    }
+
+    #[test]
+    fn a_package_signed_by_someone_else_is_refused() {
+        let mut bytes = sample();
+        let mut other = TEST_SECRET;
+        other[0] ^= 1;
+        sign(&mut bytes, &other).unwrap();
+        let public = nexus_crypto::public_key(&TEST_SECRET);
+        let package = Package::open(&bytes).unwrap();
+        assert_eq!(package.verify_signed_by(&public), Err(Error::Forged));
+    }
+
+    #[test]
+    fn changing_a_signed_package_breaks_the_signature() {
+        let mut bytes = sample();
+        sign(&mut bytes, &TEST_SECRET).unwrap();
+        let public = nexus_crypto::public_key(&TEST_SECRET);
+
+        // Substitute a file and fix up the digest, which is what somebody with
+        // no key can do. The signature is over the digest, so the digest moving
+        // is exactly what it catches.
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        let whole = digest_of(&bytes);
+        bytes[at::DIGEST..at::DIGEST + DIGEST].copy_from_slice(&whole);
+
+        let package = Package::open(&bytes).unwrap();
+        assert_eq!(package.verify_signed_by(&public), Err(Error::Forged));
+    }
+
+    #[test]
+    fn signing_fixes_a_wrong_digest_rather_than_blessing_it() {
+        let mut bytes = sample();
+        // Scribble on the digest field before signing. `sign` recomputes it, so
+        // what comes out is a package that verifies -- rather than a signature
+        // over a number somebody else chose.
+        bytes[at::DIGEST] ^= 0xFF;
+        sign(&mut bytes, &TEST_SECRET).unwrap();
+        let public = nexus_crypto::public_key(&TEST_SECRET);
+        Package::open(&bytes)
+            .unwrap()
+            .verify_signed_by(&public)
+            .unwrap();
     }
 }

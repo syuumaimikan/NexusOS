@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Installs a .nexus package onto a filesystem it was handed."
+build = "build.rs"
 
 [[bin]]
 name = "nexus-install"

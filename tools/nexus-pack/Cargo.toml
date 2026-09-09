@@ -12,3 +12,4 @@ path = "src/main.rs"
 
 [dependencies]
 nexus-pkg = { path = "../../shared/nexus-pkg" }
+nexus-crypto = { path = "../../shared/nexus-crypto" }

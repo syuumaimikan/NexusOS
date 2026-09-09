@@ -9,3 +9,6 @@ description = "The .nexus package format, and the hash that keeps it honest."
 [lib]
 name = "nexus_pkg"
 path = "src/lib.rs"
+
+[dependencies]
+nexus-crypto = { path = "../nexus-crypto" }

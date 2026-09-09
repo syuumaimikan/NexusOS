@@ -1293,15 +1293,64 @@ package carried them faithfully, the installer wrote them faithfully, and the
 program reading it back saw a string that did not start where it should. The
 package was right; the thing that made it was not.
 
-Still to do: signatures (the field is in the header and is currently zero),
-repositories, fetching over the network, dependency resolution, and uninstall.
-None is stubbed — the signature field is documented as unsigned rather than
-checked against something that always passes.
+Signatures are done — see Phase 14. Still to do: repositories, fetching over
+the network, dependency resolution, and uninstall.
 
-## Phase 14 — Security ⬜
+## Phase 14 — Security 🚧
 
 Capabilities, sandboxing, the permission model, secure storage, code signing,
 application identity, audit logging.
+
+**Capabilities are not a phase, they are the system.** Every authority on this
+machine is a handle: a program cannot open a file it was not given a directory
+for, cannot start a program without a channel to a spawn service, cannot reach
+the display without a surface. The installer added in Phase 13 is the clearest
+case — it has no privilege at all until `init` hands it a directory, and the
+rights on that handle are read, write and transfer but *not* close, so it cannot
+take the filesystem away from whoever started it.
+
+**Code signing is real.** Ed25519, written out in `shared/nexus-crypto` and
+checked against the test vectors in RFC 8032 — the same keys, the same
+messages, the same signatures, byte for byte. Signing as well as verifying,
+because a system that could only verify would need its packages signed by
+something else and there is nothing else.
+
+```
+[user] install: demo 1.0.0, 2 files, signed by the key this machine trusts
+[user] install: FAILED: PKG/BAD.NEX: the package's signature is not from a trusted key
+[user] init: a package altered after signing was refused
+```
+
+That second pair is the half that matters. The build makes a second package
+which is the first one with a byte changed *after* it was signed — what a
+package looks like when somebody with no key alters it in transit — and the
+machine refuses it, on the machine, every boot. A system that only ever sees
+correct packages is a system whose checking has never been exercised.
+
+The trusted key is compiled into the installer by a build script that reads
+`keys/development.pub`, not read from the filesystem at runtime: a trusted key
+that lived on disk could be replaced by anything that can write to the disk,
+which is precisely what a package installer is for. The private half is
+committed and is worth nothing — `keys/README.md` says so in both languages, and
+switching to a real key changes exactly one file.
+
+Three details of the implementation are worth naming, because each is a way to
+get it subtly wrong:
+
+* the scalar `S` in a signature is checked to be below the group order, because
+  otherwise `S + L` is a *second, different* signature on the same message that
+  also verifies — fine for authenticity, wrong anywhere something is identified
+  by the bytes of its signature;
+* points are compared projectively (`X₁·Z₂ = X₂·Z₁`), because comparing
+  coordinates would call two spellings of one point different;
+* scalar multiplication performs the addition on every bit and discards the
+  result when the bit is clear, so how long it takes does not depend on the
+  scalar — which, when signing, is the private key.
+
+Still to do: sandboxing beyond what capabilities already give, a permission
+model a person interacts with, secure storage, application identity as something
+more than a signing key, and an audit log that records which capability was
+granted to whom.
 
 ## Phase 15 — Compatibility ⬜
 
