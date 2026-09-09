@@ -150,6 +150,12 @@ try {
             $writer.WriteLine('mouse_move 40 40')
             Start-Sleep -Milliseconds 40
         }
+        # And back up out of the strip of tabs along the bottom. The pointer can
+        # go further down than a window can, because the strip is reserved --
+        # so driving into the corner lands below the window rather than in its
+        # grip, and this is the ten pixels back up.
+        $writer.WriteLine('mouse_move 0 -10')
+        Start-Sleep -Milliseconds 80
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 150
         foreach ($step in 1..12) {
@@ -158,6 +164,47 @@ try {
         }
         $writer.WriteLine('mouse_button 0')
         Start-Sleep -Milliseconds 400
+
+        # And put a window away, then bring it back. The pointer is at the
+        # window's bottom-right corner, so its title bar is up and to the left;
+        # the window is a hundred or so tall after the resize, so going up that
+        # far and a little left lands on the bar.
+        Write-Host '==> Minimising a window and restoring it' -ForegroundColor Cyan
+        # Up to the top of the rectangle, where the pointer clamps, and a little
+        # left so it is over the window rather than past its right edge. Then
+        # twenty pixels down, which is inside the title bar of a window sitting
+        # at the top of the area windows may occupy.
+        foreach ($step in 1..10) {
+            $writer.WriteLine('mouse_move -8 -40')
+            Start-Sleep -Milliseconds 40
+        }
+        foreach ($step in 1..5) {
+            $writer.WriteLine('mouse_move 0 4')
+            Start-Sleep -Milliseconds 40
+        }
+        # The right button, which is the one that puts a window away.
+        $writer.WriteLine('mouse_button 2')
+        Start-Sleep -Milliseconds 200
+        $writer.WriteLine('mouse_button 0')
+        Start-Sleep -Milliseconds 200
+
+        # Its tab is in the strip along the very bottom, in the *left-hand* half:
+        # the window that was dragged, resized and put away is the first one,
+        # and a tab sits at its window's index so that it does not move when
+        # another window is minimised. Bottom-left corner, then a little right,
+        # because the tabs are inset from the edge by half a gap.
+        foreach ($step in 1..10) {
+            $writer.WriteLine('mouse_move -40 40')
+            Start-Sleep -Milliseconds 40
+        }
+        foreach ($step in 1..4) {
+            $writer.WriteLine('mouse_move 15 0')
+            Start-Sleep -Milliseconds 40
+        }
+        $writer.WriteLine('mouse_button 1')
+        Start-Sleep -Milliseconds 200
+        $writer.WriteLine('mouse_button 0')
+        Start-Sleep -Milliseconds 300
         # Wait for the monitor thread's next report, which is what carries the
         # keyboard figures and the decoded line into the serial log. It runs
         # every five seconds, so this has to outlast one full period.
@@ -291,6 +338,21 @@ if ($output.Contains('client: took a new surface and kept drawing')) {
     Write-Host '    ok   the client took the new surface and went on drawing' -ForegroundColor DarkGray
 } else {
     $failures += 'the client never took the surface it was given'
+}
+
+# And minimising. The tab is the whole reason this is a feature rather than a
+# trap: a window that can be put away and not brought back has been destroyed
+# with extra steps, and its client would go on drawing frames nobody would see.
+# So both halves are required.
+if ($output.Contains('compositor: put a window away, leaving its tab')) {
+    Write-Host '    ok   a window was put away' -ForegroundColor DarkGray
+} else {
+    $failures += 'no window was ever put away'
+}
+if ($output.Contains('compositor: brought a window back from its tab')) {
+    Write-Host '    ok   and brought back from its tab' -ForegroundColor DarkGray
+} else {
+    $failures += 'a window that was put away could not be brought back'
 }
 
 # F1 is a distinct key, and acting on it says the decoded key reached something

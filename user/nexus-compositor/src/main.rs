@@ -82,9 +82,27 @@
 //! resize from flashing: without it the window is blank until the client draws
 //! its next frame, which at two frames a second is half a second of black.
 //!
+//! # Minimising
+//!
+//! The right button on a title bar puts a window away, and a strip along the
+//! bottom of the rectangle holds a tab for each one that has been put away.
+//! Clicking a tab brings its window back, raised and focused.
+//!
+//! The tab is the whole reason minimising is a feature rather than a trap. A
+//! window that can be put away and not brought back has been destroyed with
+//! extra steps, and the client would go on drawing frames into a surface
+//! nobody would ever see again. So the strip is *reserved*: windows are laid
+//! out and clamped within the rectangle above it, and cannot be moved over the
+//! one place that can undo the thing.
+//!
+//! A minimised client is still told its frames are shown. It has not been
+//! stopped, it is not being punished, and it does not know: a client that could
+//! tell whether it was visible would be a client that could behave differently
+//! when nobody was looking.
+//!
 //! # What it is not
 //!
-//! No minimising, and no window that is not a rectangle.
+//! No window that is not a rectangle.
 
 #![no_std]
 #![no_main]
@@ -122,6 +140,8 @@ struct Pointer {
     /// "went down" would refocus a window forty times a second while somebody
     /// held the button.
     held: bool,
+    /// The same, for the right button, which puts a window away.
+    other_held: bool,
     /// What is under it, saved before the cursor was drawn over it.
     beneath: [u32; CURSOR * CURSOR],
     /// Whether `beneath` holds anything, and where it was taken from.
@@ -164,6 +184,7 @@ const CURSOR: usize = 10;
 mod pointer {
     pub const SIZE: usize = 12;
     pub const LEFT: u32 = 1 << 0;
+    pub const RIGHT: u32 = 1 << 1;
 }
 
 /// What a key looks like on the wire: a kind, then a number.
@@ -205,6 +226,12 @@ const GAP: u32 = 8;
 const TITLE: u32 = 14;
 /// How large the corner is that resizes a window.
 const GRIP: u32 = 12;
+/// How tall the strip of tabs along the bottom is.
+///
+/// Reserved: windows are laid out and clamped above it, so the one place that
+/// brings a minimised window back cannot be covered by another window.
+const TASKBAR: u32 = 16;
+
 /// The smallest a window may be made.
 ///
 /// Small enough to be a real constraint and large enough that a window can
@@ -233,6 +260,18 @@ struct Screen {
     screen_height: u32,
 }
 
+impl Screen {
+    /// The part windows may occupy: everything but the strip of tabs.
+    fn usable_height(&self) -> u32 {
+        self.height.saturating_sub(TASKBAR)
+    }
+
+    /// Where the strip of tabs begins.
+    fn taskbar_y(&self) -> u32 {
+        self.y + self.usable_height()
+    }
+}
+
 /// One client, and everything this program knows about it.
 struct Tile {
     /// The channel it talks on, and the process, so its ending can be heard.
@@ -253,6 +292,8 @@ struct Tile {
     frames: u32,
     /// Keys forwarded to it, likewise.
     keys: u32,
+    /// Put away, and reachable only by its tab.
+    minimised: bool,
 }
 
 impl Tile {
@@ -264,6 +305,17 @@ impl Tile {
     /// Whether a point is in the strip that can be taken hold of.
     fn title_contains(&self, x: u32, y: u32) -> bool {
         self.contains(x, y) && y < self.y + TITLE
+    }
+
+    /// Where this window's tab sits in the strip along the bottom.
+    ///
+    /// By index, so a tab does not move when another window is minimised or
+    /// brought back. A tab that shuffled sideways under the pointer would be a
+    /// tab somebody clicked and missed.
+    fn tab(index: usize, screen: &Screen) -> (u32, u32, u32, u32) {
+        let width = (screen.width / CLIENTS as u32).saturating_sub(GAP);
+        let x = screen.x + GAP / 2 + index as u32 * (width + GAP);
+        (x, screen.taskbar_y() + 2, width, TASKBAR - 4)
     }
 
     /// Whether a point is in the corner that resizes.
@@ -298,7 +350,7 @@ extern "C" fn main() -> ! {
     // before any client exists, because a client is told the size of its
     // surface and cannot be told twice.
     let tile_width = (screen.width - GAP * (CLIENTS as u32 + 1)) / CLIENTS as u32;
-    let tile_height = screen.height - GAP * 2;
+    let tile_height = screen.usable_height() - GAP * 2;
     if tile_width == 0 || tile_height == 0 {
         failed("compositor: FAILED: the rectangle it was given is too small to divide");
         finish();
@@ -469,6 +521,7 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
         live: true,
         frames: 0,
         keys: 0,
+        minimised: false,
     })
 }
 
@@ -511,6 +564,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
         x: screen.x + screen.width / 2,
         y: screen.y + screen.height / 2,
         held: false,
+        other_held: false,
         beneath: [0; CURSOR * CURSOR],
         drawn: None,
         dragging: None,
@@ -745,7 +799,48 @@ fn read_pointer(
     );
 
     let pressed = buttons & pointer::LEFT != 0;
+    let put_away = buttons & pointer::RIGHT != 0;
     let mut carried = 0;
+
+    // The right button on a title bar puts a window away. Checked before the
+    // left button's business, because the two are different acts and a window
+    // being minimised is not a window being raised.
+    if put_away && !cursor.other_held {
+        for &index in order.iter().rev() {
+            let Some(Some(tile)) = tiles.get_mut(index) else {
+                continue;
+            };
+            if tile.live && !tile.minimised && tile.title_contains(cursor.x, cursor.y) {
+                tile.minimised = true;
+                cursor.dragging = None;
+                nexus_user::log("compositor: put a window away, leaving its tab").ok();
+                break;
+            }
+        }
+    }
+    cursor.other_held = put_away;
+
+    // A tab brings its window back. Checked before the windows are, because a
+    // tab is in the strip they cannot reach and nothing else can be there.
+    if pressed && !cursor.held {
+        for index in 0..CLIENTS {
+            let (tx, ty, tw, th) = Tile::tab(index, screen);
+            if cursor.x < tx || cursor.x >= tx + tw || cursor.y < ty || cursor.y >= ty + th {
+                continue;
+            }
+            let Some(Some(tile)) = tiles.get_mut(index) else {
+                continue;
+            };
+            if tile.live && tile.minimised {
+                tile.minimised = false;
+                raise(order, index);
+                *focus = index;
+                nexus_user::log("compositor: brought a window back from its tab").ok();
+                cursor.held = true;
+                return Some(0);
+            }
+        }
+    }
 
     if pressed && !cursor.held {
         // Front to back, so a press lands on what is visible rather than on
@@ -756,7 +851,7 @@ fn read_pointer(
             let Some(tile) = tiles.get(index).and_then(Option::as_ref) else {
                 continue;
             };
-            if !tile.live || !tile.contains(cursor.x, cursor.y) {
+            if !tile.live || tile.minimised || !tile.contains(cursor.x, cursor.y) {
                 continue;
             }
 
@@ -814,7 +909,11 @@ fn read_pointer(
                     let wanted_x = i64::from(cursor.x) - i64::from(grab_x);
                     let wanted_y = i64::from(cursor.y) - i64::from(grab_y);
                     let moved_x = clamp(wanted_x, screen.x, screen.x + screen.width - tile.width);
-                    let moved_y = clamp(wanted_y, screen.y, screen.y + screen.height - tile.height);
+                    let moved_y = clamp(
+                        wanted_y,
+                        screen.y,
+                        screen.taskbar_y().saturating_sub(tile.height),
+                    );
                     if moved_x != tile.x || moved_y != tile.y {
                         tile.x = moved_x;
                         tile.y = moved_y;
@@ -836,7 +935,7 @@ fn read_pointer(
                     let wanted_height = clamp(
                         corner_y - i64::from(tile.y),
                         MIN_SIZE,
-                        screen.y + screen.height - tile.y,
+                        screen.taskbar_y().saturating_sub(tile.y),
                     );
 
                     if wanted_width != tile.width || wanted_height != tile.height {
@@ -1016,13 +1115,40 @@ fn repaint(
         let Some(tile) = tiles.get(index).and_then(Option::as_ref) else {
             continue;
         };
-        if !tile.live {
+        if !tile.live || tile.minimised {
             continue;
         }
         composite(screen, tile);
         title_bar(screen, tile, index == focus);
         grip(screen, tile, index == focus);
         outline(screen, tile, index == focus);
+    }
+
+    // The strip, last of the windows and before the pointer. A tab for every
+    // live window, so that one which has been put away has somewhere to be
+    // clicked and one which has not shows where it would go.
+    fill(
+        screen,
+        screen.x,
+        screen.taskbar_y(),
+        screen.width,
+        TASKBAR,
+        0x0006_0D1A,
+    );
+    for (index, tile) in tiles.iter().enumerate() {
+        let Some(tile) = tile else { continue };
+        if !tile.live {
+            continue;
+        }
+        let (x, y, width, height) = Tile::tab(index, screen);
+        let colour = if tile.minimised {
+            0x0027_6DA8
+        } else if index == focus {
+            0x0019_3350
+        } else {
+            0x0011_1E30
+        };
+        fill(screen, x, y, width, height, colour);
     }
 
     if pointing {

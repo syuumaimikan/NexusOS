@@ -942,7 +942,26 @@ The grip is checked before the title bar, because on a window small enough for
 the two to overlap the grip has to win: a window can always be moved by the rest
 of its bar, and a window too small to resize can never be made bigger.
 
-Outstanding here: no minimising, and no window that is not a rectangle.
+### Putting a window away
+
+The right button on a title bar minimises a window, and a strip along the bottom
+of the compositor's rectangle holds a tab for each one. Clicking a tab brings its
+window back, raised and focused.
+
+The tab is the whole reason this is a feature rather than a trap. A window that
+can be put away and not brought back has been destroyed with extra steps, and
+its client would go on drawing frames into a surface nobody would ever see
+again. So the strip is *reserved*: windows are laid out and clamped above it and
+cannot be moved or resized over the one place that undoes the thing. A tab sits
+at its window's index rather than being packed beside the other minimised ones,
+so it does not move when another window is put away -- a tab that shuffled
+sideways under the pointer would be a tab somebody clicked and missed.
+
+A minimised client is still told its frames are shown. It has not been stopped
+and it does not know: a client that could tell whether it was visible would be a
+client that could behave differently when nobody was looking.
+
+Outstanding here: no window that is not a rectangle.
 
 
 
