@@ -167,6 +167,63 @@ fn ask_for_a_program() {
     share_memory_with(child);
     wait_on_both(child, process);
     wait_for(process);
+    stop_a_program();
+}
+
+/// Start a program that will never finish, and stop it.
+///
+/// Every other program here ends because it has finished, which says nothing
+/// about whether one can be *made* to end -- a program that was going to exit
+/// anyway would exit at about the right moment whether or not the kill worked.
+/// So this one starts something that blocks on a channel nobody will ever send
+/// to, stops it, and waits to see what it did.
+///
+/// The handle is the authority. There is no call that stops a process by
+/// number, and this program can only stop what it was handed.
+fn stop_a_program() {
+    const PROGRAM: &[u8] = b"BIN/IDLE.ELF";
+
+    if nexus_user::send(SPAWNER, PROGRAM, &[]).is_err() {
+        failed("init: FAILED: could not ask for a program to stop");
+        return;
+    }
+    let mut buffer = [0u8; 64];
+    let mut handles = [nexus_user::Handle(0); 2];
+    let Ok(received) = nexus_user::receive(SPAWNER, &mut buffer, &mut handles) else {
+        failed("init: FAILED: the spawn service did not answer the second time");
+        return;
+    };
+    if received.handles != 2 {
+        failed("init: FAILED: no program came back to stop");
+        return;
+    }
+    let channel = handles[0];
+    let process = handles[1];
+
+    // A moment, so it reaches its wait. Stopping it before it blocks would
+    // still work -- the check at the system-call boundary catches it on the way
+    // in -- but then this would be testing the easy half.
+    nexus_user::sleep(200).ok();
+
+    if nexus_user::kill(process).is_err() {
+        failed("init: FAILED: could not stop the program");
+        return;
+    }
+
+    match nexus_user::wait(process) {
+        Ok(nexus_user::Ending::Stopped) => {
+            nexus_user::log("init: stopped a program that was waiting forever").ok();
+        }
+        Ok(nexus_user::Ending::Exited(_)) => {
+            // It got out of its wait and exited on its own, which means the
+            // kill did not do it and something else did.
+            failed("init: FAILED: the program it stopped exited by itself instead");
+        }
+        Err(_) => failed("init: FAILED: could not wait for the program it stopped"),
+    }
+
+    nexus_user::close(channel).ok();
+    nexus_user::close(process).ok();
 }
 
 /// The keys this program gives the two things it watches.
@@ -280,15 +337,17 @@ fn wait_on_both(child: nexus_user::Handle, process: nexus_user::Handle) {
 /// wait that never returned.
 fn wait_for(process: nexus_user::Handle) {
     match nexus_user::wait(process) {
-        Ok(0) => {
+        Ok(nexus_user::Ending::Exited(0)) => {
             nexus_user::log("init: the program it asked for finished, and said it worked").ok();
         }
-        Ok(status) => {
-            // Reported rather than ignored. A non-zero status here means the
-            // other program decided something went wrong, and a parent that
-            // dropped that would be the reason nobody ever found out.
-            let _ = status;
+        // Reported rather than ignored. A non-zero status means the other
+        // program decided something went wrong, and a parent that dropped that
+        // would be the reason nobody ever found out.
+        Ok(nexus_user::Ending::Exited(_)) => {
             failed("init: FAILED: the program it asked for reported a failure");
+        }
+        Ok(nexus_user::Ending::Stopped) => {
+            failed("init: FAILED: the program it asked for was stopped by someone");
         }
         Err(_) => {
             failed("init: FAILED: could not wait for the program it asked for");

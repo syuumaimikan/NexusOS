@@ -229,6 +229,11 @@ impl WaitSet {
             if self.is_empty() {
                 return Vec::new();
             }
+            // Asked to stop. Reported as an empty set for the same reason a
+            // closed channel is: nothing is coming.
+            if crate::sched::cancelled() {
+                return Vec::new();
+            }
 
             self.changed.wait_if_unchanged(seen);
         }

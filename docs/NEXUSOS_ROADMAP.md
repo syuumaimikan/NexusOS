@@ -726,8 +726,48 @@ heard all five heard someone else's keys, which is the difference between
 routing and broadcasting, and it is how what is typed into one window ends up in
 another.
 
+### Stopping a program
+
+Whoever holds a process handle can now end it. Not by reaching into it -- a
+thread cannot be torn off a processor it is running on, and one stopped
+half-way through a system call would leave the kernel holding whatever it was
+holding. A kill sets a flag and wakes everything the process had asleep; the
+threads notice and leave, because a thread is the only thing that knows what it
+is holding.
+
+So it is cooperative in mechanism and not in effect. Every place a thread can
+wait consults the flag, and so does the system-call boundary on the way in and
+on the way out. A blocked program stops at once; a program making calls stops at
+its next one. What it does not reach is a loop that touches nothing at all --
+no calls, no waiting, just arithmetic. That needs the check on the way back to
+ring 3 from the timer, and it is written down here rather than glossed as
+"cooperative".
+
+Read and write are different rights on a process handle: watching something end
+is not the same as being able to end it, so a program handed a read-only one can
+wait and nothing more. A stopped process ends with a status above anything
+`exit` can be given -- `exit` takes a 32-bit number -- so a waiter tells "it
+decided to fail" from "it was stopped" without a second call.
+
+Two things had to be found by running it. Waking a killed thread was not enough:
+`wait_until` re-tested its condition, found it still false, and went back to
+sleep forever, so the check had to go inside the wait queue rather than in each
+caller. And the first version leaked an address space per kill, because it held
+an `Arc<Process>` across a call to `exit` -- which never returns, so nothing
+after it runs, destructors included. The accounting said fourteen address spaces
+created and thirteen freed, which is exactly the kind of thing that invariant is
+kept for.
+
+`idle` exists to be stopped. Every other program here ends because it has
+finished, which says nothing about whether one can be *made* to end: a program
+that was going to exit anyway would exit at about the right moment whether or
+not the kill worked. That one blocks on a channel nobody will ever send to, and
+`init` starts it, lets it reach its wait, stops it, and requires the ending to
+be a stop rather than an exit.
+
 Outstanding here: no windows, no stacking, no resizing, no pointer. Tiles are
-laid out once and never move.
+laid out once and never move. A program in a tight loop that makes no system
+calls cannot yet be stopped.
 
 
 

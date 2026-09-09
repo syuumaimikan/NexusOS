@@ -339,6 +339,47 @@ pub fn current_process() -> Option<Arc<crate::process::Process>> {
         .and_then(|thread| thread.process.clone())
 }
 
+/// Whether the calling thread's process has been asked to stop.
+///
+/// Every place a thread can wait consults this, and so does the system-call
+/// boundary. A thread that finds it set leaves: it is the only thing that can,
+/// because it is the only thing that knows what it is holding.
+#[must_use]
+pub fn cancelled() -> bool {
+    current_process().is_some_and(|process| process.completion.is_cancelled())
+}
+
+/// Wake every thread of `process`, so each can notice it has been asked to stop.
+///
+/// Returns how many were woken. Waking a thread that is not blocked is a
+/// no-op, and a thread woken with a stale entry still in some wait queue is
+/// fine: the queue pops it later and finds it already awake, which is a case
+/// that already happens whenever two wakers race.
+pub fn wake_process_threads(process: crate::process::ProcessId) -> usize {
+    let waking: alloc::vec::Vec<ThreadId> = {
+        let scheduler = SCHEDULER.lock();
+        scheduler
+            .threads
+            .iter()
+            .filter(|(_, thread)| {
+                thread
+                    .process
+                    .as_ref()
+                    .is_some_and(|owner| owner.id == process)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    };
+
+    // Outside the lock, because waking takes it again.
+    let mut woken = 0;
+    for id in waking {
+        wake_blocked(id);
+        woken += 1;
+    }
+    woken
+}
+
 /// The thread running on this processor, if it has joined the scheduler.
 ///
 /// Reads per-processor state rather than the scheduler itself, so it is safe to

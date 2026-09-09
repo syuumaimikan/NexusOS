@@ -103,6 +103,10 @@ $ClientElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-client
 $StagedClient = Publish-Program -Elf $ClientElf -ProgramDir $ProgramDir -Name 'client.elf'
 $clientSize = [math]::Round((Get-Item $StagedClient).Length / 1KB, 1)
 
+$IdleElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-idle"
+$StagedIdle = Publish-Program -Elf $IdleElf -ProgramDir $ProgramDir -Name 'idle.elf'
+$idleSize = [math]::Round((Get-Item $StagedIdle).Length / 1KB, 1)
+
 # The disk the kernel drives. Data only, with nothing to boot from: a machine
 # given two bootable disks leaves the firmware to choose between them, and it
 # chose the one whose kernel was older. Made once and left alone, because the
@@ -134,6 +138,7 @@ Write-Host "  init       : $initSize KiB  -> BIN\INIT.ELF on the disk"
 Write-Host "  hello      : $helloSize KiB  -> BIN\HELLO.ELF on the disk"
 Write-Host "  compositor : $compositorSize KiB  -> BIN\COMP.ELF on the disk"
 Write-Host "  client     : $clientSize KiB  -> BIN\CLIENT.ELF on the disk"
+Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''
 Write-Host 'Run it with: .\scripts\run.ps1'

@@ -130,11 +130,19 @@ impl WaitQueue {
         super::schedule();
     }
 
-    /// Block until `condition` holds.
+    /// Block until `condition` holds, or until this thread is asked to stop.
     ///
     /// The condition is checked before waiting and after every wake-up, which
     /// is what makes a spurious wake-up harmless and a wake-up that arrives
     /// just before the wait harmless too.
+    ///
+    /// It can also return with the condition *false*, when the calling thread's
+    /// process has been asked to stop. Callers must re-check what they were
+    /// waiting for rather than assume this returning means they got it -- which
+    /// they already had to, because a wake-up here has never been a promise.
+    /// Without this a killed thread wakes, finds its condition still false, and
+    /// goes back to sleep forever: waking it is not the same as letting it
+    /// leave.
     pub fn wait_until(&self, mut condition: impl FnMut() -> bool) {
         loop {
             // Read first, test second, block third. Reading the counter after
@@ -143,6 +151,9 @@ impl WaitQueue {
             // the counter, and the thread would sleep with its condition true.
             let seen = self.generation();
             if condition() {
+                return;
+            }
+            if super::cancelled() {
                 return;
             }
             self.wait_if_unchanged(seen);

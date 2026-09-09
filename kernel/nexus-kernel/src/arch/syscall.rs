@@ -273,11 +273,13 @@ pub enum Call {
     HandleDuplicate = 25,
     /// Stop running for a while. `(milliseconds)`.
     Sleep = 26,
+    /// Ask a process to stop. `(handle)`.
+    ProcessKill = 27,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 27;
+    pub const COUNT: usize = 28;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -309,6 +311,7 @@ impl Call {
             24 => Some(Self::WaitSetWait),
             25 => Some(Self::HandleDuplicate),
             26 => Some(Self::Sleep),
+            27 => Some(Self::ProcessKill),
             _ => None,
         }
     }
@@ -376,6 +379,12 @@ extern "sysv64" fn dispatch(
     super::interrupts::enable();
     CALLS.fetch_add(1, Ordering::Relaxed);
 
+    // On the way in. A process that has been asked to stop does not get to make
+    // another call: this is where a program that is busy rather than blocked
+    // notices, and it is the earliest point at which it can, because the kernel
+    // is holding nothing yet.
+    stop_here_if_asked();
+
     let result = match Call::from_number(number) {
         Some(Call::Exit) => {
             match crate::sched::current_process() {
@@ -433,6 +442,7 @@ extern "sysv64" fn dispatch(
         Some(Call::WaitSetWait) => wait_set_wait(argument0, argument1, argument2),
         Some(Call::HandleDuplicate) => handle_duplicate(argument0, argument1),
         Some(Call::Sleep) => sleep(argument0),
+        Some(Call::ProcessKill) => process_kill(argument0),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -440,10 +450,49 @@ extern "sysv64" fn dispatch(
         }
     };
 
+    // And on the way out. A call that blocked may have been woken *by* the kill
+    // rather than by what it was waiting for, and returning its answer to a
+    // process that no longer exists as far as anyone else is concerned would be
+    // letting it run on after it was stopped.
+    stop_here_if_asked();
+
     // The stub restores the user stack pointer and swaps `GS` back; an
     // interrupt between those two would be taken with a mismatched pair.
     super::interrupts::disable();
     result
+}
+
+/// Leave, if this process has been asked to stop.
+///
+/// Called at both edges of every system call. It never returns when the flag is
+/// set: the thread records the killed status and retires, which is the only way
+/// a thread can be stopped safely -- it is the only thing that knows what it is
+/// holding.
+fn stop_here_if_asked() {
+    // The reference to the process is confined to this block, and that is not
+    // tidiness. `exit` never returns, so nothing after it runs -- including
+    // every destructor for everything still alive. An `Arc<Process>` held
+    // across it is a reference that is never given back, which means an address
+    // space that is never freed: the accounting said fourteen created and
+    // thirteen freed, and this was the one.
+    {
+        let Some(process) = crate::sched::current_process() else {
+            return;
+        };
+        if !process.completion.is_cancelled() {
+            return;
+        }
+
+        process.completion.finish(crate::process::KILLED);
+        kprintln!(
+            "[sys ] process {} \"{}\" stopped because it was asked to",
+            process.id,
+            process.name.as_str()
+        );
+    }
+
+    super::interrupts::disable();
+    crate::sched::exit()
 }
 
 /// [`Call::Log`]: write a string from user memory to the kernel log.
@@ -1376,6 +1425,48 @@ fn sleep(milliseconds: u64) -> u64 {
     }
     if milliseconds > 0 {
         crate::sched::sleep_ms(milliseconds);
+    }
+    0
+}
+
+/// [`Call::ProcessKill`]: ask a process to stop.
+///
+/// The handle is the authority, as everywhere: a process that was never handed
+/// one cannot stop anything, and there is no identifier it could use instead.
+/// Write, not read -- being able to *watch* something end is not the same right
+/// as being able to end it, and a program handed a read-only process handle can
+/// wait for it and nothing more.
+///
+/// Returns at once. Stopping is asking: the flag is set, everything the process
+/// had asleep is woken, and its threads leave when they notice. A caller that
+/// wants to know it has actually gone waits for it, which is what the handle is
+/// also for.
+fn process_kill(handle: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+    let completion = match process.handles.process(handle, crate::ipc::Rights::WRITE) {
+        Ok(completion) => completion,
+        Err(error) => return handle_error(error),
+    };
+
+    // Already finished. Not an error: a caller that asks twice, or asks about
+    // something that ended while it was deciding to, has got what it wanted.
+    if completion.status().is_some() {
+        return 0;
+    }
+
+    if completion.cancel() {
+        let woken = crate::sched::wake_process_threads(completion.id);
+        kprintln!(
+            "[sys ] process {} \"{}\" was asked to stop; {woken} of its threads woken to notice",
+            completion.id,
+            completion.name.as_str()
+        );
     }
     0
 }

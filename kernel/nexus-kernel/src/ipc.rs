@@ -256,6 +256,12 @@ impl Endpoint {
             if !self.peer_open() {
                 return None;
             }
+            // Asked to stop. Reported the same way as a closed peer, because
+            // to the caller it is the same fact: no message is coming, and
+            // there is nothing further for this thread to do.
+            if crate::sched::cancelled() {
+                return None;
+            }
 
             // The condition is re-checked inside the wait, under the queue's
             // lock, which is what closes the window between the check above and

@@ -128,6 +128,7 @@ enum Call {
     WaitSetWait = 24,
     HandleDuplicate = 25,
     Sleep = 26,
+    ProcessKill = 27,
 }
 
 /// Make a system call.
@@ -599,6 +600,21 @@ pub fn size(node: Handle) -> Result<usize, Error> {
 
 // -- Processes -----------------------------------------------------------------
 
+/// Ask a process to stop.
+///
+/// Returns at once, because stopping is asking: the kernel sets a flag and
+/// wakes whatever the process had asleep, and its threads leave when they
+/// notice. Wait for it afterwards to know it has actually gone.
+///
+/// Needs write on the handle. Being able to watch something end is not the same
+/// right as being able to end it, so a program handed a read-only process
+/// handle can wait for it and nothing more.
+pub fn kill(process: Handle) -> Result<(), Error> {
+    // SAFETY: takes one integer.
+    let result = unsafe { syscall(Call::ProcessKill, u64::from(process.0), 0, 0, 0, 0, 0) };
+    check(result).map(|_| ())
+}
+
 /// Wait for a process to end, and take its status.
 ///
 /// Blocks. A process that has already ended answers immediately, which is the
@@ -608,10 +624,26 @@ pub fn size(node: Handle) -> Result<usize, Error> {
 /// The handle is the authority. There is no call that waits on a process
 /// identifier, because an identifier is a number that could be guessed and a
 /// handle is something that had to be given.
-pub fn wait(process: Handle) -> Result<u32, Error> {
+pub fn wait(process: Handle) -> Result<Ending, Error> {
     // SAFETY: takes one integer.
     let result = unsafe { syscall(Call::ProcessWait, u64::from(process.0), 0, 0, 0, 0, 0) };
-    check(result).map(|status| status as u32)
+    check(result).map(|status| {
+        if status >= 1 << 32 {
+            Ending::Stopped
+        } else {
+            Ending::Exited(status as u32)
+        }
+    })
+}
+
+/// How a process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    /// It decided to stop, with this status. Zero conventionally means it
+    /// worked, because that is what every program here writes.
+    Exited(u32),
+    /// Somebody stopped it.
+    Stopped,
 }
 
 // -- Waiting for several things ------------------------------------------------

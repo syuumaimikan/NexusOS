@@ -28,11 +28,31 @@
 //! identifier and an outcome -- three words and a wait queue -- and it outlives
 //! the process by design.
 //!
+//! # Ending it from outside
+//!
+//! Whoever holds a handle can also *stop* it. Not by reaching into it -- a
+//! thread cannot be torn off a processor it is running on, and one stopped
+//! half-way through a system call would leave the kernel holding whatever it
+//! was holding. What a kill does is set a flag and wake everything that was
+//! asleep; the threads themselves notice and leave.
+//!
+//! So it is cooperative in mechanism and not in effect. Every place a thread
+//! can wait -- a channel, a wait set, another process -- checks the flag and
+//! gives up, and so does the system-call boundary, on the way in and on the way
+//! out. A program that is blocked stops at once, and a program that is making
+//! calls stops at its next one.
+//!
+//! What it does not reach is a program in a loop that touches nothing: no
+//! system calls, no waiting, just arithmetic. That thread runs until it is
+//! preempted and then runs again. Stopping it needs the check to happen on the
+//! way back to ring 3 from the timer interrupt, which is the next piece and is
+//! written down here rather than glossed as "cooperative".
+//!
 //! # What is deliberately absent
 //!
-//! No parent, no children, no process groups, no signals, and no way to end a
-//! process other than its own thread returning. A process is created by asking
-//! whoever is allowed to answer, not by a system call that trusts the asker.
+//! No parent, no children, no process groups and no signals. A process is
+//! created by asking whoever is allowed to answer, not by a system call that
+//! trusts the asker.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -63,6 +83,13 @@ impl core::fmt::Display for ProcessId {
 pub struct Completion {
     pub id: ProcessId,
     pub name: String,
+    /// Somebody has asked this process to stop.
+    ///
+    /// Here rather than on [`Process`] because a handle names a completion, and
+    /// the right to stop something has to be reachable from the thing that
+    /// confers it. A thread finds it through its own process, which holds the
+    /// same completion.
+    cancelled: AtomicBool,
     /// Taken by whoever gets to decide the status. Exclusion only; it says
     /// nothing about whether the status has been written yet.
     claimed: AtomicBool,
@@ -76,7 +103,29 @@ pub struct Completion {
     watchers: crate::waitset::Watchers,
 }
 
+/// The status a process that was stopped ends with.
+///
+/// Above anything a program can pass to `Exit`, which takes a 32-bit number, so
+/// a waiter can tell "it decided to fail" from "it was stopped" without a
+/// second call to ask which.
+pub const KILLED: u64 = 1 << 32;
+
 impl Completion {
+    /// Ask the process to stop.
+    ///
+    /// Returns whether this call was the one that asked; a second ask changes
+    /// nothing and is not an error, because two things noticing the same
+    /// misbehaviour at once is ordinary.
+    pub fn cancel(&self) -> bool {
+        !self.cancelled.swap(true, Ordering::Release)
+    }
+
+    /// Whether it has been asked to stop.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
     /// Record that the process ended, and wake everyone waiting.
     ///
     /// Idempotent, because a process with more than one thread will one day
@@ -122,6 +171,13 @@ impl Completion {
             if let Some(status) = self.status() {
                 return status;
             }
+            // The *waiting* process being asked to stop, not this one. A thread
+            // told to leave must not stay blocked on something that may never
+            // end -- which is the whole of what makes a kill work on a program
+            // that spends its life waiting for a child.
+            if crate::sched::cancelled() {
+                return KILLED;
+            }
             self.waiters.wait();
         }
     }
@@ -160,6 +216,7 @@ impl Process {
             completion: Arc::new(Completion {
                 id,
                 name: String::from(name),
+                cancelled: AtomicBool::new(false),
                 claimed: AtomicBool::new(false),
                 finished: AtomicBool::new(false),
                 status: AtomicU64::new(0),
