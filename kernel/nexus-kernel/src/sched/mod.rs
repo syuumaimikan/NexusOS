@@ -349,6 +349,38 @@ pub fn cancelled() -> bool {
     current_process().is_some_and(|process| process.completion.is_cancelled())
 }
 
+/// Leave, if this thread's process has been asked to stop.
+///
+/// Called from the two places a thread can be made to notice: the system-call
+/// boundary, and the way back to ring 3 from the timer. It never returns when
+/// the flag is set -- the thread records the killed status and retires, which
+/// is the only safe way for a thread to be stopped, because it is the only
+/// thing that knows what it is holding.
+pub fn stop_if_asked() {
+    // The reference to the process is confined to this block, and that is not
+    // tidiness. `exit` never returns, so nothing after it runs -- destructors
+    // included. An `Arc<Process>` held across it is a reference never given
+    // back, which is an address space never freed.
+    {
+        let Some(process) = current_process() else {
+            return;
+        };
+        if !process.completion.is_cancelled() {
+            return;
+        }
+
+        process.completion.finish(crate::process::KILLED);
+        crate::kprintln!(
+            "[sys ] process {} \"{}\" stopped because it was asked to",
+            process.id,
+            process.name.as_str()
+        );
+    }
+
+    crate::arch::interrupts::disable();
+    exit()
+}
+
 /// Wake every thread of `process`, so each can notice it has been asked to stop.
 ///
 /// Returns how many were woken. Waking a thread that is not blocked is a

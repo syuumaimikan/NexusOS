@@ -383,7 +383,7 @@ extern "sysv64" fn dispatch(
     // another call: this is where a program that is busy rather than blocked
     // notices, and it is the earliest point at which it can, because the kernel
     // is holding nothing yet.
-    stop_here_if_asked();
+    crate::sched::stop_if_asked();
 
     let result = match Call::from_number(number) {
         Some(Call::Exit) => {
@@ -454,45 +454,12 @@ extern "sysv64" fn dispatch(
     // rather than by what it was waiting for, and returning its answer to a
     // process that no longer exists as far as anyone else is concerned would be
     // letting it run on after it was stopped.
-    stop_here_if_asked();
+    crate::sched::stop_if_asked();
 
     // The stub restores the user stack pointer and swaps `GS` back; an
     // interrupt between those two would be taken with a mismatched pair.
     super::interrupts::disable();
     result
-}
-
-/// Leave, if this process has been asked to stop.
-///
-/// Called at both edges of every system call. It never returns when the flag is
-/// set: the thread records the killed status and retires, which is the only way
-/// a thread can be stopped safely -- it is the only thing that knows what it is
-/// holding.
-fn stop_here_if_asked() {
-    // The reference to the process is confined to this block, and that is not
-    // tidiness. `exit` never returns, so nothing after it runs -- including
-    // every destructor for everything still alive. An `Arc<Process>` held
-    // across it is a reference that is never given back, which means an address
-    // space that is never freed: the accounting said fourteen created and
-    // thirteen freed, and this was the one.
-    {
-        let Some(process) = crate::sched::current_process() else {
-            return;
-        };
-        if !process.completion.is_cancelled() {
-            return;
-        }
-
-        process.completion.finish(crate::process::KILLED);
-        kprintln!(
-            "[sys ] process {} \"{}\" stopped because it was asked to",
-            process.id,
-            process.name.as_str()
-        );
-    }
-
-    super::interrupts::disable();
-    crate::sched::exit()
 }
 
 /// [`Call::Log`]: write a string from user memory to the kernel log.

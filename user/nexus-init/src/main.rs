@@ -224,6 +224,63 @@ fn stop_a_program() {
 
     nexus_user::close(channel).ok();
     nexus_user::close(process).ok();
+
+    stop_a_spinning_program();
+}
+
+/// And the harder one: a program that asks the kernel for nothing.
+///
+/// The one above blocks, so stopping it is a matter of waking it. This one
+/// loops on a number and makes no system calls at all, so it never reaches the
+/// boundary where a thread is asked to leave. The only thing that interrupts it
+/// is the timer, and being stopped there is the whole claim: without it a
+/// kernel can be asked to stop a program and simply fail to, forever.
+fn stop_a_spinning_program() {
+    const PROGRAM: &[u8] = b"BIN/IDLE.ELF";
+
+    if nexus_user::send(SPAWNER, PROGRAM, &[]).is_err() {
+        failed("init: FAILED: could not ask for a program to spin");
+        return;
+    }
+    let mut buffer = [0u8; 64];
+    let mut handles = [nexus_user::Handle(0); 2];
+    let Ok(received) = nexus_user::receive(SPAWNER, &mut buffer, &mut handles) else {
+        failed("init: FAILED: the spawn service did not answer the third time");
+        return;
+    };
+    if received.handles != 2 {
+        failed("init: FAILED: no program came back to spin");
+        return;
+    }
+    let channel = handles[0];
+    let process = handles[1];
+
+    if nexus_user::send(channel, b"spin", &[]).is_err() {
+        failed("init: FAILED: could not tell the program to spin");
+        return;
+    }
+
+    // Long enough that it is certainly in its loop. Stopping it before it got
+    // there would be testing the boundary again rather than the timer.
+    nexus_user::sleep(300).ok();
+
+    if nexus_user::kill(process).is_err() {
+        failed("init: FAILED: could not stop the spinning program");
+        return;
+    }
+
+    match nexus_user::wait(process) {
+        Ok(nexus_user::Ending::Stopped) => {
+            nexus_user::log("init: stopped a program that was asking the kernel for nothing").ok();
+        }
+        Ok(nexus_user::Ending::Exited(_)) => {
+            failed("init: FAILED: the spinning program exited by itself instead");
+        }
+        Err(_) => failed("init: FAILED: could not wait for the spinning program"),
+    }
+
+    nexus_user::close(channel).ok();
+    nexus_user::close(process).ok();
 }
 
 /// The keys this program gives the two things it watches.

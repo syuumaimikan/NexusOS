@@ -165,6 +165,26 @@ extern "x86-interrupt" fn apic_timer_interrupt(frame: InterruptStackFrame) {
     // SAFETY: called exactly once, from the handler for this vector.
     unsafe { apic::end_of_interrupt() };
 
+    // A program that makes no system calls and never waits cannot be stopped at
+    // the system-call boundary, because it never reaches one. This is the other
+    // place it can be made to notice: the timer arrives whether a program asks
+    // for anything or not, so a loop that touches nothing is interrupted here
+    // several hundred times a second and can be told to leave at any of them.
+    //
+    // Only when the interrupt came from ring 3. Kernel code is not asked to
+    // stop -- there is no process to have been asked -- and a check that fired
+    // in kernel context would be stopping a thread part-way through whatever
+    // the kernel was doing on its behalf, which is the thing this whole
+    // arrangement exists to avoid.
+    //
+    // Safe here for the same reason `preempt` is: the handler runs on the
+    // interrupted thread's own kernel stack. The `GS` guard above is not
+    // dropped, and must not be -- this never returns to ring 3, so the kernel's
+    // base is the one that should stay.
+    if frame.code_segment & 3 == 3 {
+        crate::sched::stop_if_asked();
+    }
+
     if crate::sched::needs_reschedule() {
         preempt();
     }

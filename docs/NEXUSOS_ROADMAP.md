@@ -738,10 +738,20 @@ is holding.
 So it is cooperative in mechanism and not in effect. Every place a thread can
 wait consults the flag, and so does the system-call boundary on the way in and
 on the way out. A blocked program stops at once; a program making calls stops at
-its next one. What it does not reach is a loop that touches nothing at all --
-no calls, no waiting, just arithmetic. That needs the check on the way back to
-ring 3 from the timer, and it is written down here rather than glossed as
-"cooperative".
+its next one. A loop that touches nothing -- no calls, no waiting, just arithmetic -- never
+reaches that boundary, so it is stopped somewhere else: on the way back to ring
+3 from the timer, which arrives whether a program asks for anything or not. Only
+when the interrupt came from ring 3, because kernel code has no process to have
+been asked, and stopping a thread part-way through what the kernel was doing on
+its behalf is the thing this whole arrangement exists to avoid. It is safe there
+for the same reason preemption is: the handler runs on the interrupted thread's
+own kernel stack.
+
+`idle` therefore waits in two ways. Told nothing it blocks, and stopping it
+means reaching a thread that is off every run queue. Told `spin` it loops on a
+number and asks the kernel for nothing at all -- and a kernel that only checked
+at the system-call boundary would run that loop until the machine was turned
+off.
 
 Read and write are different rights on a process handle: watching something end
 is not the same as being able to end it, so a program handed a read-only one can
@@ -766,8 +776,7 @@ not the kill worked. That one blocks on a channel nobody will ever send to, and
 be a stop rather than an exit.
 
 Outstanding here: no windows, no stacking, no resizing, no pointer. Tiles are
-laid out once and never move. A program in a tight loop that makes no system
-calls cannot yet be stopped.
+laid out once and never move.
 
 
 

@@ -178,6 +178,8 @@ Invoke-Step 'boot test' {
         'idle: waiting for something that will never arrive',
         'stopped because it was asked to',
         'init: stopped a program that was waiting forever',
+        'idle: spinning, and asking the kernel for nothing at all',
+        'init: stopped a program that was asking the kernel for nothing',
         'loaded from BIN/INIT.ELF',
         'init: loaded from disk and running in ring 3',
         'init: clock, channel and handle checks all passed',
