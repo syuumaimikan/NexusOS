@@ -76,7 +76,7 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-net', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
 
         # And the kernel, which needs its own target and core rebuilt for it,
         # and so was left out until it had accumulated a dozen findings nobody
@@ -208,6 +208,11 @@ Invoke-Step 'boot test' {
         'display adopted',
         'display thread',
         'I/O APIC 0 version',
+        'virtio card at',
+        'network thread',
+        'address 10.0.2.15/24 from 10.0.2.2',
+        'gateway 10.0.2.2, DNS 10.0.2.3',
+        'ping 10.0.2.2: reply in',
         'keyboard on IRQ 1',
         'PS/2 mouse reporting on IRQ 12',
         'mouse on IRQ 12',

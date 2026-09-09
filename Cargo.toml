@@ -4,6 +4,7 @@ members = [
     "shared/nexus-abi",
     "shared/nexus-font",
     "shared/nexus-i18n",
+    "shared/nexus-net",
     "boot/nexus-boot",
     "kernel/nexus-mm",
     "kernel/nexus-kernel",

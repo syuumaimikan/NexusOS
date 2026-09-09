@@ -28,6 +28,15 @@ pub const DISK_VECTOR: u8 = super::idt::IRQ_BASE + 18;
 /// Vector the mouse is routed to through the I/O APIC.
 pub const MOUSE_VECTOR: u8 = super::idt::IRQ_BASE + 19;
 
+/// The network card.
+///
+/// Its own vector rather than one shared with the disk, even though both are
+/// virtio devices behind PCI pins that may well be shared: a shared vector
+/// means every handler runs on every interrupt and each has to ask its own
+/// device whether it was the one, and asking costs a port read. One vector
+/// each costs a line in a table.
+pub const NETWORK_VECTOR: u8 = super::idt::IRQ_BASE + 20;
+
 /// Vector the local APIC reports spurious interrupts on.
 ///
 /// The architecture requires the low four bits to be set on some older
@@ -272,6 +281,45 @@ extern "x86-interrupt" fn disk_interrupt(frame: InterruptStackFrame) {
     // SAFETY: called only as the handler for this vector.
     unsafe {
         crate::drivers::virtio_blk::on_interrupt();
+        // And the card, if it is on the same pin. PCI pins are shared: two
+        // devices in adjacent slots routinely land on one line, and the only
+        // thing that says which of them raised it is each device's own status
+        // register. So both are asked, and each answers for itself.
+        //
+        // This is not an optimisation and it is not defensive. A line with two
+        // devices on it and one handler is a line where the other device's
+        // interrupt is acknowledged by nobody -- and a level-triggered pin that
+        // is never acknowledged stays asserted, which is an interrupt storm on
+        // top of a device that has stopped answering.
+        if SHARED_LINE.load(core::sync::atomic::Ordering::Relaxed) {
+            crate::drivers::virtio_net::on_interrupt();
+        }
+        apic::end_of_interrupt();
+    }
+}
+
+/// Whether the network card is on the same interrupt line as the disk.
+static SHARED_LINE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Say that the card and the disk share a pin, so both handlers ask both.
+pub fn share_line_with_disk() {
+    SHARED_LINE.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// The network card has received a frame or finished sending one.
+///
+/// It does nothing with either. The handler acknowledges the device and wakes
+/// whoever was waiting; reading a frame means parsing it, which means locks and
+/// allocation and possibly a reply, none of which belongs in an interrupt.
+extern "x86-interrupt" fn network_interrupt(frame: InterruptStackFrame) {
+    let _gs = super::idt::KernelGs::enter(&frame);
+    // SAFETY: called only as the handler for this vector.
+    unsafe {
+        crate::drivers::virtio_net::on_interrupt();
+        // The other way round, for the same reason.
+        if SHARED_LINE.load(core::sync::atomic::Ordering::Relaxed) {
+            crate::drivers::virtio_blk::on_interrupt();
+        }
         apic::end_of_interrupt();
     }
 }
@@ -354,6 +402,7 @@ pub unsafe fn init(timer_hz: u32) {
         idt.set_handler(KEYBOARD_VECTOR, keyboard_interrupt as *const ());
         idt.set_handler(DISK_VECTOR, disk_interrupt as *const ());
         idt.set_handler(MOUSE_VECTOR, mouse_interrupt as *const ());
+        idt.set_handler(NETWORK_VECTOR, network_interrupt as *const ());
         idt.set_handler(SPURIOUS_VECTOR, apic_spurious_interrupt as *const ());
         idt.set_handler(TLB_SHOOTDOWN_VECTOR, tlb_shootdown_interrupt as *const ());
 

@@ -27,6 +27,13 @@
     Stop as soon as this text appears in the serial log, instead of running for
     the whole timeout. -Timeout then means how long to wait for it.
 
+    One monitor report is allowed to pass after the text appears, so that the
+    figures the log carries describe the machine *after* whatever the marker
+    was about. Stopping on the marker itself catches the system mid-tidy --
+    processes that have said what they had to say but whose address spaces have
+    not been reaped yet -- which reads as a leak rather than as a run that was
+    cut short.
+
     How long a boot takes is a property of the host, not of the system under
     test: four emulated processors share one real one, and a debug build under
     dynamic translation runs at a fraction of wall-clock speed that changes with
@@ -112,14 +119,24 @@ if ($Headless) {
     $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
     $exited = $false
     if ($Until) {
+        $seenAt = -1
+        $reportsThen = 0
         for ($waited = 0; $waited -lt $Timeout; $waited++) {
             if ($process.WaitForExit(1000)) { $exited = $true; break }
-            if (Test-Path $SerialLog) {
-                $sofar = (Get-Content $SerialLog -Raw -Encoding UTF8) -replace "`0", ''
-                if ($sofar.Contains($Until)) {
-                    Write-Host "==> Saw '$Until' after $waited s; stopping QEMU" -ForegroundColor Cyan
-                    break
-                }
+            if (-not (Test-Path $SerialLog)) { continue }
+            $sofar = (Get-Content $SerialLog -Raw -Encoding UTF8) -replace "`0", ''
+            $reports = ([regex]::Matches($sofar, '\[mon \] \d+s uptime')).Count
+
+            if ($seenAt -lt 0) {
+                if (-not $sofar.Contains($Until)) { continue }
+                $seenAt = $waited
+                $reportsThen = $reports
+                Write-Host "==> Saw '$Until' after $waited s; waiting for one more report" -ForegroundColor Cyan
+                continue
+            }
+            if ($reports -gt $reportsThen) {
+                Write-Host "==> Settled after $($waited - $seenAt) s more; stopping QEMU" -ForegroundColor Cyan
+                break
             }
         }
     } else {

@@ -65,6 +65,7 @@ dependencies = [
  "nexus-font",
  "nexus-i18n",
  "nexus-mm",
+ "nexus-net",
 ]
 
 [[package]]
@@ -73,6 +74,10 @@ version = "0.1.0"
 dependencies = [
  "nexus-abi",
 ]
+
+[[package]]
+name = "nexus-net"
+version = "0.1.0"
 
 [[package]]
 name = "nexus-shell"

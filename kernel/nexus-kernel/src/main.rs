@@ -28,6 +28,7 @@ mod i18n;
 mod input;
 mod ipc;
 mod memory;
+mod net;
 mod panic;
 mod process;
 mod sched;
@@ -202,6 +203,18 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         bring_up_disk_interrupt(info);
     }
 
+    // The network card, on the same terms: not fatal if there is none, because
+    // a machine with no network is a machine that still boots.
+    // SAFETY: called once, after enumeration, with the allocators running.
+    match unsafe { drivers::virtio_net::init(&devices) } {
+        Ok(_) => {
+            if let Some(info) = acpi_info.as_ref() {
+                bring_up_network_interrupt(info);
+            }
+        }
+        Err(error) => kprintln!("[net ] no network card: {error}"),
+    }
+
     // The display comes up only now, after the heap: translated strings are
     // built at runtime by substituting into templates, so drawing anything
     // localised allocates. Bringing the display up earlier cost a boot to an
@@ -256,6 +269,11 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
 fn start_system_threads() {
     display::start_thread();
     input::start_thread();
+
+    // And the network, which has to be a thread: getting an address means
+    // sending a broadcast and waiting for an answer, and waiting is something
+    // only a thread can do.
+    net::start_thread();
 
     // The first thing NexusOS runs that it does not trust. Not fatal if it
     // fails: the system is less of a system without it, but it is still one.
@@ -389,6 +407,27 @@ fn monitor_thread(_argument: usize) {
             let (bytes, packets, desynchronised, overflows) = drivers::mouse::statistics();
             kprintln!(
                 "[mon ] pointer {packets} packets from {bytes} bytes,              {desynchronised} resynchronised, {overflows} overflowed"
+            );
+        }
+        if drivers::virtio_net::is_present() {
+            let (received, transmitted, dropped, interrupts) = drivers::virtio_net::statistics();
+            let (frames_in, frames_out, arp, echoes, unknown) = net::statistics();
+            let interface = net::interface();
+            if net::is_up() {
+                kprintln!(
+                    "[mon ] network {}.{}.{}.{} up, {received} frames in, {transmitted} out,              {interrupts} interrupts, {dropped} dropped",
+                    interface.ip[0],
+                    interface.ip[1],
+                    interface.ip[2],
+                    interface.ip[3]
+                );
+            } else {
+                kprintln!(
+                    "[mon ] network down, {received} frames in, {transmitted} out,              {interrupts} interrupts, {dropped} dropped"
+                );
+            }
+            kprintln!(
+                "[mon ] stack {frames_in} frames read, {frames_out} written,              {arp} ARP answered, {echoes} echoes answered, {unknown} ignored"
             );
         }
         let (calls, unknown) = arch::syscall::statistics();
@@ -619,6 +658,63 @@ fn bring_up_disk_interrupt(info: &acpi::AcpiInfo) {
         return;
     }
     drivers::virtio_blk::adopt_interrupt();
+}
+
+/// Route the network card's interrupt.
+///
+/// Unlike the disk there is no request to make to prove the line works: nothing
+/// asks a card for a frame. So the proof comes later and from somewhere else --
+/// the network thread sends one frame the spinning way, and what comes back is
+/// what says the interrupt arrives.
+fn bring_up_network_interrupt(info: &acpi::AcpiInfo) {
+    let Some(irq) = drivers::virtio_net::interrupt_line() else {
+        return;
+    };
+    let gsi = info.global_system_interrupt_for(irq);
+    if info.route(gsi).is_none() {
+        kprintln!("[net ] no I/O APIC serves global interrupt {gsi}; the card will spin");
+        return;
+    }
+
+    // The disk may already be on this pin. Routing it again would not add the
+    // card to the line -- it would *move* the line to a different vector, and
+    // the disk's completions would arrive at a handler that knows nothing about
+    // disks. That is what happened the first time this was written, and it
+    // looked like a machine that hung halfway through booting.
+    if let Some(disk) = drivers::virtio_blk::interrupt_line() {
+        if info.global_system_interrupt_for(disk) == gsi {
+            arch::interrupts::share_line_with_disk();
+            kprintln!(
+                "[net ] card shares IRQ {irq} with the disk; both are asked on vector {}",
+                arch::interrupts::DISK_VECTOR
+            );
+            return;
+        }
+    }
+
+    // Level triggered and active low, because that is what a PCI pin is. An
+    // edge-triggered pin delivers the first interrupt and never another: the
+    // device holds the line down until it is acknowledged.
+    let (active_low, level) = info.override_for(irq).map_or((true, true), |entry| {
+        (entry.is_active_low(), entry.is_level_triggered())
+    });
+
+    // SAFETY: a handler for the vector was registered when the IDT was built.
+    match unsafe {
+        arch::ioapic::route(
+            gsi,
+            arch::interrupts::NETWORK_VECTOR,
+            arch::apic::local_id(),
+            active_low,
+            level,
+        )
+    } {
+        Ok(()) => kprintln!(
+            "[net ] card on IRQ {irq} (global interrupt {gsi}) routed to vector {}",
+            arch::interrupts::NETWORK_VECTOR
+        ),
+        Err(error) => kprintln!("[net ] could not route the card: {error}; sends will spin"),
+    }
 }
 
 /// Start the processors ACPI reported, other than this one.

@@ -1148,9 +1148,57 @@ notifications, a settings program, a file manager, a terminal and search. Each
 of them is now an ordinary program rather than a change to the compositor, which
 is the point of having done this part first.
 
-## Phase 12 — Networking ⬜
+## Phase 12 — Networking 🚧
 
 Ethernet, ARP, IPv4/IPv6, ICMP, UDP, TCP, DHCP, DNS, sockets, firewall.
+
+The machine is on a network. It has a card, an address it was *given*, and the
+gateway answers it.
+
+```
+[net ] virtio card at 00:03.0: 52:54:00:12:34:56, queues of 256 and 256
+[net ] card shares IRQ 11 with the disk; both are asked on vector 50
+[net ] address 10.0.2.15/24 from 10.0.2.2, gateway 10.0.2.2, DNS 10.0.2.3, lease 86400 s
+[net ] ping 10.0.2.2: reply in 0 ms
+```
+
+**The card** is legacy virtio-net over a PCI I/O port window — the same
+transport as the disk, for the same reason. Two queues rather than one, and
+receiving is backwards from a disk: nobody asks for a frame, so the driver
+hands the card thirty-two empty buffers at bring-up and gives each one straight
+back after reading it. A card with none posted drops everything.
+
+**DHCP is the proof.** An address that was *leased* cannot be invented locally:
+it took a broadcast, a server that parsed it, an offer, a request that tells
+every other server on the segment their offer was declined, and an
+acknowledgement. Four frames each way through every layer of the stack. The
+ping is the other half — DHCP proves broadcast and UDP, and a ping proves ARP
+(the gateway's hardware address had to be asked for) and unicast in both
+directions.
+
+**The wire format is a crate**, `shared/nexus-net`, because it is pure logic:
+seventeen host tests build packets, parse them back, and check the Internet
+checksum against the worked example in RFC 1071 — on a machine with no card in
+it. The kernel's `net` module is what is left once the formats are gone: an
+interface, an ARP table, a DHCP conversation, and a thread.
+
+**Two bugs worth recording.** The card shares IRQ 11 with the disk, and routing
+its pin *moved* the line to a new vector rather than adding the card to it —
+disk completions started arriving at a handler that knows nothing about disks,
+and the machine hung halfway through booting. Shared PCI lines mean every
+device on the line is asked, and each answers from its own status register.
+
+The second was silent. Legacy virtio-net puts a ten-byte header in front of
+every frame, not twelve; the twelfth and eleventh bytes exist only when
+`VIRTIO_NET_F_MRG_RXBUF` has been negotiated. With the wrong size the card
+takes the frame, the device sends it, nothing reports an error, and the frame
+on the wire is shifted by two bytes so no reply ever comes. What it looked like
+was a DHCP server that would not answer.
+
+Still to do: TCP, DNS, IPv6, a routing table, fragmentation, a firewall, and
+sockets as capability handles so that a *program* can use any of it. None of
+them is stubbed out — a stub that returns success is worse than a function that
+does not exist.
 
 ## Phase 13 — Packages ⬜
 

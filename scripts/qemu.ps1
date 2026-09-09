@@ -135,6 +135,20 @@ function Get-NexusQemuArgs {
         }
     }
 
+    # A network card, on the same legacy virtio transport as the disk and for
+    # the same reason: an I/O port window instead of the modern transport's
+    # memory-mapped capability structures.
+    #
+    # QEMU's user-mode networking rather than a tap: it needs no privileges and
+    # no host configuration, and it brings a DHCP server at 10.0.2.2, a DNS
+    # forwarder at 10.0.2.3 and a gateway that answers ICMP. Everything the
+    # guest does on it is real -- real frames, real ARP, a real lease -- and
+    # none of it needs the host to be set up first.
+    $arguments += @(
+        '-netdev', 'user,id=nexusnet',
+        '-device', 'virtio-net-pci,netdev=nexusnet,disable-modern=on'
+    )
+
     if ($MonitorPort -gt 0) {
         $arguments += @('-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait")
     }
