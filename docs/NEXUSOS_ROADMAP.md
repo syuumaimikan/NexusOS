@@ -821,8 +821,44 @@ to resynchronise is one where a byte went to the wrong driver; and it clicks on
 the tile the keyboard did *not* leave focused, so the click has something to
 change.
 
-Outstanding here: no windows, no stacking, no resizing, no dragging. Tiles are
-laid out once and never move, and the pointer can focus one but not carry it.
+### Windows that move
+
+A window can be picked up by its title bar and carried, and one that is clicked
+comes to the front. Both are the compositor's alone: the client is never told
+where it is, so it cannot notice being moved, and the bar is a decoration --
+drawn over the client's own pixels after its surface has been copied out, so a
+client can neither draw one nor remove the one it has. A window with no bar
+would be a window that cannot be picked up without picking up whatever is
+inside it.
+
+Once windows can move they can overlap, and once they overlap there has to be
+an order. It is kept back to front, a click raises what was clicked, and a press
+searches front to back -- a compositor that searched the other way would give
+focus to the window *under* the one clicked, which looks exactly like the click
+going through it.
+
+Painting became a full recomposite of the rectangle the compositor owns: clear
+it, then every window in order, then the pointer. That is more work than
+repainting what changed, and it is what makes overlap simply work. A compositor
+that repainted only the damaged window would leave a hole in whatever was above
+it, and getting that right needs damage arithmetic this does not have and does
+not yet need -- the rectangle is ninety thousand pixels.
+
+The drag remembers where within the window it was grabbed. Without that offset a
+window would jump so its corner met the pointer the instant it was picked up,
+which is not what picking something up looks like. And it says so when the
+window first *moves* rather than when it is taken hold of: a press that goes
+nowhere is not a window being carried.
+
+Driving this from the test found a flip worth writing down. QEMU's monitor takes
+screen coordinates, its PS/2 emulation negates Y on the way to the guest, and
+the compositor negates it again on the way to a position. All three are correct
+and they are in three different places, which is why the first drag went
+confidently in the wrong direction.
+
+Outstanding here: no resizing, no minimising, no window that is not a rectangle.
+A window's size is fixed when its client is told what surface it has, and
+telling a client its surface has changed is a protocol this does not have.
 
 
 

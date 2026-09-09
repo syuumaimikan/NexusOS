@@ -113,6 +113,31 @@ try {
         Start-Sleep -Milliseconds 200
         $writer.WriteLine('mouse_button 0')
         Start-Sleep -Milliseconds 200
+
+        # And carry a window. The pointer is inside the first tile, a little
+        # over a hundred pixels below its title bar -- the strip the compositor
+        # draws over the top of it, and the only part that can be taken hold of.
+        #
+        # Negative is upwards here. QEMU's monitor takes screen coordinates and
+        # its PS/2 emulation flips the sign on the way to the guest, because a
+        # mouse reports Y increasing upwards and a screen has it increasing
+        # downwards. Both flips are real and they are in different places.
+        Write-Host '==> Carrying a window by its title bar' -ForegroundColor Cyan
+        foreach ($step in 1..9) {
+            $writer.WriteLine('mouse_move 0 -12')
+            Start-Sleep -Milliseconds 50
+        }
+        $writer.WriteLine('mouse_button 1')
+        Start-Sleep -Milliseconds 150
+        # Rightwards and down, with the button held. There is far more room to
+        # the right than below -- a window can only fall eight pixels before it
+        # reaches the bottom of the rectangle the compositor owns.
+        foreach ($step in 1..10) {
+            $writer.WriteLine('mouse_move 6 4')
+            Start-Sleep -Milliseconds 60
+        }
+        $writer.WriteLine('mouse_button 0')
+        Start-Sleep -Milliseconds 200
         # Wait for the monitor thread's next report, which is what carries the
         # keyboard figures and the decoded line into the serial log. It runs
         # every five seconds, so this has to outlast one full period.
@@ -220,6 +245,16 @@ if ($output.Contains('the pointer gave focus to the first client')) {
     Write-Host '    ok   clicking a tile moved the focus to it' -ForegroundColor DarkGray
 } else {
     $failures += 'clicking a tile did not move the focus'
+}
+
+# And the drag. A window that moved is the whole of what a title bar is for, and
+# it is the one thing here the client is never told about: it draws into a
+# surface and has no idea where that surface ends up, so it cannot have moved
+# itself.
+if ($output.Contains('compositor: carried a window by its title bar')) {
+    Write-Host '    ok   a window was carried by its title bar' -ForegroundColor DarkGray
+} else {
+    $failures += 'the pointer never carried a window'
 }
 
 # F1 is a distinct key, and acting on it says the decoded key reached something

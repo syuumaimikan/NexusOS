@@ -47,13 +47,28 @@
 //! cannot remove. A client that could paint its own focus ring could claim a
 //! focus it does not have.
 //!
+//! # Windows
+//!
+//! A window can be picked up by its title bar and carried, and one that is
+//! clicked comes to the front. Both are this program's alone: the client is
+//! never told where it is, so it cannot notice being moved, and the bar is a
+//! decoration -- drawn over the client's own pixels, after its surface has been
+//! copied out, so a client can neither draw one nor remove the one it has.
+//!
+//! Once windows can move they can overlap, and once they overlap there has to
+//! be an order. It is kept back-to-front and a click raises what was clicked.
+//! Painting is then a full recomposite of the rectangle this program owns:
+//! clear it, and draw every window in order. That is more work than repainting
+//! what changed, and it is what makes overlap simply work -- a compositor that
+//! repainted only the damaged tile would leave the window above it with a hole
+//! in it, and getting that right needs the damage arithmetic that this does not
+//! have and does not yet need. The rectangle is ninety thousand pixels.
+//!
 //! # What it is not
 //!
-//! There are no windows, no stacking and no resizing. Tiles are laid out once
-//! and never move. Those are worth having and none of them is what this
-//! establishes, which is that the path from a client's pixel to the display,
-//! and from a keystroke to a client, runs through a process rather than through
-//! the kernel.
+//! No resizing, no minimising, no window that is not a rectangle. A window's
+//! size is fixed when its client is told what surface it has, and telling a
+//! client its surface has changed is a protocol this does not have.
 
 #![no_std]
 #![no_main]
@@ -95,6 +110,25 @@ struct Pointer {
     beneath: [u32; CURSOR * CURSOR],
     /// Whether `beneath` holds anything, and where it was taken from.
     drawn: Option<(u32, u32)>,
+    /// The window being carried, and where it was grabbed within it.
+    ///
+    /// The offset matters: without it a window would jump so that its corner
+    /// met the pointer the instant it was picked up, which is not what picking
+    /// something up looks like.
+    dragging: Option<Drag>,
+}
+
+/// A window being carried.
+struct Drag {
+    tile: usize,
+    grab_x: u32,
+    grab_y: u32,
+    /// Whether this drag has already said so.
+    ///
+    /// Said when the window first *moves*, not when it is taken hold of: a
+    /// press on a title bar that never moves anywhere is not a window being
+    /// carried, and a line per movement would be a hundred lines a second.
+    announced: bool,
 }
 
 /// How large the pointer is, in pixels.
@@ -131,6 +165,20 @@ const CLIENT: &[u8] = b"BIN/CLIENT.ELF";
 const CLIENTS: usize = 2;
 /// Pixels between two tiles, and around them.
 const GAP: u32 = 8;
+/// How tall a window's title bar is.
+///
+/// Drawn over the top of the client's own surface rather than taking space away
+/// from it. Taking space would mean the client's surface and its window were
+/// different sizes, which is a second rectangle to keep in step for the sake of
+/// fourteen pixels a client was going to fill with its own border anyway.
+const TITLE: u32 = 14;
+
+/// The background of the rectangle this program owns.
+///
+/// Its own, not the kernel's. What is behind the windows is the compositor's
+/// business, and matching the kernel's gradient exactly would mean knowing how
+/// the kernel draws -- which is the coupling this whole arrangement removes.
+const BACKGROUND: u32 = 0x0009_1428;
 
 /// What the kernel says about the display.
 struct Screen {
@@ -165,6 +213,18 @@ struct Tile {
     frames: u32,
     /// Keys forwarded to it, likewise.
     keys: u32,
+}
+
+impl Tile {
+    /// Whether a point is inside this window.
+    fn contains(&self, x: u32, y: u32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+
+    /// Whether a point is in the strip that can be taken hold of.
+    fn title_contains(&self, x: u32, y: u32) -> bool {
+        self.contains(x, y) && y < self.y + TITLE
+    }
 }
 
 #[unsafe(naked)]
@@ -403,10 +463,8 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
         held: false,
         beneath: [0; CURSOR * CURSOR],
         drawn: None,
+        dragging: None,
     };
-    if pointing {
-        draw_cursor(screen, &mut cursor);
-    }
 
     let mut composited = 0u32;
     let mut moved = 0u32;
@@ -416,6 +474,11 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
     // every key to everyone, which is not routing -- it is broadcasting, and it
     // is how a password ends up in a program that was only ever on screen.
     let mut focus = 0usize;
+    // Back to front. Windows can overlap now, so there has to be an order, and
+    // a click raises what was clicked.
+    let mut order: [usize; CLIENTS] = core::array::from_fn(|index| index);
+
+    repaint(screen, tiles, &order, focus, &mut cursor, pointing);
 
     // Bounded, so a client that neither draws nor dies cannot hang the machine.
     // The bound is generous: it is a backstop and not a schedule.
@@ -435,16 +498,22 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
 
         for key in &keys[..count] {
             if *key == KEY_KEYBOARD {
-                match read_key(screen, set, tiles, &mut focus) {
-                    Some(sent) => forwarded += sent,
+                match read_key(set, tiles, &mut focus) {
+                    Some(sent) => {
+                        forwarded += sent;
+                        repaint(screen, tiles, &order, focus, &mut cursor, pointing);
+                    }
                     None => return,
                 }
                 continue;
             }
 
             if *key == KEY_POINTER {
-                match read_pointer(screen, set, tiles, &mut cursor, &mut focus) {
-                    Some(steps) => moved += steps,
+                match read_pointer(screen, set, tiles, &mut cursor, &mut focus, &mut order) {
+                    Some(_) => {
+                        moved += 1;
+                        repaint(screen, tiles, &order, focus, &mut cursor, pointing);
+                    }
                     None => return,
                 }
                 continue;
@@ -464,16 +533,6 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
                 let mut none = [Handle(0); 1];
                 match nexus_user::receive(tile.channel, &mut message, &mut none) {
                     Ok(_) => {
-                        // Lifted before the tile is painted and put back after.
-                        // Compositing writes over whatever was there, and what
-                        // was there includes the pointer -- a compositor that
-                        // forgot this leaves a trail of cursors behind it.
-                        lift_cursor(screen, &mut cursor);
-                        composite(screen, tile);
-                        outline(screen, tile, index == focus);
-                        if pointing {
-                            draw_cursor(screen, &mut cursor);
-                        }
                         tile.frames += 1;
                         composited += 1;
                         // Answered, so the client knows the buffer is free
@@ -484,19 +543,20 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
                             // which is ordinary and not a failure.
                             stop_listening(set, tile, index);
                         }
+                        repaint(screen, tiles, &order, focus, &mut cursor, pointing);
                     }
                     Err(_) => stop_listening(set, tile, index),
                 }
             } else {
-                // It has ended. Its tile is cleared, because a dead client's
-                // last frame left on screen is a lie about what is running.
-                clear(screen, tile);
+                // It has ended. Its window goes, because a dead client's last
+                // frame left on screen is a lie about what is running.
                 if tile.live {
                     tile.live = false;
                     ended += 1;
                 }
                 nexus_user::unwatch(set, *key).ok();
                 nexus_user::unwatch(set, channel_key(index)).ok();
+                repaint(screen, tiles, &order, focus, &mut cursor, pointing);
             }
         }
     }
@@ -532,12 +592,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
 ///
 /// Returns how many keys were passed on, or `None` if something went wrong
 /// badly enough to stop.
-fn read_key(
-    screen: &Screen,
-    set: Handle,
-    tiles: &mut [Option<Tile>; CLIENTS],
-    focus: &mut usize,
-) -> Option<u32> {
+fn read_key(set: Handle, tiles: &mut [Option<Tile>; CLIENTS], focus: &mut usize) -> Option<u32> {
     let mut message = [0u8; 32];
     let mut none = [Handle(0); 1];
     let Ok(received) = nexus_user::receive(KEYS, &mut message, &mut none) else {
@@ -567,16 +622,8 @@ fn read_key(
             "compositor: focus moved to the second client"
         })
         .ok();
-
-        // Redrawn now rather than at the next frame, so the ring follows the
-        // focus rather than the focus following a client's drawing.
-        for (index, tile) in tiles.iter().enumerate() {
-            if let Some(tile) = tile {
-                if tile.live {
-                    outline(screen, tile, index == *focus);
-                }
-            }
-        }
+        // The caller repaints; the ring follows the focus rather than waiting
+        // for a client to draw.
         return Some(0);
     }
 
@@ -594,24 +641,25 @@ fn read_key(
     Some(1)
 }
 
-/// Read whatever the mouse sent and move the pointer.
+/// Read whatever the mouse sent, and act on it.
 ///
 /// Movement is relative and arrives with no idea of where anything is. Turning
 /// it into a position is this program's job, because a position only means
 /// something against a screen and a set of windows -- and the kernel has
 /// neither.
 ///
-/// A press inside a tile focuses it. That is the second piece of policy this
-/// program owns: the kernel knows a button went down and has no idea what it
-/// went down *on*.
+/// A press in a window raises it and gives it focus; a press in its *title bar*
+/// also picks it up. Both are policy this program owns: the kernel knows a
+/// button went down and has no idea what it went down on.
 ///
-/// Returns how many movements were handled, or `None` to stop.
+/// Returns 1 if a window was carried this step, 0 otherwise, or `None` to stop.
 fn read_pointer(
     screen: &Screen,
     set: Handle,
     tiles: &mut [Option<Tile>; CLIENTS],
     cursor: &mut Pointer,
     focus: &mut usize,
+    order: &mut [usize; CLIENTS],
 ) -> Option<u32> {
     let mut message = [0u8; 32];
     let mut none = [Handle(0); 1];
@@ -632,7 +680,6 @@ fn read_pointer(
     // Clamped to the rectangle this program owns. A pointer that could leave it
     // would be drawn over the kernel's panel, which this program does not own
     // and must not touch.
-    lift_cursor(screen, cursor);
     cursor.x = clamp(
         i64::from(cursor.x) + i64::from(dx),
         screen.x,
@@ -648,18 +695,32 @@ fn read_pointer(
     );
 
     let pressed = buttons & pointer::LEFT != 0;
+    let mut carried = 0;
+
     if pressed && !cursor.held {
-        for (index, tile) in tiles.iter().enumerate() {
-            let Some(tile) = tile else { continue };
-            if !tile.live {
+        // Front to back, so a press lands on what is visible rather than on
+        // whatever happens to be first in the array. A compositor that searched
+        // the other way would give focus to the window *under* the one that was
+        // clicked, which looks like the click going through it.
+        for &index in order.iter().rev() {
+            let Some(tile) = tiles.get(index).and_then(Option::as_ref) else {
+                continue;
+            };
+            if !tile.live || !tile.contains(cursor.x, cursor.y) {
                 continue;
             }
-            if cursor.x >= tile.x
-                && cursor.x < tile.x + tile.width
-                && cursor.y >= tile.y
-                && cursor.y < tile.y + tile.height
-                && *focus != index
-            {
+
+            if tile.title_contains(cursor.x, cursor.y) {
+                cursor.dragging = Some(Drag {
+                    tile: index,
+                    grab_x: cursor.x - tile.x,
+                    grab_y: cursor.y - tile.y,
+                    announced: false,
+                });
+            }
+
+            raise(order, index);
+            if *focus != index {
                 *focus = index;
                 nexus_user::log(if index == 0 {
                     "compositor: the pointer gave focus to the first client"
@@ -668,20 +729,48 @@ fn read_pointer(
                 })
                 .ok();
             }
+            break;
         }
-        // Redrawn now, so the ring follows the click rather than the next frame.
-        for (index, tile) in tiles.iter().enumerate() {
-            if let Some(tile) = tile {
-                if tile.live {
-                    outline(screen, tile, index == *focus);
+    }
+
+    if !pressed {
+        cursor.dragging = None;
+    }
+
+    if let Some(drag) = &mut cursor.dragging {
+        if let Some(Some(tile)) = tiles.get_mut(drag.tile) {
+            // Where the window would go if the point that was grabbed stayed
+            // under the pointer -- clamped so no part of it leaves the
+            // rectangle this program owns.
+            let wanted_x = i64::from(cursor.x) - i64::from(drag.grab_x);
+            let wanted_y = i64::from(cursor.y) - i64::from(drag.grab_y);
+            let moved_x = clamp(wanted_x, screen.x, screen.x + screen.width - tile.width);
+            let moved_y = clamp(wanted_y, screen.y, screen.y + screen.height - tile.height);
+            if moved_x != tile.x || moved_y != tile.y {
+                tile.x = moved_x;
+                tile.y = moved_y;
+                carried = 1;
+                if !drag.announced {
+                    drag.announced = true;
+                    nexus_user::log("compositor: carried a window by its title bar").ok();
                 }
             }
         }
     }
-    cursor.held = pressed;
 
-    draw_cursor(screen, cursor);
-    Some(1)
+    cursor.held = pressed;
+    Some(carried)
+}
+
+/// Bring a window to the front of the order.
+fn raise(order: &mut [usize; CLIENTS], index: usize) {
+    let Some(at) = order.iter().position(|&which| which == index) else {
+        return;
+    };
+    // Rotate rather than swap. Swapping with the last would put whatever was in
+    // front behind everything, which is not raising one window -- it is
+    // exchanging two.
+    order[at..].rotate_left(1);
 }
 
 /// Keep a number inside a range, from a wider one that may have gone outside it.
@@ -695,61 +784,94 @@ fn clamp(value: i64, low: u32, high: u32) -> u32 {
     }
 }
 
-/// Put back what the pointer was covering.
-fn lift_cursor(screen: &Screen, cursor: &mut Pointer) {
-    let Some((x, y)) = cursor.drawn.take() else {
-        return;
-    };
-    for row in 0..CURSOR {
-        for column in 0..CURSOR {
-            let offset = (((y as usize + row) * screen.stride as usize) + x as usize + column) * 4;
-            // SAFETY: the framebuffer is mapped writable and this address is
-            // inside the rectangle this program owns, which the cursor is
-            // clamped to.
+/// Draw the whole of the rectangle this program owns.
+///
+/// Clear it, then every window back to front, then the pointer on top. More
+/// work than repainting what changed, and it is what makes overlap simply work:
+/// a compositor that repainted only the damaged window would leave a hole in
+/// whatever was above it, and getting that right needs damage arithmetic this
+/// does not have and does not yet need.
+fn repaint(
+    screen: &Screen,
+    tiles: &[Option<Tile>; CLIENTS],
+    order: &[usize; CLIENTS],
+    focus: usize,
+    cursor: &mut Pointer,
+    pointing: bool,
+) {
+    // The saved pixels are from before this repaint and mean nothing after it,
+    // so the cursor is forgotten rather than restored.
+    cursor.drawn = None;
+
+    fill(
+        screen,
+        screen.x,
+        screen.y,
+        screen.width,
+        screen.height,
+        BACKGROUND,
+    );
+
+    for &index in order {
+        let Some(tile) = tiles.get(index).and_then(Option::as_ref) else {
+            continue;
+        };
+        if !tile.live {
+            continue;
+        }
+        composite(screen, tile);
+        title_bar(screen, tile, index == focus);
+        outline(screen, tile, index == focus);
+    }
+
+    if pointing {
+        draw_cursor(screen, cursor);
+    }
+}
+
+/// Fill a rectangle with one colour.
+fn fill(screen: &Screen, x: u32, y: u32, width: u32, height: u32, colour: u32) {
+    for row in 0..height {
+        let destination =
+            FRAMEBUFFER_AT + (((y + row) as usize * screen.stride as usize) + x as usize) * 4;
+        for column in 0..width as usize {
+            // SAFETY: the framebuffer is mapped writable, and the rectangle was
+            // checked against the screen when the display was taken.
             unsafe {
-                core::ptr::write_volatile(
-                    (FRAMEBUFFER_AT + offset) as *mut u32,
-                    cursor.beneath[row * CURSOR + column],
-                );
+                core::ptr::write_volatile((destination + column * 4) as *mut u32, colour);
             }
         }
     }
 }
 
-/// Save what is under the pointer and draw it.
+/// Draw a window's title bar.
 ///
-/// An arrow, of a sort: a triangle with a light edge, so that it is visible
-/// over a client's gradient and over the background alike. Saving first is what
-/// makes moving it cheap -- there is no second buffer to composite from, so the
-/// pixels it covers have nowhere else to be kept.
-fn draw_cursor(screen: &Screen, cursor: &mut Pointer) {
-    for row in 0..CURSOR {
-        for column in 0..CURSOR {
-            let offset =
-                (((cursor.y as usize + row) * screen.stride as usize) + cursor.x as usize + column)
-                    * 4;
-            // SAFETY: as in `lift_cursor`.
-            let under =
-                unsafe { core::ptr::read_volatile((FRAMEBUFFER_AT + offset) as *const u32) };
-            cursor.beneath[row * CURSOR + column] = under;
+/// A decoration: over the client's own pixels, after its surface has been
+/// copied out, so a client can neither draw one nor remove the one it has. It
+/// is also what there is to take hold of -- a window with no bar is a window
+/// that cannot be picked up without picking up whatever is inside it.
+fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
+    let colour = if focused { 0x0021_5C99 } else { 0x0018_2334 };
+    fill(
+        screen,
+        tile.x,
+        tile.y,
+        tile.width,
+        TITLE.min(tile.height),
+        colour,
+    );
 
-            // The arrow: filled where the column is inside the row, edged on
-            // the diagonal, and nothing outside it.
-            let colour = if column > row {
-                continue;
-            } else if column == row || column == 0 || row == CURSOR - 1 {
-                0x00F2_F6FF
-            } else {
-                0x0012_1A2A
-            };
-
-            // SAFETY: as above.
-            unsafe {
-                core::ptr::write_volatile((FRAMEBUFFER_AT + offset) as *mut u32, colour);
-            }
+    // Three lines at the left, so the bar reads as something to grab rather
+    // than as a band of colour. There is no text: drawing it would need a font,
+    // which is the kernel's and not this program's.
+    let mark = if focused { 0x00CFE4FF } else { 0x004A5A70 };
+    for line in 0..3u32 {
+        let row = tile.y + 4 + line * 3;
+        if row >= tile.y + TITLE.min(tile.height) {
+            break;
         }
+        fill(screen, tile.x + 6, row, (tile.width / 4).max(1), 1, mark);
     }
-    cursor.drawn = Some((cursor.x, cursor.y));
 }
 
 /// Read a little-endian signed `i32` out of a message.
@@ -826,19 +948,41 @@ fn composite(screen: &Screen, tile: &Tile) {
     }
 }
 
-/// Blank a tile, for a client that is not coming back.
-fn clear(screen: &Screen, tile: &Tile) {
-    for row in 0..tile.height {
-        let destination = FRAMEBUFFER_AT
-            + (((tile.y + row) as usize * screen.stride as usize) + tile.x as usize) * 4;
-        for column in 0..tile.width as usize {
-            // SAFETY: as in `composite`, and writing a constant rather than
-            // reading anything.
+/// Draw the pointer, saving what it covers.
+///
+/// An arrow, of a sort: a triangle with a light edge, so that it shows over a
+/// client's gradient and over the background alike. There is no second buffer
+/// to composite from, so the pixels it covers have nowhere to be kept but here
+/// -- and a repaint discards them, because pixels saved before a repaint mean
+/// nothing after one.
+fn draw_cursor(screen: &Screen, cursor: &mut Pointer) {
+    for row in 0..CURSOR {
+        for column in 0..CURSOR {
+            // The arrow: filled where the column is inside the row, edged on
+            // the diagonal, and nothing outside it.
+            if column > row {
+                continue;
+            }
+            let colour = if column == row || column == 0 || row == CURSOR - 1 {
+                0x00F2_F6FF
+            } else {
+                0x0012_1A2A
+            };
+
+            let offset =
+                (((cursor.y as usize + row) * screen.stride as usize) + cursor.x as usize + column)
+                    * 4;
+            // SAFETY: the framebuffer is mapped writable and this address is
+            // inside the rectangle this program owns, which the cursor is
+            // clamped to.
             unsafe {
-                core::ptr::write_volatile((destination + column * 4) as *mut u32, 0x0009_1428);
+                let under = core::ptr::read_volatile((FRAMEBUFFER_AT + offset) as *const u32);
+                cursor.beneath[row * CURSOR + column] = under;
+                core::ptr::write_volatile((FRAMEBUFFER_AT + offset) as *mut u32, colour);
             }
         }
     }
+    cursor.drawn = Some((cursor.x, cursor.y));
 }
 
 /// Read a little-endian `u32` out of a message.
