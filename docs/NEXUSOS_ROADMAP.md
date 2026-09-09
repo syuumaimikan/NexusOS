@@ -546,6 +546,32 @@ still cannot write and skips long names. The block driver serves one request at
 a time. A program gets no arguments, and nothing can end a process but its own
 thread.
 
+### A block cache
+
+Every read NexusFS made went to the platter. Reading a 128-byte inode cost a
+four-kilobyte block; reading the next inode in the same block cost it again;
+walking a directory read the same bitmap and the same inode table over and over.
+A megabyte of cache -- two hundred and fifty-six blocks, second-chance
+replacement -- now serves 99% of those reads from memory, and the boot's sector
+reads fell from 2652 to 892.
+
+**Write-through, not write-back**, and that is a decision rather than a
+simplification. Everything this filesystem claims about surviving a power
+failure is an argument about the *order* writes reach the disk: an inode is
+written before the directory entry that names it, so a failure in between leaks
+an inode rather than leaving a name pointing at nothing; an inode is written
+before its old blocks are freed, so no inode ever points at a block the bitmap
+calls free. A write-back cache reorders writes by construction, and would turn
+every one of those arguments into a comment that used to be true -- silently,
+and only visibly on a machine that lost power. When there is a journal the cache
+can hold writes back, because then the journal is what orders them.
+
+The disk self-test writes a raw sector straight to the driver, which is the one
+thing on this machine that goes behind the cache's back. It throws the cache
+away afterwards rather than reasoning about it: it costs a few re-reads once per
+boot, and reasoning about it is how a cache ends up serving a block that was
+overwritten underneath it.
+
 ### The disk takes its interrupt
 
 A request is submitted and the thread that made it *blocks*; the device's

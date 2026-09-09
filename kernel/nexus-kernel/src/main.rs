@@ -377,6 +377,12 @@ fn monitor_thread(_argument: usize) {
                     drivers::virtio_blk::capacity(),
                     if blocking { "block" } else { "spin" }
                 );
+                let (hits, misses, writes, evictions) = fs::cache::statistics();
+                kprintln!(
+                    "[mon ] block cache {}% of {} reads served from memory,              {writes} written through, {evictions} evicted",
+                    fs::cache::hit_rate(),
+                    hits + misses
+                );
             }
         }
         let (calls, unknown) = arch::syscall::statistics();
@@ -994,6 +1000,13 @@ fn disk_self_test() {
         kprintln!("[test] FAILED: could not verify the restored sector: {error}");
         return;
     }
+    // Everything above went straight to the driver, past the block cache. That
+    // is the one thing that can leave the cache holding something the disk no
+    // longer says -- so it is thrown away rather than reasoned about. It costs
+    // a few re-reads once per boot, and reasoning about it is how a cache ends
+    // up serving a block that was overwritten behind its back.
+    fs::cache::invalidate();
+
     if buffer != original {
         kprintln!("[test] FAILED: the scratch sector was not restored");
         return;

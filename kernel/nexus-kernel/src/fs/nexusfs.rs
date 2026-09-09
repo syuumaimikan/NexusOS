@@ -22,10 +22,12 @@
 //! # Whole files
 //!
 //! A file is read and written entire. There is no partial write, no seek and no
-//! append, because there is no buffer cache underneath to make one cheap: every
-//! block goes to the disk the moment it is written, so a byte-at-a-time
-//! interface would be a byte-at-a-time disk. When a cache exists this grows the
-//! interface it deserves; until then the honest one is the small one.
+//! append. There is a [block cache](super::cache) underneath now, so a read of
+//! the same block twice costs the disk once -- but it is write-*through*, which
+//! means every write still reaches the platter before the call returns. A
+//! byte-at-a-time interface would still be a byte-at-a-time disk on the writing
+//! side, so the interface stays the small honest one until there is a journal
+//! and the cache can hold writes back.
 //!
 //! # What it does not do yet
 //!
@@ -967,13 +969,12 @@ impl Volume {
     }
 
     fn write_block(&self, block: u64, buffer: &[u8; BLOCK_SIZE]) -> Result<(), FsError> {
-        let base = self.start_lba + block * SECTORS_PER_BLOCK;
-        for index in 0..SECTORS_PER_BLOCK {
-            let offset = index as usize * SECTOR_SIZE;
-            virtio_blk::write_sector(base + index, &buffer[offset..offset + SECTOR_SIZE])
-                .map_err(FsError::Disk)?;
-        }
-        Ok(())
+        // Through the cache, which writes it to the disk and then remembers it.
+        // Write-*through*, not write-back: everything this filesystem claims
+        // about surviving a power failure is an argument about the order writes
+        // reach the platter, and a cache that held them would reorder them.
+        super::cache::write(self.start_lba + block * SECTORS_PER_BLOCK, buffer)
+            .map_err(FsError::Disk)
     }
 
     /// Put the superblock back, with the free counts as they now stand.
@@ -1113,14 +1114,12 @@ fn write_u64(block: &mut [u8], offset: usize, value: u64) {
 }
 
 /// Read one block of the partition starting at `start_lba`.
+///
+/// Through the cache, which is where the repeated reads go: an inode is 128
+/// bytes in a block of four thousand and ninety-six, and reading the next one
+/// along used to cost the same block off the platter a second time.
 fn read_block_at(start_lba: u64, block: u64, buffer: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
-    let base = start_lba + block * SECTORS_PER_BLOCK;
-    for index in 0..SECTORS_PER_BLOCK {
-        let offset = index as usize * SECTOR_SIZE;
-        virtio_blk::read_sector(base + index, &mut buffer[offset..offset + SECTOR_SIZE])
-            .map_err(FsError::Disk)?;
-    }
-    Ok(())
+    super::cache::read(start_lba + block * SECTORS_PER_BLOCK, buffer).map_err(FsError::Disk)
 }
 
 /// CRC-32, the ordinary reflected one, as the partition table uses.

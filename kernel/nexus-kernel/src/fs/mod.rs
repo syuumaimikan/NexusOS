@@ -10,8 +10,10 @@
 //!
 //! NexusFS is the one that is. It lives in its own partition, it is written as
 //! well as read, and it is where the system keeps anything it means to still
-//! have after a reboot.
+//! have after a reboot. Underneath it is a cache, so that reading the same
+//! block twice costs the disk once.
 
+pub mod cache;
 pub mod fat32;
 pub mod gpt;
 pub mod nexusfs;

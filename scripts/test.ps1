@@ -158,6 +158,7 @@ Invoke-Step 'boot test' {
         'devices',
         'virtio disk at',
         'requests now block instead of spinning',
+        'block cache',
         'disk verified',
         'EFI system partition',
         'mounted at sector',
@@ -374,6 +375,22 @@ Invoke-Step 'boot test' {
         throw 'the disk never raised an interrupt'
     }
     Write-Host "    the disk raised $($Matches[3]) interrupts and never spun for one" -ForegroundColor DarkGray
+
+    # And the cache under the filesystem is actually catching the repeated
+    # reads it exists for. A cache that missed everything would still be
+    # correct, and would be a cache in name only.
+    $cache = [regex]::Matches($output, 'block cache (\d+)% of (\d+) reads served from memory')
+    if ($cache.Count -lt 1) {
+        throw 'the kernel never reported its block cache'
+    }
+    $last = $cache[$cache.Count - 1]
+    if ([int]$last.Groups[2].Value -lt 50) {
+        throw "the block cache saw only $($last.Groups[2].Value) reads, which proves nothing"
+    }
+    if ([int]$last.Groups[1].Value -lt 80) {
+        throw "the block cache served only $($last.Groups[1].Value)% of reads from memory"
+    }
+    Write-Host "    the block cache served $($last.Groups[1].Value)% of $($last.Groups[2].Value) reads from memory" -ForegroundColor DarkGray
     # The filesystem reader has to have walked a path and followed a chain, not
     # merely opened something in the root. The count of root entries is what
     # says the directory walk saw the whole directory.
