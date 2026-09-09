@@ -296,7 +296,7 @@ calibration -- measures against the PIT rather than assuming a frequency, so a
 slower host gives a smaller number and not a wrong one. A failing run keeps the
 serial logs, because a red cross is not a diagnosis.
 
-## Phase 7 — Storage and NexusFS 🚧
+## Phase 7 — Storage and NexusFS ✅
 
 - virtio-blk, then NVMe and AHCI
 - Block cache, VFS layer
@@ -612,12 +612,43 @@ add one line -- sixteen kilobytes each way for forty bytes, all on the boot path
 It appends now, and still rewrites when it has to be trimmed, because taking
 bytes off the front of a file means moving every byte after them.
 
-Outstanding: no permissions, no
-timestamps beyond the tick a thing was made at, no partial writes and no seek,
-so a large file is read and written whole. The FAT32 reader still cannot write
-and skips long names. The block driver serves one request at a time, which is
-what the journal's ordering currently rests on. Nothing can end a process but
-its own thread.
+### What is left, and why some of it is left on purpose
+
+Four things on this phase's list are still not done, and they divide into two
+kinds. Writing them down apart matters, because a list that mixes "not yet" with
+"deliberately not" turns into a list nobody trusts.
+
+**Not yet.** Timestamps are the tick a thing was made at, because there is no
+real-time clock driver: they are comparable within a boot and meaningless across
+one. That is a driver away, and the driver is worth writing.
+
+**Deliberately not**, and each for a reason that would have to change first:
+
+*Permissions.* This system already has an answer to "what may this program
+touch", and it is the handle. A program reaches a file by naming a component
+inside a directory it was given; one that was handed nothing can open nothing,
+and there is no name it could use instead. Adding owners and mode bits would put
+a second, weaker mechanism beside that one -- weaker because a mode bit is a
+property of the file that everyone shares, and a handle is a property of the
+holder. Two mechanisms that answer the same question is how a system ends up
+with a rule that is enforced in one of them and not the other.
+
+*More than one disk request in flight.* The journal's guarantee is an argument
+about the order writes reach the device, and what makes that argument true today
+is that the driver issues one request and waits for it. Raising the queue depth
+without a barrier the device honours would not make the filesystem slower to
+notice -- it would make it silently wrong, and only on a machine that lost
+power. The order to do these in is: negotiate a flush, then use it in the
+journal, then raise the depth. Doing the third first is the tempting one and the
+one that breaks everything.
+
+*Writing FAT32, and long names.* The boot partition is not ours to design. A
+FAT32 writer has to keep two allocation tables and a free-cluster count
+consistent through a power failure, for a filesystem this project reads once at
+boot and never writes -- and a writer that is nearly safe is worse than none,
+because the failure is somebody else's disk. Long names are the same trade
+smaller: every name this reads fits the short form, and a partial implementation
+would look like it worked.
 
 ### A journal
 
@@ -981,7 +1012,10 @@ A minimised client is still told its frames are shown. It has not been stopped
 and it does not know: a client that could tell whether it was visible would be a
 client that could behave differently when nobody was looking.
 
-Outstanding here: no window that is not a rectangle.
+Outstanding here: no window that is not a rectangle, and no damage tracking --
+the compositor repaints its whole rectangle on every change, which is what makes
+overlap simply work and is the thing that stops scaling first. Both belong to
+Phase 9, which the compositor has already begun.
 
 
 
@@ -989,16 +1023,37 @@ Outstanding here: no window that is not a rectangle.
 - User-space driver model over IPC
 - `init`, service manager, libc, runtime, shell
 
-## Phase 9 — Graphics and the compositor ⬜
-
-Partially anticipated: the kernel already has a bitmap font, text rendering and
-a live status screen redrawn by its own thread. That is a boot display, not a
-compositor — no surfaces, no damage tracking, no windows — and it exists to be
-replaced by the real one.
+## Phase 9 — Graphics and the compositor 🚧
 
 - Nexus Graphics abstraction over the framebuffer, later a GPU
 - Nexus Compositor: surfaces, damage tracking, frame scheduling, multi-monitor
 - Input routing: focus, event delivery to processes, mouse and touchpad
+
+Delivered ahead of schedule, because Phase 8 could not be finished without it:
+the compositor is described under that phase and is real. Surfaces, windows that
+move and stack and resize and minimise, a pointer, focus, and keys routed to one
+client and not the others.
+
+What this phase still means, now that the shape exists:
+
+**Damage tracking.** The compositor repaints its whole rectangle on every
+change. That is ninety thousand pixels and it is what makes overlap simply
+work; on a full screen at sixty frames a second it would be two hundred million
+pixels a second, and the arithmetic that avoids it -- which parts of which
+windows are actually covered -- is the real content of this item.
+
+**Frame scheduling.** Clients draw when they feel like it and the compositor
+composites when they say so. There is no vertical blank, no deadline, and
+nothing that says a frame arriving halfway through a scanout should wait.
+
+**Multi-monitor.** One framebuffer, from the firmware. A second output means
+asking the hardware rather than being handed one, which means a real display
+driver, which is what "Nexus Graphics over a GPU" is.
+
+**The rest of the screen.** The kernel still owns the banner and the status
+panel; the compositor owns a rectangle. Moving the whole screen behind the
+compositor means moving the panel into a program, which needs a font in user
+space -- and that is Phase 10's business, not a hole in this one.
 
 ## Phase 10 — NexusUI ⬜
 
