@@ -113,6 +113,10 @@ extern "C" fn main() -> ! {
 
     ask_for_a_program();
     use_the_filesystem();
+
+    // And a package, installed by a program that had to be handed a directory
+    // before it could touch anything at all.
+    install_a_package();
     finish()
 }
 
@@ -548,6 +552,99 @@ fn share_memory_with(child: nexus_user::Handle) {
 /// call that takes a path, so a filesystem it was not handed is one it cannot
 /// name -- the same argument as for the spawner, applied to files.
 const ROOT: nexus_user::Handle = nexus_user::Handle(2);
+
+/// Ask for a package to be installed, and hand over what it needs.
+///
+/// The installer is an ordinary program with no privilege at all. It cannot
+/// reach the filesystem until this one gives it a directory, and what it can do
+/// there is bounded by the rights on the handle it is given -- which is the
+/// same argument as for the spawner, applied to files. A package manager that
+/// had to run as the system to install a file would be a package manager that
+/// can install a file anywhere.
+///
+/// The handle is *duplicated* before it is sent, because handles move when they
+/// cross a channel: sending the only one would leave this program with no
+/// filesystem for the rest of the boot.
+fn install_a_package() {
+    const INSTALLER: &[u8] = b"BIN/INST.ELF";
+    const PACKAGE: &[u8] = b"PKG/DEMO.NEX";
+
+    if nexus_user::send(SPAWNER, INSTALLER, &[]).is_err() {
+        failed("init: FAILED: could not reach the spawn service");
+        return;
+    }
+    let mut buffer = [0u8; 64];
+    let mut handles = [nexus_user::Handle(0); 2];
+    let received = match nexus_user::receive(SPAWNER, &mut buffer, &mut handles) {
+        Ok(received) => received,
+        Err(_) => {
+            failed("init: FAILED: the spawn service did not answer");
+            return;
+        }
+    };
+    if received.handles != 2 {
+        let text = core::str::from_utf8(&buffer[..received.bytes]).unwrap_or("<not text>");
+        nexus_user::log(text).ok();
+        failed("init: FAILED: the installer did not start");
+        return;
+    }
+    let child = handles[0];
+    let process = handles[1];
+
+    // Read, write and transfer: it has to read the package, write what is in
+    // it, and be able to be given the handle at all. Not close -- an installer
+    // that could close this program's root directory would be an installer that
+    // can take the filesystem away from whoever started it.
+    let Ok(theirs) = nexus_user::duplicate(
+        ROOT,
+        nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+    ) else {
+        failed("init: FAILED: could not duplicate the root directory");
+        return;
+    };
+
+    if nexus_user::send(child, PACKAGE, &[theirs]).is_err() {
+        failed("init: FAILED: could not tell the installer what to install");
+        return;
+    }
+
+    match nexus_user::wait(process) {
+        Ok(nexus_user::Ending::Exited(0)) => {
+            nexus_user::log("init: the installer finished, and said it worked").ok();
+        }
+        Ok(_) => failed("init: FAILED: the installer reported a problem"),
+        Err(_) => failed("init: FAILED: could not wait for the installer"),
+    }
+
+    nexus_user::close(child).ok();
+    nexus_user::close(process).ok();
+
+    // And read one of the installed files back, from this program's own handle
+    // rather than the installer's. What that checks is not the installer's
+    // report -- it is that the bytes are on the disk where a different process
+    // with a different handle can find them.
+    let Ok(directory) = nexus_user::open(ROOT, "demo") else {
+        failed("init: FAILED: the package's directory is not there");
+        return;
+    };
+    let Ok(file) = nexus_user::open(directory, "hello.txt") else {
+        failed("init: FAILED: the package's file is not there");
+        return;
+    };
+    let mut text = [0u8; 128];
+    let length = nexus_user::read(file, &mut text).unwrap_or(0);
+    nexus_user::close(file).ok();
+    nexus_user::close(directory).ok();
+
+    if core::str::from_utf8(&text[..length])
+        .unwrap_or("")
+        .starts_with("installed from a package")
+    {
+        nexus_user::log("init: read a file that arrived inside a package").ok();
+    } else {
+        failed("init: FAILED: the installed file does not say what it should");
+    }
+}
 
 /// The directory this program keeps its own things in.
 const OUR_DIRECTORY: &str = "init";

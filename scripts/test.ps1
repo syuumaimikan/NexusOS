@@ -76,7 +76,7 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-net', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
 
         # And the kernel, which needs its own target and core rebuilt for it,
         # and so was left out until it had accumulated a dozen findings nobody
@@ -193,6 +193,11 @@ Invoke-Step 'boot test' {
         'init: heard you',
         'hello: read the shared page and wrote back into it',
         'init: the other process wrote into memory we both map',
+        'placed on the store from the image',
+        'install: demo 1.0.0, 2 files, verified before anything was written',
+        'install: the package is on the filesystem',
+        'init: the installer finished, and said it worked',
+        'init: read a file that arrived inside a package',
         'init: allocated, grew, and gave it all back',
         'client: laid out ',
         'lines, widest ',

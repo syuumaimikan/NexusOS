@@ -1,0 +1,11 @@
+[package]
+name = "nexus-pkg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The .nexus package format, and the hash that keeps it honest."
+
+[lib]
+name = "nexus_pkg"
+path = "src/lib.rs"

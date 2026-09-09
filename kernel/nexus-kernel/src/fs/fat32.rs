@@ -273,6 +273,28 @@ impl Volume {
         self.read_directory(self.root_cluster)
     }
 
+    /// Read a directory named by a path, as [`Volume::read_file`] reads a file.
+    ///
+    /// Wanted by anything that has to act on *whatever* is in a directory
+    /// rather than on a name it already knows -- copying every package out of
+    /// an image, for instance, on a system that should not need changing to
+    /// ship a second one.
+    ///
+    /// # Errors
+    ///
+    /// If the path does not exist or does not name a directory.
+    pub fn read_directory_at(&self, path: &str) -> Result<Vec<Entry>, FatError> {
+        let mut directory = self.root_cluster;
+        for component in path.split(['/', '\\']).filter(|part| !part.is_empty()) {
+            let entry = self.find(directory, component)?;
+            if !entry.is_directory {
+                return Err(FatError::WrongKind);
+            }
+            directory = entry.cluster;
+        }
+        self.read_directory(directory)
+    }
+
     /// Look one name up in a directory, case-insensitively.
     fn find(&self, directory: u32, name: &str) -> Result<Entry, FatError> {
         self.read_directory(directory)?

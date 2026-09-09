@@ -5,6 +5,8 @@ members = [
     "shared/nexus-font",
     "shared/nexus-i18n",
     "shared/nexus-net",
+    "shared/nexus-pkg",
+    "tools/nexus-pack",
     "boot/nexus-boot",
     "kernel/nexus-mm",
     "kernel/nexus-kernel",
@@ -15,6 +17,7 @@ members = [
     "user/nexus-compositor",
     "user/nexus-client",
     "user/nexus-shell",
+    "user/nexus-install",
     "user/nexus-idle",
 ]
 

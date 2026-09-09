@@ -107,9 +107,54 @@ $ShellElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-shell"
 $StagedShell = Publish-Program -Elf $ShellElf -ProgramDir $ProgramDir -Name 'shell.elf'
 $shellSize = [math]::Round((Get-Item $StagedShell).Length / 1KB, 1)
 
+$InstallElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-install"
+$StagedInstall = Publish-Program -Elf $InstallElf -ProgramDir $ProgramDir -Name 'inst.elf'
+$installSize = [math]::Round((Get-Item $StagedInstall).Length / 1KB, 1)
+
 $IdleElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-idle"
 $StagedIdle = Publish-Program -Elf $IdleElf -ProgramDir $ProgramDir -Name 'idle.elf'
 $idleSize = [math]::Round((Get-Item $StagedIdle).Length / 1KB, 1)
+
+# A package, built on this machine by the tool that makes them and read on the
+# other side by the program that installs them. Both use `shared/nexus-pkg`, so
+# the format has exactly one implementation: a packer with its own idea of the
+# layout is a packer that agrees with the installer until somebody changes one
+# of them.
+Write-Host '==> Packing a package' -ForegroundColor Cyan
+Push-Location $RepoRoot
+try {
+    & cargo build --offline -q -p nexus-pack
+    if ($LASTEXITCODE -ne 0) { throw 'could not build nexus-pack' }
+} finally { Pop-Location }
+
+$PackExe = Join-Path $RepoRoot 'target\debug\nexus-pack.exe'
+$PackageDir = Join-Path $BuildDir 'package'
+New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
+
+# What goes inside. Written here rather than committed, because the interesting
+# part is the format and the install, not the contents -- and a file generated
+# at build time cannot drift out of step with what the test expects to read.
+#
+# Written without a byte-order mark. `Set-Content -Encoding utf8` on Windows
+# PowerShell puts one at the front, and a package carries exactly the bytes it
+# was given -- so the file installed on the other side began with three bytes
+# nobody expected and the program reading it back saw a string that did not
+# start where it should. The package was right; the source of it was not.
+$utf8 = New-Object System.Text.UTF8Encoding $false
+$greeting = Join-Path $PackageDir 'hello.txt'
+[System.IO.File]::WriteAllText($greeting, @'
+installed from a package, verified twice: once before anything was written,
+and once after it had been read back off the disk.
+'@, $utf8)
+$notes = Join-Path $PackageDir 'notes.txt'
+[System.IO.File]::WriteAllText($notes, @'
+A second file, so that the entry table has to be walked rather than guessed.
+'@, $utf8)
+
+$Package = Join-Path $ProgramDir 'demo.nex'
+& $PackExe $Package 'demo' '1.0.0' "demo/hello.txt=$greeting" "demo/notes.txt=$notes"
+if ($LASTEXITCODE -ne 0) { throw 'could not pack the package' }
+$packageSize = [math]::Round((Get-Item $Package).Length / 1KB, 1)
 
 # The disk the kernel drives. Data only, with nothing to boot from: a machine
 # given two bootable disks leaves the firmware to choose between them, and it
@@ -143,6 +188,8 @@ Write-Host "  hello      : $helloSize KiB  -> BIN\HELLO.ELF on the disk"
 Write-Host "  compositor : $compositorSize KiB  -> BIN\COMP.ELF on the disk"
 Write-Host "  client     : $clientSize KiB  -> BIN\CLIENT.ELF on the disk"
 Write-Host "  shell      : $shellSize KiB  -> BIN\SHELL.ELF on the disk"
+Write-Host "  installer  : $installSize KiB  -> BIN\INST.ELF on the disk"
+Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk"
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''

@@ -826,6 +826,11 @@ fn nexusfs_self_test() {
         }
     };
 
+    // Anything the image brought that a program will have to open. Here rather
+    // than with the filesystem checks above, because those run before this
+    // point and the store is what is being written to.
+    seed_packages();
+
     let (total, free) = store::space().unwrap_or((0, 0));
     kprintln!(
         "[fs  ] NexusFS {} at sector {}: {} MiB, {} MiB free, boot {}",
@@ -1061,6 +1066,55 @@ fn filesystem_self_test() {
         partitions.len(),
         root.len()
     );
+}
+
+/// Copy the packages in the image onto the store, if they are not there yet.
+///
+/// The two filesystems have different jobs. The image's FAT partition is what
+/// the firmware and the loader read, and nothing on this system writes to it;
+/// the store is where programs keep things, and on a fresh disk it is empty
+/// because it was made empty. A package that arrived in the image therefore has
+/// to be *put* somewhere a program can open it, and this is where.
+///
+/// It runs after the store is mounted and not with the rest of the filesystem
+/// checks, which is where it was first written -- and the store was not up yet,
+/// so every copy was refused with "there is no disk to keep a filesystem on".
+///
+/// Not a special case for one file: every `.NEX` in the image's program
+/// directory is copied. A system that hard-coded one package's name would need
+/// changing to ship two.
+fn seed_packages() {
+    let Ok(partitions) = fs::gpt::read() else {
+        return;
+    };
+    let Some(esp) = partitions.iter().find(|partition| partition.is_esp()) else {
+        return;
+    };
+    let Ok(volume) = fs::fat32::Volume::mount(esp.first_lba) else {
+        return;
+    };
+    let Ok(files) = volume.read_directory_at("BIN") else {
+        return;
+    };
+    for entry in files {
+        if entry.is_directory || !entry.name.as_str().ends_with(".NEX") {
+            continue;
+        }
+        let path = alloc::format!("BIN/{}", entry.name.as_str());
+        let Ok(contents) = volume.read_file(path.as_str()) else {
+            kprintln!("[pkg ] {path} is in the image but will not read");
+            continue;
+        };
+        match fs::store::seed("PKG", entry.name.as_str(), &contents) {
+            Ok(true) => kprintln!(
+                "[pkg ] PKG/{} placed on the store from the image, {} bytes",
+                entry.name.as_str(),
+                contents.len()
+            ),
+            Ok(false) => kprintln!("[pkg ] PKG/{} is already on the store", entry.name.as_str()),
+            Err(error) => kprintln!("[pkg ] could not place {path}: {error}"),
+        }
+    }
 }
 
 /// The sector the write test uses.

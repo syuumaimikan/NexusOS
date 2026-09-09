@@ -58,6 +58,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-install"
+version = "0.1.0"
+dependencies = [
+ "nexus-pkg",
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-kernel"
 version = "0.1.0"
 dependencies = [
@@ -77,6 +85,17 @@ dependencies = [
 
 [[package]]
 name = "nexus-net"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-pack"
+version = "0.1.0"
+dependencies = [
+ "nexus-pkg",
+]
+
+[[package]]
+name = "nexus-pkg"
 version = "0.1.0"
 
 [[package]]

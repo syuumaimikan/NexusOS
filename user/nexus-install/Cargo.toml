@@ -1,0 +1,16 @@
+[package]
+name = "nexus-install"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Installs a .nexus package onto a filesystem it was handed."
+
+[[bin]]
+name = "nexus-install"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-pkg = { path = "../../shared/nexus-pkg" }

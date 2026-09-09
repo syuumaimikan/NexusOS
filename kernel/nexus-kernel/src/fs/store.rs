@@ -501,6 +501,35 @@ fn is_open(inode: u32) -> bool {
     OPEN.lock().contains_key(&inode)
 }
 
+/// Put a file into the store, under a directory, if it is not already there.
+///
+/// What a system image does to the filesystem it is installing onto. The
+/// programs the kernel starts are read out of the image's FAT partition, which
+/// nothing on this system writes to; anything a *program* has to open has to be
+/// on the store, and on the first boot the store is empty because it was made
+/// empty.
+///
+/// Idempotent, and deliberately so: a file that is already there is left
+/// exactly as it is. The copy in the image is the original, and whatever is on
+/// the store may have been changed by something with every right to change it.
+///
+/// # Errors
+///
+/// If the store is not mounted, or the directory or the file cannot be made.
+pub fn seed(directory: &str, name: &str, contents: &[u8]) -> Result<bool, StoreError> {
+    let root = root()?;
+    let folder = match open_child(&root, directory) {
+        Ok(node) => node,
+        Err(_) => create_child(&root, directory, true)?,
+    };
+    if open_child(&folder, name).is_ok() {
+        return Ok(false);
+    }
+    let file = create_child(&folder, name, false)?;
+    write_node(&file, contents)?;
+    Ok(true)
+}
+
 /// A handle to the root directory.
 ///
 /// The whole filesystem, which is why it is handed out by the kernel to the

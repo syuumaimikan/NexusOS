@@ -1239,9 +1239,64 @@ one connection at a time, and sockets as capability handles so that a *program*
 can use any of it. None of them is stubbed out — a stub that returns success is
 worse than a function that does not exist.
 
-## Phase 13 — Packages ⬜
+## Phase 13 — Packages 🚧
 
 The `.nexus` format, repositories, dependency resolution, signatures, rollback.
+
+A package is built on the host, shipped in the image, placed on the store, and
+installed by a program with no privileges — and every step is checked.
+
+```
+[pkg ] PKG/DEMO.NEX placed on the store from the image, 587 bytes
+[user] install: demo 1.0.0, 2 files, verified before anything was written
+[user] install: wrote 2 files for demo 1.0.0
+[user] init: read a file that arrived inside a package
+```
+
+**The format.** One file: a header, a table of what is in it and where, and the
+contents laid end to end. Read in place — nothing is decompressed and nothing is
+allocated to parse it. Every entry carries its own SHA-256 as well as the
+package carrying one over the whole of itself, because the two answer different
+questions: the outer digest is what a signature will sign and catches
+reordering, dropping or duplicating entries; the per-entry digests say *which*
+file is wrong and can be checked one at a time as each is installed.
+
+**SHA-256 is written out**, not depended on, and checked against the vectors in
+FIPS 180-4 — the empty string, "abc", a message that lands exactly on a block
+boundary, and a million characters fed in a thousand pieces. That last one found
+the bug: `update` reset its buffered count unconditionally at the end, so every
+call threw away the part-built block. A hash fed in one piece was right and a
+hash fed in two was not, and the padding loop never terminated.
+
+**The installer is an ordinary program.** It cannot reach the filesystem at all
+until `init` *hands* it a directory handle, and what it can do is bounded by the
+rights on that handle — read, write and transfer, but not close, so it cannot
+take the filesystem away from whoever started it. A package manager that had to
+run as the system in order to install a file would be a package manager that can
+install a file anywhere.
+
+**Rollback.** Every file about to be overwritten is copied beside itself first
+and every file created is remembered; if anything fails, the copies go back and
+the new files go. What that buys is that an install either happened or did not.
+It is not atomic against losing power — that needs the journal to cover a whole
+sequence — but it is atomic against the install failing, which is what actually
+happens.
+
+**Each file is verified twice**: once as part of the package, before a byte is
+written, and again after it has been written and read back off the disk. The
+second check is not about the package. It is about the disk.
+
+A packaging bug worth recording, because it was in the *build* and not in the
+system: PowerShell's `Set-Content -Encoding utf8` writes a byte-order mark, so
+the file that went into the package began with three bytes nobody expected. The
+package carried them faithfully, the installer wrote them faithfully, and the
+program reading it back saw a string that did not start where it should. The
+package was right; the thing that made it was not.
+
+Still to do: signatures (the field is in the header and is currently zero),
+repositories, fetching over the network, dependency resolution, and uninstall.
+None is stubbed — the signature field is documented as unsigned rather than
+checked against something that always passes.
 
 ## Phase 14 — Security ⬜
 
