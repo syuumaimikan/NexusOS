@@ -1,0 +1,16 @@
+[package]
+name = "nexus-find"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Indexes a directory it was handed and answers a question about it."
+
+[[bin]]
+name = "nexus-find"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-index = { path = "../../shared/nexus-index" }

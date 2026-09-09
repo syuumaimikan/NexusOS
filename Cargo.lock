@@ -33,6 +33,14 @@ name = "nexus-crypto"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-find"
+version = "0.1.0"
+dependencies = [
+ "nexus-index",
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-font"
 version = "0.1.0"
 
@@ -53,6 +61,10 @@ version = "0.1.0"
 dependencies = [
  "nexus-user",
 ]
+
+[[package]]
+name = "nexus-index"
+version = "0.1.0"
 
 [[package]]
 name = "nexus-init"

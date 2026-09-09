@@ -1,0 +1,11 @@
+[package]
+name = "nexus-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A hashed character n-gram index, so that a file can be found again by what is in it."
+
+[lib]
+name = "nexus_index"
+path = "src/lib.rs"

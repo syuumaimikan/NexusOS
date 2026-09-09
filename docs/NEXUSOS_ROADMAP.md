@@ -1468,13 +1468,66 @@ does not need a vertical blank is done — see Phase 9, where it belongs.
 Controllers need USB, which is its own phase-sized piece of work and is not on
 this list anywhere. That is an omission in the plan rather than in the system.
 
-## Phase 17 — AI ⬜
+## Phase 17 — AI 🚧
 
 Nexus Intelligence (local and remote models, embeddings, semantic index),
 Nexus Agent under capability control, Nexus Workflow automation.
 
 Non-negotiable: the agent gets explicit, revocable, auditable capabilities.
 Never ambient root.
+
+**The non-negotiable comes first**, because it is the part that has to be true
+before anything else here is safe to build:
+
+```
+[user] find: given one directory with read transfer
+[user] find: tried to write where it was reading, and was refused
+[user] find: indexed 2 files it was able to read
+[user] find: "verified twice before anything was written" is closest to hello.txt
+[user] init: something read a directory it was lent and answered
+```
+
+`nexus-find` is the smallest thing that is honestly an agent: it is given a job
+and a place to do it in, it decides for itself which files to read, and it comes
+back with an answer nobody told it. What it may do is exactly what its handle
+says — read and transfer, not write — so the answer to "what can this thing do
+to my files" is a fact about the handle and not a promise about the program.
+
+And it is asked to prove it. The first thing it does is try to create a file in
+the directory it was lent, and report being refused. A program that merely does
+not write is not a program that cannot; the difference is the whole point of a
+capability, and the only way to see it is to push against it.
+
+**The index is real and it is not a model.** `shared/nexus-index` hashes every
+three-character sequence of a document into one of two hundred and fifty-six
+buckets and compares documents by the cosine of the angle between their count
+vectors. That is the hashing trick over character n-grams — an old, real
+technique — and it finds a file again by what is in it. Nothing has been
+trained, there is no learned weight anywhere in it, and saying so plainly
+matters: "embedding" is a word that invites the reader to assume a neural
+network.
+
+Two decisions in it are worth naming. Characters rather than words, because
+`画面には触れていません` has no spaces in it and a word tokeniser would treat
+the whole sentence as one token and match nothing. And no floating-point
+arithmetic at all: a cosine is a ratio of a dot product to a product of square
+roots, but two cosines can be *compared* by cross-multiplying and squaring,
+which leaves exact integer arithmetic that ranks the same way on every machine
+and needs no floating-point unit — which matters in a system whose kernel does
+not enable one.
+
+A bug worth recording, because it was not in any of this: the finder page
+faulted on its first run. A program that reads a directory into a buffer and
+builds a vector per file overflows a four-kilobyte stack, and what that looks
+like is a write to an address just below the stack with nothing to say what
+asked for it. Programs now get four pages, with nothing mapped below them so an
+overflow is still a fault.
+
+Still to do: a model of any kind, local or remote; a persistent index rather
+than one built per query; and Nexus Workflow. Remote models need the network
+stack to grow a client and a way for a program to be *given* the authority to
+talk to one — which is the same capability question again, and the reason it was
+answered first.
 
 ## Phase 18 — Virtualisation ⬜
 

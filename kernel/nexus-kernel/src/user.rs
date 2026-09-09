@@ -1254,6 +1254,15 @@ static COMPOSITOR: crate::sync::IrqSpinLock<Option<Arc<ipc::Endpoint>>> =
 /// and is the right amount to notice when one does.
 const DISK_STACK_TOP: u64 = 0x0000_0000_0100_0000;
 
+/// How many pages of it.
+///
+/// Four. One was what a program that draws a gradient needs and is not what a
+/// program that indexes a directory needs; the fault it caused was a write just
+/// below the stack, which says nothing about what asked for it. Below the lowest
+/// page nothing is mapped, so an overflow is still a fault and not a program
+/// quietly writing over something else.
+const DISK_STACK_PAGES: usize = 4;
+
 /// Read a program from the filesystem and start it in a process of its own.
 ///
 /// This is the difference between a system that can run user code and one that
@@ -1357,16 +1366,32 @@ pub unsafe fn start_from_disk_as(
         unsafe { space.map(virt, phys, flags) }.map_err(UserError::Map)?;
     }
 
-    let stack = zeroed_frame()?;
-    // SAFETY: as above.
-    unsafe {
-        space
-            .map(
-                DISK_STACK_TOP - layout::PAGE_SIZE,
-                stack,
-                paging::USER | paging::WRITABLE | paging::NO_EXECUTE,
-            )
-            .map_err(UserError::Map)?;
+    // The stack. Several pages rather than one: a program that reads a
+    // directory into a buffer, builds a vector for every file in it and sorts
+    // the result is a program that overflows four kilobytes -- which it did,
+    // and what that looks like is a page fault at an address just below the
+    // stack rather than anything that names the cause.
+    //
+    // Nothing is mapped below the lowest page, so an overflow still faults
+    // rather than quietly writing over something. What changed is how much has
+    // to happen first.
+    let mut stack = 0;
+    for page in 1..=DISK_STACK_PAGES {
+        let frame = zeroed_frame()?;
+        if page == 1 {
+            // The top one, which is where the initial contents go.
+            stack = frame;
+        }
+        // SAFETY: as above.
+        unsafe {
+            space
+                .map(
+                    DISK_STACK_TOP - layout::PAGE_SIZE * page as u64,
+                    frame,
+                    paging::USER | paging::WRITABLE | paging::NO_EXECUTE,
+                )
+                .map_err(UserError::Map)?;
+        }
     }
 
     let process = crate::process::Process::with_personality(name, Arc::new(space), personality);

@@ -76,7 +76,7 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
 
         # And the kernel, which needs its own target and core rebuilt for it,
         # and so was left out until it had accumulated a dozen findings nobody
@@ -201,6 +201,11 @@ Invoke-Step 'boot test' {
         '[linux] spawned wrote: a program built for Linux, running on NexusOS',
         'exited with status 0 through the Linux boundary',
         'init: a Linux program ran and exited through the translation',
+        'find: given one directory with read transfer',
+        'find: tried to write where it was reading, and was refused',
+        'find: indexed 2 files it was able to read',
+        'is closest to hello.txt',
+        'init: something read a directory it was lent and answered',
         'install: the package is on the filesystem',
         'init: the installer finished, and said it worked',
         'init: read a file that arrived inside a package',

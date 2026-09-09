@@ -120,6 +120,10 @@ extern "C" fn main() -> ! {
 
     // And a program built for a different operating system entirely.
     run_a_linux_program();
+
+    // And something that decides for itself what to read, inside the one place
+    // it was lent.
+    ask_a_question();
     finish()
 }
 
@@ -555,6 +559,76 @@ fn share_memory_with(child: nexus_user::Handle) {
 /// call that takes a path, so a filesystem it was not handed is one it cannot
 /// name -- the same argument as for the spawner, applied to files.
 const ROOT: nexus_user::Handle = nexus_user::Handle(2);
+
+/// Ask a program to find something, and give it only what it needs to.
+///
+/// The handle it gets carries read and transfer and *not* write, so the answer
+/// to "what can this thing do to my files" is a fact about the handle rather
+/// than a promise about the program. It is asked to prove it, too: the first
+/// thing it does is try to write, and report being refused.
+///
+/// The directory it is given is the one the package installed, which is the
+/// point -- it is somewhere with real files in it that this program did not
+/// write, and neither of them had to agree in advance what is in there.
+fn ask_a_question() {
+    const FINDER: &[u8] = b"BIN/FIND.ELF";
+    const QUESTION: &[u8] = b"verified twice before anything was written";
+
+    let Ok(directory) = nexus_user::open(ROOT, "demo") else {
+        failed("init: FAILED: there is nothing installed to search");
+        return;
+    };
+
+    if nexus_user::send(SPAWNER, FINDER, &[]).is_err() {
+        failed("init: FAILED: could not reach the spawn service");
+        return;
+    }
+    let mut buffer = [0u8; 64];
+    let mut handles = [nexus_user::Handle(0); 2];
+    let received = match nexus_user::receive(SPAWNER, &mut buffer, &mut handles) {
+        Ok(received) => received,
+        Err(_) => {
+            failed("init: FAILED: the spawn service did not answer");
+            return;
+        }
+    };
+    if received.handles != 2 {
+        let text = core::str::from_utf8(&buffer[..received.bytes]).unwrap_or("<not text>");
+        nexus_user::log(text).ok();
+        failed("init: FAILED: the finder did not start");
+        return;
+    }
+    let child = handles[0];
+    let process = handles[1];
+
+    // Read and transfer. Not write, and not close: a program asked to look at
+    // something has no business changing it, and none at all taking it away
+    // from whoever lent it.
+    let Ok(theirs) = nexus_user::duplicate(
+        directory,
+        nexus_user::rights::READ | nexus_user::rights::TRANSFER,
+    ) else {
+        failed("init: FAILED: could not narrow the directory handle");
+        return;
+    };
+
+    if nexus_user::send(child, QUESTION, &[theirs]).is_err() {
+        failed("init: FAILED: could not ask the question");
+        return;
+    }
+
+    match nexus_user::wait(process) {
+        Ok(nexus_user::Ending::Exited(0)) => {
+            nexus_user::log("init: something read a directory it was lent and answered").ok();
+        }
+        Ok(_) => failed("init: FAILED: the finder reported a problem"),
+        Err(_) => failed("init: FAILED: could not wait for the finder"),
+    }
+
+    nexus_user::close(child).ok();
+    nexus_user::close(process).ok();
+    nexus_user::close(directory).ok();
+}
 
 /// Run a program that was not built for this system.
 ///
