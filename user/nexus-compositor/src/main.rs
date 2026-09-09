@@ -878,6 +878,23 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
     // What the desktop was last told, so it is told again only when it differs.
     // Seeded with a state no window can be in, so the first list always goes.
     let mut reported = [u8::MAX; CLIENTS];
+    // Damage gathered over everything one wake-up brought, and composited once
+    // at the end of it.
+    //
+    // A wait returns every member that is ready, which on a busy machine is
+    // several: two clients that both drew, a key, and the desktop's own frame
+    // can all arrive together. Compositing after each of them puts the same
+    // pixels on the display three times and shows nobody the first two -- so
+    // the work is done, the damage is remembered, and the display is touched
+    // once when there is nothing left to do.
+    //
+    // This is as close to frame scheduling as a machine with no vertical blank
+    // can get. There is no deadline here and no notion of a frame's duration:
+    // what it does is refuse to composite faster than it is asked to, which is
+    // the half of the problem that does not need the hardware to tell it when a
+    // scanout began.
+    let mut pending = Region::nothing();
+    let mut batched = 0u32;
 
     announce(shell, tiles, focus, &mut reported);
     repaint(
@@ -919,16 +936,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                         announce(shell, tiles, focus, &mut reported);
                         // Everything, because a key may have moved the focus,
                         // and a focus ring is on two windows at once.
-                        repaint(
-                            screen,
-                            tiles,
-                            shell,
-                            &order,
-                            focus,
-                            &mut cursor,
-                            pointing,
-                            everything(screen),
-                        );
+                        pending = pending.union(everything(screen));
                     }
                     None => return,
                 }
@@ -951,16 +959,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                     Some(moved_damage) => {
                         moved += 1;
                         announce(shell, tiles, focus, &mut reported);
-                        repaint(
-                            screen,
-                            tiles,
-                            shell,
-                            &order,
-                            focus,
-                            &mut cursor,
-                            pointing,
-                            moved_damage,
-                        );
+                        pending = pending.union(moved_damage);
                     }
                     None => return,
                 }
@@ -989,16 +988,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                     None => return,
                 };
                 announce(shell, tiles, focus, &mut reported);
-                repaint(
-                    screen,
-                    tiles,
-                    shell,
-                    &order,
-                    focus,
-                    &mut cursor,
-                    pointing,
-                    asked,
-                );
+                pending = pending.union(asked);
                 continue;
             }
 
@@ -1014,16 +1004,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                     nexus_user::close(gone.process).ok();
                 }
                 nexus_user::log("compositor: the desktop ended; its strip is empty").ok();
-                repaint(
-                    screen,
-                    tiles,
-                    shell,
-                    &order,
-                    focus,
-                    &mut cursor,
-                    pointing,
-                    strip(screen),
-                );
+                pending = pending.union(strip(screen));
                 continue;
             }
 
@@ -1055,16 +1036,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                         // tracking exists for: a client redrawing twice a
                         // second used to cost the whole display every time.
                         let drawn = region_of(tile);
-                        repaint(
-                            screen,
-                            tiles,
-                            shell,
-                            &order,
-                            focus,
-                            &mut cursor,
-                            pointing,
-                            drawn,
-                        );
+                        pending = pending.union(drawn);
                     }
                     Err(_) => stop_listening(set, tile, index),
                 }
@@ -1080,17 +1052,27 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                 announce(shell, tiles, focus, &mut reported);
                 // Everything: its window goes, and what was behind it has to
                 // come back.
-                repaint(
-                    screen,
-                    tiles,
-                    shell,
-                    &order,
-                    focus,
-                    &mut cursor,
-                    pointing,
-                    everything(screen),
-                );
+                pending = pending.union(everything(screen));
             }
+        }
+
+        // Once, for everything that arrived together. On a machine where three
+        // things become ready in the same instant this is one composite instead
+        // of three, and the two that were skipped were never on screen long
+        // enough for anybody to see them.
+        if !pending.is_empty() {
+            batched += 1;
+            repaint(
+                screen,
+                tiles,
+                shell,
+                &order,
+                focus,
+                &mut cursor,
+                pointing,
+                pending,
+            );
+            pending = Region::nothing();
         }
     }
 
@@ -1115,6 +1097,11 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
     nexus_user::log(&alloc::format!(
         "compositor: {repaints} repaints covered {damaged} pixels of a possible {whole},          {} written",
         clip::written()
+    ))
+    .ok();
+    nexus_user::log(&alloc::format!(
+        "compositor: {batched} composites for {} things that changed",
+        composited + moved + forwarded + commanded
     ))
     .ok();
     nexus_user::log("compositor: composited every frame its clients drew").ok();

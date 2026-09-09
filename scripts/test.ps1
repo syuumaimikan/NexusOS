@@ -214,6 +214,7 @@ Invoke-Step 'boot test' {
         'client: drew every frame into a surface it was given',
         'compositor: composited every frame its clients drew',
         'repaints covered',
+        'composites for',
         'shared pages made',
         'early initialisation complete',
         'boot thread retiring',

@@ -1065,9 +1065,27 @@ the saved pixels are saved from a framebuffer that already has a pointer in it.
 And anything that changes stacking or focus, because a focus ring is on two
 windows at once and raising a window changes what covers what.
 
-**Frame scheduling.** Clients draw when they feel like it and the compositor
-composites when they say so. There is no vertical blank, no deadline, and
-nothing that says a frame arriving halfway through a scanout should wait.
+**Frame scheduling — half of it.** The compositor no longer composites once per
+event. A wait returns *every* member that is ready, which on a busy machine is
+several — two clients that both drew, a key, and the desktop's own frame can all
+arrive together — so the damage is gathered across everything one wake-up
+brought and the display is touched once at the end of it:
+
+```
+[user] compositor: 45 composites for 50 things that changed
+```
+
+That is the half of frame scheduling that does not need the hardware: refusing
+to composite faster than there is reason to. The other half needs a vertical
+blank to schedule against, which needs a display driver, which is the same
+missing piece as multi-monitor.
+
+Making this change exposed a real bug in the desktop, which is the useful part.
+Its strip was redrawn only when a new window list arrived *after* the
+compositor had acknowledged its previous frame — so when the list arrived first,
+which it usually did, the desktop sat holding a strip it had drawn before it
+knew any windows existed. The tabs appeared or not depending on which message
+won a race, and changing the timing is what made it lose.
 
 **Multi-monitor.** One framebuffer, from the firmware. A second output means
 asking the hardware rather than being handed one, which means a real display
@@ -1436,6 +1454,19 @@ software becomes the test. Windows is untouched.
 ## Phase 16 — Gaming ⬜
 
 Vulkan, GPU drivers, controllers, HDR, VRR, shader cache, frame pacing.
+
+Nothing here is started, and it is worth saying why rather than leaving the box
+unticked. Every item on this list stands on a GPU driver: Vulkan is an interface
+to one, a shader cache caches what one compiles, HDR and VRR are things one
+negotiates with a display. The framebuffer this system draws into came from the
+firmware and is a rectangle of memory with no device behind it that can be asked
+for anything.
+
+The one item that does not need a GPU is frame pacing, and the half of it that
+does not need a vertical blank is done — see Phase 9, where it belongs.
+
+Controllers need USB, which is its own phase-sized piece of work and is not on
+this list anywhere. That is an omission in the plan rather than in the system.
 
 ## Phase 17 — AI ⬜
 

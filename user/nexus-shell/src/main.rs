@@ -226,11 +226,19 @@ fn run(desktop: &mut Desktop) {
         }
         drawn += 1;
 
-        // Read until the frame is acknowledged, then keep reading until
-        // something changes what is on the strip. A click is answered inside
-        // this loop because the answer is a message to the compositor, not a
-        // repaint: what a click does comes back as a new list of windows.
+        // Read until the frame is acknowledged *and* something has changed what
+        // is on the strip. Both, in either order: the compositor sends the
+        // first list of windows as soon as it has one, which may well be before
+        // it has acknowledged this program's first frame. A loop that only
+        // broke on a change arriving *after* the acknowledgement would sit
+        // there holding a strip drawn before it knew there were any windows --
+        // which is exactly what it did, and what made the tabs appear or not
+        // depending on which message won a race.
+        //
+        // A click is answered inside this loop rather than redrawn for, because
+        // what a click does comes back as a new list of windows.
         let mut shown = false;
+        let mut changed = false;
         loop {
             let mut message = [0u8; 64];
             let mut none = [Handle(0); 1];
@@ -242,6 +250,9 @@ fn run(desktop: &mut Desktop) {
 
             if message == wire::SHOWN {
                 shown = true;
+                if changed {
+                    break;
+                }
                 continue;
             }
 
@@ -249,6 +260,7 @@ fn run(desktop: &mut Desktop) {
                 let count = (message.len() - 3).min(MAX_WINDOWS);
                 desktop.windows = [state::GONE; MAX_WINDOWS];
                 desktop.windows[..count].copy_from_slice(&message[3..3 + count]);
+                changed = true;
                 if shown {
                     break;
                 }
@@ -267,6 +279,7 @@ fn run(desktop: &mut Desktop) {
                         nexus_user::log("shell: drew its strip in the language it was told").ok();
                     }
                 }
+                changed = true;
                 if shown {
                     break;
                 }
