@@ -117,6 +117,9 @@ extern "C" fn main() -> ! {
     // And a package, installed by a program that had to be handed a directory
     // before it could touch anything at all.
     install_a_package();
+
+    // And a program built for a different operating system entirely.
+    run_a_linux_program();
     finish()
 }
 
@@ -552,6 +555,53 @@ fn share_memory_with(child: nexus_user::Handle) {
 /// call that takes a path, so a filesystem it was not handed is one it cannot
 /// name -- the same argument as for the spawner, applied to files.
 const ROOT: nexus_user::Handle = nexus_user::Handle(2);
+
+/// Run a program that was not built for this system.
+///
+/// A static Linux x86-64 executable: `ET_EXEC`, `EM_X86_64`, no interpreter,
+/// and machine code that makes its requests with Linux's own call numbers. It
+/// has never heard of NexusOS, there is nothing in it that could have been
+/// adjusted to suit, and this program does nothing special to run it -- it asks
+/// the same spawn service, over the same channel, and the only difference is
+/// four characters of prefix saying which interface the program speaks.
+fn run_a_linux_program() {
+    const PROGRAM: &[u8] = b"linux:BIN/HELLO.LX";
+
+    if nexus_user::send(SPAWNER, PROGRAM, &[]).is_err() {
+        failed("init: FAILED: could not reach the spawn service");
+        return;
+    }
+    let mut buffer = [0u8; 64];
+    let mut handles = [nexus_user::Handle(0); 2];
+    let received = match nexus_user::receive(SPAWNER, &mut buffer, &mut handles) {
+        Ok(received) => received,
+        Err(_) => {
+            failed("init: FAILED: the spawn service did not answer");
+            return;
+        }
+    };
+    if received.handles != 2 {
+        let text = core::str::from_utf8(&buffer[..received.bytes]).unwrap_or("<not text>");
+        nexus_user::log(text).ok();
+        failed("init: FAILED: the Linux program did not start");
+        return;
+    }
+    let child = handles[0];
+    let process = handles[1];
+
+    // Waited for like any other program, because it is one. Its ending arrives
+    // through the same completion a Nexus program's does -- the translation is
+    // above the interface, so what is below sees a process like any other.
+    match nexus_user::wait(process) {
+        Ok(nexus_user::Ending::Exited(0)) => {
+            nexus_user::log("init: a Linux program ran and exited through the translation").ok();
+        }
+        Ok(_) => failed("init: FAILED: the Linux program did not exit cleanly"),
+        Err(_) => failed("init: FAILED: could not wait for the Linux program"),
+    }
+    nexus_user::close(child).ok();
+    nexus_user::close(process).ok();
+}
 
 /// Ask for a package to be installed, and hand over what it needs.
 ///

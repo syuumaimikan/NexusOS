@@ -115,6 +115,25 @@ $IdleElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-idle"
 $StagedIdle = Publish-Program -Elf $IdleElf -ProgramDir $ProgramDir -Name 'idle.elf'
 $idleSize = [math]::Round((Get-Item $StagedIdle).Length / 1KB, 1)
 
+# A program built for Linux, emitted by a tool that writes out every byte of the
+# ELF with the field it belongs to named beside it. Nothing about it is
+# NexusOS's: it is ET_EXEC, EM_X86_64, ELFOSABI_SYSV with no interpreter, and
+# its machine code makes requests with Linux's own call numbers. Running it is
+# the whole claim of the compatibility layer, and a binary that had been shaped
+# to suit would prove nothing.
+Write-Host '==> Emitting a Linux executable' -ForegroundColor Cyan
+Push-Location $RepoRoot
+try {
+    & cargo build --offline -q -p nexus-linux-example
+    if ($LASTEXITCODE -ne 0) { throw 'could not build nexus-linux-example' }
+} finally { Pop-Location }
+
+$LinuxExe = Join-Path $RepoRoot 'target\debug\nexus-linux-example.exe'
+$LinuxProgram = Join-Path $ProgramDir 'hello.lx'
+& $LinuxExe $LinuxProgram 'a program built for Linux, running on NexusOS'
+if ($LASTEXITCODE -ne 0) { throw 'could not emit the Linux program' }
+$linuxSize = (Get-Item $LinuxProgram).Length
+
 # A package, built on this machine by the tool that makes them and read on the
 # other side by the program that installs them. Both use `shared/nexus-pkg`, so
 # the format has exactly one implementation: a packer with its own idea of the
@@ -204,6 +223,7 @@ Write-Host "  shell      : $shellSize KiB  -> BIN\SHELL.ELF on the disk"
 Write-Host "  installer  : $installSize KiB  -> BIN\INST.ELF on the disk"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"
+Write-Host "  linux      : $linuxSize bytes of static Linux ELF -> BIN\HELLO.LX on the disk"
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''

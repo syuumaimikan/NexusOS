@@ -396,6 +396,22 @@ extern "sysv64" fn dispatch(
     // is holding nothing yet.
     crate::sched::stop_if_asked();
 
+    // A program built for something else. The number in `rax` means what that
+    // system says it means, so it goes to the layer that knows -- which turns
+    // it into the same operations below that a Nexus call reaches, and nothing
+    // more. The check is one comparison on a value the process was created
+    // with; there is no sniffing and no guessing.
+    if matches!(
+        crate::sched::current_process().map(|process| process.personality),
+        Some(crate::process::Personality::Linux)
+    ) {
+        let answer = crate::compat::linux::dispatch(
+            number, argument0, argument1, argument2, argument3, argument4,
+        );
+        super::interrupts::disable();
+        return answer;
+    }
+
     let result = match Call::from_number(number) {
         Some(Call::Exit) => {
             match crate::sched::current_process() {
@@ -513,7 +529,7 @@ fn log(pointer: u64, length: u64) -> u64 {
 /// can never name kernel memory. What is *not* checked is whether the range is
 /// mapped -- that is the caller's own page fault, and treating it as one is
 /// deliberate until there is a fixup table to turn it into an error return.
-fn user_range(pointer: u64, length: u64, limit: u64) -> Option<(u64, usize)> {
+pub fn user_range(pointer: u64, length: u64, limit: u64) -> Option<(u64, usize)> {
     if length == 0 || length > limit {
         return None;
     }

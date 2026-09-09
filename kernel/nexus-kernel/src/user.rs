@@ -1041,6 +1041,17 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
         );
     };
 
+    // A program built for something else is asked for by saying so. Nothing in
+    // an executable distinguishes a static Linux binary from a NexusOS one --
+    // both are ET_EXEC, EM_X86_64, ELFOSABI_SYSV with no interpreter -- so the
+    // asker says which, and a caller that says nothing gets this system's own
+    // interface. Guessing would mean occasionally reading a program's first
+    // system call as a completely different request.
+    let (personality, path) = match path.strip_prefix("linux:") {
+        Some(rest) => (crate::process::Personality::Linux, rest),
+        None => (crate::process::Personality::Nexus, path),
+    };
+
     // A channel between the asker and whatever is about to run. Both ends are
     // made here because the kernel is the only thing that can hand one to a
     // process that does not exist yet.
@@ -1049,10 +1060,11 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
     // SAFETY: the heap, the scheduler and the block device are all running;
     // this thread does nothing else while it loads.
     let result = unsafe {
-        start_from_disk(
+        start_from_disk_as(
             path,
             "spawned",
             &[(ipc::Object::Channel(to_parent), ipc::Rights::ALL)],
+            personality,
         )
     };
 
@@ -1257,6 +1269,27 @@ pub unsafe fn start_from_disk(
     name: &str,
     endowments: &[(ipc::Object, ipc::Rights)],
 ) -> Result<alloc::sync::Arc<crate::process::Completion>, UserError> {
+    // SAFETY: forwarded to the caller's promise.
+    unsafe { start_from_disk_as(path, name, endowments, crate::process::Personality::Nexus) }
+}
+
+/// The same, for a program built for something other than this system.
+///
+/// The personality is *given*, never guessed. A static Linux executable and a
+/// NexusOS one are both `ET_EXEC`, `EM_X86_64`, `ELFOSABI_SYSV` images with no
+/// interpreter: nothing in the file distinguishes them, and a loader that tried
+/// would eventually read one as the other -- which is not a failure, it is a
+/// program whose first system call means something else entirely.
+///
+/// # Safety
+///
+/// As [`start_from_disk`].
+pub unsafe fn start_from_disk_as(
+    path: &str,
+    name: &str,
+    endowments: &[(ipc::Object, ipc::Rights)],
+    personality: crate::process::Personality,
+) -> Result<alloc::sync::Arc<crate::process::Completion>, UserError> {
     let partitions = fs::gpt::read().map_err(UserError::PartitionTable)?;
     let esp = partitions
         .iter()
@@ -1336,7 +1369,7 @@ pub unsafe fn start_from_disk(
             .map_err(UserError::Map)?;
     }
 
-    let process = crate::process::Process::new(name, Arc::new(space));
+    let process = crate::process::Process::with_personality(name, Arc::new(space), personality);
     let id = process.id;
     // Taken before the process is handed to the scheduler, because after that
     // it may have exited by the time this function returns and the `Arc` in
@@ -1353,13 +1386,20 @@ pub unsafe fn start_from_disk(
         kprintln!("[user] process {id} \"{name}\" starts holding {kind} handle {handle}");
     }
 
-    sched::spawn_user(
-        name,
-        loaded.entry_point,
-        DISK_STACK_TOP - INITIAL_STACK_OFFSET,
-        process,
-    )
-    .map_err(UserError::Spawn)?;
+    // Where the program finds its stack pointer, which is not the same question
+    // in the two worlds. A Nexus program is handed one number below the top; a
+    // program built for Linux expects a whole structure there, and expects it
+    // before its first instruction runs.
+    let stack_pointer = match personality {
+        crate::process::Personality::Nexus => DISK_STACK_TOP - INITIAL_STACK_OFFSET,
+        // SAFETY: `stack` is the frame just mapped at the top of this address
+        // space, it is this kernel's to write through the direct map until the
+        // process runs, and the layout is written entirely inside it.
+        crate::process::Personality::Linux => unsafe { system_v_stack(stack, name) },
+    };
+
+    sched::spawn_user(name, loaded.entry_point, stack_pointer, process)
+        .map_err(UserError::Spawn)?;
 
     kprintln!(
         "[user] process {id} \"{name}\" loaded from {path}: {} bytes, entry {:#x}, \
@@ -1370,6 +1410,70 @@ pub unsafe fn start_from_disk(
         span_pages * layout::PAGE_SIZE as usize / 1024
     );
     Ok(completion)
+}
+
+/// Lay out the stack a System V program expects, and say where its `rsp` goes.
+///
+/// At the entry point of a program built for Linux, `rsp` points at `argc`,
+/// followed by the argument pointers, a null, the environment pointers, another
+/// null, and then the auxiliary vector terminated by `AT_NULL`. That is not a
+/// convenience the C library sets up -- it is what the kernel is required to
+/// have put there, and a program that reads it finds whatever was in the page
+/// if nobody did.
+///
+/// This is the smallest honest version of it: one argument, which is the
+/// program's name, no environment, and an empty auxiliary vector. A program
+/// that needs `AT_PHDR` or `AT_RANDOM` will find them absent, which is what
+/// `AT_NULL` immediately means and what such a program is required to cope with.
+///
+/// `rsp` is sixteen-byte aligned, because the ABI says so and because the first
+/// `movaps` in any compiled function faults if it is not.
+///
+/// # Safety
+///
+/// `stack` must be the physical frame mapped at the top of the target address
+/// space, and nothing else may be writing it.
+unsafe fn system_v_stack(stack: u64, name: &str) -> u64 {
+    /// Bytes set aside at the very top for the program's name.
+    const NAME_ROOM: u64 = 32;
+
+    let page = layout::phys_to_virt(stack);
+    let bottom = DISK_STACK_TOP - layout::PAGE_SIZE;
+
+    // The name string, as high in the page as it will go.
+    let name_at = DISK_STACK_TOP - NAME_ROOM;
+    let bytes = name.as_bytes();
+    let taken = bytes.len().min(NAME_ROOM as usize - 1);
+    // SAFETY: the destination is inside the page, and the length is bounded by
+    // the room set aside for it.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            (page + (name_at - bottom)) as *mut u8,
+            taken,
+        );
+        // The terminator, which is what makes it a C string -- and every
+        // program that reads `argv[0]` reads it as one.
+        core::ptr::write_volatile((page + (name_at - bottom) + taken as u64) as *mut u8, 0);
+    }
+
+    // Six words: argc, one argument, the null that ends the arguments, the null
+    // that ends the environment, and the two that are `AT_NULL`.
+    let words: u64 = 6;
+    let vector_at = (name_at - words * 8) & !15;
+
+    // SAFETY: as above; the vector lies below the name and inside the page.
+    unsafe {
+        let slot = (page + (vector_at - bottom)) as *mut u64;
+        slot.write_volatile(1); // argc
+        slot.add(1).write_volatile(name_at); // argv[0]
+        slot.add(2).write_volatile(0); // argv is null-terminated
+        slot.add(3).write_volatile(0); // and so is the environment
+        slot.add(4).write_volatile(0); // AT_NULL
+        slot.add(5).write_volatile(0); // with a value of nothing
+    }
+
+    vector_at
 }
 
 /// What `init` starts holding.

@@ -20,6 +20,7 @@ extern crate alloc;
 
 mod acpi;
 mod arch;
+mod compat;
 mod display;
 mod drivers;
 mod framebuffer;
@@ -435,6 +436,10 @@ fn monitor_thread(_argument: usize) {
                     "[mon ] tcp {accepted} connections accepted, {answered} answered,              {resets} reset, {retried} segments resent"
                 );
             }
+        }
+        let (translated, refused) = compat::linux::statistics();
+        if translated > 0 || refused > 0 {
+            kprintln!("[mon ] linux {translated} calls translated, {refused} answered ENOSYS");
         }
         let (calls, unknown) = arch::syscall::statistics();
         let (entered, returned) = arch::syscall::yield_statistics();

@@ -184,9 +184,26 @@ impl Completion {
 }
 
 /// Everything a thread is allowed to reach by virtue of what it belongs to.
+/// Which system-call interface a process's threads speak.
+///
+/// The same instruction reaches the kernel either way; what differs is what the
+/// number in `rax` means. Nothing in an executable says which world it was
+/// built for -- a static Linux binary and a Nexus one are both `ET_EXEC`,
+/// `EM_X86_64`, `ELFOSABI_SYSV` with no interpreter -- so this is set by
+/// whoever asked for the program to run, not guessed from the file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Personality {
+    /// The system's own interface.
+    Nexus,
+    /// Linux's, translated above it by `compat::linux`.
+    Linux,
+}
+
 pub struct Process {
     pub id: ProcessId,
     pub name: String,
+    /// Which interface its system calls are read as.
+    pub personality: Personality,
     /// The page tables its threads run on.
     pub address_space: Arc<AddressSpace>,
     /// The objects it may name, and what it may do with them.
@@ -206,11 +223,22 @@ impl Process {
     /// Create a process around an address space.
     #[must_use]
     pub fn new(name: &str, address_space: Arc<AddressSpace>) -> Arc<Self> {
+        Self::with_personality(name, address_space, Personality::Nexus)
+    }
+
+    /// Create a process that speaks a particular interface.
+    #[must_use]
+    pub fn with_personality(
+        name: &str,
+        address_space: Arc<AddressSpace>,
+        personality: Personality,
+    ) -> Arc<Self> {
         CREATED.fetch_add(1, Ordering::Relaxed);
         let id = ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed));
         Arc::new(Self {
             id,
             name: String::from(name),
+            personality,
             address_space,
             handles: HandleTable::new(),
             completion: Arc::new(Completion {

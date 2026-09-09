@@ -1352,10 +1352,63 @@ model a person interacts with, secure storage, application identity as something
 more than a signing key, and an audit log that records which capability was
 granted to whom.
 
-## Phase 15 — Compatibility ⬜
+## Phase 15 — Compatibility 🚧
 
 Linux: ELF loader, POSIX layer, libc, syscall translation.
 Windows: PE loader, Win32 layer, DirectX translation.
+
+**A Linux program runs.**
+
+```
+[user] process p19 "spawned" loaded from BIN/HELLO.LX: 202 bytes, entry 0x400078
+[linux] spawned wrote: a program built for Linux, running on NexusOS
+[linux] process p19 "spawned" exited with status 0 through the Linux boundary
+[user] init: a Linux program ran and exited through the translation
+```
+
+What ran is a static Linux x86-64 executable — `ET_EXEC`, `EM_X86_64`,
+`ELFOSABI_SYSV`, one `PT_LOAD`, no interpreter — whose machine code makes its
+requests with the `syscall` instruction and Linux's own call numbers: 1 for
+`write`, 231 for `exit_group`. Nothing in it was shaped to suit NexusOS, and
+nothing could have been: `tools/nexus-linux-example` writes out every byte with
+the field it belongs to named beside it, so that the claim can be checked by
+reading rather than taken on trust. It is generated rather than committed for
+the same reason, and because building one otherwise needs a Linux toolchain this
+repository's machine does not have.
+
+**The translation is above the interface, which is the whole rule.** Every Linux
+call becomes something the Nexus interface already offers to any program:
+`write` on standard output becomes the same logging operation `nexus_user::log`
+reaches, `exit_group` becomes the same exit, `getpid` reads the same process
+identifier. There is no operation a translated program can perform that a Nexus
+program could not, and nothing below `compat::linux` knows Linux exists. The
+moment a Linux call needs something Nexus does not have, the answer is to add it
+to Nexus — for everybody — and then translate.
+
+**A program is not sniffed, it is declared.** A static Linux binary and a
+NexusOS one are both `ET_EXEC`, `EM_X86_64`, `ELFOSABI_SYSV` images with no
+interpreter; nothing in the file says which world it was built for. So the asker
+says: a spawn request beginning `linux:` means the program speaks Linux's
+interface. Guessing would be worse than asking, because the two ways of being
+wrong are "a Nexus program's first call is read as Linux's number one" and "a
+Linux program's write is read as a channel send", and both corrupt memory rather
+than fail.
+
+**The stack is the part that is easy to forget.** At the entry point of a
+program built for Linux, `rsp` points at `argc`, then the argument pointers, a
+null, the environment, another null, and an auxiliary vector ending in
+`AT_NULL`. That is not something a C library sets up — it is what the kernel is
+required to have put there, and a program that reads it finds whatever was in
+the page if nobody did.
+
+An unimplemented call answers `-ENOSYS` and says so in the log, which is what
+Linux itself does and what a real program is required to handle. It is not a
+stub: nothing pretends to have succeeded.
+
+Still to do: `brk` and `mmap` so a program can have a heap, file descriptors
+that reach the real filesystem, `clone` and futexes, enough of the auxiliary
+vector for a dynamic loader, and then a libc — at which point ordinary Linux
+software becomes the test. Windows is untouched.
 
 ## Phase 16 — Gaming ⬜
 
