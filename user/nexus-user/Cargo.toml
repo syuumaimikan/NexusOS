@@ -10,3 +10,4 @@ description = "The NexusOS user-space runtime: the system-call interface, and no
 path = "src/lib.rs"
 
 [dependencies]
+nexus-mm = { path = "../../kernel/nexus-mm" }

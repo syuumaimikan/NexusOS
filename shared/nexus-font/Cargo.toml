@@ -1,0 +1,12 @@
+[package]
+name = "nexus-font"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The face NexusOS draws text with, shared by the kernel and by programs."
+build = "build.rs"
+
+[lib]
+name = "nexus_font"
+path = "src/lib.rs"

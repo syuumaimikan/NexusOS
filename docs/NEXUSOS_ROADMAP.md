@@ -1055,10 +1055,47 @@ panel; the compositor owns a rectangle. Moving the whole screen behind the
 compositor means moving the panel into a program, which needs a font in user
 space -- and that is Phase 10's business, not a hole in this one.
 
-## Phase 10 — NexusUI ⬜
+## Phase 10 — NexusUI 🚧
 
 Declarative, reactive, GPU-accelerated widgets: layout, text, theming,
 animation, accessibility, DPI scaling, localisation.
+
+Started, from the bottom. A toolkit is drawing, layout and text, and none of
+those could exist in user space until three things did.
+
+**A heap.** `nexus_user::heap` asks the kernel for a memory object and maps it,
+and gives the region to `nexus_mm::Heap` -- the kernel's own allocator, so the
+thirty-four host tests that already exercise coalescing and alignment and
+exhaustion cover the user side too. There is no `brk` and no anonymous `mmap`:
+a heap is a memory object like any other and the only thing that makes it a
+heap is what the allocator does with it. A program could have two.
+
+**A face both sides can draw with.** The rasteriser moved out of the kernel's
+build script into `shared/nexus-font`, which the kernel and every program now
+depend on. Two faces would be a system where the same string is two widths
+depending on who drew it. The face still covers exactly the characters the
+translations use, plus whatever `shared/nexus-font/charset.txt` adds -- which
+is how a program declares characters no translation happens to contain.
+
+**Something to draw with.** `user/nexus-ui`: `Canvas` over packed or strided
+memory, `Colour`, `Rect`, a `Column` that hands out rows, `wrap` that breaks
+text to a width, `measure` that says how wide a string is. `nexus-client` now
+draws a panel, a title bar, wrapped bilingual body text and a bar that grows
+with the keys it has been routed -- and reports its own layout in a line built
+at run time, which is the heap and the shared face both proving themselves:
+
+```
+[user] client: laid out 5 lines, widest 144 px, in 156 px of surface
+```
+
+Wrapping was where the first real bug was. Slicing by byte index put a cut in
+the middle of a multi-byte character, which ASCII never notices and Japanese
+hits on the first line.
+
+What the phase still means: widgets rather than drawing calls, a retained tree
+rather than repainting from nothing, state that invalidates only what changed,
+theming, animation, accessibility, and DPI scaling -- and "GPU-accelerated"
+waits on a display driver, which is Phase 9's remaining half.
 
 ## Phase 11 — Nexus Desktop ⬜
 

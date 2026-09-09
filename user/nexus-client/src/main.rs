@@ -5,33 +5,47 @@
 //! the display at all, what else is on screen, or who else is running. It draws
 //! into the memory it was given and says it has finished.
 //!
-//! That ignorance is the whole point. Everything drawn before this was drawn by
-//! something that could reach the framebuffer — the kernel, or `paint`, which
-//! was handed the framebuffer itself. A client that cannot reach the
+//! That ignorance is the whole point. A client that cannot reach the
 //! framebuffer cannot scribble over another client's window, cannot read what
 //! another client is showing, and cannot be broken by the compositor moving
 //! things around underneath it.
+//!
+//! # What it draws
+//!
+//! A panel with text in it, through [`nexus_ui`] — the same face the kernel
+//! draws its own panel with, so a string is the same width whoever drew it, and
+//! the same crate a real application would use. Before NexusUI existed this
+//! program drew a gradient, because a gradient is what you can draw with no
+//! font, no allocator and no layout.
+//!
+//! It shows both languages, which is not decoration: a toolkit that only ever
+//! laid out half-width glyphs would advance the cursor wrongly for the other
+//! half and nobody would find out until there was Japanese on screen.
 //!
 //! # What it is told
 //!
 //! One message to begin with: the width and height of its surface and a number
 //! to shade it by, as little-endian 32-bit values, and a handle to the memory.
-//! The surface is tightly packed — width times four bytes per row, no padding —
-//! because it is memory made for this and not a window onto hardware someone
-//! else chose the shape of.
+//! The surface is tightly packed — width times four bytes per row, no padding.
 //!
 //! And then, possibly, again. A surface can be *replaced*: the compositor sends
 //! a new size and a new handle, and this program unmaps what it had and maps
 //! what it was given. It still does not know why, or where the thing is, or
-//! whether anyone can see it. A client that had to be told why its window
-//! changed size would be a client that knew it had a window.
+//! whether anyone can see it.
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::panic::PanicInfo;
 
+use nexus_ui::{Canvas, Colour, Rect};
 use nexus_user::Handle;
+
+/// Where this program's allocations come from.
+#[global_allocator]
+static ALLOCATOR: nexus_user::heap::Allocator = nexus_user::heap::Allocator;
 
 /// The channel to the compositor that started this program.
 const COMPOSITOR: Handle = Handle(1);
@@ -57,19 +71,24 @@ const RESIZED: &[u8] = b"size";
 /// Where this program maps its surface. Its own choice, as every mapping is.
 const SURFACE_AT: usize = 0x0000_0000_1000_0000;
 
-/// How many times it redraws before it is done.
+/// What this program has to say, in both languages.
 ///
-/// More than one, because a compositor that composited once could be a
-/// compositor that runs its loop once. Each frame looks different, so a
-/// composite that used a stale buffer shows the wrong one.
+/// Both, because a toolkit that only ever laid out half-width glyphs would
+/// advance the cursor wrongly for the other half and nobody would find out
+/// until there was Japanese on screen. Every character in it is in
+/// `shared/nexus-font/charset.txt`, which is how a program says what the face
+/// has to cover -- the translations cover their own, and this sentence is not
+/// in a translation.
+const BODY: &str = "drawn by a program into memory it was given. 画面には触れていません。";
+
+/// How many times it redraws before it is done.
 const FRAMES: u32 = 24;
 
 /// How long it waits between frames.
 ///
-/// Sleeping rather than drawing as fast as it can, for two reasons. A client
-/// that redrew flat out would be a client using a whole processor to animate a
-/// rectangle, which is what a frame rate exists to avoid. And it makes the
-/// thing visible: composition that finishes in three milliseconds is
+/// Sleeping rather than drawing as fast as it can. A client that redrew flat
+/// out would be a client using a whole processor to animate a rectangle, and it
+/// makes the thing visible: composition that finishes in three milliseconds is
 /// composition nobody ever sees happen.
 const FRAME_MS: u64 = 500;
 
@@ -85,17 +104,19 @@ pub extern "C" fn _start() -> ! {
     )
 }
 
-/// How many keys this program has been sent, and the last one.
-///
-/// Drawn into the surface, so that a key arriving is something to *see* and not
-/// only something in a log. A client with focus looks different from one
-/// without because it is being typed at.
+/// How many keys this program has been sent.
 static KEYS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Which client this is, as the compositor numbered it.
 static WHICH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 extern "C" fn main() -> ! {
+    // Before anything allocates, and NexusUI allocates.
+    if !nexus_user::heap::init(nexus_user::heap::DEFAULT_SIZE) {
+        failed("client: FAILED: could not get a heap");
+        finish();
+    }
+
     let mut buffer = [0u8; 32];
     let mut handles = [Handle(0); 1];
 
@@ -193,6 +214,9 @@ extern "C" fn main() -> ! {
             }
         }
 
+        if frame == 0 {
+            report(width);
+        }
         nexus_user::sleep(FRAME_MS).ok();
     }
 
@@ -211,9 +235,8 @@ fn heard(message: &[u8]) {
     if message[0] != key::CHARACTER {
         return;
     }
-    // Two fixed strings rather than a formatted one: there is no allocator
-    // here, and which of them appears is the whole point -- a key that reached
-    // both clients would print both.
+    // Two fixed strings rather than a formatted one, and which of them appears
+    // is the whole point -- a key that reached both clients would print both.
     nexus_user::log(if WHICH.load(core::sync::atomic::Ordering::Relaxed) == 0 {
         "client 0: heard a key from the compositor"
     } else {
@@ -222,39 +245,81 @@ fn heard(message: &[u8]) {
     .ok();
 }
 
-/// Fill the surface: a border, and a gradient shaded by `tint` and `frame`.
+/// Draw the whole surface: a panel, a title, and some text under it.
 ///
-/// A gradient rather than a flat colour, because a flat rectangle is what a
-/// single stuck write looks like too. One that runs the right way in both
-/// directions says every pixel was addressed correctly, and one that changes
-/// with the frame says the compositor is showing this frame and not the last.
+/// Drawn from nothing every frame. At a few tens of thousands of pixels that is
+/// cheaper than remembering what changed, and remembering is the optimisation
+/// to make when there is something to measure.
 fn draw(width: u32, height: u32, tint: u32, frame: u32) {
-    // Keys move the gradient as well as the frame does, so a client being typed
-    // at looks different from one that is not -- which makes routing something
-    // to see and not only something in a log.
-    let shift = frame * 60 + KEYS.load(core::sync::atomic::Ordering::Relaxed) * 24;
+    // SAFETY: the surface is mapped here, writable, and is at least
+    // `width * height * 4` bytes -- checked against the mapping before the
+    // first frame and again after every replacement.
+    let mut canvas = unsafe { Canvas::packed(SURFACE_AT, width, height) };
 
-    for row in 0..height {
-        for column in 0..width {
-            let border = row < 2 || column < 2 || row + 2 >= height || column + 2 >= width;
+    let keys = KEYS.load(core::sync::atomic::Ordering::Relaxed);
+    let accent = Colour::rgb(0x38, 0x8B, 0xE8).blend(Colour::rgb(0xE0, 0x60, 0xA0), tint as u8);
 
-            let colour = if border {
-                0x00E8_ECF5
-            } else {
-                let red = ((column * 255 / width.max(1)) + shift) & 0xFF;
-                let green = ((row * 255 / height.max(1)) + shift) & 0xFF;
-                (red << 16) | (green << 8) | (tint & 0xFF)
-            };
+    // The background moves with the frame and with the keys, so a stale buffer
+    // shows as a frame that did not change and a client being typed at looks
+    // different from one that is not.
+    let shift = ((frame * 6 + keys * 12) & 0x3F) as u8;
+    canvas.gradient(
+        canvas.bounds(),
+        Colour::rgb(0x0C, 0x16, 0x28).blend(accent, shift / 4),
+        Colour::rgb(0x05, 0x0A, 0x14),
+    );
 
-            let offset = (row as usize * width as usize + column as usize) * 4;
+    let panel = canvas.bounds().inset(6);
+    canvas.outline(panel, 1, accent);
 
-            // SAFETY: the surface is mapped here, writable, and the offset was
-            // computed from the size checked against the mapping above.
-            unsafe {
-                core::ptr::write_volatile((SURFACE_AT + offset) as *mut u32, colour);
-            }
+    let mut column = nexus_ui::Column::new(panel.inset(6), 3);
+
+    // The title, centred, in the accent colour.
+    let title = column.row(nexus_ui::LINE_HEIGHT + 4);
+    canvas.fill(title, accent.blend(Colour::rgb(0, 0, 0), 200));
+    canvas.text_centred(title, "NexusUI", Colour::rgb(0xF0, 0xF4, 0xFF));
+
+    // And some lines under it, wrapped to the width they have. Both languages,
+    // because a toolkit that only ever laid out half-width glyphs would advance
+    // the cursor wrongly for the other half.
+    let ink = Colour::rgb(0xC8, 0xD4, 0xE8);
+    for line in nexus_ui::wrap(BODY, column.remaining().min(panel.width)) {
+        let row = column.line();
+        if row.width == 0 {
+            break;
+        }
+        canvas.text(row.x, row.y, line, ink);
+    }
+
+    // A bar that grows with the keys this client has been sent, so routing is
+    // something to see and not only something in a log.
+    if column.remaining() >= nexus_ui::LINE_HEIGHT {
+        let row = column.line();
+        if row.width > 0 {
+            let filled = (keys * 16).min(row.width);
+            canvas.fill(Rect::new(row.x, row.y + 4, filled, 4), accent);
         }
     }
+}
+
+/// Say what the layout came out as, once, in a line built at run time.
+///
+/// Three things at once, and all three are new. The string is *formatted*,
+/// which needs a heap, which needs the kernel to have given this program memory
+/// it asked for itself. The line count comes from wrapping real text to a real
+/// width. And the width in pixels comes from the same face the kernel measures
+/// its own panel with, so a claim about it is a claim about both.
+fn report(width: u32) {
+    let usable = width.saturating_sub(24);
+    let lines = nexus_ui::wrap(BODY, usable);
+    let widest = lines.iter().map(|line| nexus_ui::measure(line)).max();
+    nexus_user::log(&alloc::format!(
+        "client: laid out {} lines, widest {} px, in {} px of surface",
+        lines.len(),
+        widest.unwrap_or(0),
+        usable
+    ))
+    .ok();
 }
 
 /// Read a little-endian `u32` out of the message.

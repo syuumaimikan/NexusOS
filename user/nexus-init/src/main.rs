@@ -14,7 +14,18 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::panic::PanicInfo;
+
+/// Where this program's allocations come from.
+///
+/// A memory object like any other, taken from the kernel and handed to the same
+/// allocator the kernel uses. Nothing about it is special except what the
+/// allocator does with it.
+#[global_allocator]
+static ALLOCATOR: nexus_user::heap::Allocator = nexus_user::heap::Allocator;
 
 /// The entry point the kernel jumps to.
 ///
@@ -41,6 +52,14 @@ pub extern "C" fn _start() -> ! {
 /// What the program actually does.
 extern "C" fn main() -> ! {
     nexus_user::log("init: loaded from disk and running in ring 3").ok();
+
+    // Before anything allocates. A program that allocated first would get a
+    // null pointer and Rust's panic for one, which says less than this does.
+    if !nexus_user::heap::init(nexus_user::heap::DEFAULT_SIZE) {
+        failed("init: FAILED: could not get a heap");
+        finish();
+    }
+    use_the_heap();
 
     // The uptime, twice, with a yield between. Two different answers say the
     // clock is running and that this process is one among others rather than
@@ -95,6 +114,51 @@ extern "C" fn main() -> ! {
     ask_for_a_program();
     use_the_filesystem();
     finish()
+}
+
+/// Allocate, grow, free, and check the accounting.
+///
+/// A program could not do this at all until now: it was a fixed set of arrays,
+/// which is enough to draw a gradient and not enough to do anything with what
+/// it is told. Everything above this in the system -- a toolkit that lays out
+/// text, a program that reads a directory -- needs somewhere to put the answer.
+fn use_the_heap() {
+    let (used_before, total) = nexus_user::heap::used();
+    if total == 0 {
+        failed("init: FAILED: the heap reports no memory");
+        return;
+    }
+
+    // Grown well past its first allocation, so the block is moved at least once
+    // and the old one handed back. A heap that never freed would pass a test
+    // that only ever allocated.
+    let mut numbers: Vec<u64> = Vec::new();
+    for index in 0..4096u64 {
+        numbers.push(index * 3);
+    }
+    if numbers.len() != 4096 || numbers[4095] != 4095 * 3 {
+        failed("init: FAILED: what went into the heap did not come back");
+        return;
+    }
+
+    let (used_during, _) = nexus_user::heap::used();
+    if used_during <= used_before {
+        failed("init: FAILED: allocating did not use any of the heap");
+        return;
+    }
+
+    drop(numbers);
+    let (used_after, _) = nexus_user::heap::used();
+    if used_after != used_before {
+        failed("init: FAILED: the heap did not take the memory back");
+        return;
+    }
+    if nexus_user::heap::refused() != 0 {
+        failed("init: FAILED: the heap refused an allocation it should have met");
+        return;
+    }
+
+    nexus_user::log("init: allocated, grew, and gave it all back").ok();
 }
 
 /// The channel to the spawn service, as the kernel hands it over: the first

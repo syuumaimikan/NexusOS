@@ -793,3 +793,172 @@ pub fn wait_any(set: Handle, keys: &mut [u64]) -> Result<usize, Error> {
     };
     check(result).map(|count| count as usize)
 }
+
+// -- A heap --------------------------------------------------------------------
+
+/// The heap a program gets if it asks for one.
+///
+/// Everything above this in the system allocates: a toolkit that lays out text
+/// has to build the layout somewhere, and a program that reads a directory has
+/// to put the names somewhere. Until this existed a user program was a fixed
+/// set of arrays, which is enough for a program that draws a gradient and not
+/// enough for a program that does anything with what it is told.
+///
+/// # Where the memory comes from
+///
+/// The same place a shared surface does: [`memory_create`] and [`memory_map`].
+/// There is no `brk`, no `mmap` of anonymous memory, and no separate
+/// arrangement for a heap -- it is a memory object like any other, and the only
+/// thing that makes it a heap is what this allocator does with it. A program
+/// that wanted two heaps could have two.
+///
+/// # The allocator
+///
+/// `nexus_mm::Heap`, which is the one the kernel uses. Sharing it is not
+/// tidiness: it is thirty-four host tests that already exist, exercising the
+/// coalescing and the alignment and the exhaustion path, and a second allocator
+/// would be a second set of those to write and to keep true.
+///
+/// # What it is not
+///
+/// Not thread-safe beyond one lock, not growable, and not lazy. It takes its
+/// whole region at once from the kernel, which means a program that asks for a
+/// megabyte gets a megabyte of frames whether it uses them or not -- there is
+/// no page-fault path in this system that could hand out pages on demand, and
+/// pretending otherwise would be a heap that failed at a moment nothing could
+/// explain.
+pub mod heap {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::cell::UnsafeCell;
+    use core::ptr;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use nexus_mm::Heap;
+
+    /// Where a program's heap is mapped.
+    ///
+    /// Its own choice, as every mapping is: well above where a program's image
+    /// and stack go, and clear of the addresses the surface and framebuffer
+    /// mappings use.
+    const HEAP_AT: usize = 0x0000_0000_4000_0000;
+
+    /// How much a program takes when it asks for a heap without saying how much.
+    pub const DEFAULT_SIZE: usize = 256 * 1024;
+
+    /// The one heap, and the flag that says a thread is in it.
+    ///
+    /// A spinlock rather than a blocking one, because allocating must not be
+    /// able to block: a `GlobalAlloc` is called from inside `Vec::push`, and a
+    /// program that could be descheduled there would be holding this while it
+    /// was. Held for a few instructions, and this is a single-threaded program
+    /// in every case that exists so far.
+    struct Locked {
+        held: AtomicBool,
+        heap: UnsafeCell<Heap>,
+    }
+
+    // SAFETY: the flag is what serialises access to the heap.
+    unsafe impl Sync for Locked {}
+
+    static HEAP: Locked = Locked {
+        held: AtomicBool::new(false),
+        heap: UnsafeCell::new(Heap::new()),
+    };
+
+    /// Whether the heap has been given its memory.
+    static READY: AtomicBool = AtomicBool::new(false);
+    /// Allocations that failed, so a program can say so rather than only fault.
+    static REFUSED: AtomicUsize = AtomicUsize::new(0);
+
+    /// Ask the kernel for memory and give it to the allocator.
+    ///
+    /// Call once, before anything allocates. Returns whether it worked; a
+    /// program that ignores the answer and then allocates gets a null pointer
+    /// and the panic that Rust raises for one, which is a worse way to find out.
+    pub fn init(size: usize) -> bool {
+        if READY.load(Ordering::Acquire) {
+            return true;
+        }
+        let Ok(handle) = super::memory_create(size) else {
+            return false;
+        };
+        let Ok(mapped) = super::memory_map(handle, HEAP_AT, true) else {
+            return false;
+        };
+
+        // SAFETY: the kernel has just mapped exactly this range, writable, and
+        // nothing else in this program uses it. Zero-length would be a region
+        // the allocator could hand out of, which is why the map is checked.
+        unsafe {
+            lock(|heap| heap.add_region(HEAP_AT, mapped));
+        }
+        READY.store(true, Ordering::Release);
+        true
+    }
+
+    /// Run something with the heap held.
+    fn lock<R>(f: impl FnOnce(&mut Heap) -> R) -> R {
+        while HEAP
+            .held
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // SAFETY: the flag above is held, so this is the only reference.
+        let result = f(unsafe { &mut *HEAP.heap.get() });
+        HEAP.held.store(false, Ordering::Release);
+        result
+    }
+
+    /// Bytes in use and bytes the heap has, or zeroes before it is ready.
+    #[must_use]
+    pub fn used() -> (usize, usize) {
+        if !READY.load(Ordering::Acquire) {
+            return (0, 0);
+        }
+        lock(|heap| {
+            let stats = heap.stats();
+            (stats.used, stats.total)
+        })
+    }
+
+    /// How many allocations have been refused.
+    #[must_use]
+    pub fn refused() -> usize {
+        REFUSED.load(Ordering::Relaxed)
+    }
+
+    /// The allocator Rust's collections go through.
+    pub struct Allocator;
+
+    // SAFETY: `alloc` returns either null or a block of the requested layout
+    // that nothing else has, and `dealloc` is only ever given one of those.
+    unsafe impl GlobalAlloc for Allocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if !READY.load(Ordering::Acquire) {
+                // Before `init`. Null is what a failed allocation is, and Rust
+                // turns it into a panic with a message about memory rather than
+                // a fault at an address nobody can explain.
+                REFUSED.fetch_add(1, Ordering::Relaxed);
+                return ptr::null_mut();
+            }
+            match lock(|heap| heap.allocate(layout)) {
+                Some(block) => block.as_ptr(),
+                None => {
+                    REFUSED.fetch_add(1, Ordering::Relaxed);
+                    ptr::null_mut()
+                }
+            }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            let Some(pointer) = core::ptr::NonNull::new(pointer) else {
+                return;
+            };
+            // SAFETY: upheld by the caller -- this pointer came from `alloc`
+            // with this layout.
+            lock(|heap| unsafe { heap.deallocate(pointer, layout) });
+        }
+    }
+}

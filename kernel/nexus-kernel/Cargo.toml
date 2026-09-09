@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 nexus-abi = { path = "../../shared/nexus-abi" }
+nexus-font = { path = "../../shared/nexus-font" }
 nexus-mm = { path = "../nexus-mm" }
 
 [features]

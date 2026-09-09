@@ -1,5 +1,8 @@
-//! Build script: turns `locales/*.txt` into compiled-in string tables, and
-//! rasterises the glyphs those strings need.
+//! Build script: turns `locales/*.txt` into compiled-in string tables.
+//!
+//! The glyphs those strings need are rasterised by `shared/nexus-font`, which
+//! reads the same files: the face and the strings have to cover the same set,
+//! and the face is wanted by programs as well as by the kernel.
 //!
 //! The kernel has no filesystem yet, so translations cannot be loaded at
 //! runtime; they are compiled in. Keeping them in data files anyway is what
@@ -15,18 +18,15 @@
 //!
 //! [§77 of the specification]: ../../docs/NEXUSOS_ROADMAP.md
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Width and height of a full-width glyph cell, in pixels.
-const CELL: usize = 16;
-
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let repo_root = manifest.parent().unwrap().parent().unwrap().to_path_buf();
+    let repo_root = manifest.parent().unwrap().parent().unwrap();
     let locale_dir = repo_root.join("locales");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
@@ -36,16 +36,6 @@ fn main() {
     let keys = validate_and_collect_keys(&locales);
 
     fs::write(out_dir.join("locales.rs"), emit_locales(&locales, &keys)).unwrap();
-
-    // Every character any translation can put on screen, so the font contains
-    // exactly what is needed and nothing more.
-    let charset = required_characters(&locales);
-    let (description, glyphs) = rasterise(&repo_root, &out_dir, &charset);
-    fs::write(
-        out_dir.join("wide_font.rs"),
-        emit_font(&description, &glyphs),
-    )
-    .unwrap();
 }
 
 /// One parsed locale file.
@@ -184,216 +174,6 @@ fn emit_locales(locales: &[LocaleFile], keys: &[String]) -> String {
             "    Locale {{ tag: {:?}, name: {:?}, values: &VALUES_{index} }},",
             locale.tag, name
         );
-    }
-    out.push_str("];\n");
-
-    out
-}
-
-/// Every character that appears in any translation, plus printable ASCII.
-///
-/// Printable ASCII is included unconditionally because the kernel formats
-/// numbers and untranslated identifiers with it regardless of locale.
-fn required_characters(locales: &[LocaleFile]) -> BTreeSet<char> {
-    let mut characters: BTreeSet<char> = (0x20u8..=0x7E).map(char::from).collect();
-    for locale in locales {
-        for value in locale.entries.values() {
-            characters.extend(value.chars());
-        }
-    }
-    // Placeholder braces are consumed by the formatter, never drawn.
-    characters.remove(&'{');
-    characters.remove(&'}');
-    characters
-}
-
-/// One rasterised glyph.
-struct Glyph {
-    codepoint: u32,
-    /// Advance width in pixels: 8 for half-width, 16 for full-width.
-    width: u32,
-    /// Sixteen rows, most significant bit leftmost.
-    rows: [u16; CELL],
-}
-
-/// Rasterise `characters` by asking the host to draw them.
-///
-/// The kernel ships no font file. Hand-authoring a CJK face is not realistic —
-/// even the kana alone would be hundreds of bitmaps — and bundling a system
-/// font's data in the repository would be redistributing it, which its licence
-/// generally does not allow. So the glyphs are rendered from a font already
-/// installed on the machine doing the build, cached under `target/`, and never
-/// committed. Each build machine uses its own licensed copy, exactly as linking
-/// against a system library does.
-///
-/// If this cannot run, the build still succeeds: the table comes out empty, the
-/// kernel falls back to its built-in ASCII font, and text outside that set
-/// renders as a placeholder box.
-///
-/// Returns which font was actually used alongside the glyphs, so the kernel can
-/// report it at boot. Font resolution has already gone wrong twice in ways that
-/// were invisible until someone looked closely at a screenshot; a line in the
-/// serial log costs nothing and makes the next substitution obvious.
-fn rasterise(
-    repo_root: &Path,
-    out_dir: &Path,
-    characters: &BTreeSet<char>,
-) -> (String, Vec<Glyph>) {
-    let none = || (String::from("built-in 8x8 only"), Vec::new());
-
-    let script = repo_root.join("scripts").join("generate-font.ps1");
-    println!("cargo:rerun-if-changed={}", script.display());
-
-    if !script.exists() {
-        println!("cargo:warning=font generator missing; using the built-in ASCII font only");
-        return none();
-    }
-
-    let charset_path = out_dir.join("charset.txt");
-    let text: String = characters.iter().collect();
-    fs::write(&charset_path, &text).unwrap();
-
-    let glyph_path = out_dir.join("glyphs.txt");
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            &script.to_string_lossy(),
-            "-CharsetFile",
-            &charset_path.to_string_lossy(),
-            "-OutputFile",
-            &glyph_path.to_string_lossy(),
-        ])
-        .output();
-
-    match output {
-        Ok(result) if result.status.success() => {}
-        Ok(result) => {
-            println!(
-                "cargo:warning=font generation failed ({}); using the built-in ASCII font only",
-                String::from_utf8_lossy(&result.stderr)
-                    .trim()
-                    .replace('\n', " ")
-            );
-            return none();
-        }
-        Err(error) => {
-            println!("cargo:warning=could not run the font generator ({error}); using the built-in ASCII font only");
-            return none();
-        }
-    }
-
-    let table = fs::read_to_string(&glyph_path).unwrap_or_default();
-    let glyphs = parse_glyphs(&table);
-    if glyphs.is_empty() {
-        return none();
-    }
-    (font_description(&table), glyphs)
-}
-
-/// The generator's `# font: ...` header, or a placeholder if it is absent.
-fn font_description(table: &str) -> String {
-    table
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("# font:"))
-        .map_or_else(|| String::from("unknown"), |rest| rest.trim().to_string())
-}
-
-/// Parse the generator's output: `codepoint width row0 row1 ... row15`, hex.
-fn parse_glyphs(text: &str) -> Vec<Glyph> {
-    let mut glyphs = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() != CELL + 2 {
-            continue;
-        }
-
-        let Ok(codepoint) = u32::from_str_radix(fields[0], 16) else {
-            continue;
-        };
-        let Ok(width) = fields[1].parse::<u32>() else {
-            continue;
-        };
-
-        let mut rows = [0u16; CELL];
-        let mut ok = true;
-        for (index, field) in fields[2..].iter().enumerate() {
-            match u16::from_str_radix(field, 16) {
-                Ok(row) => rows[index] = row,
-                Err(_) => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if ok {
-            glyphs.push(Glyph {
-                codepoint,
-                width,
-                rows,
-            });
-        }
-    }
-
-    glyphs.sort_by_key(|glyph| glyph.codepoint);
-    glyphs
-}
-
-/// Emit the glyph table.
-fn emit_font(description: &str, glyphs: &[Glyph]) -> String {
-    let mut out = String::new();
-    out.push_str("// Generated by build.rs. Do not edit.\n");
-    out.push_str("//\n");
-    out.push_str("// Rasterised from a font installed on the build machine and never\n");
-    out.push_str("// committed; see the `rasterise` function in build.rs for why.\n\n");
-
-    let _ = writeln!(
-        out,
-        "/// Which font this table came from, reported at boot.\npub const SOURCE: &str = {description:?};"
-    );
-    let _ = writeln!(out, "\npub const GLYPH_COUNT: usize = {};", glyphs.len());
-    let _ = writeln!(
-        out,
-        "\n/// Codepoints present in [`GLYPHS`], ascending, for binary search."
-    );
-    let _ = writeln!(out, "pub const CODEPOINTS: [u32; GLYPH_COUNT] = [");
-    for glyph in glyphs {
-        let _ = writeln!(out, "    {:#06x},", glyph.codepoint);
-    }
-    out.push_str("];\n");
-
-    let _ = writeln!(
-        out,
-        "\n/// Advance width in pixels for each entry of [`CODEPOINTS`]."
-    );
-    let _ = writeln!(out, "pub const WIDTHS: [u8; GLYPH_COUNT] = [");
-    for glyph in glyphs {
-        let _ = writeln!(out, "    {},", glyph.width);
-    }
-    out.push_str("];\n");
-
-    let _ = writeln!(
-        out,
-        "\n/// Sixteen rows per glyph, most significant bit leftmost."
-    );
-    let _ = writeln!(out, "pub const GLYPHS: [[u16; 16]; GLYPH_COUNT] = [");
-    for glyph in glyphs {
-        out.push_str("    [");
-        for (index, row) in glyph.rows.iter().enumerate() {
-            if index > 0 {
-                out.push_str(", ");
-            }
-            let _ = write!(out, "{row:#06x}");
-        }
-        out.push_str("],\n");
     }
     out.push_str("];\n");
 
