@@ -429,6 +429,12 @@ fn monitor_thread(_argument: usize) {
             kprintln!(
                 "[mon ] stack {frames_in} frames read, {frames_out} written,              {arp} ARP answered, {echoes} echoes answered, {unknown} ignored"
             );
+            let (accepted, answered, resets, retried) = net::tcp::statistics();
+            if accepted > 0 || resets > 0 {
+                kprintln!(
+                    "[mon ] tcp {accepted} connections accepted, {answered} answered,              {resets} reset, {retried} segments resent"
+                );
+            }
         }
         let (calls, unknown) = arch::syscall::statistics();
         let (entered, returned) = arch::syscall::yield_statistics();

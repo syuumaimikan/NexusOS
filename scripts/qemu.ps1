@@ -81,6 +81,11 @@ function Get-NexusQemuArgs {
         [int]$Processors = 4,
         [string]$Memory = '1G',
         [int]$MonitorPort = 0,
+        # Which host port reaches the guest's TCP service. Different per run, so
+        # that two tests in flight at once do not fight over one socket -- and
+        # so that a stale QEMU holding the port is a test that says so rather
+        # than one that quietly talks to the wrong machine.
+        [int]$HostHttpPort = 18080,
         [switch]$Headless,
         [switch]$StopOnFault,
         [switch]$BootFromImage
@@ -144,8 +149,15 @@ function Get-NexusQemuArgs {
     # forwarder at 10.0.2.3 and a gateway that answers ICMP. Everything the
     # guest does on it is real -- real frames, real ARP, a real lease -- and
     # none of it needs the host to be set up first.
+    #
+    # And a way in. `hostfwd` makes QEMU listen on the host and forward what
+    # arrives to a port in the guest, which is what lets a test open a real TCP
+    # connection to the kernel's own listener -- a real handshake, real sequence
+    # numbers, and a client that has no idea what it is talking to. Bound to
+    # the loopback address on purpose: this exposes a service written this month
+    # and it has no business being reachable from anywhere else.
     $arguments += @(
-        '-netdev', 'user,id=nexusnet',
+        '-netdev', "user,id=nexusnet,hostfwd=tcp:127.0.0.1:${HostHttpPort}-:80",
         '-device', 'virtio-net-pci,netdev=nexusnet,disable-modern=on'
     )
 

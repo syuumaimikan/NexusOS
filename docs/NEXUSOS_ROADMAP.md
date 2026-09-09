@@ -1195,10 +1195,49 @@ takes the frame, the device sends it, nothing reports an error, and the frame
 on the wire is shifted by two bytes so no reply ever comes. What it looked like
 was a DHCP server that would not answer.
 
-Still to do: TCP, DNS, IPv6, a routing table, fragmentation, a firewall, and
-sockets as capability handles so that a *program* can use any of it. None of
-them is stubbed out — a stub that returns success is worse than a function that
-does not exist.
+**TCP works, and something outside the machine can prove it.** QEMU forwards a
+port on the host into the guest, so `scripts/test-network.ps1` opens an ordinary
+socket with an ordinary .NET `TcpClient` — a client that has never heard of
+NexusOS — and gets an answer:
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 258
+
+NexusOS
+=======
+
+you asked   : GET /nexus HTTP/1.1
+address     : 10.0.2.15/24
+uptime      : 3.673 s
+processes   : 16 started, 12 ended
+frames      : 12 in, 11 out
+```
+
+A three-way handshake, an acknowledgement for the request, a response, a
+four-way close, and retransmission when an acknowledgement does not come back.
+Every number in that page is read at the moment the request arrives, which is
+what makes it an answer rather than a fixed string: it could not have been
+written in advance, and it differs between two requests.
+
+The bug worth recording is the one that made it look like the peer had gone
+silent. This end claimed the response's *sequence space* only after the
+response was acknowledged — but an acknowledgement is accepted only if it falls
+at or before what this end has sent, so the connection rejected the very
+acknowledgement it was waiting for, resent four times, and gave up on a peer
+that had answered instantly every time. The client saw the whole page; the
+server thought nobody was there.
+
+What TCP here deliberately is not: no active open (this end never starts a
+connection), no send queue, no congestion control, no out-of-order reassembly —
+a segment ahead of a gap is dropped so the peer sends it again in order, which
+is correct and, on a link that does not reorder, free.
+
+Still to do: DNS, IPv6, a routing table, fragmentation, a firewall, more than
+one connection at a time, and sockets as capability handles so that a *program*
+can use any of it. None of them is stubbed out — a stub that returns success is
+worse than a function that does not exist.
 
 ## Phase 13 — Packages ⬜
 

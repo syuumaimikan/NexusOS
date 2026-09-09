@@ -30,6 +30,8 @@
 //! the roadmap; none of them is stubbed out here, because a stub that returns
 //! success is worse than a function that does not exist.
 
+pub mod tcp;
+
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::drivers::virtio_net;
@@ -157,6 +159,7 @@ fn network_thread(_argument: usize) {
     if configure() {
         UP.store(true, Ordering::Release);
         prove();
+        tcp::listen();
     } else {
         kprintln!("[net ] no address; the interface is up but unconfigured");
     }
@@ -268,6 +271,7 @@ fn handle_ipv4(bytes: &[u8]) {
     match packet.protocol {
         wire::protocol::ICMP => handle_icmp(&interface, packet.from, packet.payload),
         wire::protocol::UDP => handle_udp(packet.from, packet.payload),
+        wire::protocol::TCP => tcp::receive(packet.from, packet.to, packet.payload),
         _ => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
         }

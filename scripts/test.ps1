@@ -213,6 +213,7 @@ Invoke-Step 'boot test' {
         'address 10.0.2.15/24 from 10.0.2.2',
         'gateway 10.0.2.2, DNS 10.0.2.3',
         'ping 10.0.2.2: reply in',
+        'listening on TCP port 80',
         'keyboard on IRQ 1',
         'PS/2 mouse reporting on IRQ 12',
         'mouse on IRQ 12',
@@ -466,6 +467,10 @@ Invoke-Step 'boot from the image' {
 
 Invoke-Step 'persistence' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-persistence.ps1')) 'persistence tests'
+}
+
+Invoke-Step 'network' {
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-network.ps1')) 'network tests'
 }
 
 Invoke-Step 'input' {

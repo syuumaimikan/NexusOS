@@ -497,6 +497,151 @@ pub fn parse_dhcp(bytes: &[u8]) -> Option<Dhcp> {
     Some(message)
 }
 
+// -- TCP -----------------------------------------------------------------------
+
+/// Bytes of a TCP header with no options, which is the only kind written here.
+pub const TCP_HEADER: usize = 20;
+
+/// The flags in a TCP header.
+///
+/// Six bits that carry the whole protocol. A segment is not a "SYN packet" or
+/// an "ACK packet": it is a segment with some of these set, and more than one
+/// of them at once is the normal case -- a handshake's second segment is a SYN
+/// and an ACK together.
+pub mod tcp_flag {
+    pub const FIN: u8 = 1 << 0;
+    pub const SYN: u8 = 1 << 1;
+    pub const RST: u8 = 1 << 2;
+    pub const PSH: u8 = 1 << 3;
+    pub const ACK: u8 = 1 << 4;
+}
+
+/// What a TCP segment said.
+pub struct Segment<'a> {
+    pub source: u16,
+    pub destination: u16,
+    /// Where this segment's first byte sits in the sender's stream.
+    pub sequence: u32,
+    /// The next byte the sender expects, valid only when `ACK` is set.
+    pub acknowledgement: u32,
+    pub flags: u8,
+    /// How much more the sender is willing to receive.
+    pub window: u16,
+    pub payload: &'a [u8],
+}
+
+impl Segment<'_> {
+    /// Whether a flag is set.
+    #[must_use]
+    pub fn has(&self, flag: u8) -> bool {
+        self.flags & flag != 0
+    }
+
+    /// How much of the sequence space this segment occupies.
+    ///
+    /// Its payload, plus one for a SYN and one for a FIN. Those two are not
+    /// data and they are still *numbered*, which is what lets the other side
+    /// acknowledge them: an implementation that acknowledged a FIN with the
+    /// sequence number it arrived on would be asking for the FIN again for
+    /// ever.
+    #[must_use]
+    pub fn sequence_length(&self) -> u32 {
+        self.payload.len() as u32
+            + u32::from(self.has(tcp_flag::SYN))
+            + u32::from(self.has(tcp_flag::FIN))
+    }
+}
+
+/// Write a TCP segment over a payload already in place at `TCP_HEADER`, and say
+/// how long the whole segment is.
+///
+/// The checksum covers the same pseudo header UDP's does, for the same reason:
+/// without it a segment delivered to the wrong address still checksums.
+#[allow(clippy::too_many_arguments)]
+pub fn tcp(
+    into: &mut [u8],
+    from: Ipv4,
+    to: Ipv4,
+    source: u16,
+    destination: u16,
+    sequence: u32,
+    acknowledgement: u32,
+    flags: u8,
+    window: u16,
+    length: usize,
+) -> usize {
+    put16(into, 0, source);
+    put16(into, 2, destination);
+    put32(into, 4, sequence);
+    put32(into, 8, acknowledgement);
+    // The high nibble is the header length in 32-bit words. Five, because no
+    // options are written; a receiver uses it to find the payload, so a header
+    // that lied about its own length would hand over the wrong bytes.
+    into[12] = 5 << 4;
+    into[13] = flags;
+    put16(into, 14, window);
+    put16(into, 16, 0);
+    put16(into, 18, 0);
+
+    let mut pseudo = [0u8; 12];
+    pseudo[0..4].copy_from_slice(&from);
+    pseudo[4..8].copy_from_slice(&to);
+    pseudo[9] = protocol::TCP;
+    put16(&mut pseudo, 10, (TCP_HEADER + length) as u16);
+
+    let sum = checksum(&[&pseudo, &into[..TCP_HEADER + length]]);
+    put16(into, 16, sum);
+    TCP_HEADER + length
+}
+
+/// Make sense of a TCP segment, or not.
+///
+/// The checksum is verified against the addresses the packet actually arrived
+/// with, which is the only thing that catches a segment delivered to the wrong
+/// machine.
+#[must_use]
+pub fn parse_tcp<'a>(bytes: &'a [u8], from: Ipv4, to: Ipv4) -> Option<Segment<'a>> {
+    if bytes.len() < TCP_HEADER {
+        return None;
+    }
+    let header = (bytes[12] >> 4) as usize * 4;
+    if header < TCP_HEADER || bytes.len() < header {
+        return None;
+    }
+
+    let mut pseudo = [0u8; 12];
+    pseudo[0..4].copy_from_slice(&from);
+    pseudo[4..8].copy_from_slice(&to);
+    pseudo[9] = protocol::TCP;
+    put16(&mut pseudo, 10, bytes.len() as u16);
+    if checksum(&[&pseudo, bytes]) != 0 {
+        return None;
+    }
+
+    Some(Segment {
+        source: be16(bytes, 0),
+        destination: be16(bytes, 2),
+        sequence: be32(bytes, 4),
+        acknowledgement: be32(bytes, 8),
+        // Only the six that are defined here; the rest of the byte is reserved
+        // and older stacks put nothing in it.
+        flags: bytes[13] & 0x3F,
+        window: be16(bytes, 14),
+        payload: &bytes[header..],
+    })
+}
+
+/// Whether `a` is at or before `b` in a sequence space that wraps.
+///
+/// Sequence numbers are 32 bits and they wrap, so `<` is the wrong question:
+/// after four gigabytes a connection's numbers start again from zero and a
+/// comparison that used ordinary arithmetic would decide every new segment was
+/// ancient history. What is meaningful is the *difference*, read as signed.
+#[must_use]
+pub fn sequence_at_or_before(a: u32, b: u32) -> bool {
+    (b.wrapping_sub(a) as i32) >= 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,5 +922,112 @@ mod tests {
         let parsed = parse_dhcp(&message).expect("what this writes, it can read");
         assert_eq!(parsed.kind, dhcp_type::REQUEST);
         assert_eq!(parsed.server, [10, 0, 2, 2]);
+    }
+
+    #[test]
+    fn a_segment_survives_the_round_trip() {
+        let mut segment = [0u8; TCP_HEADER + 5];
+        segment[TCP_HEADER..].copy_from_slice(b"hello");
+        tcp(
+            &mut segment,
+            [10, 0, 2, 15],
+            [10, 0, 2, 2],
+            80,
+            42000,
+            0x1000_0000,
+            0x2000_0000,
+            tcp_flag::ACK | tcp_flag::PSH,
+            8192,
+            5,
+        );
+
+        let parsed = parse_tcp(&segment, [10, 0, 2, 15], [10, 0, 2, 2])
+            .expect("a segment this wrote must parse");
+        assert_eq!(parsed.source, 80);
+        assert_eq!(parsed.destination, 42000);
+        assert_eq!(parsed.sequence, 0x1000_0000);
+        assert_eq!(parsed.acknowledgement, 0x2000_0000);
+        assert!(parsed.has(tcp_flag::ACK));
+        assert!(parsed.has(tcp_flag::PSH));
+        assert!(!parsed.has(tcp_flag::SYN));
+        assert_eq!(parsed.payload, b"hello");
+        assert_eq!(parsed.window, 8192);
+    }
+
+    #[test]
+    fn a_segment_delivered_to_the_wrong_address_is_refused() {
+        let mut segment = [0u8; TCP_HEADER];
+        tcp(
+            &mut segment,
+            [10, 0, 2, 15],
+            [10, 0, 2, 2],
+            80,
+            42000,
+            1,
+            0,
+            tcp_flag::SYN,
+            8192,
+            0,
+        );
+        // Same bytes, different addresses. The pseudo header is what makes the
+        // checksum notice: without it this would parse perfectly.
+        assert!(parse_tcp(&segment, [10, 0, 2, 15], [10, 0, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn a_syn_and_a_fin_each_take_a_sequence_number() {
+        let mut segment = [0u8; TCP_HEADER];
+        tcp(
+            &mut segment,
+            [10, 0, 2, 15],
+            [10, 0, 2, 2],
+            80,
+            42000,
+            1,
+            0,
+            tcp_flag::SYN,
+            8192,
+            0,
+        );
+        let parsed = parse_tcp(&segment, [10, 0, 2, 15], [10, 0, 2, 2]).expect("parses");
+        // No payload, and still one byte of sequence space -- which is what the
+        // other side acknowledges.
+        assert_eq!(parsed.payload.len(), 0);
+        assert_eq!(parsed.sequence_length(), 1);
+    }
+
+    #[test]
+    fn a_header_with_options_finds_its_payload() {
+        // A real SYN from a real client carries options: maximum segment size,
+        // window scale, timestamps. They are not understood here, but the
+        // header length has to be honoured or the payload starts in the middle
+        // of them.
+        let mut segment = [0u8; 24 + 3];
+        segment[12] = 6 << 4; // six words: twenty bytes plus four of options
+        segment[13] = tcp_flag::ACK;
+        segment[24..].copy_from_slice(b"abc");
+        // Checksum it by hand, over the whole thing.
+        let mut pseudo = [0u8; 12];
+        pseudo[0..4].copy_from_slice(&[10, 0, 2, 2]);
+        pseudo[4..8].copy_from_slice(&[10, 0, 2, 15]);
+        pseudo[9] = protocol::TCP;
+        put16(&mut pseudo, 10, segment.len() as u16);
+        let sum = checksum(&[&pseudo, &segment]);
+        put16(&mut segment, 16, sum);
+
+        let parsed =
+            parse_tcp(&segment, [10, 0, 2, 2], [10, 0, 2, 15]).expect("options are not an error");
+        assert_eq!(parsed.payload, b"abc");
+    }
+
+    #[test]
+    fn sequence_numbers_compare_across_the_wrap() {
+        assert!(sequence_at_or_before(1, 2));
+        assert!(sequence_at_or_before(2, 2));
+        assert!(!sequence_at_or_before(3, 2));
+        // The whole point: just before the wrap is *earlier* than just after,
+        // even though the number is larger.
+        assert!(sequence_at_or_before(0xFFFF_FFFF, 1));
+        assert!(!sequence_at_or_before(1, 0xFFFF_FFFF));
     }
 }
