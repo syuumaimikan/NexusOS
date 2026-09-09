@@ -25,6 +25,9 @@ pub const KEYBOARD_VECTOR: u8 = super::idt::IRQ_BASE + 17;
 /// independent and the numbers only have to differ.
 pub const DISK_VECTOR: u8 = super::idt::IRQ_BASE + 18;
 
+/// Vector the mouse is routed to through the I/O APIC.
+pub const MOUSE_VECTOR: u8 = super::idt::IRQ_BASE + 19;
+
 /// Vector the local APIC reports spurious interrupts on.
 ///
 /// The architecture requires the low four bits to be set on some older
@@ -238,6 +241,23 @@ extern "x86-interrupt" fn keyboard_interrupt(frame: InterruptStackFrame) {
     }
 }
 
+/// The mouse.
+///
+/// Reads one byte and, when three of them make a packet, sends it on. The
+/// controller is shared with the keyboard, so the handler checks whose byte it
+/// is before taking it -- reading the other device's would take it away from
+/// the driver whose it is.
+extern "x86-interrupt" fn mouse_interrupt(frame: InterruptStackFrame) {
+    // Entered from ring 3 as readily as from the kernel, and a device
+    // interrupt is the likeliest of all of them to land on user code.
+    let _gs = super::idt::KernelGs::enter(&frame);
+    // SAFETY: called only as the handler for this vector.
+    unsafe {
+        crate::drivers::mouse::on_interrupt();
+        apic::end_of_interrupt();
+    }
+}
+
 /// The disk's interrupt.
 ///
 /// Acknowledges at the device -- which is a register read, and the only thing
@@ -333,6 +353,7 @@ pub unsafe fn init(timer_hz: u32) {
         idt.set_handler(APIC_TIMER_VECTOR, apic_timer_interrupt as *const ());
         idt.set_handler(KEYBOARD_VECTOR, keyboard_interrupt as *const ());
         idt.set_handler(DISK_VECTOR, disk_interrupt as *const ());
+        idt.set_handler(MOUSE_VECTOR, mouse_interrupt as *const ());
         idt.set_handler(SPURIOUS_VECTOR, apic_spurious_interrupt as *const ());
         idt.set_handler(TLB_SHOOTDOWN_VECTOR, tlb_shootdown_interrupt as *const ());
 

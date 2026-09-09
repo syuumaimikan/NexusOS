@@ -68,12 +68,43 @@ const KERNEL: Handle = Handle(1);
 const SPAWNER: Handle = Handle(2);
 /// The channel keys arrive on.
 const KEYS: Handle = Handle(3);
+/// The channel pointer movements arrive on.
+const POINTER: Handle = Handle(4);
 
-/// The key this program gives the keyboard in its wait set.
+/// The keys this program gives the keyboard and the pointer in its wait set.
 ///
 /// Above anything a client can be given, since client keys are an index shifted
 /// left with a bit for which of its two things became ready.
 const KEY_KEYBOARD: u64 = 0xFFFF;
+const KEY_POINTER: u64 = 0xFFFE;
+
+/// The pointer, and what it is over.
+///
+/// Where it is on the screen is this program's business and nobody else's. The
+/// mouse reports that it *moved*, never where it is -- it cannot know, because
+/// where a pointer is depends on how large the screen is and what is on it.
+struct Pointer {
+    x: u32,
+    y: u32,
+    /// Whether a button was down at the last report, so that a press can be
+    /// told from being held. A compositor that acted on "down" rather than on
+    /// "went down" would refocus a window forty times a second while somebody
+    /// held the button.
+    held: bool,
+    /// What is under it, saved before the cursor was drawn over it.
+    beneath: [u32; CURSOR * CURSOR],
+    /// Whether `beneath` holds anything, and where it was taken from.
+    drawn: Option<(u32, u32)>,
+}
+
+/// How large the pointer is, in pixels.
+const CURSOR: usize = 10;
+
+/// What a movement looks like on the wire: two signed numbers and the buttons.
+mod pointer {
+    pub const SIZE: usize = 12;
+    pub const LEFT: u32 = 1 << 0;
+}
 
 /// What a key looks like on the wire: a kind, then a number.
 ///
@@ -359,8 +390,26 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
         failed("compositor: FAILED: could not watch the keyboard");
         return;
     }
+    // A machine with no mouse has no pointer channel worth watching, and
+    // watching one that will never carry anything is a member that is never
+    // ready. It is not an error, so it is not reported as one.
+    let pointing = nexus_user::watch(set, POINTER, KEY_POINTER).is_ok();
+
+    // Started in the middle of the rectangle this program owns, because there
+    // is nowhere else meaningful for it to be before anyone has moved it.
+    let mut cursor = Pointer {
+        x: screen.x + screen.width / 2,
+        y: screen.y + screen.height / 2,
+        held: false,
+        beneath: [0; CURSOR * CURSOR],
+        drawn: None,
+    };
+    if pointing {
+        draw_cursor(screen, &mut cursor);
+    }
 
     let mut composited = 0u32;
+    let mut moved = 0u32;
     let mut forwarded = 0u32;
     let mut ended = 0usize;
     // Which client keys go to. A compositor without this would have to send
@@ -393,6 +442,14 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
                 continue;
             }
 
+            if *key == KEY_POINTER {
+                match read_pointer(screen, set, tiles, &mut cursor, &mut focus) {
+                    Some(steps) => moved += steps,
+                    None => return,
+                }
+                continue;
+            }
+
             let index = (*key >> 1) as usize;
             let Some(Some(tile)) = tiles.get_mut(index) else {
                 failed("compositor: FAILED: a wait set returned a key it was never given");
@@ -407,8 +464,16 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
                 let mut none = [Handle(0); 1];
                 match nexus_user::receive(tile.channel, &mut message, &mut none) {
                     Ok(_) => {
+                        // Lifted before the tile is painted and put back after.
+                        // Compositing writes over whatever was there, and what
+                        // was there includes the pointer -- a compositor that
+                        // forgot this leaves a trail of cursors behind it.
+                        lift_cursor(screen, &mut cursor);
                         composite(screen, tile);
                         outline(screen, tile, index == focus);
+                        if pointing {
+                            draw_cursor(screen, &mut cursor);
+                        }
                         tile.frames += 1;
                         composited += 1;
                         // Answered, so the client knows the buffer is free
@@ -448,6 +513,9 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS]) {
         return;
     }
     nexus_user::log("compositor: composited every frame its clients drew").ok();
+    if moved > 0 {
+        nexus_user::log("compositor: moved a pointer of its own across the display").ok();
+    }
     if forwarded > 0 {
         nexus_user::log("compositor: routed keys to the client that had focus").ok();
     }
@@ -524,6 +592,169 @@ fn read_key(
     }
     tile.keys += 1;
     Some(1)
+}
+
+/// Read whatever the mouse sent and move the pointer.
+///
+/// Movement is relative and arrives with no idea of where anything is. Turning
+/// it into a position is this program's job, because a position only means
+/// something against a screen and a set of windows -- and the kernel has
+/// neither.
+///
+/// A press inside a tile focuses it. That is the second piece of policy this
+/// program owns: the kernel knows a button went down and has no idea what it
+/// went down *on*.
+///
+/// Returns how many movements were handled, or `None` to stop.
+fn read_pointer(
+    screen: &Screen,
+    set: Handle,
+    tiles: &mut [Option<Tile>; CLIENTS],
+    cursor: &mut Pointer,
+    focus: &mut usize,
+) -> Option<u32> {
+    let mut message = [0u8; 32];
+    let mut none = [Handle(0); 1];
+    let Ok(received) = nexus_user::receive(POINTER, &mut message, &mut none) else {
+        // The kernel has stopped sending; there is still a screen to composite.
+        nexus_user::unwatch(set, KEY_POINTER).ok();
+        return Some(0);
+    };
+    if received.bytes < pointer::SIZE {
+        failed("compositor: FAILED: a pointer movement arrived in the wrong shape");
+        return None;
+    }
+
+    let dx = read_i32(&message, 0);
+    let dy = read_i32(&message, 4);
+    let buttons = read_u32(&message, 8);
+
+    // Clamped to the rectangle this program owns. A pointer that could leave it
+    // would be drawn over the kernel's panel, which this program does not own
+    // and must not touch.
+    lift_cursor(screen, cursor);
+    cursor.x = clamp(
+        i64::from(cursor.x) + i64::from(dx),
+        screen.x,
+        screen.x + screen.width - CURSOR as u32,
+    );
+    // The mouse reports Y increasing upwards and the screen has it increasing
+    // downwards, so this is where the two are reconciled -- not in the kernel,
+    // which has no screen to be upside down with respect to.
+    cursor.y = clamp(
+        i64::from(cursor.y) - i64::from(dy),
+        screen.y,
+        screen.y + screen.height - CURSOR as u32,
+    );
+
+    let pressed = buttons & pointer::LEFT != 0;
+    if pressed && !cursor.held {
+        for (index, tile) in tiles.iter().enumerate() {
+            let Some(tile) = tile else { continue };
+            if !tile.live {
+                continue;
+            }
+            if cursor.x >= tile.x
+                && cursor.x < tile.x + tile.width
+                && cursor.y >= tile.y
+                && cursor.y < tile.y + tile.height
+                && *focus != index
+            {
+                *focus = index;
+                nexus_user::log(if index == 0 {
+                    "compositor: the pointer gave focus to the first client"
+                } else {
+                    "compositor: the pointer gave focus to the second client"
+                })
+                .ok();
+            }
+        }
+        // Redrawn now, so the ring follows the click rather than the next frame.
+        for (index, tile) in tiles.iter().enumerate() {
+            if let Some(tile) = tile {
+                if tile.live {
+                    outline(screen, tile, index == *focus);
+                }
+            }
+        }
+    }
+    cursor.held = pressed;
+
+    draw_cursor(screen, cursor);
+    Some(1)
+}
+
+/// Keep a number inside a range, from a wider one that may have gone outside it.
+fn clamp(value: i64, low: u32, high: u32) -> u32 {
+    if value < i64::from(low) {
+        low
+    } else if value > i64::from(high) {
+        high
+    } else {
+        value as u32
+    }
+}
+
+/// Put back what the pointer was covering.
+fn lift_cursor(screen: &Screen, cursor: &mut Pointer) {
+    let Some((x, y)) = cursor.drawn.take() else {
+        return;
+    };
+    for row in 0..CURSOR {
+        for column in 0..CURSOR {
+            let offset = (((y as usize + row) * screen.stride as usize) + x as usize + column) * 4;
+            // SAFETY: the framebuffer is mapped writable and this address is
+            // inside the rectangle this program owns, which the cursor is
+            // clamped to.
+            unsafe {
+                core::ptr::write_volatile(
+                    (FRAMEBUFFER_AT + offset) as *mut u32,
+                    cursor.beneath[row * CURSOR + column],
+                );
+            }
+        }
+    }
+}
+
+/// Save what is under the pointer and draw it.
+///
+/// An arrow, of a sort: a triangle with a light edge, so that it is visible
+/// over a client's gradient and over the background alike. Saving first is what
+/// makes moving it cheap -- there is no second buffer to composite from, so the
+/// pixels it covers have nowhere else to be kept.
+fn draw_cursor(screen: &Screen, cursor: &mut Pointer) {
+    for row in 0..CURSOR {
+        for column in 0..CURSOR {
+            let offset =
+                (((cursor.y as usize + row) * screen.stride as usize) + cursor.x as usize + column)
+                    * 4;
+            // SAFETY: as in `lift_cursor`.
+            let under =
+                unsafe { core::ptr::read_volatile((FRAMEBUFFER_AT + offset) as *const u32) };
+            cursor.beneath[row * CURSOR + column] = under;
+
+            // The arrow: filled where the column is inside the row, edged on
+            // the diagonal, and nothing outside it.
+            let colour = if column > row {
+                continue;
+            } else if column == row || column == 0 || row == CURSOR - 1 {
+                0x00F2_F6FF
+            } else {
+                0x0012_1A2A
+            };
+
+            // SAFETY: as above.
+            unsafe {
+                core::ptr::write_volatile((FRAMEBUFFER_AT + offset) as *mut u32, colour);
+            }
+        }
+    }
+    cursor.drawn = Some((cursor.x, cursor.y));
+}
+
+/// Read a little-endian signed `i32` out of a message.
+fn read_i32(buffer: &[u8], offset: usize) -> i32 {
+    read_u32(buffer, offset) as i32
 }
 
 /// Draw a ring around a tile saying whether it has focus.

@@ -200,6 +200,8 @@ Invoke-Step 'boot test' {
         'display thread',
         'I/O APIC 0 version',
         'keyboard on IRQ 1',
+        'PS/2 mouse reporting on IRQ 12',
+        'mouse on IRQ 12',
         'input thread',
         'glyphs available, including CJK',
         'interface language en-US, 2 available',

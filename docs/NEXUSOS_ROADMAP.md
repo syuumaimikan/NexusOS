@@ -775,8 +775,54 @@ not the kill worked. That one blocks on a channel nobody will ever send to, and
 `init` starts it, lets it reach its wait, stops it, and requires the ending to
 be a stop rather than an exit.
 
-Outstanding here: no windows, no stacking, no resizing, no pointer. Tiles are
-laid out once and never move.
+### A pointer
+
+The mouse shares its controller with the keyboard and almost nothing else. The
+same two ports carry both, and one bit in the status register says whose byte is
+waiting -- so the two drivers are readers of one wire, and getting that wrong
+means one of them decoding the other's bytes *and* the other finding its own
+missing.
+
+It went wrong immediately, and instructively. Bringing the mouse up means asking
+the controller questions and reading its answers out of the one output buffer,
+and the keyboard's interrupt was already unmasked by then: its handler took the
+configuration byte, and the mouse reported that the controller would not say how
+it was configured. Two fixes, and both were needed. The device is brought up
+before any pin on that controller is unmasked, and each handler now checks the
+bit and leaves the other's bytes alone.
+
+Movement is relative and always will be: a mouse reports that it *moved*, never
+where it is, because it cannot know. Turning that into a position needs a screen
+to be a position on and a set of windows to be over, and the kernel has neither.
+So the kernel decodes packets and sends them on, and the compositor keeps the
+pointer -- clamped to the rectangle it owns, so it cannot be drawn over the
+panel that is not its to touch, and with the vertical axis flipped where the two
+conventions meet rather than in the driver, which has no screen to be upside
+down with respect to.
+
+Drawing it costs one thing worth naming. There is no second buffer to composite
+from, so the pixels under the cursor have nowhere to be kept but in the
+compositor: it saves them before drawing and puts them back before moving. It
+also lifts the cursor before painting a tile and draws it again after, because
+compositing writes over whatever was there -- and what was there includes the
+pointer. A compositor that forgot leaves a trail of them.
+
+A press inside a tile focuses it, and a *press* rather than a button being
+down: one that acted on "down" would refocus a window forty times a second while
+somebody held it. That is the second piece of policy this program owns. The
+kernel knows a button went down and has no idea what it went down on.
+
+The input test drives it through QEMU's monitor with `mouse_move`, which is
+relative -- the same shape of input the hardware produces, not a position
+injected past the driver. It requires packets rather than bytes, because three
+bytes that never became a packet is a driver reading the stream without
+understanding it; it requires *no* resynchronisations, because a stream that had
+to resynchronise is one where a byte went to the wrong driver; and it clicks on
+the tile the keyboard did *not* leave focused, so the click has something to
+change.
+
+Outstanding here: no windows, no stacking, no resizing, no dragging. Tiles are
+laid out once and never move, and the pointer can focus one but not carry it.
 
 
 

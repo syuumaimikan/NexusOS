@@ -92,6 +92,27 @@ try {
             # being blamed on the queue.
             Start-Sleep -Milliseconds 300
         }
+
+        # And the pointer. `mouse_move` is relative, which is what a PS/2 mouse
+        # reports and the only thing it can report -- so this is the same shape
+        # of input the hardware produces, not a position injected past the
+        # driver.
+        #
+        # Leftwards, far enough to leave the tile the keyboard left focused and
+        # land inside the other one -- but not so far that it ends up in the gap
+        # between them, where a click would prove the button arrived and nothing
+        # about what it landed on. The pointer starts in the middle of the
+        # rectangle, the tiles are a hundred and eighty pixels wide, and the gap
+        # is eight.
+        Write-Host '==> Moving the pointer and clicking' -ForegroundColor Cyan
+        foreach ($step in 1..12) {
+            $writer.WriteLine('mouse_move -12 0')
+            Start-Sleep -Milliseconds 60
+        }
+        $writer.WriteLine('mouse_button 1')
+        Start-Sleep -Milliseconds 200
+        $writer.WriteLine('mouse_button 0')
+        Start-Sleep -Milliseconds 200
         # Wait for the monitor thread's next report, which is what carries the
         # keyboard figures and the decoded line into the serial log. It runs
         # every five seconds, so this has to outlast one full period.
@@ -169,6 +190,36 @@ if ($first -gt 3 -or $second -gt 2) {
     $failures += "a client heard keys meant for the other ($first and $second of 3 and 2)"
 } else {
     Write-Host '    ok   neither client heard the keys meant for the other' -ForegroundColor DarkGray
+}
+
+# The pointer. Packets rather than bytes, because three bytes that never became
+# a packet is a driver that is reading the stream and not understanding it.
+if (-not ($output -match 'pointer (\d+) packets from (\d+) bytes,\s+(\d+) resynchronised, (\d+) overflowed')) {
+    $failures += 'the kernel never reported what the pointer did'
+} else {
+    $packets = [int]$Matches[1]
+    $desynchronised = [int]$Matches[3]
+    if ($packets -lt 5) {
+        $failures += "only $packets pointer packets arrived"
+    } else {
+        Write-Host "    ok   $packets pointer packets decoded from $($Matches[2]) bytes" -ForegroundColor DarkGray
+    }
+    # A packet stream that had to resynchronise is one where a byte went to the
+    # wrong driver: the keyboard and the mouse share a controller, and only one
+    # bit says whose byte is waiting.
+    if ($desynchronised -gt 0) {
+        $failures += "$desynchronised pointer packets had to resynchronise, so bytes are going astray"
+    }
+}
+
+# And the click. The keyboard's tab left the second client focused, so a click
+# landing in the first one has something to change -- which is what says the
+# compositor turned a relative movement into a position and worked out what was
+# under it.
+if ($output.Contains('the pointer gave focus to the first client')) {
+    Write-Host '    ok   clicking a tile moved the focus to it' -ForegroundColor DarkGray
+} else {
+    $failures += 'clicking a tile did not move the focus'
 }
 
 # F1 is a distinct key, and acting on it says the decoded key reached something

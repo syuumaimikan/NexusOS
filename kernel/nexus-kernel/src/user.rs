@@ -1105,9 +1105,15 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
     // typed on its own panel; what crosses here is a copy.
     let (keys_here, keys_there) = ipc::Endpoint::pair();
 
+    // And the pointer, on a channel of its own rather than mixed in with the
+    // keys. Two devices, two streams: a compositor that had to tell them apart
+    // by the length of a message would be one format change away from routing a
+    // keystroke as a movement.
+    let (pointer_here, pointer_there) = ipc::Endpoint::pair();
+
     // In this order, because the program names them by the numbers they get:
     // the channel the display arrives on, the one it asks for clients on, and
-    // the one keys arrive on.
+    // the two that carry keys and pointer movements.
     // SAFETY: as above.
     unsafe {
         start_from_disk(
@@ -1117,10 +1123,12 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
                 (ipc::Object::Channel(client), ipc::Rights::ALL),
                 (ipc::Object::Channel(spawner), ipc::Rights::ALL),
                 (ipc::Object::Channel(keys_there), ipc::Rights::ALL),
+                (ipc::Object::Channel(pointer_there), ipc::Rights::ALL),
             ],
         )?;
     }
     crate::input::route_to(keys_here);
+    crate::drivers::mouse::route_to(pointer_here);
 
     let mut message = [0u8; 32];
     for (index, value) in [

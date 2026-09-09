@@ -36,6 +36,8 @@ const STATUS_PORT: u16 = 0x64;
 
 /// Status bit: the output buffer holds a byte to read.
 const STATUS_OUTPUT_FULL: u8 = 1 << 0;
+/// The byte waiting came from the auxiliary device rather than this one.
+const STATUS_FROM_MOUSE: u8 = 1 << 5;
 
 /// The legacy IRQ a PS/2 keyboard raises.
 pub const KEYBOARD_IRQ: u8 = 1;
@@ -198,9 +200,19 @@ pub unsafe fn on_interrupt() {
     // SAFETY: the PS/2 status and data ports; reading data is what clears the
     // controller's interrupt.
     let byte = unsafe {
-        if inb(STATUS_PORT) & STATUS_OUTPUT_FULL == 0 {
+        let status = inb(STATUS_PORT);
+        if status & STATUS_OUTPUT_FULL == 0 {
             // Nothing to read. Some controllers share the line, so this is not
             // an error.
+            return;
+        }
+        // And the byte may not be this device's. One controller carries both
+        // the keyboard and the mouse, and bit 5 is the only thing that says
+        // which -- so a handler that read without checking would take the
+        // other driver's packet and decode it as a scancode. It also would not
+        // be there when that driver looked, which is the harder half of the
+        // bug to see.
+        if status & STATUS_FROM_MOUSE != 0 {
             return;
         }
         inb(DATA_PORT)

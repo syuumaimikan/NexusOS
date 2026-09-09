@@ -385,6 +385,12 @@ fn monitor_thread(_argument: usize) {
                 );
             }
         }
+        if drivers::mouse::is_present() {
+            let (bytes, packets, desynchronised, overflows) = drivers::mouse::statistics();
+            kprintln!(
+                "[mon ] pointer {packets} packets from {bytes} bytes,              {desynchronised} resynchronised, {overflows} overflowed"
+            );
+        }
         let (calls, unknown) = arch::syscall::statistics();
         let (entered, returned) = arch::syscall::yield_statistics();
         if entered != returned {
@@ -479,6 +485,15 @@ fn bring_up_device_interrupts(info: &acpi::AcpiInfo) {
         (entry.is_active_low(), entry.is_level_triggered())
     });
 
+    // The mouse first, and this ordering is load-bearing. Bringing it up means
+    // asking the shared controller questions and reading its answers out of the
+    // one output buffer both devices use -- and the moment the keyboard's pin
+    // is unmasked, its handler is entitled to take whatever is in there. It did
+    // exactly that, and the mouse reported that the controller would not say
+    // how it was configured.
+    // SAFETY: called once, before any pin on this controller is unmasked.
+    unsafe { drivers::mouse::init() };
+
     // SAFETY: the controller is drained and scanning enabled before the pin is
     // unmasked, so the first interrupt has a byte to read and a handler to
     // read it.
@@ -500,6 +515,52 @@ fn bring_up_device_interrupts(info: &acpi::AcpiInfo) {
             ),
             Err(error) => kprintln!("[input] could not route the keyboard: {error}"),
         }
+    }
+
+    bring_up_mouse(info);
+}
+
+/// Route the mouse's interrupt.
+///
+/// The device itself was brought up earlier, before the keyboard's pin was
+/// unmasked: both are on one controller with one output buffer, and asking the
+/// controller a question while another handler is entitled to read its answer
+/// is how the answer goes missing.
+///
+/// Reported and tolerated on failure. A machine with no pointing device is a
+/// machine that still boots.
+fn bring_up_mouse(info: &acpi::AcpiInfo) {
+    if !drivers::mouse::is_present() {
+        return;
+    }
+
+    let irq = drivers::mouse::MOUSE_IRQ;
+    let gsi = info.global_system_interrupt_for(irq);
+    if info.route(gsi).is_none() {
+        kprintln!("[mouse] no I/O APIC serves global interrupt {gsi}; the pointer is unavailable");
+        return;
+    }
+
+    let (active_low, level) = info.override_for(irq).map_or((false, false), |entry| {
+        (entry.is_active_low(), entry.is_level_triggered())
+    });
+
+    // SAFETY: a handler for the vector was registered when the IDT was built,
+    // and the device is reporting.
+    match unsafe {
+        arch::ioapic::route(
+            gsi,
+            arch::interrupts::MOUSE_VECTOR,
+            arch::apic::local_id(),
+            active_low,
+            level,
+        )
+    } {
+        Ok(()) => kprintln!(
+            "[mouse] mouse on IRQ {irq} (global interrupt {gsi}) routed to vector {}",
+            arch::interrupts::MOUSE_VECTOR
+        ),
+        Err(error) => kprintln!("[mouse] could not route the mouse: {error}"),
     }
 }
 

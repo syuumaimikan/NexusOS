@@ -4,5 +4,6 @@
 //! the Nexus driver model moves them into user space, behind IPC, once there is
 //! a user space to move them into.
 pub mod keyboard;
+pub mod mouse;
 pub mod pci;
 pub mod virtio_blk;
