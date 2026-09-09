@@ -236,7 +236,13 @@ fn stop_a_program() {
 /// is the timer, and being stopped there is the whole claim: without it a
 /// kernel can be asked to stop a program and simply fail to, forever.
 fn stop_a_spinning_program() {
-    const PROGRAM: &[u8] = b"BIN/IDLE.ELF";
+    // The path, a zero byte, and what the program should be told. Arguments are
+    // not a separate mechanism: they are the first message on the channel the
+    // program is given, sent by the kernel on this program's behalf -- because
+    // this program does not have that channel until the reply comes back, and a
+    // program that had to wait for its arguments until after it had started
+    // would have started without them.
+    const PROGRAM: &[u8] = b"BIN/IDLE.ELF spin";
 
     if nexus_user::send(SPAWNER, PROGRAM, &[]).is_err() {
         failed("init: FAILED: could not ask for a program to spin");
@@ -254,11 +260,6 @@ fn stop_a_spinning_program() {
     }
     let channel = handles[0];
     let process = handles[1];
-
-    if nexus_user::send(channel, b"spin", &[]).is_err() {
-        failed("init: FAILED: could not tell the program to spin");
-        return;
-    }
 
     // Long enough that it is certainly in its loop. Stopping it before it got
     // there would be testing the boundary again rather than the timer.

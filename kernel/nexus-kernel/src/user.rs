@@ -1010,13 +1010,31 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
     use alloc::format;
     use alloc::vec::Vec;
 
-    if request.len() > MAX_PATH {
+    // A path, and after a zero byte whatever the asker wants the new program to
+    // be told. Arguments are not a separate mechanism here: they are the first
+    // message on the channel the program is given, sent by the kernel on the
+    // asker's behalf because the asker does not have that channel until the
+    // reply comes back -- and a program that had to wait for its arguments
+    // until after it had started would have started without them.
+    let split = request.iter().position(|byte| *byte == 0);
+    let (path, arguments) = match split {
+        Some(at) => (&request[..at], &request[at + 1..]),
+        None => (request, &request[request.len()..]),
+    };
+
+    if path.len() > MAX_PATH {
         return (
-            format!("refused: a path of {} bytes is too long", request.len()),
+            format!("refused: a path of {} bytes is too long", path.len()),
             Vec::new(),
         );
     }
-    let Ok(path) = core::str::from_utf8(request) else {
+    if arguments.len() > ipc::MAX_MESSAGE {
+        return (
+            format!("refused: {} bytes of argument is too much", arguments.len()),
+            Vec::new(),
+        );
+    }
+    let Ok(path) = core::str::from_utf8(path) else {
         return (
             alloc::string::String::from("refused: the path is not text"),
             Vec::new(),
@@ -1041,6 +1059,18 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
     match result {
         Ok(completion) => {
             let id = completion.id;
+
+            // The arguments go down the channel before its other end is handed
+            // over, so they are already waiting when the program makes its
+            // first read -- and before the asker can send anything of its own,
+            // so a program can rely on its arguments being the first thing it
+            // hears and not merely an early one.
+            if !arguments.is_empty() {
+                if let Err(error) = to_child.send(arguments, Vec::new()) {
+                    kprintln!("[spawn] could not give {id} its arguments: {error}");
+                }
+            }
+
             kprintln!("[spawn] started {id} from {path} at a process's request");
             // Two handles, in a fixed order: the channel to talk to it, and the
             // process to wait for it. Both go back with the one reply, because

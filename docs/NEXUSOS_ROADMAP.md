@@ -577,6 +577,21 @@ reply waited forever, and which of the two it was depended on scheduling, which
 is why it only appeared once something else got slower. Each service has its own
 slot now, given to its thread when it is started.
 
+### Arguments
+
+A spawn request may carry a path, a zero byte, and whatever the asker wants the
+new program to be told. The kernel sends those bytes down the new program's
+channel before handing the other end back.
+
+Arguments *are* the first message, and that is the resolution rather than a
+shortcut around one. This system already has a way for a program to be told
+things; a second would be a second thing to bound, check, copy across an address
+space and explain. What arguments need that a message does not is *timing* --
+they have to be there before the program's first read and before the asker can
+send anything of its own, so a program can rely on them being the first thing it
+hears and not merely an early one. Sending them before the channel is handed
+over is exactly that guarantee and nothing more.
+
 Outstanding: no permissions, no
 timestamps beyond the tick a thing was made at, no partial writes and no seek,
 so a large file is read and written whole. The FAT32 reader still cannot write
