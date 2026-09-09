@@ -231,9 +231,16 @@ so there is no current directory for them to be relative to.
 
 ## What is written when
 
-Reads and writes go straight to the disk; there is no cache. A file is read and
-written entire, because with no cache underneath a byte-at-a-time interface
-would be a byte-at-a-time disk.
+A file can be read and written whole, and from an offset. The second only
+became affordable once there was a block cache underneath: without one,
+changing four bytes in the middle of a block meant four kilobytes off the
+platter, four bytes changed, and four kilobytes back, for every call.
+
+Writing past the end grows the file, and the gap reads as zeroes — a block is
+zeroed when it is allocated, so a file with a hole in it cannot show whatever
+the last file to own that block left there. There is no cursor and no seek: a
+file has no position, only the offsets its holder chooses, which is the
+arrangement two programs sharing a file can both be right about.
 
 Growing a file takes every block it needs before writing any of them, and hands
 them all back if one cannot be had, so a write that will not fit changes nothing
@@ -256,8 +263,6 @@ is always 1.
 **No timestamps worth the name.** Created and modified are timer ticks since
 boot, because there is no real-time clock driver yet. They are comparable within
 a boot and meaningless across one.
-
-**No partial writes, no append, no seek.** See above.
 
 **No user-space `fsck`, no quotas, no mount points.** One volume, found by
 partition type.

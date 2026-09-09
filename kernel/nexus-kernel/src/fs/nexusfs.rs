@@ -19,15 +19,22 @@
 //! indirection is four lines and would make the limit a gigabyte, and adding it
 //! before anything needs it would be adding a path nothing has ever walked.
 //!
-//! # Whole files
+//! # Reading and writing part of a file
 //!
-//! A file is read and written entire. There is no partial write, no seek and no
-//! append. There is a [block cache](super::cache) underneath now, so a read of
-//! the same block twice costs the disk once -- but it is write-*through*, which
-//! means every write still reaches the platter before the call returns. A
-//! byte-at-a-time interface would still be a byte-at-a-time disk on the writing
-//! side, so the interface stays the small honest one until there is a journal
-//! and the cache can hold writes back.
+//! A file can be read and written whole, and it can be read and written from an
+//! offset. The second only became affordable when there was a [block
+//! cache](super::cache) underneath: without one, writing four bytes in the
+//! middle of a block meant reading four kilobytes off the platter, changing
+//! four bytes, and writing four kilobytes back -- for every call.
+//!
+//! With the cache the read is usually free and the write is one block. It is
+//! still write-*through*, so every write reaches the disk before the call
+//! returns; what changed is how much of the file has to be touched, not how
+//! durable the touch is.
+//!
+//! Appending is the case this exists for. The boot log used to be read entire
+//! and written entire on every start, which is sixteen kilobytes each way to
+//! add one line.
 //!
 //! # The journal
 //!
@@ -877,6 +884,34 @@ impl Volume {
         }
     }
 
+    /// Change part of a file, growing it if the change runs past the end.
+    ///
+    /// The metadata goes through the journal and the contents do not, exactly as
+    /// a whole-file write does: a failure leaves the old file rather than a new
+    /// one pointing at blocks that were never written.
+    pub fn write_at(&mut self, inode: u32, offset: u64, data: &[u8]) -> Result<u64, FsError> {
+        self.begin();
+        match self.write_at_inode(inode, offset, data) {
+            Ok(written) => {
+                if let Err(error) = self.write_superblock() {
+                    self.abandon();
+                    return Err(error);
+                }
+                self.commit()?;
+                Ok(written)
+            }
+            Err(error) => {
+                self.abandon();
+                Err(error)
+            }
+        }
+    }
+
+    /// Read part of a file, returning how much there was.
+    pub fn read_at(&self, inode: u32, offset: u64, buffer: &mut [u8]) -> Result<usize, FsError> {
+        self.read_at_inode(inode, offset, buffer)
+    }
+
     /// What a name is, without reading it.
     pub fn stat(&self, inode: u32) -> Result<(Kind, u64), FsError> {
         let inode = self.read_inode(inode)?;
@@ -902,6 +937,149 @@ impl Volume {
     ///
     /// Blocks are taken before anything is written, so a write that will not fit
     /// changes nothing at all rather than half of a file.
+    /// Take enough blocks for a file of `wanted` blocks, or none at all.
+    ///
+    /// Every block is taken before any of them is used, and a failure part-way
+    /// hands back what was taken -- so a write that will not fit changes
+    /// nothing rather than half of a file.
+    fn grow_blocks(
+        &mut self,
+        inode: &mut Inode,
+        blocks: &mut Vec<u64>,
+        wanted: usize,
+    ) -> Result<(), FsError> {
+        if wanted <= blocks.len() {
+            return Ok(());
+        }
+
+        let mut taken = Vec::new();
+        // A file that grows past its direct blocks needs somewhere to keep the
+        // rest; that block is metadata and is not counted as content.
+        if wanted > DIRECT && inode.indirect == 0 {
+            // Nothing has been taken yet, so a failure here owes nothing back.
+            let block = self.allocate_block()?;
+            inode.indirect = block;
+            taken.push(block);
+            let empty = [0u8; BLOCK_SIZE];
+            if let Err(error) = self.write_block(block, &empty) {
+                self.give_back(&taken);
+                return Err(error);
+            }
+        }
+        while blocks.len() < wanted {
+            match self.allocate_block() {
+                Ok(block) => {
+                    blocks.push(block);
+                    taken.push(block);
+                }
+                Err(error) => {
+                    // The list is left as it was found, so the caller's inode
+                    // still describes a file that exists.
+                    blocks
+                        .truncate(blocks.len() - (taken.len() - usize::from(inode.indirect != 0)));
+                    self.give_back(&taken);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Change part of a file, growing it if the change runs past the end.
+    ///
+    /// Read-modify-write on the two blocks at the ends, whole-block writes in
+    /// between. The reads are what the cache is for: without one, changing four
+    /// bytes in the middle of a file meant four kilobytes off the platter and
+    /// four kilobytes back.
+    ///
+    /// A gap left by writing past the end reads as zeroes, because a block is
+    /// zeroed when it is allocated. That is a promise worth stating: a file with
+    /// a hole in it must not show whatever the last file to own that block left
+    /// there.
+    fn write_at_inode(&mut self, number: u32, offset: u64, data: &[u8]) -> Result<u64, FsError> {
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or(FsError::TooLarge)?;
+        if end > MAX_FILE as u64 {
+            return Err(FsError::TooLarge);
+        }
+        if data.is_empty() {
+            return Ok(0);
+        }
+
+        let mut inode = self.read_inode(number)?;
+        if inode.kind != Kind::File {
+            return Err(FsError::WrongKind);
+        }
+
+        let mut blocks = self.block_list(&inode)?;
+        let wanted = (end as usize).div_ceil(BLOCK_SIZE);
+        self.grow_blocks(&mut inode, &mut blocks, wanted)?;
+
+        let mut written = 0usize;
+        while written < data.len() {
+            let at = offset as usize + written;
+            let index = at / BLOCK_SIZE;
+            let within = at % BLOCK_SIZE;
+            let take = (BLOCK_SIZE - within).min(data.len() - written);
+            let block = *blocks.get(index).ok_or(FsError::Corrupt)?;
+
+            let mut buffer = [0u8; BLOCK_SIZE];
+            // Only where the change does not cover the whole block. A read
+            // before a full overwrite is a read of something about to be
+            // discarded, and on the growing edge it is a read of a block that
+            // was just allocated and is already zero.
+            if within != 0 || take != BLOCK_SIZE {
+                self.read_block(block, &mut buffer)?;
+            }
+            buffer[within..within + take].copy_from_slice(&data[written..written + take]);
+            self.write_block_now(block, &buffer)?;
+            written += take;
+        }
+
+        if end > inode.size {
+            inode.size = end;
+        }
+        inode.modified = crate::arch::time::ticks();
+        self.set_block_list(&mut inode, &blocks)?;
+        self.write_inode(number, &inode)?;
+        Ok(written as u64)
+    }
+
+    /// Read part of a file into `buffer`, returning how much there was.
+    ///
+    /// Short at the end of the file rather than an error: a caller that asks for
+    /// more than is there has reached the end, which is a thing that happens and
+    /// not a thing that went wrong.
+    fn read_at_inode(&self, number: u32, offset: u64, buffer: &mut [u8]) -> Result<usize, FsError> {
+        let inode = self.read_inode(number)?;
+        if inode.kind != Kind::File {
+            return Err(FsError::WrongKind);
+        }
+        if offset >= inode.size || buffer.is_empty() {
+            return Ok(0);
+        }
+
+        let blocks = self.block_list(&inode)?;
+        let available = (inode.size - offset) as usize;
+        let wanted = buffer.len().min(available);
+
+        let mut done = 0usize;
+        let mut block_buffer = [0u8; BLOCK_SIZE];
+        while done < wanted {
+            let at = offset as usize + done;
+            let index = at / BLOCK_SIZE;
+            let within = at % BLOCK_SIZE;
+            let take = (BLOCK_SIZE - within).min(wanted - done);
+            let block = *blocks.get(index).ok_or(FsError::Corrupt)?;
+
+            self.read_block(block, &mut block_buffer)?;
+            buffer[done..done + take].copy_from_slice(&block_buffer[within..within + take]);
+            done += take;
+        }
+        Ok(done)
+    }
+
     fn write_inode_data(
         &mut self,
         number: u32,
@@ -915,38 +1093,7 @@ impl Volume {
         let wanted = data.len().div_ceil(BLOCK_SIZE);
         let mut blocks = self.block_list(&inode)?;
 
-        // Grow first, into a list that is not on the disk yet. If an allocation
-        // fails halfway, the blocks taken so far are handed back and the file is
-        // exactly as it was.
-        let mut taken = Vec::new();
-        if wanted > blocks.len() {
-            // A file that grows past its direct blocks needs somewhere to keep
-            // the rest; that block is metadata and is not counted as content.
-            if wanted > DIRECT && inode.indirect == 0 {
-                // Nothing has been taken yet, so a failure here owes
-                // nothing back.
-                let block = self.allocate_block()?;
-                inode.indirect = block;
-                taken.push(block);
-                let empty = [0u8; BLOCK_SIZE];
-                if let Err(error) = self.write_block(block, &empty) {
-                    self.give_back(&taken);
-                    return Err(error);
-                }
-            }
-            while blocks.len() < wanted {
-                match self.allocate_block() {
-                    Ok(block) => {
-                        blocks.push(block);
-                        taken.push(block);
-                    }
-                    Err(error) => {
-                        self.give_back(&taken);
-                        return Err(error);
-                    }
-                }
-            }
-        }
+        self.grow_blocks(&mut inode, &mut blocks, wanted)?;
 
         // Shrink, keeping the blocks to free until the inode no longer points
         // at them.

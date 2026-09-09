@@ -278,11 +278,16 @@ pub enum Call {
     /// Take a memory object out of this process's address space.
     /// `(handle, address)`.
     MemoryUnmap = 28,
+    /// Read part of a file. `(file, offset, pointer, capacity)`, returning how
+    /// much of it was there.
+    NodeReadAt = 29,
+    /// Change part of a file. `(file, offset, pointer, length)`.
+    NodeWriteAt = 30,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 29;
+    pub const COUNT: usize = 31;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -316,6 +321,8 @@ impl Call {
             26 => Some(Self::Sleep),
             27 => Some(Self::ProcessKill),
             28 => Some(Self::MemoryUnmap),
+            29 => Some(Self::NodeReadAt),
+            30 => Some(Self::NodeWriteAt),
             _ => None,
         }
     }
@@ -448,6 +455,8 @@ extern "sysv64" fn dispatch(
         Some(Call::Sleep) => sleep(argument0),
         Some(Call::ProcessKill) => process_kill(argument0),
         Some(Call::MemoryUnmap) => memory_unmap(argument0, argument1),
+        Some(Call::NodeReadAt) => node_read_at(argument0, argument1, argument2, argument3),
+        Some(Call::NodeWriteAt) => node_write_at(argument0, argument1, argument2, argument3),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -1505,4 +1514,61 @@ fn memory_unmap(handle: u64, address: u64) -> u64 {
     }
 
     bytes
+}
+
+/// [`Call::NodeReadAt`]: read part of a file.
+///
+/// Short at the end of the file rather than an error: a caller that asks for
+/// more than is there has reached the end, which is a thing that happens and
+/// not a thing that went wrong. Zero means there was nothing at that offset.
+fn node_read_at(file: u64, offset: u64, pointer: u64, capacity: u64) -> u64 {
+    let (node, _) = match caller_node(file, crate::ipc::Rights::READ) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+    if capacity == 0 {
+        return 0;
+    }
+    let Some((_, length)) = user_range(pointer, capacity, MAX_TRANSFER) else {
+        return EINVAL;
+    };
+
+    // Read into the kernel's own buffer and copied out afterwards, rather than
+    // read straight into the caller's. The filesystem can block, and a caller
+    // that unmapped the range while it did would have the disk write into
+    // whatever took its place.
+    let mut buffer = alloc::vec![0u8; length];
+    match crate::fs::store::read_node_at(&node, offset, &mut buffer) {
+        Ok(0) => 0,
+        Ok(read) => copy_out(&buffer[..read], pointer, capacity),
+        Err(error) => store_error(error),
+    }
+}
+
+/// [`Call::NodeWriteAt`]: change part of a file.
+///
+/// Writing past the end grows the file, and the gap reads as zeroes -- a block
+/// is zeroed when it is allocated, so a file with a hole in it cannot show
+/// whatever the last file to own that block left there.
+fn node_write_at(file: u64, offset: u64, pointer: u64, length: u64) -> u64 {
+    let (node, _) = match caller_node(file, crate::ipc::Rights::WRITE) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+    if length == 0 {
+        return 0;
+    }
+    let Some((pointer, length)) = user_range(pointer, length, MAX_TRANSFER) else {
+        return EINVAL;
+    };
+
+    // SAFETY: the range lies inside the user half, which this thread's address
+    // space maps. Copied before the filesystem is touched, so nothing below
+    // holds a pointer into user memory across a call that can block.
+    let data = unsafe { core::slice::from_raw_parts(pointer as *const u8, length) }.to_vec();
+
+    match crate::fs::store::write_node_at(&node, offset, &data) {
+        Ok(written) => written,
+        Err(error) => store_error(error),
+    }
 }

@@ -589,6 +589,70 @@ fn use_the_filesystem() {
         return;
     }
 
+    // -- And the same file, a piece at a time --------------------------------
+
+    // Appending. There is no cursor to seek: a file has no position, only the
+    // offsets its holder chooses, which is the arrangement two programs sharing
+    // a file can both be right about.
+    const ADDED: &[u8] = b"and this was appended
+";
+    let end = WRITTEN.len() as u64;
+    if nexus_user::write_at(note, end, ADDED) != Ok(ADDED.len()) {
+        failed("init: FAILED: could not append to its own file");
+        return;
+    }
+    if nexus_user::size(note) != Ok(WRITTEN.len() + ADDED.len()) {
+        failed("init: FAILED: appending did not make the file longer");
+        return;
+    }
+
+    // Read back only the part that was appended, from the offset it went to.
+    // Reading the whole file and looking at the end would pass whether or not
+    // the offset was honoured.
+    let mut tail = [0u8; 64];
+    match nexus_user::read_at(note, end, &mut tail) {
+        Ok(read) if &tail[..read] == ADDED => {}
+        _ => {
+            failed("init: FAILED: what was appended did not read back from its offset");
+            return;
+        }
+    }
+
+    // Changing four bytes in the middle, which is the case a whole-file write
+    // cannot express at all: everything around them has to be left alone.
+    if nexus_user::write_at(note, 4, b"WAS!") != Ok(4) {
+        failed("init: FAILED: could not change part of its own file");
+        return;
+    }
+    // "init was here..." with four bytes replaced from offset four is
+    // "initWAS!" -- the space is byte four and goes with them. Counted rather
+    // than guessed, because a test that expected the wrong answer here would
+    // have reported the kernel as broken when it was not.
+    let mut middle = [0u8; 8];
+    match nexus_user::read_at(note, 0, &mut middle) {
+        Ok(8) if &middle[..8] == b"initWAS!" => {}
+        _ => {
+            failed("init: FAILED: changing part of a file changed the wrong part");
+            return;
+        }
+    }
+
+    // Past the end reads as nothing, rather than as an error or as whatever
+    // happened to be in the last block.
+    let mut past = [0u8; 8];
+    if nexus_user::read_at(note, 10_000, &mut past) != Ok(0) {
+        failed("init: FAILED: reading past the end of a file returned something");
+        return;
+    }
+
+    nexus_user::log("init: appended to a file and changed four bytes in the middle").ok();
+
+    // Put it back the way the next boot expects to find it.
+    if nexus_user::write(note, WRITTEN) != Ok(WRITTEN.len()) {
+        failed("init: FAILED: could not restore its own file");
+        return;
+    }
+
     // A buffer too small has to be an error rather than a prefix. Half a file
     // that reports its own length looks exactly like a whole one.
     let mut tiny = [0u8; 4];

@@ -130,6 +130,8 @@ enum Call {
     Sleep = 26,
     ProcessKill = 27,
     MemoryUnmap = 28,
+    NodeReadAt = 29,
+    NodeWriteAt = 30,
 }
 
 /// Make a system call.
@@ -617,6 +619,52 @@ pub fn write(file: Handle, data: &[u8]) -> Result<usize, Error> {
         )
     };
     check(result).map(|bytes| bytes as usize)
+}
+
+/// Read part of a file into `buffer`, returning how much of it was there.
+///
+/// Short at the end of the file rather than an error, and zero past it: a
+/// caller that asks for more than is there has reached the end, which is a
+/// thing that happens and not a thing that went wrong.
+pub fn read_at(file: Handle, offset: u64, buffer: &mut [u8]) -> Result<usize, Error> {
+    // SAFETY: the buffer is live and writable here.
+    let result = unsafe {
+        syscall(
+            Call::NodeReadAt,
+            u64::from(file.0),
+            offset,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+        )
+    };
+    check(result).map(|read| read as usize)
+}
+
+/// Change part of a file, growing it if the change runs past the end.
+///
+/// A gap left by writing past the end reads as zeroes. That is a promise and
+/// not an accident: a block is zeroed when it is allocated, so a file with a
+/// hole in it cannot show whatever the last file to own that block left there.
+///
+/// This is what appending is. There is no cursor to seek: a file has no
+/// position, only the offsets its holder chooses, which is the arrangement two
+/// programs sharing a file can both be right about.
+pub fn write_at(file: Handle, offset: u64, data: &[u8]) -> Result<usize, Error> {
+    // SAFETY: the slice is live here.
+    let result = unsafe {
+        syscall(
+            Call::NodeWriteAt,
+            u64::from(file.0),
+            offset,
+            data.as_ptr() as u64,
+            data.len() as u64,
+            0,
+            0,
+        )
+    };
+    check(result).map(|written| written as usize)
 }
 
 /// How many bytes a file or directory holds.

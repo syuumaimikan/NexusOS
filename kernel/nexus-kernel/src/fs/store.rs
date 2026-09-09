@@ -231,8 +231,22 @@ fn record_boot(volume: &mut Volume) -> Result<u64, FsError> {
         Err(FsError::NotFound) => volume.create(system, BOOT_LOG, Kind::File)?,
         Err(error) => return Err(error),
     };
-    let mut log = volume.read(log_inode)?;
     let line = format!("boot {boots} at {} ticks\n", crate::arch::time::ticks());
+
+    // Appended rather than rewritten. The log used to be read entire and
+    // written entire to add one line, which is sixteen kilobytes each way for
+    // forty bytes -- and all of it on the boot path.
+    let (_, length) = volume.stat(log_inode)?;
+    if length + line.len() as u64 <= BOOT_LOG_KEEP as u64 {
+        volume.write_at(log_inode, length, line.as_bytes())?;
+        return Ok(boots);
+    }
+
+    // Trimming still means rewriting, because taking bytes off the front of a
+    // file means moving every byte after them. It happens once the log is full
+    // rather than on every boot, which is what trimming at a fraction of the
+    // maximum buys.
+    let mut log = volume.read(log_inode)?;
     log.extend_from_slice(line.as_bytes());
     if log.len() > BOOT_LOG_KEEP {
         // Cut at a line boundary, so the file stays a list of lines rather than
@@ -582,6 +596,26 @@ pub fn write_node(node: &Node, data: &[u8]) -> Result<(), StoreError> {
     let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
     volume.write(node.inode, data)?;
     Ok(())
+}
+
+/// Change part of an open file, growing it if the change runs past the end.
+pub fn write_node_at(node: &Node, offset: u64, data: &[u8]) -> Result<u64, StoreError> {
+    if node.is_directory() {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let mut volume = VOLUME.lock();
+    let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+    Ok(volume.write_at(node.inode, offset, data)?)
+}
+
+/// Read part of an open file, returning how much of it was there.
+pub fn read_node_at(node: &Node, offset: u64, buffer: &mut [u8]) -> Result<usize, StoreError> {
+    if node.is_directory() {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let volume = VOLUME.lock();
+    let volume = volume.as_ref().ok_or(StoreError::NoDisk)?;
+    Ok(volume.read_at(node.inode, offset, buffer)?)
 }
 
 /// How many bytes an open file or directory holds.

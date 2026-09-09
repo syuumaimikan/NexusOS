@@ -171,6 +171,7 @@ Invoke-Step 'boot test' {
         'the boot log has',
         'starts holding directory handle',
         'init: made a directory and a file',
+        'init: appended to a file and changed four bytes in the middle',
         'process lifetime verified',
         'wait set verified',
         'one wait covered a channel and a process, and reported both',

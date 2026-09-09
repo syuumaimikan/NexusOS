@@ -592,6 +592,26 @@ send anything of its own, so a program can rely on them being the first thing it
 hears and not merely an early one. Sending them before the channel is handed
 over is exactly that guarantee and nothing more.
 
+### Part of a file
+
+A file could only be read and written whole, which was deliberate for a reason
+that stopped being true when the block cache landed: without one, changing four
+bytes in the middle of a block meant four kilobytes off the platter and four
+kilobytes back, every call.
+
+So there is `read_at` and `write_at`, in the filesystem and as two system calls.
+Read-modify-write at the ends, whole blocks in between, and the read skipped
+where a change covers a whole block. Writing past the end grows the file and the
+gap reads as zeroes -- a promise rather than an accident, since a block is zeroed
+when it is allocated. There is no cursor and no seek: a file has no position,
+only the offsets its holder chooses, which is the arrangement two programs
+sharing a file can both be right about.
+
+The boot log is the first user. It used to be read entire and written entire to
+add one line -- sixteen kilobytes each way for forty bytes, all on the boot path.
+It appends now, and still rewrites when it has to be trimmed, because taking
+bytes off the front of a file means moving every byte after them.
+
 Outstanding: no permissions, no
 timestamps beyond the tick a thing was made at, no partial writes and no seek,
 so a large file is read and written whole. The FAT32 reader still cannot write
