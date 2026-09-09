@@ -132,6 +132,34 @@ pub fn mount() -> Result<Mounted, StoreError> {
 
     let (mut volume, formatted) =
         Volume::mount_or_format(partition.first_lba, partition.sectors())?;
+
+    // Checked before it is used. The journal finishes an operation that was
+    // interrupted and says nothing about damage that predates it, and a
+    // filesystem is easiest to repair before anything has started writing to
+    // it. It costs a walk of the inode table, which is forty-seven blocks on
+    // this partition and all of them in the cache by the time it is done.
+    let checked = volume.check()?;
+    if !checked.clean() {
+        crate::kprintln!(
+            "[fs  ] check: {} blocks reclaimed, {} claimed back, {} shared, {} dangling, {} unreadable{}",
+            checked.leaked,
+            checked.unclaimed,
+            checked.shared,
+            checked.dangling,
+            checked.unreadable,
+            if checked.counts_corrected {
+                ", free counts corrected"
+            } else {
+                ""
+            }
+        );
+    }
+    if checked.needs_attention() {
+        crate::kprintln!(
+            "[fs  ] check: some of that cannot be repaired without deciding which file to damage"
+        );
+    }
+
     let boots = record_boot(&mut volume)?;
 
     *VOLUME.lock() = Some(volume);
@@ -361,6 +389,24 @@ pub fn self_test() -> Result<String, StoreError> {
     Ok(format!(
         "NexusFS verified: made, written, read, emptied; {total} blocks, {free} free, nothing leaked"
     ))
+}
+
+/// Leak a block on purpose, then check that the check finds it.
+///
+/// A third kind of claim again. The first says the filesystem does what it is
+/// asked; the second says it survives not being allowed to finish; this one
+/// says it can find damage that no journal would have caught -- because from
+/// the journal's point of view the operation that leaked the block completed
+/// perfectly.
+///
+/// The damage is made the only way it can be: a block is taken from the
+/// allocator and then nothing is done with it. That is exactly what a kernel
+/// with a bug in its write path leaves behind, and there is no other way to
+/// produce it on a machine that is working.
+pub fn check_self_test() -> Result<String, StoreError> {
+    let mut guard = VOLUME.lock();
+    let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
+    Ok(volume.check_self_test()?)
 }
 
 /// Crash the filesystem between a commit and its writes, and check it recovers.

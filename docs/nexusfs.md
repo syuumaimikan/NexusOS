@@ -250,9 +250,6 @@ changes them.
 
 ## What it does not do
 
-**No `fsck`.** Recovery finishes an interrupted operation; nothing looks for
-damage that predates it, and nothing reclaims space leaked by an older kernel.
-
 **No permissions, no ownership, no hard links.** `links` exists in the inode and
 is always 1.
 
@@ -313,6 +310,38 @@ disk are all "the filesystem said no", because inventing a code per internal
 condition would publish the implementation as an interface. The kernel log
 carries the detail.
 
+## Checking it
+
+The journal finishes an operation that was interrupted. It says nothing about
+damage that predates it: a block the bitmap calls taken that no file points at,
+a block two files both claim, a name pointing at an inode that is not there.
+Those come from a kernel that had a bug, a disk that lied, or a version of this
+code that is no longer running - and no amount of journalling finds them,
+because from the journal's point of view every one of those operations
+completed.
+
+So there is a check, and it runs at every mount, before anything has started
+writing. It walks the inode table a block at a time - thirty-two inodes share
+one, and reading a block per inode is thirty-two times the work - builds its own
+picture of which blocks are reachable, and compares that with the bitmap.
+
+What it does about a disagreement depends on which way round it is, and the
+asymmetry is the design:
+
+* a block the bitmap calls **taken that nothing reaches** is leaked. Reclaiming
+  it is safe, because nothing can be pointing at it.
+* a block **something reaches that the bitmap calls free** is dangerous: the
+  allocator would hand it out from under a file that is using it. The bit is set.
+
+In both cases the fix is to the bitmap, which is the derived thing. The files
+are what the filesystem is *for*, and are never edited to make the bookkeeping
+agree.
+
+Three things are reported and not repaired: a block two files claim, a directory
+entry naming something that is not there, and an inode whose block list does not
+parse. Each of them can only be fixed by choosing which file to damage, and that
+is not a decision to make without being asked.
+
 ## How it is tested
 
 Three layers, because they catch different things.
@@ -339,6 +368,13 @@ makes its own directory (or opens it, on a later boot), reads what the previous
 boot left, writes a file, reads it back through the same handle, and then checks
 the refusals — a buffer too small, a name with a separator in it, a name that is
 not there, and removing a file that is still open.
+
+`Volume::check_self_test` damages the filesystem on purpose, the only way that
+damage can be made: it takes a block from the allocator and does nothing with
+it, which is exactly what a kernel with a bug in its write path leaves behind.
+It then requires the check to have been quiet before, to find exactly one leaked
+block, to be quiet again afterwards, and to hand the same block out again - a
+repair that had to be run twice would not be a repair.
 
 `Volume::journal_self_test` crashes the filesystem on purpose. It writes a
 transaction to the journal and then stops — no blocks written home, no

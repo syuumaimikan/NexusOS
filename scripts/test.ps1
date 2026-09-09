@@ -165,6 +165,7 @@ Invoke-Step 'boot test' {
         'filesystem verified',
         'structural checks passed',
         'NexusFS verified',
+        'check verified',
         'journal verified',
         'finished an operation the last boot did not',
         'the boot log has',

@@ -936,9 +936,26 @@ pub unsafe fn start() -> Result<(), UserError> {
     Ok(())
 }
 
-/// The service end of the spawn channel, held by the thread that answers on it.
-static SPAWN_SERVICE: crate::sync::IrqSpinLock<Option<Arc<ipc::Endpoint>>> =
-    crate::sync::IrqSpinLock::new(None);
+/// The service end of each spawn channel, held by the thread that answers on it.
+///
+/// A slot per service rather than one place, because there is more than one
+/// now: `init` has a spawner and so does the compositor, and they must not be
+/// the same channel -- a compositor that could be asked for programs on
+/// `init`'s behalf is a compositor answering for somebody else.
+///
+/// It was one place, and that was a race with a very confusing shape. Starting
+/// the second service overwrote the first before the first thread had read it,
+/// so both threads served the *same* endpoint and the other channel had nobody
+/// answering on it. Whoever was waiting for a reply waited forever, and which
+/// of the two it was depended on how the two threads were scheduled.
+static SPAWN_SERVICES: crate::sync::IrqSpinLock<[Option<Arc<ipc::Endpoint>>; MAX_SERVICES]> =
+    crate::sync::IrqSpinLock::new([None, None, None, None]);
+
+/// How many spawn services there may be.
+const MAX_SERVICES: usize = 4;
+
+/// Which slot the next service takes.
+static NEXT_SERVICE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Longest program path the spawn service will accept.
 ///
@@ -957,8 +974,10 @@ const MAX_PATH: usize = 64;
 ///
 /// The reply carries a handle to a channel connected to whatever was started,
 /// so the asker gets a way to talk to it and not merely a yes.
-fn spawn_service(_argument: usize) {
-    let endpoint = SPAWN_SERVICE.lock().clone();
+fn spawn_service(slot: usize) {
+    // The slot is this thread's own, given to it when it was started, so no
+    // second service can take its endpoint away between the two.
+    let endpoint = SPAWN_SERVICES.lock().get(slot).and_then(Clone::clone);
     let Some(endpoint) = endpoint else {
         return;
     };
@@ -1051,11 +1070,25 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
 ///
 /// Call once, with the scheduler running.
 unsafe fn start_spawn_service() -> Result<Arc<ipc::Endpoint>, UserError> {
-    let (service, client) = ipc::Endpoint::pair();
-    *SPAWN_SERVICE.lock() = Some(service);
+    let slot = NEXT_SERVICE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // More services than slots is a mistake in this file rather than a
+    // condition to handle, so it is reported and refused rather than made to
+    // work by growing something.
+    if slot >= MAX_SERVICES {
+        kprintln!("[spawn] no slot left for another spawn service");
+        return Err(UserError::NoFilesystem);
+    }
 
-    sched::spawn("spawn", sched::thread::Priority::Normal, spawn_service, 0)
-        .map_err(UserError::Spawn)?;
+    let (service, client) = ipc::Endpoint::pair();
+    SPAWN_SERVICES.lock()[slot] = Some(service);
+
+    sched::spawn(
+        "spawn",
+        sched::thread::Priority::Normal,
+        spawn_service,
+        slot,
+    )
+    .map_err(UserError::Spawn)?;
 
     Ok(client)
 }

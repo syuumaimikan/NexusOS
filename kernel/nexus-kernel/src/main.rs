@@ -782,6 +782,11 @@ fn nexusfs_self_test() {
         Err(error) => kprintln!("[test] FAILED: NexusFS: {error}"),
     }
 
+    match store::check_self_test() {
+        Ok(verdict) => kprintln!("[test] {verdict}"),
+        Err(error) => kprintln!("[test] FAILED: the check: {error}"),
+    }
+
     match store::journal_self_test() {
         Ok(verdict) => kprintln!("[test] {verdict}"),
         Err(error) => kprintln!("[test] FAILED: the journal: {error}"),

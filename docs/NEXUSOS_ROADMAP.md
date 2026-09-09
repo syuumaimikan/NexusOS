@@ -537,8 +537,47 @@ is much easier to lose than one a single blocking receive depends on, because
 there is always another message coming on a channel and there is not always
 another client.
 
-Outstanding: NexusFS has no `fsck` -- recovery finishes an interrupted
-operation, and nothing looks for damage that predates it. No permissions, no
+### Checking the filesystem
+
+The journal finishes an operation that was interrupted, and says nothing about
+damage that predates it: a block the bitmap calls taken that no file points at,
+a block two files claim, a name pointing at an inode that is not there. No
+amount of journalling finds those, because from the journal's point of view
+every one of those operations completed.
+
+So there is a check now, and it runs at every mount before anything has started
+writing. It walks the inode table, builds its own picture of what is reachable,
+and corrects the bitmap to match. The asymmetry is the design: a block the
+bitmap calls taken that nothing reaches is leaked and safe to reclaim, and a
+block something reaches that the bitmap calls free is dangerous, so the bit is
+set. In both cases the *bitmap* is corrected, because it is the derived thing --
+the files are what the filesystem is for and are never edited to make the
+bookkeeping agree. A block two files claim, a dangling name and an unreadable
+inode are reported and left alone, because each can only be fixed by choosing
+which file to damage.
+
+The test damages the filesystem the only way that damage can be made: it takes a
+block from the allocator and does nothing with it. It then requires the check to
+have been quiet before, to find exactly one leaked block, to be quiet again
+after, and to hand the same block out again -- a repair that had to be run twice
+would not be a repair.
+
+It had to be made thirty-two times faster before it was usable, by reading the
+inode table a block at a time rather than a block per inode. The first version
+ran eight full walks a boot and pushed the tests past their window, which is a
+good reminder that a check nobody can afford to run is a check that gets turned
+off.
+
+And the slowdown flushed out a race that had been waiting since the compositor
+got its own spawn service. `start_spawn_service` handed the endpoint to its
+thread through a single global, and starting the second service could overwrite
+it before the first thread had read it -- so both threads served the same
+channel and the other had nobody answering on it. Whoever was waiting for a
+reply waited forever, and which of the two it was depended on scheduling, which
+is why it only appeared once something else got slower. Each service has its own
+slot now, given to its thread when it is started.
+
+Outstanding: no permissions, no
 timestamps beyond the tick a thing was made at, no partial writes and no seek,
 so a large file is read and written whole. The FAT32 reader still cannot write
 and skips long names. The block driver serves one request at a time, which is

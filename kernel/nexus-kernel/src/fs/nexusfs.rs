@@ -56,6 +56,29 @@
 //! data is written before the metadata that points at it, so a failure leaves
 //! the old file rather than a new one full of someone else's blocks.
 //!
+//! # Checking it
+//!
+//! The journal finishes an operation that was interrupted. It says nothing
+//! about damage that predates it: a block the bitmap calls taken that no file
+//! points at, a block two files both claim, a name pointing at an inode that is
+//! not there. Those come from a kernel that had a bug, or a disk that lied, or
+//! a version of this code that is no longer running -- and no amount of
+//! journalling finds them, because from the journal's point of view every one
+//! of those operations completed.
+//!
+//! So there is a check, and it runs at every mount. It walks every inode and
+//! every directory, builds its own picture of which blocks are reachable, and
+//! compares that with what the bitmap says.
+//!
+//! What it does about a disagreement depends on which way round it is, and the
+//! asymmetry is the whole design. A block the bitmap calls taken that nothing
+//! reaches is *leaked*: reclaiming it is safe, because nothing can be pointing
+//! at it. A block something reaches that the bitmap calls free is *dangerous*:
+//! the allocator would hand it out from under a file that is using it, so the
+//! bit is set rather than the file being touched. In both cases the fix is to
+//! the bitmap, which is the derived thing; the files are what the filesystem is
+//! for and are never edited to make the bookkeeping agree.
+//!
 //! # What it does not do yet
 //!
 //! No permissions, no timestamps beyond the tick a thing was made at, no links
@@ -330,6 +353,51 @@ impl Inode {
     /// Blocks the file's contents occupy, not counting the indirect block.
     fn data_blocks(&self) -> usize {
         (self.size as usize).div_ceil(BLOCK_SIZE)
+    }
+}
+
+/// What a check found, and what it did about it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Check {
+    /// Inodes in use.
+    pub inodes: u64,
+    /// Blocks reachable from them.
+    pub blocks: u64,
+    /// Blocks the bitmap called taken that nothing reaches. Reclaimed.
+    pub leaked: u64,
+    /// Blocks something reaches that the bitmap called free. Marked taken.
+    pub unclaimed: u64,
+    /// Blocks more than one file claims. Reported and not touched.
+    pub shared: u64,
+    /// Directory entries naming something that is not there. Reported.
+    pub dangling: u64,
+    /// Inodes whose block list could not be read. Reported.
+    pub unreadable: u64,
+    /// Whether the superblock's free counts were wrong and have been corrected.
+    pub counts_corrected: bool,
+}
+
+impl Check {
+    /// Whether anything at all was wrong.
+    #[must_use]
+    pub fn clean(&self) -> bool {
+        self.leaked == 0
+            && self.unclaimed == 0
+            && self.shared == 0
+            && self.dangling == 0
+            && self.unreadable == 0
+            && !self.counts_corrected
+    }
+
+    /// Whether something was found that this cannot fix.
+    ///
+    /// A leak is repaired and a miscounted superblock is corrected. A block two
+    /// files claim is neither: choosing which of them keeps it is choosing
+    /// which one to corrupt, and that is not a decision to make without being
+    /// asked.
+    #[must_use]
+    pub fn needs_attention(&self) -> bool {
+        self.shared > 0 || self.dangling > 0 || self.unreadable > 0
     }
 }
 
@@ -1276,6 +1344,233 @@ impl Volume {
         self.write_block_now(self.superblock.journal_start, &[0u8; BLOCK_SIZE])
     }
 
+    // -- Checking ------------------------------------------------------------
+
+    /// Walk everything, and make the bitmap agree with it.
+    ///
+    /// The picture is built from the files, not from the bitmap: what the
+    /// filesystem *is* is its inodes and its directories, and the bitmap is a
+    /// note about them that can be wrong. So the walk is the truth and the
+    /// bitmap is what gets corrected.
+    pub fn check(&mut self) -> Result<Check, FsError> {
+        let mut report = Check::default();
+        let total = self.superblock.total_blocks;
+        let bitmap_bytes = (self.superblock.bitmap_blocks * BLOCK_SIZE as u64) as usize;
+        let mut reachable = vec![0u8; bitmap_bytes];
+
+        // The metadata regions, which no inode points at and which are taken
+        // all the same. Marked first so that a file claiming one shows up as a
+        // block two things claim rather than as agreement.
+        for block in 0..self.superblock.data_start {
+            set_bit(&mut reachable, block as usize, true);
+        }
+        // And the bits past the end of the volume, which `format` marks so the
+        // allocator cannot hand out a block beyond the partition.
+        for block in total..bitmap_bytes as u64 * 8 {
+            set_bit(&mut reachable, block as usize, true);
+        }
+
+        // A block at a time, not an inode at a time. Thirty-two inodes share a
+        // block, so reading one per inode is thirty-two times the work -- and
+        // the work is a lock and a lookup in the block cache each time, which
+        // showed up as a boot slow enough to run the tests out of their window.
+        let mut table = [0u8; BLOCK_SIZE];
+        for block_index in 0..self.superblock.inode_blocks {
+            self.read_block(self.superblock.inode_start + block_index, &mut table)?;
+
+            for slot in 0..INODES_PER_BLOCK {
+                let number = block_index * INODES_PER_BLOCK as u64 + slot as u64;
+                // Inode zero is never used, and the table can be longer than
+                // the filesystem says it is.
+                if number < u64::from(ROOT) {
+                    continue;
+                }
+                if number >= self.superblock.inode_count {
+                    break;
+                }
+                let offset = slot * INODE_SIZE;
+                let inode = Inode::decode(&table[offset..offset + INODE_SIZE]);
+                if inode.kind == Kind::Free {
+                    continue;
+                }
+                report.inodes += 1;
+
+                let blocks = match self.block_list(&inode) {
+                    Ok(blocks) => blocks,
+                    Err(_) => {
+                        // An inode whose block list does not make sense. Left
+                        // alone: its blocks cannot be identified, so reclaiming
+                        // anything on its behalf would be guessing.
+                        report.unreadable += 1;
+                        continue;
+                    }
+                };
+
+                let mut claims: Vec<u64> = blocks;
+                if inode.indirect != 0 {
+                    claims.push(inode.indirect);
+                }
+                for block in claims {
+                    if block >= total {
+                        report.unreadable += 1;
+                        continue;
+                    }
+                    if bit(&reachable, block as usize) {
+                        report.shared += 1;
+                    } else {
+                        set_bit(&mut reachable, block as usize, true);
+                        report.blocks += 1;
+                    }
+                }
+
+                if inode.kind == Kind::Directory {
+                    let Ok(contents) = self.read_inode_data(&inode) else {
+                        report.unreadable += 1;
+                        continue;
+                    };
+                    let Ok(entries) = parse_directory(&contents) else {
+                        report.unreadable += 1;
+                        continue;
+                    };
+                    for (child, _, kind) in entries {
+                        match self.read_inode(child) {
+                            Ok(actual) if actual.kind == kind => {}
+                            // A name pointing at nothing, or at the other kind of
+                            // thing. Removing it is a change to a directory, which
+                            // is the filesystem itself; that is a decision for
+                            // whoever is looking at the report.
+                            _ => report.dangling += 1,
+                        }
+                    }
+                }
+            }
+        }
+
+        // -- And now the bitmap, one block at a time --------------------------
+
+        self.begin();
+        let mut free_blocks = 0u64;
+        for index in 0..self.superblock.bitmap_blocks {
+            let mut stored = [0u8; BLOCK_SIZE];
+            self.read_block(self.superblock.bitmap_start + index, &mut stored)?;
+            let mut changed = false;
+
+            for offset in 0..BLOCK_SIZE * 8 {
+                let block = index * (BLOCK_SIZE as u64 * 8) + offset as u64;
+                if block >= bitmap_bytes as u64 * 8 {
+                    break;
+                }
+                let says_taken = bit(&stored, offset);
+                let is_reached = bit(&reachable, block as usize);
+
+                match (says_taken, is_reached) {
+                    // Taken and unreachable: leaked. Safe to reclaim, because
+                    // nothing can be pointing at it.
+                    (true, false) => {
+                        report.leaked += 1;
+                        set_bit(&mut stored, offset, false);
+                        changed = true;
+                    }
+                    // Reachable and free: dangerous. The allocator would hand
+                    // it out from under a file that is using it, so the bit is
+                    // set -- the bookkeeping is corrected, never the file.
+                    (false, true) => {
+                        report.unclaimed += 1;
+                        set_bit(&mut stored, offset, true);
+                        changed = true;
+                    }
+                    _ => {}
+                }
+
+                if block < total && !bit(&stored, offset) {
+                    free_blocks += 1;
+                }
+            }
+
+            if changed {
+                self.write_block(self.superblock.bitmap_start + index, &stored)?;
+            }
+        }
+
+        let free_inodes = self
+            .superblock
+            .inode_count
+            .saturating_sub(report.inodes + 1);
+        if free_blocks != self.superblock.free_blocks || free_inodes != self.superblock.free_inodes
+        {
+            report.counts_corrected = true;
+            self.superblock.free_blocks = free_blocks;
+            self.superblock.free_inodes = free_inodes;
+            self.write_superblock()?;
+        }
+
+        self.commit()?;
+        Ok(report)
+    }
+
+    /// Leak a block on purpose, and require the check to find and reclaim it.
+    ///
+    /// The damage is made the only way it can be made: a block is taken from
+    /// the allocator and then nothing is done with it, which is exactly what a
+    /// kernel with a bug in its write path leaves behind. A journal would not
+    /// have caught it -- from the journal's point of view that operation
+    /// completed perfectly.
+    ///
+    /// It also requires the check to be *quiet* first and quiet again after, so
+    /// that a check which reported damage on every filesystem it saw could not
+    /// pass this by accident.
+    pub fn check_self_test(&mut self) -> Result<String, FsError> {
+        let before = self.check()?;
+        if !before.clean() {
+            return Err(FsError::Corrupt);
+        }
+        let (_, free_before) = self.space();
+
+        // Taken and abandoned. Committed, so it is on the disk and not merely
+        // in a transaction that could be thrown away -- the point is to leave
+        // the filesystem genuinely wrong.
+        self.begin();
+        let orphan = self.allocate_block()?;
+        self.write_superblock()?;
+        self.commit()?;
+
+        let found = self.check()?;
+        if found.leaked != 1 {
+            return Err(FsError::Corrupt);
+        }
+        if found.needs_attention() {
+            return Err(FsError::Corrupt);
+        }
+        let (_, free_after) = self.space();
+        if free_after != free_before {
+            return Err(FsError::Corrupt);
+        }
+
+        // And quiet again, because a repair that had to be run twice would not
+        // be a repair.
+        if !self.check()?.clean() {
+            return Err(FsError::Corrupt);
+        }
+
+        // The block really is available again, and it is the same one.
+        //
+        // Abandoning throws away the bitmap write but not the free count, which
+        // `allocate_block` had already decremented in memory -- so it is put
+        // back by hand. A test that left the filesystem one block out would be
+        // a test the next check reported as damage.
+        self.begin();
+        let reissued = self.allocate_block()?;
+        self.abandon();
+        self.superblock.free_blocks += 1;
+        if reissued != orphan {
+            return Err(FsError::Corrupt);
+        }
+
+        Ok(String::from(
+            "check verified: a block leaked on purpose was found, reclaimed and handed out again",
+        ))
+    }
+
     // -- Proving recovery ---------------------------------------------------
 
     /// Leave the filesystem exactly as a power failure after a commit would.
@@ -1533,6 +1828,11 @@ fn set_bit(bitmap: &mut [u8], bit: usize, set: bool) {
     } else {
         bitmap[bit / 8] &= !mask;
     }
+}
+
+/// Whether one bit of a bitmap is set.
+fn bit(bitmap: &[u8], index: usize) -> bool {
+    bitmap[index / 8] & (1u8 << (index % 8)) != 0
 }
 
 /// The first zero bit of a bitmap, if it has one.
