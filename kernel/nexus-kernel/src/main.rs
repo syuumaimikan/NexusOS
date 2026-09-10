@@ -21,6 +21,7 @@ extern crate alloc;
 mod acpi;
 mod arch;
 mod compat;
+mod crash;
 mod display;
 mod drivers;
 mod framebuffer;
@@ -408,6 +409,17 @@ fn monitor_thread(_argument: usize) {
             let (bytes, packets, desynchronised, overflows) = drivers::mouse::statistics();
             kprintln!(
                 "[mon ] pointer {packets} packets from {bytes} bytes,              {desynchronised} resynchronised, {overflows} overflowed"
+            );
+        }
+        // Anything a fault left behind. Written from here rather than from the
+        // handler that recorded it, because writing a file needs the disk and a
+        // sleeping lock and the thread that faulted may have been holding
+        // either.
+        crash::flush();
+        let (recorded, written, dropped) = crash::statistics();
+        if recorded > 0 {
+            kprintln!(
+                "[mon ] crash {recorded} faults recorded, {written} written,              {dropped} dropped for want of room"
             );
         }
         if drivers::virtio_net::is_present() {
@@ -835,6 +847,7 @@ fn nexusfs_self_test() {
     // than with the filesystem checks above, because those run before this
     // point and the store is what is being written to.
     seed_packages();
+    crash::report_previous();
 
     let (total, free) = store::space().unwrap_or((0, 0));
     kprintln!(

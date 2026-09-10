@@ -1529,14 +1529,84 @@ stack to grow a client and a way for a program to be *given* the authority to
 talk to one — which is the same capability question again, and the reason it was
 answered first.
 
-## Phase 18 — Virtualisation ⬜
+## Phase 18 — Virtualisation 🚧
 
 VT-x/AMD-V, virtio devices, containers.
 
-## Phase 19 — Production hardening ⬜
+**Containers, in the only sense a capability system has one.** A container here
+is not a namespace, a cgroup or a mount table — it is a process whose authority
+is a strict subset of its parent's, and the property that has to hold is that
+authority can be *narrowed and never widened*.
+
+That is one comparison in one function, `HandleTable::duplicate`, which refuses
+to hand out a handle carrying rights the original does not have. A system where
+that comparison were the wrong way round would look exactly like this one until
+somebody tried it — so something does:
+
+```
+[user] find: given one directory with read transfer
+[user] find: asked for more authority than it holds, and was refused
+[user] find: tried to write where it was reading, and was refused
+```
+
+Both halves matter. The second says the handle's rights are enforced; the first
+says they cannot be escaped by asking. Together they are what makes "give this
+program only what it needs" a fact rather than a hope, and they are checked on
+the machine on every boot.
+
+**virtio devices** are driven, not provided: this system is a virtio *guest* —
+block and network both — and providing them to a guest of its own is the other
+side of the same protocol and has not been started.
+
+**VT-x is not started, and cannot be tested here.** The processor extension
+needs to be exposed to the guest, which needs nested virtualisation, which needs
+a hypervisor underneath that offers it. The development machine runs QEMU under
+dynamic translation, where `VMX` is not available at all. Writing it blind
+against no way to run it would be exactly the kind of code this project refuses
+to write.
+
+## Phase 19 — Production hardening 🚧
 
 Installer, recovery environment, A/B updates with rollback, crash reporting,
 diagnostics, performance work, security audit.
+
+**A program that faults no longer takes the machine with it.** Every exception
+used to end the same way, which meant any program on the machine could stop it
+by dereferencing a null pointer. Now the two cases are told apart, because they
+are not the same: a program that faults has made a mistake about its own memory,
+and a kernel that faults has made one about everyone's.
+
+```
+[user] about to read kernel memory from ring 3
+ EXCEPTION 14: page fault
+  address    : 0xffffffff80000000
+    origin   : user mode
+[fault] process p5 "violation" ended by a page fault; the machine continues
+[crash] wrote crash/5.txt: violation ended by a page fault
+```
+
+The injection test that provokes it now *requires* that the machine did not
+halt, which is the check that would catch this being undone.
+
+**Crash reporting.** The fault outlives the program. What makes that possible is
+where the work happens: writing a file needs the block device, the journal and a
+sleeping lock, and the thread that just faulted may have been holding any of
+them — a handler that reached for a lock its own thread already owned would turn
+a program's bug into a machine that stops. So the handler does the one thing
+that cannot block, writing into a fixed array under an interrupt-safe lock, and
+the monitor thread — an ordinary thread holding nothing — takes what is there
+and writes it out. The next boot reads the directory and says how many it found.
+
+That is the difference between a crash report and a crash: the report has to
+work when the system is in the worst state it has been in all boot.
+
+**Performance work** is done where it was measured, not where it was guessed:
+damage tracking and per-wake-up composition under Phase 9, the block cache under
+Phase 8. Both are reported in numbers the boot log carries.
+
+Still to do: an installer, a recovery environment, A/B updates with rollback —
+which now has signed packages and a rollback-capable installer to build on — and
+a security audit by somebody who did not write it.
 
 ---
 

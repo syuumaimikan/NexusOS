@@ -93,10 +93,19 @@ $Cases = @(
             'EXCEPTION 14: page fault',
             'address    : 0xffffffff80000000',
             'origin   : user mode',
-            'the system has been halted'
+            # And the machine carries on. A program that faults has made a
+            # mistake about its own memory; a kernel that faults has made one
+            # about everyone's. Only the second is a reason to stop, and this
+            # used to stop for either -- which meant any program on the machine
+            # could halt it by dereferencing a null pointer.
+            'ended by a page fault; the machine continues',
+            # The fault outlives the program that caused it.
+            'wrote crash/'
         )
         Reject = @(
-            'FAILED: ring 3 read kernel memory'
+            'FAILED: ring 3 read kernel memory',
+            # The one that matters: a fault from ring 3 must not halt anything.
+            'the system has been halted'
         )
     },
     # And the same discipline for the address spaces. Two processes reporting

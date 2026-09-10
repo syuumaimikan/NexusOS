@@ -56,6 +56,58 @@ fn report_footer() -> ! {
     halt_forever()
 }
 
+/// What a process's status says when a fault ended it.
+///
+/// A number no program would exit with on purpose, so a parent reading a status
+/// can tell "it decided to stop" from "it was stopped for it".
+pub const FAULT_STATUS: u64 = 0x8000_000E;
+
+/// End the fault: kill the process if it was one, halt the machine if it was
+/// the kernel.
+///
+/// A program that faults has made a mistake about its own memory. A kernel that
+/// faults has made a mistake about everyone's, and cannot be trusted to carry
+/// on -- so the two cases are not the same and must not end the same way. This
+/// used to halt either way, which meant any program on the machine could stop
+/// it by dereferencing a null pointer.
+///
+/// The report is already printed by the time this runs. What it adds is a line
+/// saying which of the two happened, because a boot log that ends in a fault
+/// report and then continues is otherwise a puzzle.
+fn end_of_fault(frame: &InterruptStackFrame, what: &str) -> ! {
+    kprintln!("=======================================================");
+
+    if frame.code_segment & 3 != 3 {
+        // The kernel's own. Nothing here is recoverable: the invariants this
+        // code depends on are the ones that just proved false.
+        kprintln!("the system has been halted");
+        halt_forever();
+    }
+
+    let Some(process) = crate::sched::current_process() else {
+        // Ring 3 with no process is not a thing that should be able to happen,
+        // and a machine that continued from it would be continuing on a
+        // guess.
+        kprintln!("a fault arrived from ring 3 with no process behind it");
+        kprintln!("the system has been halted");
+        halt_forever();
+    };
+
+    kprintln!(
+        "[fault] process {} \"{}\" ended by {what}; the machine continues",
+        process.id,
+        process.name.as_str()
+    );
+    crate::crash::record(process.id.0, process.name.as_str(), what);
+    process.completion.finish(FAULT_STATUS);
+
+    // Interrupts were masked on the way into the exception. The scheduler needs
+    // them to hand this processor to somebody else, and there is nothing left
+    // of this thread to protect.
+    super::interrupts::enable();
+    crate::sched::exit()
+}
+
 /// Decode a selector error code, as pushed by the segment-related faults.
 ///
 /// Bit 0 is the external flag, bits 1..3 select which table, and bits 3..16 are
@@ -146,7 +198,7 @@ extern "x86-interrupt" fn general_protection_fault(frame: InterruptStackFrame, e
     } else {
         report_selector_error(error_code);
     }
-    report_footer()
+    end_of_fault(&frame, "a general protection fault")
 }
 
 /// Page fault.
@@ -206,7 +258,7 @@ extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, error_code: u64
         kprintln!("    note     : this is the boot stack guard page (stack overflow)");
     }
 
-    report_footer()
+    end_of_fault(&frame, "a page fault")
 }
 
 /// Double fault.
