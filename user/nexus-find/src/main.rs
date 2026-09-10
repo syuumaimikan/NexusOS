@@ -125,6 +125,37 @@ extern "C" fn main() -> ! {
     // And the proof. A program that merely *does not* write is not a program
     // that *cannot*; the difference is the whole point of a capability, and the
     // only way to see it is to try.
+    // First, whether it can simply *ask* for more. A handle is duplicated with
+    // a set of rights, and nothing stops a program naming a set larger than the
+    // one it holds -- except the kernel, which refuses. That is the property
+    // the whole containment argument rests on: authority can be narrowed and
+    // never widened, so a program's reach is bounded by what it was given no
+    // matter what it does next.
+    //
+    // Worth pushing against rather than trusting, because it is one comparison
+    // in one function, and a system where that comparison were the wrong way
+    // round would look exactly like this one until somebody tried.
+    match nexus_user::duplicate(
+        directory,
+        nexus_user::rights::READ | nexus_user::rights::WRITE,
+    ) {
+        Err(nexus_user::Error::Denied) => {
+            nexus_user::log("find: asked for more authority than it holds, and was refused").ok();
+        }
+        Err(other) => {
+            failed(&format!(
+                "find: FAILED: asking for more failed for the wrong reason: {other:?}"
+            ));
+            finish();
+        }
+        Ok(_) => {
+            // Not a bug in this program. A capability system in which a handle
+            // can be widened is not a capability system.
+            failed("find: FAILED: it widened a handle it had been given narrowed");
+            finish();
+        }
+    }
+
     match nexus_user::create(directory, "agent-was-here.txt", Kind::File) {
         Err(nexus_user::Error::Denied) => {
             nexus_user::log("find: tried to write where it was reading, and was refused").ok();

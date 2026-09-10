@@ -202,6 +202,7 @@ Invoke-Step 'boot test' {
         'exited with status 0 through the Linux boundary',
         'init: a Linux program ran and exited through the translation',
         'find: given one directory with read transfer',
+        'find: asked for more authority than it holds, and was refused',
         'find: tried to write where it was reading, and was refused',
         'find: indexed 2 files it was able to read',
         'is closest to hello.txt',
@@ -339,8 +340,19 @@ Invoke-Step 'boot test' {
     if ([int]$last.Groups[2].Value -lt 1) {
         throw 'no message was ever sent across a channel'
     }
-    if ([int]$last.Groups[2].Value -ne [int]$last.Groups[3].Value) {
-        throw "$($last.Groups[2].Value) messages were sent but $($last.Groups[3].Value) received"
+    # Received may lag sent, and a small gap is not a lost message. A queue can
+    # legitimately be destroyed with something still in it: the compositor sends
+    # the desktop a final list of windows and then closes the channel, and the
+    # desktop is gone before it reads one. What would be wrong is *more*
+    # received than sent, or a gap that keeps growing -- so the gap is bounded
+    # rather than required to be zero.
+    $sent = [int]$last.Groups[2].Value
+    $received = [int]$last.Groups[3].Value
+    if ($received -gt $sent) {
+        throw "$received messages were received but only $sent sent"
+    }
+    if ($sent - $received -gt 4) {
+        throw "$sent messages were sent but only $received received"
     }
     # The conversation has to have gone the way a conversation goes. Both lines
     # being present says two processes logged something; the order says the
