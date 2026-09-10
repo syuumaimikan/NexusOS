@@ -6,6 +6,21 @@ proves the behaviour, and its tests pass — not when the code compiles.
 
 Status: ✅ complete · 🚧 in progress · ⬜ not started
 
+Every phase from 0 to 19 has now been opened, and every one of them that is
+marked in progress has something on the machine that proves it — not a design,
+not a compiling module, but a line in a boot log that could not be there if the
+thing did not work. Where a phase is not started, the entry says why in terms of
+what is missing rather than leaving the box blank.
+
+What the machine does today, in one paragraph: it boots from its own bootloader
+on UEFI, brings up four processors, runs its own filesystem with a journal on a
+disk it drives, composites windows for programs that cannot reach the display,
+puts a desktop on the screen that a person can start a program from, has an
+address it was leased and answers TCP from outside, installs signed packages and
+refuses forged ones, runs a Linux binary through a translation layer above its
+own interface, lets a program search a directory it was lent and nothing else,
+and survives a program that faults.
+
 ---
 
 ## Phase 0 — Repository audit ✅
