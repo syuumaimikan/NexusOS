@@ -107,6 +107,10 @@ $ShellElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-shell"
 $StagedShell = Publish-Program -Elf $ShellElf -ProgramDir $ProgramDir -Name 'shell.elf'
 $shellSize = [math]::Round((Get-Item $StagedShell).Length / 1KB, 1)
 
+$SetupElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-setup"
+$StagedSetup = Publish-Program -Elf $SetupElf -ProgramDir $ProgramDir -Name 'setup.elf'
+$setupSize = [math]::Round((Get-Item $StagedSetup).Length / 1KB, 1)
+
 $FindElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-find"
 $StagedFind = Publish-Program -Elf $FindElf -ProgramDir $ProgramDir -Name 'find.elf'
 $findSize = [math]::Round((Get-Item $StagedFind).Length / 1KB, 1)
@@ -226,6 +230,7 @@ Write-Host "  client     : $clientSize KiB  -> BIN\CLIENT.ELF on the disk"
 Write-Host "  shell      : $shellSize KiB  -> BIN\SHELL.ELF on the disk"
 Write-Host "  installer  : $installSize KiB  -> BIN\INST.ELF on the disk"
 Write-Host "  finder     : $findSize KiB  -> BIN\FIND.ELF on the disk"
+Write-Host "  setup      : $setupSize KiB  -> BIN\SETUP.ELF on the disk"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"
 Write-Host "  linux      : $linuxSize bytes of static Linux ELF -> BIN\HELLO.LX on the disk"

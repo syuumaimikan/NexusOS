@@ -57,15 +57,44 @@ pub fn geometry() -> Option<FramebufferInfo> {
 pub fn unclaimed_region() -> Option<(u32, u32, u32, u32)> {
     let info = geometry()?;
 
-    // Where `panel_layout` starts looking for room. Everything from here down
-    // belongs to the panel and the bar.
-    let panel_band_top = info.height * 2 / 5;
+    // The whole of it.
+    //
+    // It used to be a rectangle in a corner, because the kernel was still
+    // drawing the rest and two things painting one screen is two things
+    // fighting. What changed is that the kernel *stops*: the moment the
+    // compositor has the framebuffer, the display thread stops repainting and
+    // the screen belongs to a process.
+    //
+    // That is the whole point of having a compositor. A machine where the
+    // kernel keeps four fifths of the display is a machine whose windows live
+    // in a box in the corner, and no amount of work on the windows fixes it.
+    Some((0, 0, info.width, info.height))
+}
 
-    let width = info.width / 5;
-    let margin = 32;
-    let height = (panel_band_top - margin * 2).min(info.height / 5);
-    let x = info.width - width - margin;
-    Some((x, margin, width, height))
+/// Whether a process has taken the display over.
+///
+/// Once this is set the kernel draws nothing. It is not a lock and does not
+/// need to be: it goes from false to true exactly once, from the thread that
+/// hands the framebuffer over, and the only reader is a loop that checks it
+/// twice a second.
+static HANDED_OVER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Give up the screen.
+///
+/// Called when the framebuffer is handed to a process. Everything the kernel
+/// had drawn stays on the display until that process draws over it, which is
+/// the right behaviour: a screen that went black between the last kernel frame
+/// and the first composited one would look like a machine that had crashed at
+/// exactly the moment it started working.
+pub fn hand_over() {
+    HANDED_OVER.store(true, core::sync::atomic::Ordering::Release);
+    kprintln!("[disp] the display now belongs to a process; the kernel has stopped drawing");
+}
+
+/// Whether the kernel still owns the screen.
+#[must_use]
+pub fn is_ours() -> bool {
+    !HANDED_OVER.load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// Background at the top of the gradient.
@@ -494,6 +523,14 @@ pub fn refresh_status() {
 /// enough to cost nothing measurable.
 fn display_thread(_argument: usize) {
     loop {
+        // The screen may have been handed to a process. Nothing after this
+        // point may touch the framebuffer, and the thread stops rather than
+        // spinning: there is no other reason for it to exist.
+        if !is_ours() {
+            kprintln!("[disp] display thread retiring; the screen is somebody else's");
+            return;
+        }
+
         let locale = i18n::current_index();
         let changed = {
             let mut painted = PAINTED_LOCALE.lock();

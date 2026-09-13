@@ -61,6 +61,8 @@ pub enum Error {
     TooBig,
     /// The filesystem refused: it is full, damaged, busy, or absent.
     Filesystem,
+    /// The machine has no such device -- a clock, for instance.
+    NoDevice,
     /// Something the kernel returned that this runtime does not recognise.
     Unknown(u64),
 }
@@ -83,6 +85,7 @@ impl Error {
             v if v == u64::MAX - 9 => Self::Exists,
             v if v == u64::MAX - 10 => Self::TooBig,
             v if v == u64::MAX - 11 => Self::Filesystem,
+            v if v == u64::MAX - 12 => Self::NoDevice,
             other => Self::Unknown(other),
         }
     }
@@ -132,6 +135,7 @@ enum Call {
     MemoryUnmap = 28,
     NodeReadAt = 29,
     NodeWriteAt = 30,
+    Now = 31,
 }
 
 /// Make a system call.
@@ -224,6 +228,23 @@ pub fn yield_now() {
     unsafe {
         syscall(Call::Yield, 0, 0, 0, 0, 0, 0);
     }
+}
+
+/// What time it is, as seconds since the start of 1970 in UTC.
+///
+/// Not the same question as [`uptime`], and worth keeping apart: uptime is how
+/// long this boot has lasted and is always answerable, while this is a moment
+/// and depends on the machine having a clock. A program that used one for the
+/// other would have a clock that resets every time the machine starts.
+///
+/// # Errors
+///
+/// [`Error::NoDevice`] when there is no clock, which is a real answer: zero
+/// would be the start of 1970, and a program that could not tell the two apart
+/// would confidently print the wrong year.
+pub fn now() -> Result<u64, Error> {
+    // SAFETY: takes no arguments.
+    check(unsafe { syscall(Call::Now, 0, 0, 0, 0, 0, 0) })
 }
 
 /// This thread's identifier.
@@ -778,6 +799,20 @@ pub fn unwatch(set: Handle, key: u64) -> Result<(), Error> {
 /// Returns zero when the set is empty: nothing can ever make it ready, so
 /// waiting would be waiting forever.
 pub fn wait_any(set: Handle, keys: &mut [u64]) -> Result<usize, Error> {
+    wait_any_until(set, keys, FOREVER)
+}
+
+/// How long [`wait_any_until`] waits when it is not to give up.
+pub const FOREVER: u64 = u64::MAX;
+
+/// The same, giving up after `milliseconds` and returning zero.
+///
+/// For a program that has something to do on a schedule as well as on an event:
+/// a clock that has to tick while nobody is typing, a progress bar, anything
+/// that redraws whether or not anything happened. Returning zero is deliberately
+/// the same answer as an empty set -- both mean "nothing of yours is ready" --
+/// and a caller that needs to tell them apart knows what it put in the set.
+pub fn wait_any_until(set: Handle, keys: &mut [u64], milliseconds: u64) -> Result<usize, Error> {
     // SAFETY: the buffer is live and writable here, and its length is given in
     // bytes because that is what the kernel checks the range against.
     let result = unsafe {
@@ -786,7 +821,7 @@ pub fn wait_any(set: Handle, keys: &mut [u64]) -> Result<usize, Error> {
             u64::from(set.0),
             keys.as_mut_ptr() as u64,
             core::mem::size_of_val(keys) as u64,
-            0,
+            milliseconds,
             0,
             0,
         )

@@ -26,6 +26,20 @@
 //! running -- in the interface language, which arrives from the kernel through
 //! the compositor. Pressing F1 changes the kernel's panel and this strip at the
 //! same moment, because both read the same table and neither counts keys.
+//!
+//! And a clock, and whose machine it is. Both come from the settings file that
+//! the first-run wizard wrote, which this program is handed a directory handle
+//! to read -- not a path, and not the filesystem: the one directory, read-only.
+//! A desktop that could open anything in order to find out what time it is
+//! would be a desktop with the run of the disk for the sake of four digits.
+//!
+//! # Why this one program waits on a clock
+//!
+//! Everything else here redraws when something changed. A clock has nothing to
+//! change *except* time, so this waits on its channel with a deadline: it wakes
+//! when the compositor says something, or when the minute turns, whichever
+//! comes first. That is one wake a minute on an idle machine, against fifty a
+//! second for a program that polled.
 
 #![no_std]
 #![no_main]
@@ -35,6 +49,8 @@ extern crate alloc;
 use alloc::string::{String, ToString as _};
 use core::panic::PanicInfo;
 
+use nexus_config::{key, Settings};
+use nexus_time::Zone;
 use nexus_ui::{Canvas, Colour, Rect};
 use nexus_user::Handle;
 
@@ -47,6 +63,25 @@ const COMPOSITOR: Handle = Handle(1);
 
 /// Where the strip is mapped. This program's own choice, as every mapping is.
 const SURFACE_AT: usize = 0x0000_0000_1000_0000;
+
+/// What the settings file is called inside the directory this is handed.
+const SETTINGS_NAME: &str = "settings.txt";
+
+/// Longest settings file this will read.
+///
+/// A bound rather than a trust, on a file that is a few hundred bytes when it
+/// is right: a desktop that read whatever it found there would be a desktop a
+/// large file could stop from starting.
+const SETTINGS_MAX: usize = 8 * 1024;
+
+/// How long the strip waits before redrawing with nothing to redraw for.
+///
+/// A second and not a minute, even though the clock shows minutes. What this
+/// bounds is how late the display is when the minute turns, and a strip whose
+/// clock changed up to sixty seconds after the minute did would be a clock
+/// nobody could set a watch by. The redraw itself is skipped unless the text
+/// actually differs, so the cost of being prompt is a compare.
+const TICK_MS: u64 = 1_000;
 
 /// What the compositor says, and what this program says back.
 ///
@@ -70,6 +105,8 @@ mod wire {
     pub const HIDE: &[u8] = b"hide";
     /// Start another program.
     pub const OPEN: &[u8] = b"open";
+    /// End the session.
+    pub const QUIT: &[u8] = b"quit";
 }
 
 /// What state a window can be in, as the compositor reports it.
@@ -107,12 +144,43 @@ struct Desktop {
     /// Where the strip is, and how large.
     width: u32,
     height: u32,
+    /// Whose machine this is, if the settings said.
+    ///
+    /// `None` on a machine whose settings could not be read, which is drawn as
+    /// a strip with no name rather than as an error: a desktop that refused to
+    /// appear because it could not find out who owned it would be a machine
+    /// nobody could use to repair the file.
+    owner: Option<String>,
+    /// The timezone the clock is shown in.
+    zone: &'static Zone,
+    /// What the clock said when the strip was last drawn.
+    ///
+    /// Kept so that a wake-up with nothing to show for it costs a string
+    /// compare rather than a frame. Empty before the first draw, which no
+    /// clock ever reads as, so the first tick always draws.
+    clock: String,
 }
 
 impl Desktop {
     /// Where the button that starts a program is.
     fn launcher(&self) -> Rect {
         Rect::new(GAP, GAP / 2, LAUNCH_WIDTH, self.height.saturating_sub(GAP))
+    }
+
+    /// Where the button that ends the session is, and how wide.
+    ///
+    /// At the far right, which is where a machine's own controls go on every
+    /// desktop anybody has used, and as wide as the word in it -- "Log out" and
+    /// "ログアウト" are not the same number of pixels, and a fixed width would
+    /// clip one of them.
+    fn leave(&self) -> Rect {
+        let width = nexus_ui::measure(nexus_i18n::text("shell.leave")) + GAP * 4;
+        Rect::new(
+            self.width.saturating_sub(width + GAP),
+            GAP / 2,
+            width,
+            self.height.saturating_sub(GAP),
+        )
     }
 
     /// Where a window's tab is.
@@ -122,7 +190,10 @@ impl Desktop {
     /// tab somebody clicked and missed.
     fn tab(&self, slot: usize) -> Rect {
         let left = GAP * 2 + LAUNCH_WIDTH;
-        let available = self.width.saturating_sub(left + GAP);
+        let available = self
+            .width
+            .saturating_sub(left + GAP)
+            .saturating_sub(self.reserved());
         let each = (available / self.slots.max(1) as u32).saturating_sub(GAP);
         Rect::new(
             left + slot as u32 * (each + GAP),
@@ -146,6 +217,38 @@ impl Desktop {
             .iter()
             .all(|state| *state == state::GONE)
     }
+
+    /// How much of the strip's width the right-hand side keeps for itself.
+    ///
+    /// Measured rather than guessed, because what goes there is a clock in one
+    /// of two formats and a name somebody typed, and a fixed number would be
+    /// either too small for a long name or a gap on every machine without one.
+    /// Capped at a third: a strip is for windows, and a name long enough to
+    /// take half of it is a name that gets cut instead.
+    fn reserved(&self) -> u32 {
+        let mut width = self.leave().width + GAP * 2;
+        if !self.clock.is_empty() {
+            width += nexus_ui::measure(&self.clock) + GAP * 3;
+        }
+        if let Some(name) = &self.owner {
+            width +=
+                nexus_ui::measure(&nexus_i18n::format("shell.owner", &[("name", name)])) + GAP * 3;
+        }
+        width.min(self.width / 2)
+    }
+
+    /// What the clock says now, in the machine's timezone.
+    ///
+    /// Empty when the machine has no clock to read -- a board with no battery,
+    /// or an emulator that was not given one. Drawn as nothing rather than as
+    /// zeroes: a strip showing 00:00 all day is worse than a strip showing no
+    /// time at all, because the first one looks like an answer.
+    fn now(&self) -> String {
+        match nexus_user::now() {
+            Ok(seconds) => nexus_time::local(seconds as i64, self.zone).to_clock(),
+            Err(_) => String::new(),
+        }
+    }
 }
 
 #[unsafe(naked)]
@@ -168,14 +271,35 @@ extern "C" fn main() -> ! {
     }
 
     let mut buffer = [0u8; 32];
-    let mut handles = [Handle(0); 1];
+    // Two: the surface, and the directory the settings live in. The second is
+    // optional here and not in the compositor -- this program is the thing that
+    // gets it wrong if it is missing, and a desktop that would not start
+    // because it had no clock would be a worse machine than one with no clock.
+    let mut handles = [Handle(0); 2];
     let Ok(received) = nexus_user::receive(COMPOSITOR, &mut buffer, &mut handles) else {
         failed("shell: FAILED: nothing arrived to draw on");
         finish();
     };
-    if received.handles != 1 || received.bytes < 16 {
+    if received.handles == 0 || received.bytes < 16 {
         failed("shell: FAILED: no surface came with the message");
         finish();
+    }
+
+    let settings = (received.handles >= 2).then(|| handles[1]);
+    let (owner, zone, language) = match settings {
+        Some(directory) => read_settings(directory),
+        None => {
+            nexus_user::log("shell: started without a settings directory; no clock, no name").ok();
+            (None, &nexus_time::ZONES[0], None)
+        }
+    };
+
+    // Before the first frame, so that nothing is ever drawn in one language and
+    // then redrawn in another. The compositor sends the language too -- what it
+    // sends is what the *kernel* is showing, which a person can change with F1;
+    // this is what the machine was set up as, and it is the starting point.
+    if let Some(tag) = &language {
+        nexus_i18n::set_locale(tag);
     }
 
     let mut desktop = Desktop {
@@ -183,6 +307,9 @@ extern "C" fn main() -> ! {
         windows: [state::GONE; MAX_WINDOWS],
         width: read_u32(&buffer, 0),
         height: read_u32(&buffer, 4),
+        owner,
+        zone,
+        clock: String::new(),
     };
     let surface = handles[0];
 
@@ -202,114 +329,199 @@ extern "C" fn main() -> ! {
     }
 
     nexus_user::log("shell: took the strip along the bottom of the screen").ok();
+
+    // The line the setup test looks for, and the first thing on this machine
+    // that says a person's name back to them. Said once, at the start, because
+    // it is a fact about the machine and not an event.
+    match &desktop.owner {
+        Some(name) => nexus_user::log(&alloc::format!(
+            "desktop: welcome, {name} ({}, {})",
+            nexus_i18n::LOCALES[nexus_i18n::current_index()].tag,
+            desktop.zone.name
+        ))
+        .ok(),
+        None => nexus_user::log("desktop: welcome; this machine has no owner on record").ok(),
+    };
+
     run(&mut desktop);
     finish()
 }
 
+/// Read the settings file: who owns this machine, and where it is.
+///
+/// Every failure is the same answer -- no name, UTC, no language -- because
+/// every failure means the same thing to this program. It has a strip to draw
+/// and it draws it; what it cannot do is report the problem to anyone, since
+/// the thing that would show a message is itself.
+fn read_settings(directory: Handle) -> (Option<String>, &'static Zone, Option<String>) {
+    let utc = &nexus_time::ZONES[0];
+
+    let Ok(file) = nexus_user::open(directory, SETTINGS_NAME) else {
+        nexus_user::log("shell: no settings file; showing the strip without a name").ok();
+        return (None, utc, None);
+    };
+    let size = nexus_user::size(file).unwrap_or(0).min(SETTINGS_MAX);
+    let mut bytes = alloc::vec![0u8; size];
+    let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
+    nexus_user::close(file).ok();
+    bytes.truncate(read);
+
+    let Ok(text) = String::from_utf8(bytes) else {
+        nexus_user::log("shell: the settings file is not text; ignoring it").ok();
+        return (None, utc, None);
+    };
+    let settings = Settings::parse(&text);
+
+    let owner = settings.get(key::USER_NAME).map(String::from);
+    // By name and not by index: an index is a position in a table this program
+    // did not build, and a table that gained an entry would silently move every
+    // machine's clock.
+    let zone = settings
+        .get(key::TIMEZONE)
+        .and_then(nexus_time::zone_by_name)
+        .unwrap_or(utc);
+    let language = settings
+        .get(key::LANGUAGE)
+        .filter(|tag| nexus_i18n::LOCALES.iter().any(|locale| locale.tag == *tag))
+        .map(String::from);
+
+    (owner, zone, language)
+}
+
 /// Draw, say so, and act on whatever comes back.
 ///
-/// Event-driven rather than timed: this program redraws when something it shows
-/// has changed and at no other moment. A dock on a frame timer would be a dock
-/// costing a repaint a frame to show a strip nobody has touched in an hour.
+/// Event-driven with one exception. This program redraws when something it
+/// shows has changed, and the clock is something it shows: so the wait has a
+/// deadline, and a wake-up with nothing behind it re-reads the clock and
+/// redraws only if the text differs. On an idle machine that is one frame a
+/// minute -- the minute turning -- and not one a second, because fifty-nine of
+/// every sixty wake-ups find the same four digits and go back to sleep.
 fn run(desktop: &mut Desktop) {
     let mut drawn = 0u32;
     let mut launched = 0u32;
     let mut acted = 0u32;
     let mut announced = false;
+    let mut ticked = false;
+
+    // The channel, watched rather than read directly, because a blocking read
+    // is a read with no deadline and the clock needs one.
+    let Ok(set) = nexus_user::wait_set() else {
+        failed("shell: FAILED: could not make a wait set");
+        return;
+    };
+    const COMPOSITOR_SAID: u64 = 1;
+    if nexus_user::watch(set, COMPOSITOR, COMPOSITOR_SAID).is_err() {
+        failed("shell: FAILED: could not watch the compositor");
+        return;
+    }
+
+    // Whether the strip on screen is out of date, and whether the frame that
+    // would replace it has been acknowledged. Both, because they are different
+    // questions: a frame sent and not yet shown must not be sent again, and a
+    // change that arrives while one is in flight must not be forgotten.
+    let mut stale = true;
+    let mut in_flight = false;
 
     // Bounded, so a desktop whose compositor stops answering cannot spin. The
-    // bound is a backstop and not a schedule.
-    for _ in 0..512 {
-        draw(desktop);
-        if nexus_user::send(COMPOSITOR, wire::DAMAGED, &[]).is_err() {
-            break;
+    // bound is a backstop and not a schedule: at one frame a minute this is
+    // most of a day, and every frame it does draw is one somebody asked for.
+    for _ in 0..65_536 {
+        if stale && !in_flight {
+            desktop.clock = desktop.now();
+            draw(desktop);
+            if nexus_user::send(COMPOSITOR, wire::DAMAGED, &[]).is_err() {
+                break;
+            }
+            drawn += 1;
+            stale = false;
+            in_flight = true;
         }
-        drawn += 1;
 
-        // Read until the frame is acknowledged *and* something has changed what
-        // is on the strip. Both, in either order: the compositor sends the
-        // first list of windows as soon as it has one, which may well be before
-        // it has acknowledged this program's first frame. A loop that only
-        // broke on a change arriving *after* the acknowledgement would sit
-        // there holding a strip drawn before it knew there were any windows --
-        // which is exactly what it did, and what made the tabs appear or not
-        // depending on which message won a race.
-        //
-        // A click is answered inside this loop rather than redrawn for, because
-        // what a click does comes back as a new list of windows.
-        let mut shown = false;
-        let mut changed = false;
-        loop {
-            let mut message = [0u8; 64];
-            let mut none = [Handle(0); 1];
-            let Ok(received) = nexus_user::receive(COMPOSITOR, &mut message, &mut none) else {
-                report(drawn);
-                return;
-            };
-            let message = &message[..received.bytes];
-
-            if message == wire::SHOWN {
-                shown = true;
-                if changed {
-                    break;
+        let mut keys = [0u64; 2];
+        let Ok(ready) = nexus_user::wait_any_until(set, &mut keys, TICK_MS) else {
+            break;
+        };
+        if ready == 0 {
+            // Nothing was said. The only thing that can have changed is the
+            // time, so ask it, and draw only if the answer is different.
+            if desktop.now() != desktop.clock {
+                stale = true;
+                // Said once, the first time the clock moves on its own. It is
+                // the only evidence from outside this program that the timed
+                // wait works: a deadline that never expired would leave this
+                // line missing and the strip showing the minute it started in.
+                if !ticked {
+                    ticked = true;
+                    nexus_user::log("shell: the clock moved on without anything being said").ok();
                 }
-                continue;
             }
+            continue;
+        }
 
-            if message.starts_with(wire::WINDOWS) && message.len() >= 4 {
-                let count = (message.len() - 3).min(MAX_WINDOWS);
-                desktop.windows = [state::GONE; MAX_WINDOWS];
-                desktop.windows[..count].copy_from_slice(&message[3..3 + count]);
-                changed = true;
-                if shown {
-                    break;
+        // One message per wake-up, not a drain. The set is level-triggered:
+        // whatever is still queued makes it ready again on the next turn round
+        // this loop, and taking them one at a time means the clock is checked
+        // between them rather than after a burst.
+        let mut message = [0u8; 64];
+        let mut none = [Handle(0); 1];
+        let Ok(received) = nexus_user::receive(COMPOSITOR, &mut message, &mut none) else {
+            report(drawn);
+            return;
+        };
+        let message = &message[..received.bytes];
+
+        if message == wire::SHOWN {
+            in_flight = false;
+            continue;
+        }
+
+        if message.starts_with(wire::WINDOWS) && message.len() >= 4 {
+            let count = (message.len() - 3).min(MAX_WINDOWS);
+            desktop.windows = [state::GONE; MAX_WINDOWS];
+            desktop.windows[..count].copy_from_slice(&message[3..3 + count]);
+            stale = true;
+            continue;
+        }
+
+        if message.starts_with(wire::LANGUAGE) && message.len() >= 7 {
+            let index = read_u32(message, 3) as usize;
+            // Set by tag rather than by index, because an index is a position
+            // in a table this program did not build. The tag is what both sides
+            // actually agree on.
+            if let Some(locale) = nexus_i18n::LOCALES.get(index) {
+                nexus_i18n::set_locale(locale.tag);
+                if !announced {
+                    announced = true;
+                    nexus_user::log("shell: drew its strip in the language it was told").ok();
                 }
-                continue;
             }
+            stale = true;
+            continue;
+        }
 
-            if message.starts_with(wire::LANGUAGE) && message.len() >= 7 {
-                let index = read_u32(message, 3) as usize;
-                // Set by tag rather than by index, because an index is a
-                // position in a table this program did not build. The tag is
-                // what both sides actually agree on.
-                if let Some(locale) = nexus_i18n::LOCALES.get(index) {
-                    nexus_i18n::set_locale(locale.tag);
-                    if !announced {
-                        announced = true;
-                        nexus_user::log("shell: drew its strip in the language it was told").ok();
+        if message.starts_with(wire::CLICK) && message.len() >= 11 {
+            let x = read_u32(message, 3);
+            let y = read_u32(message, 7);
+            if let Some(sent) = clicked(desktop, x, y) {
+                // Logged the first time rather than counted up and reported at
+                // the end: this program ends when the compositor does, and a
+                // claim that only appears at shutdown is a claim nothing can
+                // check while the machine is running.
+                if acted == 0 {
+                    nexus_user::log("shell: turned a click in the strip into a command").ok();
+                }
+                acted += 1;
+                if sent {
+                    if launched == 0 {
+                        nexus_user::log("shell: asked for a program to be started").ok();
                     }
+                    launched += 1;
                 }
-                changed = true;
-                if shown {
-                    break;
-                }
-                continue;
             }
-
-            if message.starts_with(wire::CLICK) && message.len() >= 11 {
-                let x = read_u32(message, 3);
-                let y = read_u32(message, 7);
-                if let Some(sent) = clicked(desktop, x, y) {
-                    // Logged the first time rather than counted up and reported
-                    // at the end: this program ends when the compositor does,
-                    // and a claim that only appears at shutdown is a claim
-                    // nothing can check while the machine is running.
-                    if acted == 0 {
-                        nexus_user::log("shell: turned a click in the strip into a command").ok();
-                    }
-                    acted += 1;
-                    if sent {
-                        if launched == 0 {
-                            nexus_user::log("shell: asked for a program to be started").ok();
-                        }
-                        launched += 1;
-                    }
-                }
-                // No repaint yet: the compositor answers with a new list, and
-                // drawing a state this program merely expected would be a strip
-                // that lies for as long as the compositor takes to disagree.
-                continue;
-            }
+            // No repaint asked for: the compositor answers with a new list, and
+            // drawing a state this program merely expected would be a strip
+            // that lies for as long as the compositor takes to disagree.
+            continue;
         }
     }
 
@@ -322,6 +534,13 @@ fn run(desktop: &mut Desktop) {
 /// program. Nothing is changed here: this program says what should happen and
 /// the compositor decides whether it does.
 fn clicked(desktop: &Desktop, x: u32, y: u32) -> Option<bool> {
+    if desktop.leave().contains(x, y) {
+        nexus_user::log("shell: somebody pressed the button that ends the session").ok();
+        return nexus_user::send(COMPOSITOR, wire::QUIT, &[])
+            .ok()
+            .map(|_| false);
+    }
+
     if desktop.launcher().contains(x, y) {
         return nexus_user::send(COMPOSITOR, wire::OPEN, &[])
             .ok()
@@ -401,8 +620,46 @@ fn draw(desktop: &Desktop) {
         canvas.text_centred(tab, &label, ink);
     }
 
-    // What is running, at the right, if there is room for it. Cut rather than
-    // overlapped: text drawn over a tab is a strip that cannot be read.
+    // The way out, at the very edge, drawn in a colour nothing else uses: it is
+    // the one control here that cannot be undone by pressing it again.
+    let leave = desktop.leave();
+    canvas.fill(leave, Colour::rgb(0x3A, 0x14, 0x18));
+    canvas.outline(leave, 1, Colour::rgb(0xB0, 0x48, 0x50));
+    canvas.text_centred(
+        leave,
+        nexus_i18n::text("shell.leave"),
+        Colour::rgb(0xF0, 0xD8, 0xD8),
+    );
+
+    // The right-hand end, in the order a person reads back from the edge: the
+    // clock, then whose machine this is, then what is running. Each is drawn
+    // only if it fits in what is left after the one outside it, and the whole
+    // lot is cut at the last tab -- text drawn over a tab is a strip that
+    // cannot be read.
+    let last = desktop.tab(desktop.slots.saturating_sub(1));
+    let floor = last.x + last.width;
+    let mut right = leave.x.saturating_sub(GAP * 2);
+    let baseline = GAP / 2 + 2;
+
+    if !desktop.clock.is_empty() {
+        let width = nexus_ui::measure(&desktop.clock);
+        if right.saturating_sub(width) > floor {
+            right -= width;
+            canvas.text(right, baseline, &desktop.clock, ink);
+            right = right.saturating_sub(GAP * 3);
+        }
+    }
+
+    if let Some(name) = &desktop.owner {
+        let label = nexus_i18n::format("shell.owner", &[("name", name)]);
+        let width = nexus_ui::measure(&label);
+        if right.saturating_sub(width) > floor {
+            right -= width;
+            canvas.text(right, baseline, &label, ink.blend(ground, 60));
+            right = right.saturating_sub(GAP * 3);
+        }
+    }
+
     let away = desktop.away();
     let status: String = if desktop.empty() {
         nexus_i18n::text("shell.none").to_string()
@@ -412,10 +669,8 @@ fn draw(desktop: &Desktop) {
         return;
     };
     let width = nexus_ui::measure(&status);
-    let last = desktop.tab(desktop.slots - 1);
-    let right = desktop.width.saturating_sub(GAP + width);
-    if right > last.x + last.width {
-        canvas.text(right, GAP / 2 + 2, &status, ink.blend(ground, 90));
+    if right.saturating_sub(width) > floor {
+        canvas.text(right - width, baseline, &status, ink.blend(ground, 90));
     }
 }
 

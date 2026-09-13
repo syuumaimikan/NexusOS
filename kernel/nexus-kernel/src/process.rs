@@ -166,8 +166,29 @@ impl Completion {
     ///
     /// Rechecked after every wake-up rather than trusted, which is what makes a
     /// wake-up that arrives before the wait harmless.
+    ///
+    /// # The wake-up that arrives in the gap
+    ///
+    /// Between reading the status and joining the queue there is a window, and
+    /// a process that ends inside it wakes a queue nobody is on yet. Rechecking
+    /// afterwards does not save the caller: by the time it rechecks it is
+    /// already asleep, and the only thing that was ever going to wake it has
+    /// been and gone. That is a parent blocked for ever on a child that has
+    /// already exited.
+    ///
+    /// The counter closes it. It is read *before* the status, and joining the
+    /// queue is refused if anything has been woken since -- so an ending in the
+    /// window is seen as a change and this goes round again instead of
+    /// sleeping.
+    ///
+    /// This was a real hang and not a hypothetical one: `init` starts a program
+    /// that waits for ever, stops it, and waits for it, and on a machine busy
+    /// enough to lose the race it stopped there and never came back.
     pub fn wait(&self) -> u64 {
         loop {
+            // First, so that anything which happens from here on is a change
+            // this sees rather than a wake-up it sleeps through.
+            let seen = self.waiters.generation();
             if let Some(status) = self.status() {
                 return status;
             }
@@ -178,7 +199,7 @@ impl Completion {
             if crate::sched::cancelled() {
                 return KILLED;
             }
-            self.waiters.wait();
+            self.waiters.wait_if_unchanged(seen);
         }
     }
 }

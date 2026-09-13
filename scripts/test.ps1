@@ -76,7 +76,7 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
 
         # And the kernel, which needs its own target and core rebuilt for it,
         # and so was left out until it had accumulated a dozen findings nobody
@@ -94,14 +94,33 @@ Invoke-Step 'clippy' {
 Invoke-Step 'host unit tests' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-user', '--lib') 'unit tests'
+        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-crypto', '-p', 'nexus-user', '--lib') 'unit tests'
     } finally { Pop-Location }
 }
 
 Invoke-Step 'boot test' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'build.ps1')) 'build'
+    # One boot, on the disk the build just made, with somebody at the keyboard.
+    #
+    # A fresh disk is a machine nobody has set up, and that is the right thing
+    # for a fresh disk to be: the wizard comes up and waits. So this answers it
+    # -- the same keys a person would press, through the same 8042 controller --
+    # and then, once the desktop has been up and its clients have finished,
+    # presses the key that ends the session.
+    #
+    # Both are needed and for different reasons. Without the first there is no
+    # desktop to test. Without the second the machine is still running when the
+    # timeout comes, because nothing else ends a session: a desktop whose last
+    # window closes stays a desktop, and every check below about processes
+    # having ended would be reading a machine mid-session.
+    #
+    # It has to be one boot rather than two, because half the markers below are
+    # about a machine's *first* boot -- the store being seeded from the image,
+    # `init` making its directory rather than finding it.
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'run.ps1'), '-Headless', '-Timeout', '600',
-        '-Until', 'compositor: composited every frame its clients drew') 'boot'
+        '-PressAfter', 'setup: this machine has not been set up;compositor: composited every frame its clients drew',
+        '-Press', 'ret ret n e x u s ret p a s s w o r d ret p a s s w o r d ret ret;f10',
+        '-Until', 'compositor: the session ended') 'boot'
 
     $log = Join-Path $BuildDir 'serial.log'
     if (-not (Test-Path $log)) { throw 'no serial output' }
@@ -219,6 +238,10 @@ Invoke-Step 'boot test' {
         'rectangle at (',
         'client: drew every frame into a surface it was given',
         'compositor: composited every frame its clients drew',
+        'compositor: every window has closed; the desktop is empty',
+        'compositor: the session ended',
+        'seconds since 1970',
+        'desktop: welcome, nexus',
         'repaints covered',
         'composites for',
         'shared pages made',
@@ -516,6 +539,11 @@ Invoke-Step 'network' {
 }
 
 Invoke-Step 'input' {
+    # The persistence stage above makes a fresh disk, which is a machine nobody
+    # has set up -- and this one needs a desktop to send keys and clicks at. So
+    # it is set up first. On a disk that is already configured this notices and
+    # does nothing.
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-input.ps1')) 'input tests'
 }
 

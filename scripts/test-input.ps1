@@ -105,130 +105,115 @@ try {
         # of input the hardware produces, not a position injected past the
         # driver.
         #
-        # Leftwards, far enough to leave the tile the keyboard left focused and
-        # land inside the other one -- but not so far that it ends up in the gap
-        # between them, where a click would prove the button arrived and nothing
-        # about what it landed on. The pointer starts in the middle of the
-        # rectangle, the tiles are a hundred and eighty pixels wide, and the gap
-        # is eight.
+        # Nothing below tracks where the pointer is. It drives it into a corner
+        # first, where the compositor clamps it, and moves a known distance from
+        # there -- which is the only way to be sure of a position on a machine
+        # whose every packet is a delta and some of which may be coalesced.
+        #
+        # The geometry it aims at is the compositor's: the whole display, two
+        # tiles side by side with a four-pixel gap, a fourteen-pixel title bar
+        # along the top of each, and a twenty-four-pixel strip along the bottom
+        # that belongs to the desktop.
+
+        # Park at the top left, then into the body of the first tile.
         Write-Host '==> Moving the pointer and clicking' -ForegroundColor Cyan
-        foreach ($step in 1..12) {
-            $writer.WriteLine('mouse_move -12 0')
-            Start-Sleep -Milliseconds 60
+        function Move-Pointer {
+            param([int]$Dx, [int]$Dy, [int]$Steps, [int]$Pause = 40)
+            foreach ($step in 1..$Steps) {
+                $writer.WriteLine("mouse_move $Dx $Dy")
+                Start-Sleep -Milliseconds $Pause
+            }
         }
+        # Far enough to reach the corner from anywhere on a 1920x1200 display.
+        function Reset-Pointer {
+            param([int]$Dx, [int]$Dy)
+            Move-Pointer -Dx $Dx -Dy $Dy -Steps 40 -Pause 25
+        }
+
+        Reset-Pointer -Dx -60 -Dy -60
+        Move-Pointer -Dx 60 -Dy 0 -Steps 5     # x about 300
+        Move-Pointer -Dx 0 -Dy 80 -Steps 5     # y about 400, inside the tile
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 200
         $writer.WriteLine('mouse_button 0')
         Start-Sleep -Milliseconds 200
 
-        # And carry a window. The pointer is inside the first tile, a little
-        # over a hundred pixels below its title bar -- the strip the compositor
-        # draws over the top of it, and the only part that can be taken hold of.
+        # Resize it first, while its corner is where the layout put it. The
+        # first tile starts four pixels in from the left and top and is half the
+        # display wide, so its grip -- the last twelve pixels of it -- is a
+        # little under a thousand across and a little above the strip. Driving
+        # into the bottom left corner and coming back up and right lands there,
+        # without this script having to know where the pointer was.
+        Write-Host '==> Resizing a window by its corner' -ForegroundColor Cyan
+        Reset-Pointer -Dx -60 -Dy 60
+        Move-Pointer -Dx 0 -Dy -33 -Steps 1    # up out of the strip, into the grip
+        Move-Pointer -Dx 95 -Dy 0 -Steps 10    # x about 950: the tile's right edge
+        Start-Sleep -Milliseconds 150
+        $writer.WriteLine('mouse_button 1')
+        Start-Sleep -Milliseconds 200
+        Move-Pointer -Dx -20 -Dy -16 -Steps 20
+        $writer.WriteLine('mouse_button 0')
+        Start-Sleep -Milliseconds 400
+
+        # And carry a window. The title bar is the only part that can be taken
+        # hold of, and it is fourteen pixels of the top of the tile -- so the
+        # pointer goes to the top of the display, where it clamps, and comes
+        # back down by ten.
         #
         # Negative is upwards here. QEMU's monitor takes screen coordinates and
         # its PS/2 emulation flips the sign on the way to the guest, because a
         # mouse reports Y increasing upwards and a screen has it increasing
         # downwards. Both flips are real and they are in different places.
         Write-Host '==> Carrying a window by its title bar' -ForegroundColor Cyan
-        foreach ($step in 1..9) {
-            $writer.WriteLine('mouse_move 0 -12')
-            Start-Sleep -Milliseconds 50
-        }
+        Reset-Pointer -Dx 0 -Dy -60
+        Move-Pointer -Dx 0 -Dy 5 -Steps 2      # y about 10, inside the bar
         $writer.WriteLine('mouse_button 1')
-        Start-Sleep -Milliseconds 150
-        # Rightwards and down, far enough that both the window and the pointer
-        # run into the far corner of the rectangle the compositor owns. Both
-        # clamp there, which is the point: after this the window is at a
-        # position this script knows without having tracked every step, and the
-        # pointer is sitting in its resize grip.
-        foreach ($step in 1..15) {
-            $writer.WriteLine('mouse_move 20 20')
-            Start-Sleep -Milliseconds 50
-        }
-        $writer.WriteLine('mouse_button 0')
         Start-Sleep -Milliseconds 200
-
-        # And resize it. The window is now hard against the far corner, so its
-        # grip is in the last twelve pixels of the rectangle -- and driving the
-        # pointer into that corner puts it there without this script having to
-        # track where either of them ended up.
-        Write-Host '==> Resizing a window by its corner' -ForegroundColor Cyan
-        foreach ($step in 1..10) {
-            $writer.WriteLine('mouse_move 40 40')
-            Start-Sleep -Milliseconds 40
-        }
-        # And back up out of the strip along the bottom. The pointer can go
-        # further down than a window can, because the strip is reserved -- so
-        # driving into the corner lands in the strip rather than in the window's
-        # grip, and this is the height of the strip back up.
-        $writer.WriteLine('mouse_move 0 -18')
-        Start-Sleep -Milliseconds 80
-        $writer.WriteLine('mouse_button 1')
-        Start-Sleep -Milliseconds 150
-        foreach ($step in 1..12) {
-            $writer.WriteLine('mouse_move -6 -5')
-            Start-Sleep -Milliseconds 60
-        }
+        # Down and to the right until both the window and the pointer run into
+        # the far corner. Both clamp there, which is the point: afterwards the
+        # window is somewhere this script knows without having tracked it.
+        Move-Pointer -Dx 40 -Dy 40 -Steps 45 -Pause 25
         $writer.WriteLine('mouse_button 0')
-        Start-Sleep -Milliseconds 400
+        Start-Sleep -Milliseconds 300
 
-        # And put a window away, then bring it back. The pointer is at the
-        # window's bottom-right corner, so its title bar is up and to the left;
-        # the window is a hundred or so tall after the resize, so going up that
-        # far and a little left lands on the bar.
+        # And put a window away. The second tile was never moved, so its title
+        # bar is still along the top of the right-hand half of the display.
         Write-Host '==> Minimising a window and restoring it' -ForegroundColor Cyan
-        # Up to the top of the rectangle, where the pointer clamps, and a little
-        # left so it is over the window rather than past its right edge. Then
-        # twenty pixels down, which is inside the title bar of a window sitting
-        # at the top of the area windows may occupy.
-        foreach ($step in 1..10) {
-            $writer.WriteLine('mouse_move -8 -40')
-            Start-Sleep -Milliseconds 40
-        }
-        foreach ($step in 1..5) {
-            $writer.WriteLine('mouse_move 0 4')
-            Start-Sleep -Milliseconds 40
-        }
+        Reset-Pointer -Dx -60 -Dy -60
+        Move-Pointer -Dx 60 -Dy 0 -Steps 20    # x about 1200, the second tile
+        Move-Pointer -Dx 0 -Dy 5 -Steps 2      # y about 10, its title bar
         # The right button, which is the one that puts a window away.
         $writer.WriteLine('mouse_button 2')
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Milliseconds 300
 
-        # Its tab is in the strip along the very bottom, which now belongs to
-        # the desktop: the compositor no longer knows what a tab is. It reports
+        # Its tab is in the strip along the very bottom, which belongs to the
+        # desktop: the compositor no longer knows what a tab is. It reports
         # where the press landed inside the strip, the desktop decides that was
         # a tab, and it asks for the window back. Three processes for one click,
         # and the point is that the middle one is replaceable.
         #
-        # Bottom-left corner, where the pointer clamps, then right past the
-        # button that starts a program -- seventy-two pixels of it, plus the
-        # gaps -- and into the first window's tab.
+        # Bottom left, where the pointer clamps, then up into the tabs' own
+        # height and right past the button that starts a program.
         Write-Host '==> Bringing a window back from the desktop' -ForegroundColor Cyan
-        foreach ($step in 1..10) {
-            $writer.WriteLine('mouse_move -40 40')
-            Start-Sleep -Milliseconds 40
-        }
-        foreach ($step in 1..8) {
-            $writer.WriteLine('mouse_move 15 0')
-            Start-Sleep -Milliseconds 40
-        }
+        Reset-Pointer -Dx -60 -Dy 60
+        Move-Pointer -Dx 0 -Dy -8 -Steps 1     # inside the tabs, not below them
+        Move-Pointer -Dx 60 -Dy 0 -Steps 10    # x about 600: the second tab
         $writer.WriteLine('mouse_button 1')
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')
-        Start-Sleep -Milliseconds 300
+        Start-Sleep -Milliseconds 400
 
         # And back left onto the button that starts a program. Nothing on this
         # machine could do that before: every process that has ever run was
         # started at boot or by another program deciding to. This is a person
         # pressing something.
         Write-Host '==> Starting a program from the desktop' -ForegroundColor Cyan
-        foreach ($step in 1..6) {
-            $writer.WriteLine('mouse_move -15 0')
-            Start-Sleep -Milliseconds 40
-        }
+        Move-Pointer -Dx -60 -Dy 0 -Steps 12   # back to the left edge
+        Move-Pointer -Dx 30 -Dy 0 -Steps 1     # x about 30: the launcher
         $writer.WriteLine('mouse_button 1')
-        Start-Sleep -Milliseconds 250
+        Start-Sleep -Milliseconds 300
         $writer.WriteLine('mouse_button 0')
 
         # Starting a program means reading an ELF off the disk and building an

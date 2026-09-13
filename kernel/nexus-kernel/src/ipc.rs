@@ -298,7 +298,17 @@ impl Drop for Endpoint {
 ///
 /// A bound rather than a policy: the size comes from a process, and every byte
 /// of it is physical memory that process is asking the kernel to set aside.
-pub const MAX_MEMORY_OBJECT: usize = 1 << 20;
+///
+/// Sixteen megabytes. It was one, which was enough for every window that lived
+/// in a corner of the screen and not enough for the first one that filled it:
+/// a surface at 1920 by 1200 is nine megabytes of pixels. A bound that is too
+/// small does not fail safely -- it fails as a program that will not start,
+/// with nothing on screen to say why.
+///
+/// It is still a bound, and it is still there for the reason it always was: the
+/// number comes from a process, and without a limit a process could ask the
+/// kernel to set aside all of memory one page at a time.
+pub const MAX_MEMORY_OBJECT: usize = 16 << 20;
 
 /// Memory that more than one process can see.
 ///

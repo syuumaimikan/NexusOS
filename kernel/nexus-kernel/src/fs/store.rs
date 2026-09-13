@@ -501,6 +501,11 @@ fn is_open(inode: u32) -> bool {
     OPEN.lock().contains_key(&inode)
 }
 
+/// How many handles name `inode`.
+fn holders(inode: u32) -> u32 {
+    OPEN.lock().get(&inode).copied().unwrap_or(0)
+}
+
 /// Put a file into the store, under a directory, if it is not already there.
 ///
 /// What a system image does to the filesystem it is installing onto. The
@@ -528,6 +533,50 @@ pub fn seed(directory: &str, name: &str, contents: &[u8]) -> Result<bool, StoreE
     let file = create_child(&folder, name, false)?;
     write_node(&file, contents)?;
     Ok(true)
+}
+
+/// Put a file into the store under a directory, replacing what was there.
+///
+/// The counterpart to [`seed`], and the difference is the whole point of having
+/// two: `seed` is for something that arrived with the image and whose copy on
+/// the store may since have been changed by somebody entitled to change it,
+/// while this is for a fact about the machine *now* -- an address it was just
+/// leased, say -- where what was there before is out of date by definition.
+///
+/// # Errors
+///
+/// If the store is not mounted, or the directory or file cannot be made.
+pub fn replace(directory: &str, name: &str, contents: &[u8]) -> Result<(), StoreError> {
+    let root = root()?;
+    let folder = match open_child(&root, directory) {
+        Ok(node) => node,
+        Err(_) => create_child(&root, directory, true)?,
+    };
+    // Removed first: the filesystem has no truncate, so a shorter file written
+    // over a longer one would keep the old ending.
+    if open_child(&folder, name).is_ok() {
+        remove_child(&folder, name)?;
+    }
+    let file = create_child(&folder, name, false)?;
+    write_node(&file, contents)
+}
+
+/// A handle to one directory below the root, made if it is not there.
+///
+/// What the kernel hands to a program that has business in one place and none
+/// anywhere else. Made rather than refused when absent, because the first boot
+/// of a fresh machine is exactly when the settings directory does not exist yet
+/// and is exactly when something needs to write to it.
+///
+/// # Errors
+///
+/// If the store is not mounted, or the directory cannot be made.
+pub fn directory(name: &str) -> Result<Arc<Node>, StoreError> {
+    let root = root()?;
+    match open_child(&root, name) {
+        Ok(node) => Ok(node),
+        Err(_) => create_child(&root, name, true),
+    }
 }
 
 /// A handle to the root directory.
@@ -587,6 +636,19 @@ pub fn remove_child(parent: &Node, name: &str) -> Result<(), StoreError> {
         volume.lookup(parent.inode, name)?
     };
     if is_open(entry.inode) {
+        // Said rather than silent. "Busy" reaches a program as one error code
+        // among several, and from inside that program it is indistinguishable
+        // from a disk that is broken -- so the one fact that would explain it,
+        // which only the kernel has, is put where somebody can read it.
+        //
+        // Not a fault in itself: a program removing a file it still holds open
+        // is being told to close it first, and `init` asks for exactly this on
+        // purpose to check that the refusal happens.
+        crate::kprintln!(
+            "[fs  ] \"{name}\" cannot be removed yet: inode {} is open by {} handle(s)",
+            entry.inode,
+            holders(entry.inode)
+        );
         return Err(StoreError::Busy);
     }
 

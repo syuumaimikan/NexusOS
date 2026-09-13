@@ -553,10 +553,14 @@ pub fn sleep_ms(milliseconds: u64) {
 /// in `sleep_ms`: between here and the stack switch the thread is still
 /// executing, and a waker acting on the announcement in that window would queue
 /// a thread that has not saved its stack pointer.
-pub(super) fn mark_blocked(id: ThreadId) {
+/// `until_tick` is when the clock should wake it regardless, if ever. A thread
+/// blocked with a deadline is woken by `wake_sleepers` exactly as a sleeper is,
+/// and by its queue exactly as a blocked thread is; the first of the two to
+/// arrive wins and the other finds it already awake.
+pub(super) fn mark_blocked(id: ThreadId, until_tick: Option<u64>) {
     let mut scheduler = SCHEDULER.lock();
     if let Some(thread) = scheduler.threads.get_mut(&id) {
-        thread.state = ThreadState::Blocked;
+        thread.state = ThreadState::Blocked { until_tick };
         thread.switching_out = true;
     }
 }
@@ -572,7 +576,7 @@ pub(super) fn wake_blocked(id: ThreadId) {
     let Some(thread) = scheduler.threads.get_mut(&id) else {
         return;
     };
-    if !matches!(thread.state, ThreadState::Blocked) {
+    if !matches!(thread.state, ThreadState::Blocked { .. }) {
         // Already awake: two wakers raced, or the thread was woken and has not
         // reached its condition check yet. Both are ordinary.
         return;
@@ -866,7 +870,7 @@ pub fn stats() -> SchedulerStats {
         match thread.state {
             ThreadState::Ready => ready += 1,
             ThreadState::Sleeping { .. } => sleeping += 1,
-            ThreadState::Blocked => blocked += 1,
+            ThreadState::Blocked { .. } => blocked += 1,
             // Counted with the finished: it is done, and the only thing left is
             // the processor it is leaving noticing.
             ThreadState::Finished | ThreadState::Exiting => finished += 1,

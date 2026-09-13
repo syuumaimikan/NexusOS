@@ -29,6 +29,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-config"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-crypto"
 version = "0.1.0"
 
@@ -86,10 +90,12 @@ name = "nexus-kernel"
 version = "0.1.0"
 dependencies = [
  "nexus-abi",
+ "nexus-config",
  "nexus-font",
  "nexus-i18n",
  "nexus-mm",
  "nexus-net",
+ "nexus-time",
 ]
 
 [[package]]
@@ -123,13 +129,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "nexus-shell"
+name = "nexus-setup"
 version = "0.1.0"
 dependencies = [
+ "nexus-config",
+ "nexus-crypto",
  "nexus-i18n",
+ "nexus-time",
  "nexus-ui",
  "nexus-user",
 ]
+
+[[package]]
+name = "nexus-shell"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-i18n",
+ "nexus-time",
+ "nexus-ui",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-time"
+version = "0.1.0"
 
 [[package]]
 name = "nexus-ui"

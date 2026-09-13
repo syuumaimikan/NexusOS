@@ -1,13 +1,13 @@
 [package]
-name = "nexus-shell"
+name = "nexus-setup"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "The desktop: the strip along the bottom, and what starting a program looks like."
+description = "The screen a machine shows the first time it is turned on."
 
 [[bin]]
-name = "nexus-shell"
+name = "nexus-setup"
 path = "src/main.rs"
 test = false
 
@@ -17,3 +17,4 @@ nexus-ui = { path = "../nexus-ui" }
 nexus-i18n = { path = "../../shared/nexus-i18n" }
 nexus-time = { path = "../../shared/nexus-time" }
 nexus-config = { path = "../../shared/nexus-config" }
+nexus-crypto = { path = "../../shared/nexus-crypto" }

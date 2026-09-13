@@ -131,6 +131,15 @@ const SPAWNER: Handle = Handle(2);
 const KEYS: Handle = Handle(3);
 /// The channel pointer movements arrive on.
 const POINTER: Handle = Handle(4);
+/// The directory the system's settings live in.
+///
+/// Never read here. This program's whole business is the display, and what it
+/// does with this handle is hand it to the one program that has business in it:
+/// the setup wizard, on a machine that has never been configured. Holding a
+/// handle in order to pass it on is a real thing to hold -- the alternative is
+/// the wizard asking the kernel for the filesystem, which is ambient authority
+/// with more steps.
+const SETTINGS: Handle = Handle(5);
 
 /// The keys this program gives the keyboard and the pointer in its wait set.
 ///
@@ -210,6 +219,8 @@ mod pointer {
 /// someone typed into a window.
 mod key {
     pub const TAB: u8 = 5;
+    /// A function key, numbered from one.
+    pub const FUNCTION: u8 = 6;
     /// Not a key: the interface language changed, and this is what to.
     ///
     /// Passed to the desktop, which draws text, and to nobody else. It arrives
@@ -241,6 +252,13 @@ mod desk {
     pub const HIDE: &[u8] = b"hide";
     /// Start another program.
     pub const OPEN: &[u8] = b"open";
+    /// End the session.
+    ///
+    /// The desktop asks; this program does it. Which is the right way round: a
+    /// dock that could not end a session would be a machine with no way out
+    /// except the power switch, and a dock that ended it *itself* would be a
+    /// dock deciding when the display stops.
+    pub const QUIT: &[u8] = b"quit";
 
     /// What state a window can be in, as the desktop is told it.
     pub const GONE: u8 = 0;
@@ -257,12 +275,64 @@ const SURFACES_AT: usize = 0x0000_0000_3000_0000;
 ///
 /// Twice what one surface may be, because a resize has the old and the new
 /// mapped at once for the length of the copy between them.
-const SURFACE_STRIDE: usize = 0x0010_0000;
+///
+/// Thirty-two megabytes. It was one, which was ample while this program owned a
+/// rectangle in the corner of the screen and nowhere near enough the moment it
+/// owned the screen: a window filling 1920 by 1200 is nine megabytes of pixels,
+/// and what a limit that is too small looks like is a program that will not
+/// start with no hint as to why.
+///
+/// Address space, not memory. Six of these is a hundred and ninety-two
+/// megabytes of *addresses* reserved in a space that has terabytes of them; the
+/// pages behind a surface are allocated when the surface is made and are as
+/// large as the window actually is.
+const SURFACE_STRIDE: usize = 0x0200_0000;
 /// The largest a surface may be, which is what bounds how large a window is.
 const MAX_SURFACE: usize = SURFACE_STRIDE / 2;
 
+/// The interface language the kernel last announced, or `NO_LANGUAGE`.
+///
+/// Remembered because it is a fact about the machine and it is announced as an
+/// event. A program that starts after the announcement -- the desktop, on a
+/// machine that has just been through its first-run setup -- would otherwise
+/// never hear it: the wizard was running when the kernel said it, and the
+/// wizard is not the desktop. So the last one said is kept and passed on to
+/// whoever starts next.
+static LANGUAGE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(NO_LANGUAGE);
+
+/// What [`LANGUAGE`] holds before anything has been announced.
+const NO_LANGUAGE: u32 = u32::MAX;
+
+/// Note what the kernel said the interface language is now.
+fn remember_language(message: &[u8]) {
+    if message.len() >= 5 && message[0] == key::LANGUAGE {
+        LANGUAGE.store(read_u32(message, 1), core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Tell a client the interface language, if one has been announced.
+fn tell_language(channel: Handle) {
+    let index = LANGUAGE.load(core::sync::atomic::Ordering::Relaxed);
+    if index == NO_LANGUAGE {
+        return;
+    }
+    let mut forward = [0u8; desk::LANGUAGE.len() + 4];
+    forward[..desk::LANGUAGE.len()].copy_from_slice(desk::LANGUAGE);
+    forward[desk::LANGUAGE.len()..].copy_from_slice(&index.to_le_bytes());
+    nexus_user::send(channel, &forward, &[]).ok();
+}
+
+/// Which function key ends the session.
+///
+/// F10, because F1 is already the language. There is no modifier here to hang
+/// it off -- the keyboard decoder reports the key and not the shift state --
+/// so it is a key nothing else uses rather than a chord.
+const LEAVE_KEY: u32 = 10;
+
 /// The program this one gives surfaces to.
 const CLIENT: &[u8] = b"BIN/CLIENT.ELF";
+/// The one it runs instead, once, on a machine nobody has set up.
+const SETUP: &[u8] = b"BIN/SETUP.ELF";
 /// The program that draws the strip along the bottom and says what a click in
 /// it means.
 const SHELL: &[u8] = b"BIN/SHELL.ELF";
@@ -482,6 +552,8 @@ struct Screen {
     bytes_per_pixel: u32,
     screen_width: u32,
     screen_height: u32,
+    /// Whether this machine has been through its first-run setup.
+    configured: bool,
 }
 
 impl Screen {
@@ -578,6 +650,27 @@ extern "C" fn main() -> ! {
         finish();
     };
 
+    // Everything, once, before anything else draws. What was on the display a
+    // moment ago is whatever the kernel last painted, and it is not this
+    // program's -- leaving it visible under the parts nothing has covered yet
+    // is a screen showing two systems at once.
+    fill(
+        &screen,
+        screen.x,
+        screen.y,
+        screen.width,
+        screen.height,
+        BACKGROUND,
+    );
+
+    // A machine nobody has set up gets one window and one program, filling the
+    // rectangle this owns. Nothing else is started until it has finished: there
+    // is no desktop to put anything on until somebody has said what language it
+    // is in and who it belongs to.
+    if !screen.configured {
+        run_setup(&screen);
+    }
+
     // Two tiles side by side, with a gap around and between them. Laid out
     // before any client exists, because a client is told the size of its
     // surface and cannot be told twice.
@@ -602,6 +695,22 @@ extern "C" fn main() -> ! {
     // list of windows it is sent describes something that already exists --
     // a dock drawn before there was anything to put in it would show an empty
     // machine for as long as it took the first client to appear.
+    //
+    // Given the settings directory too, read-only: the strip shows a clock and
+    // whose machine this is, and both are in that file. Read and transfer, not
+    // write -- a dock that could rewrite the machine's settings is a dock that
+    // can lock somebody out of it, and drawing a clock does not need that.
+    let for_shell = nexus_user::duplicate(
+        SETTINGS,
+        nexus_user::rights::READ | nexus_user::rights::TRANSFER,
+    );
+    let for_shell = match for_shell {
+        Ok(handle) => [handle],
+        Err(_) => {
+            failed("compositor: FAILED: could not pass the settings on to the desktop");
+            finish();
+        }
+    };
     let shell = start_program(
         SHELL,
         CLIENTS,
@@ -610,7 +719,11 @@ extern "C" fn main() -> ! {
         screen.width,
         TASKBAR,
         CLIENTS as u32,
+        &for_shell,
     );
+    if let Some(shell) = &shell {
+        tell_language(shell.channel);
+    }
     let mut shell = match shell {
         Some(shell) => Some(shell),
         None => {
@@ -621,6 +734,137 @@ extern "C" fn main() -> ! {
 
     serve(&screen, &mut tiles, &mut shell);
     finish()
+}
+
+/// Run the first-run wizard, and wait for it.
+///
+/// One client, the whole rectangle, and nothing else running. It is given the
+/// settings directory as well as its surface -- the only client that ever is,
+/// and the reason this program holds that handle at all.
+fn run_setup(screen: &Screen) {
+    let Ok(theirs) = nexus_user::duplicate(
+        SETTINGS,
+        nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+    ) else {
+        failed("compositor: FAILED: could not pass on the settings directory");
+        return;
+    };
+
+    let Some(tile) = start_program(
+        SETUP,
+        // The slot after every window, so its surface does not sit where a
+        // client's will go: the wizard finishes and the windows start, and two
+        // mappings at one address would be one of them writing over the other.
+        CLIENTS + 1,
+        screen.x + GAP,
+        screen.y + GAP,
+        screen.width - GAP * 2,
+        screen.usable_height() - GAP * 2,
+        0,
+        &[theirs],
+    ) else {
+        failed("compositor: FAILED: the setup program would not start");
+        return;
+    };
+
+    nexus_user::log("compositor: this machine has not been set up; showing the wizard").ok();
+
+    // Its own little event loop, because none of the rest of this program's
+    // machinery exists yet: no desktop, no other windows, no order to keep. Two
+    // things are watched, its channel and its process, so that a wizard that
+    // stops is noticed as readily as one that draws.
+    let Ok(set) = nexus_user::wait_set() else {
+        failed("compositor: FAILED: could not make a wait set");
+        return;
+    };
+    const DREW: u64 = 1;
+    const ENDED: u64 = 2;
+    const TYPED: u64 = 3;
+    if nexus_user::watch(set, tile.channel, DREW).is_err()
+        || nexus_user::watch(set, tile.process, ENDED).is_err()
+        || nexus_user::watch(set, KEYS, TYPED).is_err()
+    {
+        failed("compositor: FAILED: could not watch the wizard");
+        return;
+    }
+
+    let mut keys = [0u64; 3];
+    let mut frames = 0u32;
+    // Generous: somebody is typing, and reading. Bounded all the same, because
+    // a wizard that stopped drawing without ending would otherwise hold the
+    // machine before anything else has started.
+    for _ in 0..65_536 {
+        let Ok(count) = nexus_user::wait_any(set, &mut keys) else {
+            break;
+        };
+        if count == 0 {
+            break;
+        }
+        let mut finished = false;
+        for key in &keys[..count] {
+            match *key {
+                ENDED => finished = true,
+                // Whatever the keyboard sent, straight to the wizard: it is the
+                // only thing running, so there is no routing decision to make.
+                //
+                // Taken from the set rather than read on spec. A plain receive
+                // here blocks until a key arrives, and the wizard finishing is
+                // not a key -- so this loop would sit waiting for a keystroke
+                // for a program that had already gone, and the desktop would
+                // never start. It did exactly that.
+                TYPED => {
+                    let mut message = [0u8; 32];
+                    let mut none = [Handle(0); 1];
+                    match nexus_user::receive(KEYS, &mut message, &mut none) {
+                        Ok(received) if received.bytes > 0 => {
+                            remember_language(&message[..received.bytes]);
+                            if nexus_user::send(tile.channel, &message[..received.bytes], &[])
+                                .is_err()
+                            {
+                                finished = true;
+                            }
+                        }
+                        // The kernel has stopped sending. Not a failure: it
+                        // means there is no keyboard, and the wizard can still
+                        // be finished from one that appears later.
+                        _ => {
+                            nexus_user::unwatch(set, TYPED).ok();
+                        }
+                    }
+                }
+                _ => {
+                    let mut message = [0u8; 32];
+                    let mut none = [Handle(0); 1];
+                    match nexus_user::receive(tile.channel, &mut message, &mut none) {
+                        Ok(_) => {
+                            frames += 1;
+                            composite(screen, &tile);
+                            if nexus_user::send(tile.channel, b"shown", &[]).is_err() {
+                                finished = true;
+                            }
+                        }
+                        Err(_) => finished = true,
+                    }
+                }
+            }
+        }
+        if finished {
+            break;
+        }
+    }
+
+    nexus_user::log(&alloc::format!(
+        "compositor: the wizard drew {frames} frames and finished"
+    ))
+    .ok();
+
+    // Everything it had goes back, including the address space its surface was
+    // mapped at -- the windows that come next need it.
+    nexus_user::memory_unmap(tile.surface, tile.mapped_at).ok();
+    nexus_user::close(tile.surface).ok();
+    nexus_user::close(tile.channel).ok();
+    nexus_user::close(tile.process).ok();
+    nexus_user::close(set).ok();
 }
 
 /// Take the display from the kernel.
@@ -641,7 +885,7 @@ fn take_the_display() -> Option<Screen> {
             return None;
         }
     };
-    if received.handles != 1 || received.bytes < 32 {
+    if received.handles != 1 || received.bytes < 36 {
         failed("compositor: FAILED: no framebuffer came with the message");
         return None;
     }
@@ -655,6 +899,10 @@ fn take_the_display() -> Option<Screen> {
         bytes_per_pixel: read_u32(&buffer, 20),
         screen_width: read_u32(&buffer, 24),
         screen_height: read_u32(&buffer, 28),
+        // Decided by the kernel, which is the only thing that can read the
+        // store before a program runs. One bit: what the setting *says* is the
+        // business of whoever shows it.
+        configured: received.bytes >= 36 && read_u32(&buffer, 32) != 0,
     };
 
     if screen.bytes_per_pixel != 4 {
@@ -701,6 +949,7 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
         width,
         height,
         0x40u32 + index as u32 * 0x70,
+        &[],
     )
 }
 
@@ -720,6 +969,12 @@ fn start_program(
     width: u32,
     height: u32,
     third: u32,
+    // Anything else the program is to be given, sent with its surface rather
+    // than after it. In the same message on purpose: a program that had to read
+    // two would have to know there were two, and one that was started without
+    // the second would block for ever waiting for something nobody was going to
+    // send.
+    also: &[nexus_user::Handle],
 ) -> Option<Tile> {
     let bytes = width as usize * height as usize * 4;
     if bytes > MAX_SURFACE {
@@ -785,7 +1040,10 @@ fn start_program(
     // client, and there is nothing for it to index into.
     message[12..16].copy_from_slice(&(index as u32).to_le_bytes());
 
-    if nexus_user::send(channel, &message, &[theirs]).is_err() {
+    let mut handed = alloc::vec::Vec::with_capacity(1 + also.len());
+    handed.push(theirs);
+    handed.extend_from_slice(also);
+    if nexus_user::send(channel, &message, &handed).is_err() {
         failed("compositor: FAILED: could not give a client its surface");
         return None;
     }
@@ -908,14 +1166,32 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
         everything(screen),
     );
 
+    // Whether somebody has asked the session to end, and whether the summary
+    // of what was composited has been said. They are different moments: the
+    // numbers are worth having when the last window closes, which on a machine
+    // somebody is using is the middle of the session and not the end of it.
+    let mut leaving = false;
+    let mut summarised = false;
+
     // Bounded, so a client that neither draws nor dies cannot hang the machine.
-    // The bound is generous: it is a backstop and not a schedule.
-    for _ in 0..1024 {
-        // Every window that ever existed has ended. Not a count against
-        // `CLIENTS`, because most of the slots are empty until somebody starts
-        // something into one, and a compositor waiting for four deaths out of
-        // two clients would wait forever.
-        if ended > 0 && tiles.iter().flatten().all(|tile| !tile.live) {
+    // The bound is a backstop and not a schedule, and it is large because this
+    // is a desktop session: a person who uses a machine for an afternoon
+    // generates a great many wake-ups, and a compositor that stopped after a
+    // thousand of them would be a machine that logs itself out at lunchtime.
+    for _ in 0..16_000_000u64 {
+        // The last window has closed. That used to end the session, which was
+        // the wrong answer to the right observation: a desktop with nothing on
+        // it is a desktop, not a finished machine. What it ends is the run of
+        // work worth reporting on, so the numbers are said here, once, and the
+        // session carries on with an empty screen and a strip that can start
+        // something new.
+        if ended > 0 && !summarised && tiles.iter().flatten().all(|tile| !tile.live) {
+            summarised = true;
+            summarise(screen, composited, batched);
+            nexus_user::log("compositor: every window has closed; the desktop is empty").ok();
+        }
+
+        if leaving {
             break;
         }
 
@@ -931,8 +1207,13 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
         for key in &keys[..count] {
             if *key == KEY_KEYBOARD {
                 match read_key(set, tiles, shell, &mut focus) {
-                    Some(sent) => {
-                        forwarded += sent;
+                    Some(typed) => {
+                        if matches!(typed, Typed::Forwarded) {
+                            forwarded += 1;
+                        }
+                        if matches!(typed, Typed::Leave) {
+                            leaving = true;
+                        }
                         announce(shell, tiles, focus, &mut reported);
                         // Everything, because a key may have moved the focus,
                         // and a focus ring is on two windows at once.
@@ -972,6 +1253,14 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                 // commands move windows, which is everything.
                 let asked = match read_shell(screen, set, tiles, shell, &mut focus, &mut order) {
                     Some(Asked::Nothing) => Region::nothing(),
+                    Some(Asked::Ended) => {
+                        // Not `return`: what is left of this turn round the
+                        // loop is the composite of whatever else arrived with
+                        // it, and a session that stopped mid-frame would leave
+                        // half a repaint on the display it is handing back.
+                        leaving = true;
+                        Region::nothing()
+                    }
                     Some(Asked::Drew) => {
                         composited += 1;
                         strip(screen)
@@ -1088,23 +1377,12 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
         return;
     }
 
-    // What damage tracking bought, in the only terms that mean anything: how
-    // many pixels were repainted, against how many a repaint of the whole
-    // rectangle each time would have cost.
-    let repaints = REPAINTS.load(core::sync::atomic::Ordering::Relaxed);
-    let damaged = DAMAGED.load(core::sync::atomic::Ordering::Relaxed);
-    let whole = u64::from(screen.width) * u64::from(screen.height) * repaints.max(1);
-    nexus_user::log(&alloc::format!(
-        "compositor: {repaints} repaints covered {damaged} pixels of a possible {whole},          {} written",
-        clip::written()
-    ))
-    .ok();
-    nexus_user::log(&alloc::format!(
-        "compositor: {batched} composites for {} things that changed",
-        composited + moved + forwarded + commanded
-    ))
-    .ok();
-    nexus_user::log("compositor: composited every frame its clients drew").ok();
+    // Unless the desktop emptied first and it was said there. Once either way:
+    // a summary printed twice is two sets of numbers for one session, and
+    // whoever reads the log has to work out which is which.
+    if !summarised {
+        summarise(screen, composited, batched);
+    }
     if moved > 0 {
         nexus_user::log("compositor: moved a pointer of its own across the display").ok();
     }
@@ -1117,12 +1395,47 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
     if opened > 0 {
         nexus_user::log("compositor: started a program because the desktop asked").ok();
     }
+    nexus_user::log("compositor: the session ended").ok();
+}
+
+/// Say what compositing cost, in the only terms that mean anything.
+///
+/// How many pixels were actually repainted, against how many repainting the
+/// whole rectangle every time would have cost. That ratio is the whole case for
+/// damage tracking, and a number nobody prints is a number nobody checks.
+fn summarise(screen: &Screen, composited: u32, batched: u32) {
+    let repaints = REPAINTS.load(core::sync::atomic::Ordering::Relaxed);
+    let damaged = DAMAGED.load(core::sync::atomic::Ordering::Relaxed);
+    let whole = u64::from(screen.width) * u64::from(screen.height) * repaints.max(1);
+    nexus_user::log(&alloc::format!(
+        "compositor: {repaints} repaints covered {damaged} pixels of a possible {whole},          {} written",
+        clip::written()
+    ))
+    .ok();
+    nexus_user::log(&alloc::format!(
+        "compositor: {batched} composites for {composited} things that changed"
+    ))
+    .ok();
+    nexus_user::log("compositor: composited every frame its clients drew").ok();
+}
+
+/// What reading from the keyboard turned out to be.
+enum Typed {
+    /// Nothing a client has to see: a language change, a focus move, a key for
+    /// a window that has gone.
+    Nothing,
+    /// Sent on to whoever has focus.
+    Forwarded,
+    /// The key that ends the session.
+    Leave,
 }
 
 /// What reading from the desktop turned out to be.
 enum Asked {
     /// Nothing this program has to act on.
     Nothing,
+    /// It asked for the session to end.
+    Ended,
     /// It drew its strip.
     Drew,
     /// It asked for something and a window changed.
@@ -1207,6 +1520,11 @@ fn read_shell(
 
     if message == desk::OPEN {
         return open_window(screen, set, tiles, focus, order);
+    }
+
+    if message == desk::QUIT {
+        nexus_user::log("compositor: the desktop asked to end the session").ok();
+        return Some(Asked::Ended);
     }
 
     if message.len() >= 8 && (message.starts_with(desk::SHOW) || message.starts_with(desk::HIDE)) {
@@ -1301,14 +1619,14 @@ fn read_key(
     tiles: &mut [Option<Tile>; CLIENTS],
     shell: &mut Option<Tile>,
     focus: &mut usize,
-) -> Option<u32> {
+) -> Option<Typed> {
     let mut message = [0u8; 32];
     let mut none = [Handle(0); 1];
     let Ok(received) = nexus_user::receive(KEYS, &mut message, &mut none) else {
         // The kernel has stopped sending. Not a failure: it means there is no
         // keyboard any more, and there is still a screen to composite.
         nexus_user::unwatch(set, KEY_KEYBOARD).ok();
-        return Some(0);
+        return Some(Typed::Nothing);
     };
     if received.bytes < key::SIZE {
         failed("compositor: FAILED: a key arrived in the wrong shape");
@@ -1320,13 +1638,26 @@ fn read_key(
     // drawing a gradient has nothing to do with it, and forwarding it as though
     // it were a keystroke would put a byte nobody expects into every window.
     if message[0] == key::LANGUAGE {
+        remember_language(&message[..key::SIZE]);
         if let Some(shell) = shell {
             let mut forward = [0u8; desk::LANGUAGE.len() + 4];
             forward[..desk::LANGUAGE.len()].copy_from_slice(desk::LANGUAGE);
             forward[desk::LANGUAGE.len()..].copy_from_slice(&message[1..5]);
             nexus_user::send(shell.channel, &forward, &[]).ok();
         }
-        return Some(0);
+        return Some(Typed::Nothing);
+    }
+
+    // The way out from a keyboard.
+    //
+    // A machine with no pointer still has to be able to finish, and a session
+    // that could only be ended by clicking is a session somebody with a broken
+    // mouse cannot leave. Not forwarded to whoever has focus: it is addressed
+    // to the session, and a client that saw it would be a client that could be
+    // confused into thinking it was typed at it.
+    if message[0] == key::FUNCTION && read_u32(&message, 1) == LEAVE_KEY {
+        nexus_user::log("compositor: somebody asked to end the session").ok();
+        return Some(Typed::Leave);
     }
 
     if message[0] == key::TAB {
@@ -1347,21 +1678,21 @@ fn read_key(
         .ok();
         // The caller repaints; the ring follows the focus rather than waiting
         // for a client to draw.
-        return Some(0);
+        return Some(Typed::Nothing);
     }
 
     let Some(Some(tile)) = tiles.get_mut(*focus) else {
-        return Some(0);
+        return Some(Typed::Nothing);
     };
     if !tile.live {
-        return Some(0);
+        return Some(Typed::Nothing);
     }
     if nexus_user::send(tile.channel, &message[..key::SIZE], &[]).is_err() {
         // It has gone. Ordinary, and the process key will say so.
-        return Some(0);
+        return Some(Typed::Nothing);
     }
     tile.keys += 1;
-    Some(1)
+    Some(Typed::Forwarded)
 }
 
 /// Read whatever the mouse sent, and act on it.

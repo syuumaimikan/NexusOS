@@ -270,6 +270,13 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
 /// Spawn the long-lived threads and hand the processor over to them.
 fn start_system_threads() {
     display::start_thread();
+    // The wall clock. After the timer, because what it records is a moment
+    // *and* the tick it was read at, and before anything that wants to know
+    // what day it is.
+    // SAFETY: called once, and nothing else on this system touches the CMOS
+    // ports.
+    unsafe { drivers::rtc::init() };
+
     input::start_thread();
 
     // And the network, which has to be a thread: getting an address means

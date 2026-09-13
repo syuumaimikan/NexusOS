@@ -45,6 +45,14 @@ param(
     [switch]$Headless,
     [int]$Timeout = 20,
     [string]$Until = '',
+    # Batches of keys, separated by ';', each batch a space-separated list of
+    # QEMU key names. One string rather than an array because these cross a
+    # process boundary from `test.ps1`, and an array of values with spaces in
+    # them does not survive that intact.
+    [string]$Press = '',
+    # One marker per batch, in the same order and with the same separator: each
+    # batch is sent when its marker appears in the serial log.
+    [string]$PressAfter = '',
     [string]$Memory = '1G',
     [switch]$Release,
     [switch]$Gdb
@@ -97,9 +105,39 @@ if (-not (Test-Path $FirmwareVars)) {
 
 if (Test-Path $SerialLog) { Remove-Item $SerialLog -Force }
 
+# A monitor, only when there are keys to send. The session on this machine
+# ends when somebody ends it -- there is no other way out, by design -- so a
+# headless run that wants to see the end of one has to press the key a person
+# would.
+$Batches = @($Press -split ';' | Where-Object { $_.Trim() })
+$Markers = @($PressAfter -split ';' | Where-Object { $_.Trim() })
+$MonitorPort = 0
+if ($Batches.Count -gt 0) { $MonitorPort = Get-Random -Minimum 26000 -Maximum 28000 }
+if ($Markers.Count -ne 0 -and $Markers.Count -ne $Batches.Count) {
+    throw '-PressAfter must name one marker per -Press batch, or none at all'
+}
+
+# Send one batch of keys through QEMU's monitor, spaced out: what is being
+# exercised is that the path works, not how fast it is, and a dropped key would
+# otherwise be blamed on the queue.
+function Send-Keys {
+    param([string]$Keys, [int]$Port)
+    $client = New-Object System.Net.Sockets.TcpClient('127.0.0.1', $Port)
+    try {
+        $writer = New-Object System.IO.StreamWriter($client.GetStream())
+        $writer.AutoFlush = $true
+        foreach ($key in ($Keys -split ' ' | Where-Object { $_ })) {
+            $writer.WriteLine("sendkey $key")
+            Start-Sleep -Milliseconds 220
+        }
+    } finally {
+        $client.Close()
+    }
+}
+
 $QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCodeLocal -FirmwareVars $FirmwareVars -SerialLog $SerialLog `
-    -Memory $Memory
+    -Memory $Memory -MonitorPort $MonitorPort
 $QemuArgs += @('-d', 'guest_errors')
 
 if ($Headless) {
@@ -121,11 +159,32 @@ if ($Headless) {
     if ($Until) {
         $seenAt = -1
         $reportsThen = 0
+        # How far through the list of things to press we are. Each batch waits
+        # for its own marker, so a machine that shows the wizard and then a
+        # desktop can be answered at both points from one run.
+        $pressing = 0
         for ($waited = 0; $waited -lt $Timeout; $waited++) {
             if ($process.WaitForExit(1000)) { $exited = $true; break }
             if (-not (Test-Path $SerialLog)) { continue }
             $sofar = (Get-Content $SerialLog -Raw -Encoding UTF8) -replace "`0", ''
             $reports = ([regex]::Matches($sofar, '\[mon \] \d+s uptime')).Count
+
+            # The keys somebody would press, once the machine has got far
+            # enough to have somebody to press them at.
+            if ($pressing -lt $Batches.Count) {
+                $marker = if ($Markers.Count -gt 0) { $Markers[$pressing].Trim() } else { '' }
+                if (-not $marker -or $sofar.Contains($marker)) {
+                    $keys = $Batches[$pressing].Trim()
+                    $pressing++
+                    Write-Host "==> Pressing '$keys' after $waited s" -ForegroundColor Cyan
+                    try {
+                        Send-Keys -Keys $keys -Port $MonitorPort
+                    } catch {
+                        Write-Host "==> Could not reach the monitor: $_" -ForegroundColor Yellow
+                    }
+                }
+                continue
+            }
 
             if ($seenAt -lt 0) {
                 if (-not $sofar.Contains($Until)) { continue }

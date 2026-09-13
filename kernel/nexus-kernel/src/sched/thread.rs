@@ -71,7 +71,13 @@ pub enum ThreadState {
     /// woken by another thread or an interrupt, and if nobody wakes it, it
     /// waits forever -- which is the correct behaviour for a thread waiting on
     /// a channel nobody will ever write to.
-    Blocked,
+    ///
+    /// Unless it asked for a deadline, which is the two states at once: woken
+    /// by whoever signals, *or* by the clock, whichever comes first. A program
+    /// with a clock on screen is the case that needs it -- it is waiting for a
+    /// keystroke that may never come and it still has to redraw every second,
+    /// and without this the only way to do both is to poll.
+    Blocked { until_tick: Option<u64> },
     /// Done running, but still standing on its own stack.
     ///
     /// The gap between the two matters: a thread that has decided to exit is
@@ -364,7 +370,19 @@ impl Thread {
     /// Whether this thread is waiting for a deadline that has now passed.
     #[must_use]
     pub fn is_wakeable(&self, now: u64) -> bool {
-        !self.switching_out
-            && matches!(self.state, ThreadState::Sleeping { until_tick } if now >= until_tick)
+        if self.switching_out {
+            return false;
+        }
+        match self.state {
+            ThreadState::Sleeping { until_tick } => now >= until_tick,
+            // A timed wait. The clock is one of the two things that can end it,
+            // and this is the clock arriving first; whoever it was waiting for
+            // may still signal afterwards and find it already awake, which is
+            // the same harmless race two wakers have always had.
+            ThreadState::Blocked {
+                until_tick: Some(until_tick),
+            } => now >= until_tick,
+            _ => false,
+        }
     }
 }

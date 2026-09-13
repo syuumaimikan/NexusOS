@@ -265,12 +265,75 @@ impl Canvas {
         let y = rect.y + rect.height.saturating_sub(font::CELL_HEIGHT) / 2;
         self.text(x, y, text, colour);
     }
+
+    /// Draw a glyph with every pixel drawn as a `scale` by `scale` block.
+    ///
+    /// Nearest-neighbour, which for a bitmap face is not a compromise: the
+    /// glyphs *are* pixels, and doubling them is what the face would look like
+    /// on a display with half the resolution. Smoothing them would invent
+    /// detail the face does not have.
+    ///
+    /// There is one face and one size in this system, which was fine while
+    /// everything it drew was a label in a small window. A screen two thousand
+    /// pixels across needs a heading somebody can read from a normal distance,
+    /// and the honest way to get one out of a sixteen-pixel face is to make
+    /// each pixel bigger.
+    pub fn glyph_scaled(
+        &mut self,
+        x: u32,
+        y: u32,
+        character: char,
+        colour: Colour,
+        scale: u32,
+    ) -> u32 {
+        let scale = scale.max(1);
+        let glyph = font::glyph(character);
+        for (row, bits) in glyph.rows.iter().enumerate() {
+            for column in 0..glyph.advance {
+                if bits & (0x8000 >> column) == 0 {
+                    continue;
+                }
+                let left = x + column * scale;
+                let top = y + row as u32 * scale;
+                for down in 0..scale {
+                    for across in 0..scale {
+                        self.set(left + across, top + down, colour);
+                    }
+                }
+            }
+        }
+        glyph.advance * scale
+    }
+
+    /// Draw a line of text at a scale, and say how wide it turned out.
+    pub fn text_scaled(&mut self, x: u32, y: u32, text: &str, colour: Colour, scale: u32) -> u32 {
+        let mut advance = 0;
+        for character in text.chars() {
+            advance += self.glyph_scaled(x + advance, y, character, colour, scale);
+        }
+        advance
+    }
+
+    /// Draw a line of text centred in a rectangle, at a scale.
+    pub fn text_centred_scaled(&mut self, rect: Rect, text: &str, colour: Colour, scale: u32) {
+        let scale = scale.max(1);
+        let width = font::measure(text) * scale;
+        let x = rect.x + rect.width.saturating_sub(width) / 2;
+        let y = rect.y + rect.height.saturating_sub(font::CELL_HEIGHT * scale) / 2;
+        self.text_scaled(x, y, text, colour, scale);
+    }
 }
 
 /// How wide a string will be, without drawing it.
 #[must_use]
 pub fn measure(text: &str) -> u32 {
     font::measure(text)
+}
+
+/// And at a scale.
+#[must_use]
+pub fn measure_scaled(text: &str, scale: u32) -> u32 {
+    font::measure(text) * scale.max(1)
 }
 
 /// How tall one line is.

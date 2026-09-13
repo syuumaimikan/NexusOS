@@ -86,6 +86,12 @@ impl WaitQueue {
 
     /// Block, unless something has been woken since `seen`.
     ///
+    /// There is deliberately no plain `wait()` here. One existed, and it was a
+    /// lost wake-up waiting to happen: a caller that tested its condition and
+    /// then called it had a window in which the thing it was waiting for could
+    /// arrive, wake an empty queue, and leave it asleep for ever. Every waiter
+    /// takes the counter first, so that window closes.
+    ///
     /// The comparison happens under the queue's lock, together with joining it,
     /// so a waker is either entirely before this -- and the counter has moved,
     /// and this returns without blocking -- or entirely after, and finds the
@@ -100,34 +106,51 @@ impl WaitQueue {
             if self.generation.load(Ordering::Acquire) != seen {
                 return;
             }
-            super::mark_blocked(current);
+            super::mark_blocked(current, None);
             waiters.push_back(current);
         }
 
         super::schedule();
     }
 
-    /// Block the calling thread until something wakes it.
+    /// Block, unless something has been woken since `seen`, and give up at
+    /// `deadline_ticks` whether or not anything does.
     ///
-    /// Spurious wake-ups are permitted, and callers must treat them as normal:
-    /// this returns when the thread has been woken, not when the condition the
-    /// caller cares about is true. [`wait_until`](Self::wait_until) is the loop
-    /// that turns one into the other.
-    pub fn wait(&self) {
+    /// The same handshake as [`wait_if_unchanged`](Self::wait_if_unchanged),
+    /// with the clock added as a second waker. What it is for is the caller who
+    /// has something to do *anyway*: a program drawing a clock is waiting for a
+    /// keystroke that may never arrive and still has to redraw every second,
+    /// and the alternative -- a short sleep in a loop, re-checking -- is the
+    /// polling this whole module exists to avoid.
+    ///
+    /// A deadline already past still blocks briefly and is woken on the next
+    /// tick. Callers get a wake-up that is at worst one tick late, never one
+    /// that never comes.
+    pub fn wait_if_unchanged_until(&self, seen: u64, deadline_ticks: u64) {
         let Some(current) = super::current_id() else {
             return;
         };
 
         {
             let mut waiters = self.waiters.lock();
-
-            // Under the queue's lock, so a waker cannot see an empty queue and
-            // a running thread at the same moment.
-            super::mark_blocked(current);
+            if self.generation.load(Ordering::Acquire) != seen {
+                return;
+            }
+            super::mark_blocked(current, Some(deadline_ticks));
             waiters.push_back(current);
         }
 
         super::schedule();
+
+        // Woken by the clock rather than by this queue leaves the thread still
+        // listed here, and a stale waiter is not free: `wake_one` would spend
+        // its wake on a thread that is already running and leave a real waiter
+        // asleep. So it takes itself off. The list is short -- the number of
+        // threads waiting on one object -- and this runs once per timed wait.
+        let mut waiters = self.waiters.lock();
+        if let Some(at) = waiters.iter().position(|id| *id == current) {
+            waiters.remove(at);
+        }
     }
 
     /// Block until `condition` holds, or until this thread is asked to stop.

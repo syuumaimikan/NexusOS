@@ -1,0 +1,11 @@
+[package]
+name = "nexus-time"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Dates, and the arithmetic that turns a second count into one."
+
+[lib]
+name = "nexus_time"
+path = "src/lib.rs"

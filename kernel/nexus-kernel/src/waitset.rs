@@ -217,6 +217,23 @@ impl WaitSet {
     /// can ever make it ready and waiting would be waiting forever -- the same
     /// judgement `receive` makes about a channel whose peer has gone.
     pub fn wait(&self) -> Vec<u64> {
+        self.wait_until(None)
+    }
+
+    /// The same, giving up at `deadline_ticks` if one is given.
+    ///
+    /// A timeout returns an empty list, which is deliberately the same answer
+    /// as an empty set and as a cancelled thread. All three mean "nothing of
+    /// yours is ready", and a caller that must distinguish them can: it knows
+    /// what it put in the set, and it can read the clock.
+    ///
+    /// What this is for is the program that has work to do on a schedule as
+    /// well as on an event -- a clock in a status bar, a spinner, anything that
+    /// has to redraw while nothing is happening. Without it such a program has
+    /// to poll the set and sleep, which costs a wake-up every interval whether
+    /// or not the interval was the thing it was waiting for.
+    #[must_use]
+    pub fn wait_until(&self, deadline_ticks: Option<u64>) -> Vec<u64> {
         loop {
             // Before the poll, so a signal that lands between the poll and the
             // block is seen as a change rather than missed.
@@ -235,7 +252,19 @@ impl WaitSet {
                 return Vec::new();
             }
 
-            self.changed.wait_if_unchanged(seen);
+            match deadline_ticks {
+                Some(deadline) => {
+                    // Tested after the poll, not before: a deadline that has
+                    // passed while something *is* ready should report the thing
+                    // that is ready. The caller asked to be woken by then, not
+                    // to be told nothing happened.
+                    if crate::arch::time::ticks() >= deadline {
+                        return Vec::new();
+                    }
+                    self.changed.wait_if_unchanged_until(seen, deadline);
+                }
+                None => self.changed.wait_if_unchanged(seen),
+            }
         }
     }
 }

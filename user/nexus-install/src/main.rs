@@ -247,7 +247,8 @@ fn place(root: Handle, target: &str, contents: &[u8], done: &mut Vec<Step>) -> R
     let saved = match nexus_user::open(where_to, file) {
         Ok(existing) => {
             let old = read_handle(existing)?;
-            nexus_user::close(existing).ok();
+            nexus_user::close(existing)
+                .map_err(|error| format!("{file}: cannot let go of the old copy: {error:?}"))?;
             let backup = format!("{file}{SAVED}");
             write_file(where_to, &backup, &old)?;
             true
@@ -322,7 +323,16 @@ fn write_file(directory: Handle, name: &str, contents: &[u8]) -> Result<(), Stri
     // Removed first, because writing over a longer file would leave its tail
     // behind: the filesystem has no truncate, so a shorter file written into a
     // longer one is a file with somebody else's ending.
-    nexus_user::remove(directory, name).ok();
+    //
+    // A file that was not there is the ordinary case and not a failure. Any
+    // other refusal is: it means the old file is still in the way, and the
+    // create below would fail with `Exists` and blame the wrong thing. Which is
+    // what it did -- "cannot create: Exists" for a file this had just asked to
+    // remove, with no hint that the removal was what went wrong.
+    match nexus_user::remove(directory, name) {
+        Ok(()) | Err(nexus_user::Error::NotFound) => {}
+        Err(error) => return Err(format!("{name}: cannot replace what is there: {error:?}")),
+    }
     let file = nexus_user::create(directory, name, Kind::File)
         .map_err(|error| format!("{name}: cannot create: {error:?}"))?;
 

@@ -540,6 +540,13 @@ fn configure() -> bool {
         interface.lease_seconds = ack.lease;
         let interface = *interface;
 
+        // Where a program can read it. The interface is the kernel's and a
+        // program cannot ask it anything; what it can do is open a file, so
+        // what the machine was leased is written down as one. A settings screen
+        // that had to guess the address would be a settings screen showing
+        // something that might be true.
+        record_address(&interface);
+
         kprintln!(
             "[net ] address {}.{}.{}.{}/{} from {}.{}.{}.{}, gateway {}.{}.{}.{}, \
              DNS {}.{}.{}.{}, lease {} s",
@@ -565,6 +572,48 @@ fn configure() -> bool {
         return true;
     }
     false
+}
+
+/// Write what the interface was given somewhere a program can read it.
+///
+/// Failures are logged and not otherwise acted on: a machine with a network and
+/// no filesystem is still a machine with a network, and refusing to configure
+/// the interface because a file could not be written would be the wrong way
+/// round.
+fn record_address(interface: &Interface) {
+    use alloc::format;
+
+    let text = format!(
+        "# Written by the kernel when the interface was configured.\n\
+         {} = dhcp\n\
+         {} = {}.{}.{}.{}/{}\n\
+         {} = {}.{}.{}.{}\n\
+         {} = {}.{}.{}.{}\n",
+        nexus_config::key::NETWORK,
+        nexus_config::key::NETWORK_ADDRESS,
+        interface.ip[0],
+        interface.ip[1],
+        interface.ip[2],
+        interface.ip[3],
+        prefix_length(interface.mask),
+        nexus_config::key::NETWORK_GATEWAY,
+        interface.gateway[0],
+        interface.gateway[1],
+        interface.gateway[2],
+        interface.gateway[3],
+        nexus_config::key::NETWORK_DNS,
+        interface.dns[0],
+        interface.dns[1],
+        interface.dns[2],
+        interface.dns[3],
+    );
+
+    // Replaced rather than left alone, because unlike a package this is a fact
+    // about *now*: a lease from a previous boot is not what the machine has.
+    match crate::fs::store::replace("system", "network.txt", text.as_bytes()) {
+        Ok(()) => kprintln!("[net ] wrote system/network.txt"),
+        Err(error) => kprintln!("[net ] could not write system/network.txt: {error}"),
+    }
 }
 
 /// How many bits of a mask are set, which is how a mask is written down.

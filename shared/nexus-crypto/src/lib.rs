@@ -26,6 +26,7 @@ extern crate alloc;
 
 pub mod ed25519;
 pub mod field;
+pub mod password;
 pub mod scalar;
 pub mod sha512;
 

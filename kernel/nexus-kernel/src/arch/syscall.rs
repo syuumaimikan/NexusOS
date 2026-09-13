@@ -265,8 +265,9 @@ pub enum Call {
     WaitSetAdd = 22,
     /// Stop watching whatever has a key. `(set, key)`.
     WaitSetRemove = 23,
-    /// Block until something is ready. `(set, pointer, capacity)`, returning
-    /// how many keys were written.
+    /// Block until something is ready. `(set, pointer, capacity, milliseconds)`,
+    /// returning how many keys were written. `u64::MAX` milliseconds waits for
+    /// as long as it takes.
     WaitSetWait = 24,
     /// Another handle to the same object, with no more rights than this one.
     /// `(handle, rights)`.
@@ -283,11 +284,18 @@ pub enum Call {
     NodeReadAt = 29,
     /// Change part of a file. `(file, offset, pointer, length)`.
     NodeWriteAt = 30,
+    /// What time it is, in seconds since 1970. `()`.
+    ///
+    /// Separate from [`Call::Uptime`] because the two answer different
+    /// questions and a program that confused them would be a program whose
+    /// clock resets every boot. Uptime is a duration and is always available;
+    /// this is a moment and depends on the machine having a clock at all.
+    Now = 31,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 31;
+    pub const COUNT: usize = 32;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -323,6 +331,7 @@ impl Call {
             28 => Some(Self::MemoryUnmap),
             29 => Some(Self::NodeReadAt),
             30 => Some(Self::NodeWriteAt),
+            31 => Some(Self::Now),
             _ => None,
         }
     }
@@ -357,6 +366,8 @@ pub const EEXIST: u64 = u64::MAX - 9;
 pub const ETOOBIG: u64 = u64::MAX - 10;
 /// The filesystem refused: it is full, damaged, busy, or absent.
 pub const EFS: u64 = u64::MAX - 11;
+/// The machine has no such device -- a clock, for instance.
+pub const ENODEV: u64 = u64::MAX - 12;
 
 /// Values at or above this are errors rather than results.
 ///
@@ -466,13 +477,21 @@ extern "sysv64" fn dispatch(
         Some(Call::WaitSetCreate) => wait_set_create(),
         Some(Call::WaitSetAdd) => wait_set_add(argument0, argument1, argument2),
         Some(Call::WaitSetRemove) => wait_set_remove(argument0, argument1),
-        Some(Call::WaitSetWait) => wait_set_wait(argument0, argument1, argument2),
+        Some(Call::WaitSetWait) => wait_set_wait(argument0, argument1, argument2, argument3),
         Some(Call::HandleDuplicate) => handle_duplicate(argument0, argument1),
         Some(Call::Sleep) => sleep(argument0),
         Some(Call::ProcessKill) => process_kill(argument0),
         Some(Call::MemoryUnmap) => memory_unmap(argument0, argument1),
         Some(Call::NodeReadAt) => node_read_at(argument0, argument1, argument2, argument3),
         Some(Call::NodeWriteAt) => node_write_at(argument0, argument1, argument2, argument3),
+        Some(Call::Now) => match crate::drivers::rtc::now() {
+            Some(seconds) => seconds,
+            // No clock. An error rather than zero, because zero is a real
+            // moment -- the start of 1970 -- and a program that could not tell
+            // the two apart would print 1970 on a machine with a dead battery
+            // rather than saying it does not know.
+            None => ENODEV,
+        },
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -1015,6 +1034,23 @@ fn insert_node(node: alloc::sync::Arc<crate::fs::store::Node>, rights: crate::ip
     let Ok(process) = caller() else {
         return ENOPROC;
     };
+    // Inherited from the directory it was reached through -- a program cannot
+    // open its way to more authority than it was given -- plus the right to let
+    // go of it.
+    //
+    // Closing is not an authority over the file. It is disposing of a reference
+    // this call has just handed the caller, and withholding it protects nobody:
+    // it makes a handle that can never be released, whose inode can therefore
+    // never be removed, by anybody, for as long as the process lives. That is
+    // not attenuation, it is a leak with a capability argument attached to it.
+    //
+    // It was a real one. `init` hands the installer a directory with read,
+    // write and transfer and no close; the installer opened a file it was
+    // replacing, read it, could not close it, and the removal underneath was
+    // then refused because something still had it open. Installing the same
+    // package twice failed on every machine, and the error it gave named the
+    // wrong step: "cannot create: Exists".
+    let rights = rights | crate::ipc::Rights::CLOSE;
     u64::from(
         process
             .handles
@@ -1244,6 +1280,12 @@ fn process_wait(handle: u64) -> u64 {
 /// Bytes one key takes in the buffer [`Call::WaitSetWait`] fills.
 const KEY_SIZE: u64 = 8;
 
+/// The timeout that is not a timeout.
+///
+/// Spelled as the largest number rather than as zero, because zero is a real
+/// answer to "how long will you wait" and forever is not a duration at all.
+const FOREVER: u64 = u64::MAX;
+
 /// Turn a wait-set refusal into the value the caller sees.
 fn waitset_error(error: crate::waitset::WaitSetError) -> u64 {
     use crate::waitset::WaitSetError;
@@ -1338,7 +1380,15 @@ fn wait_set_remove(set: u64, key: u64) -> u64 {
 /// An empty set returns zero rather than blocking. Nothing can ever make it
 /// ready, so waiting would be waiting forever -- the same judgement `receive`
 /// makes about a channel whose peer has gone.
-fn wait_set_wait(set: u64, pointer: u64, capacity: u64) -> u64 {
+///
+/// `milliseconds` is how long to wait at most, with `u64::MAX` meaning forever.
+/// A wait that ran out of time returns zero, the same as an empty set and the
+/// same as a process being asked to stop: all three mean "nothing you asked
+/// about is ready", and a caller that cares which can tell from what it put in
+/// the set and what the clock says. The bound is the same one `sleep` uses --
+/// a timeout of four hundred million years is indistinguishable from a hang to
+/// whoever is reading the log.
+fn wait_set_wait(set: u64, pointer: u64, capacity: u64, milliseconds: u64) -> u64 {
     let set = match caller_set(set, crate::ipc::Rights::READ) {
         Ok(set) => set,
         Err(error) => return error,
@@ -1351,7 +1401,16 @@ fn wait_set_wait(set: u64, pointer: u64, capacity: u64) -> u64 {
         return ETOOBIG;
     }
 
-    let ready = set.wait();
+    let deadline = if milliseconds == FOREVER {
+        None
+    } else {
+        if milliseconds > MAX_SLEEP_MS {
+            return EINVAL;
+        }
+        Some(crate::arch::time::ticks() + crate::arch::time::ms_to_ticks(milliseconds))
+    };
+
+    let ready = set.wait_until(deadline);
     if ready.is_empty() {
         return 0;
     }

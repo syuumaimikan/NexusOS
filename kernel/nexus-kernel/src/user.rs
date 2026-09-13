@@ -1186,26 +1186,48 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
     // keystroke as a movement.
     let (pointer_here, pointer_there) = ipc::Endpoint::pair();
 
+    // The directory the system's own settings live in. The compositor does not
+    // read it: what it does is *pass it on* to the program that does, which is
+    // the setup wizard on a machine that has never been configured and the
+    // desktop afterwards. A handle that is only ever forwarded is still the
+    // authority to forward it, and that is deliberate -- the alternative is
+    // every program that wants a setting asking the kernel for the filesystem,
+    // which is ambient authority with extra steps.
+    let settings = match fs::store::directory("system") {
+        Ok(node) => Some(node),
+        Err(error) => {
+            kprintln!("[user] the compositor gets no settings directory: {error}");
+            None
+        }
+    };
+
     // In this order, because the program names them by the numbers they get:
-    // the channel the display arrives on, the one it asks for clients on, and
-    // the two that carry keys and pointer movements.
+    // the channel the display arrives on, the one it asks for clients on, the
+    // two that carry keys and pointer movements, and the settings directory.
+    let mut endowments = alloc::vec![
+        (ipc::Object::Channel(client), ipc::Rights::ALL),
+        (ipc::Object::Channel(spawner), ipc::Rights::ALL),
+        (ipc::Object::Channel(keys_there), ipc::Rights::ALL),
+        (ipc::Object::Channel(pointer_there), ipc::Rights::ALL),
+    ];
+    if let Some(settings) = settings {
+        endowments.push((ipc::Object::Node(settings), ipc::Rights::ALL));
+    }
+
     // SAFETY: as above.
     unsafe {
-        start_from_disk(
-            "BIN/COMP.ELF",
-            "compositor",
-            &[
-                (ipc::Object::Channel(client), ipc::Rights::ALL),
-                (ipc::Object::Channel(spawner), ipc::Rights::ALL),
-                (ipc::Object::Channel(keys_there), ipc::Rights::ALL),
-                (ipc::Object::Channel(pointer_there), ipc::Rights::ALL),
-            ],
-        )?;
+        start_from_disk("BIN/COMP.ELF", "compositor", &endowments)?;
     }
     crate::input::route_to(keys_here);
     crate::drivers::mouse::route_to(pointer_here);
 
-    let mut message = [0u8; 32];
+    // Whether this machine has ever been set up. Decided here because the
+    // kernel is the only thing that can read the store before any program runs,
+    // and it is one bit rather than a copy of the settings: what the setting
+    // *says* is the business of whoever displays it.
+    let configured = is_configured();
+
+    let mut message = [0u8; 36];
     for (index, value) in [
         x,
         y,
@@ -1215,6 +1237,7 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
         info.bytes_per_pixel,
         info.width,
         info.height,
+        u32::from(configured),
     ]
     .iter()
     .enumerate()
@@ -1231,7 +1254,20 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
         return Ok(());
     }
 
-    kprintln!("[user] handed a {width}x{height} rectangle at ({x}, {y}) to a process");
+    // From here the kernel draws nothing. Said after the message rather than
+    // before it, so that the screen is never unowned: the compositor has the
+    // framebuffer by the time this stops the thread that was using it.
+    crate::display::hand_over();
+
+    kprintln!(
+        "[user] handed a {width}x{height} rectangle at ({x}, {y}) to a process, \
+         machine {}",
+        if configured {
+            "already set up"
+        } else {
+            "not yet set up"
+        }
+    );
 
     // Kept so the channel does not close the moment this returns, which the
     // compositor would see as its parent going away before it had drawn.
@@ -1499,6 +1535,31 @@ unsafe fn system_v_stack(stack: u64, name: &str) -> u64 {
     }
 
     vector_at
+}
+
+/// Whether the first-run setup has been completed on this machine.
+///
+/// Read from the store, and false whenever that cannot be answered -- a missing
+/// file, an unreadable one, a machine with no disk. Guessing the other way would
+/// skip setup on a machine that has never had any, which means no account and no
+/// password on something that then carries on as though it were configured.
+fn is_configured() -> bool {
+    let Ok(root) = fs::store::root() else {
+        return false;
+    };
+    let Ok(folder) = fs::store::open_child(&root, "system") else {
+        return false;
+    };
+    let Ok(file) = fs::store::open_child(&folder, "settings.txt") else {
+        return false;
+    };
+    let Ok(bytes) = fs::store::read_node(&file) else {
+        return false;
+    };
+    let Ok(text) = core::str::from_utf8(&bytes) else {
+        return false;
+    };
+    nexus_config::Settings::parse(text).is_yes(nexus_config::key::CONFIGURED)
 }
 
 /// What `init` starts holding.
