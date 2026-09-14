@@ -592,6 +592,15 @@ Invoke-Step 'pictures' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-view.ps1')) 'picture tests'
 }
 
+Invoke-Step 'the agent' {
+    # Not a test of a language model; there is not one. What it checks is that
+    # an agent decides what to do, asks permission, and is refused by name when
+    # it may not -- including the question whose only correct outcome is a
+    # refusal rather than a deletion.
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-assist.ps1')) 'agent tests'
+}
+
 Invoke-Step 'browsing' {
     # Needs a machine somebody has set up, because there is no desktop to press
     # until the wizard has been answered.

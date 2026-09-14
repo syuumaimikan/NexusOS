@@ -126,6 +126,17 @@ $SettingsElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-sett
 $StagedSettings = Publish-Program -Elf $SettingsElf -ProgramDir $ProgramDir -Name 'set.elf'
 $settingsSize = [math]::Round((Get-Item $StagedSettings).Length / 1KB, 1)
 
+$AssistElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-assist"
+$StagedAssist = Publish-Program -Elf $AssistElf -ProgramDir $ProgramDir -Name 'assist.elf'
+$assistSize = [math]::Round((Get-Item $StagedAssist).Length / 1KB, 1)
+
+# GPT-6 Astra's read-only AI service, staged at their request so that a normal
+# build carries it. Nothing starts it yet: it is a service a program would be
+# handed a channel to, and no program is handed one.
+$AiElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-ai"
+$StagedAi = Publish-Program -Elf $AiElf -ProgramDir $ProgramDir -Name 'ai.elf'
+$aiSize = [math]::Round((Get-Item $StagedAi).Length / 1KB, 1)
+
 $ViewElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-view"
 $StagedView = Publish-Program -Elf $ViewElf -ProgramDir $ProgramDir -Name 'view.elf'
 $viewSize = [math]::Round((Get-Item $StagedView).Length / 1KB, 1)
@@ -295,6 +306,8 @@ Write-Host "  wallpaper  : $wallSize KiB  -> BIN\WALL.ELF on the disk"
 Write-Host "  settings   : $settingsSize KiB  -> BIN\SET.ELF on the disk"
 Write-Host "  packages   : $storeSize KiB  -> BIN\STORE.ELF on the disk"
 Write-Host "  viewer     : $viewSize KiB  -> BIN\VIEW.ELF on the disk"
+Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
+Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
 Write-Host "  picture    : $pictureSize KiB  -> PICTURES\NEXUS.PNG on the disk"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
 Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1.1.0, signed)"

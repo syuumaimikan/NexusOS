@@ -289,6 +289,8 @@ mod desk {
     pub const PACKAGES: &[u8] = b"pkgs";
     /// Show the pictures on this machine.
     pub const PICTURES: &[u8] = b"pics";
+    /// Start the agent.
+    pub const ASSIST: &[u8] = b"asst";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -403,6 +405,8 @@ const SETTINGS_WINDOW: &[u8] = b"BIN/SET.ELF";
 const STORE: &[u8] = b"BIN/STORE.ELF";
 /// And the one that shows pictures.
 const VIEWER: &[u8] = b"BIN/VIEW.ELF";
+/// And the agent, which is given less than any of them.
+const ASSISTANT: &[u8] = b"BIN/ASSIST.ELF";
 /// The program that draws the strip along the bottom and says what a click in
 /// it means.
 const SHELL: &[u8] = b"BIN/SHELL.ELF";
@@ -1633,6 +1637,9 @@ enum What {
     Packages,
     /// The picture window, which is given the filesystem to read from.
     Pictures,
+    /// The agent, which is given the filesystem to read and the machine
+    /// snapshot, and nothing that can change anything.
+    Assistant,
 }
 
 /// What reading from the keyboard turned out to be.
@@ -1756,6 +1763,10 @@ fn read_shell(
 
     if message == desk::PICTURES {
         return open_window(screen, set, tiles, focus, order, What::Pictures);
+    }
+
+    if message == desk::ASSIST {
+        return open_window(screen, set, tiles, focus, order, What::Assistant);
     }
 
     if message == desk::QUIT {
@@ -1958,6 +1969,37 @@ fn open_window(
                 &[files],
             )?
         }
+        What::Assistant => {
+            // The narrowest set anything here is given, and deliberately so.
+            // An agent decides for itself what to do, which is what makes it an
+            // agent and what makes the question "what can it do to my machine"
+            // worth answering exactly: it can read files in the directory it
+            // was handed, and it can ask how busy the machine is.
+            //
+            // Not write. Not the spawner. Not the network. Everything else it
+            // might be asked to do is refused by name, with the permission it
+            // would have needed, which is more useful than being unable to ask.
+            let reading = nexus_user::rights::READ | nexus_user::rights::TRANSFER;
+            let talking =
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
+            let (Ok(files), Ok(machine)) = (
+                nexus_user::duplicate(FILESYSTEM, reading),
+                nexus_user::duplicate(MACHINE, talking),
+            ) else {
+                failed("compositor: FAILED: could not lend the agent what it may have");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                ASSISTANT,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[files, machine],
+            )?
+        }
     };
     if nexus_user::watch(set, tile.channel, channel_key(slot)).is_err()
         || nexus_user::watch(set, tile.process, process_key(slot)).is_err()
@@ -1979,6 +2021,9 @@ fn open_window(
             What::Settings => "compositor: started the settings, and lent them the settings",
             What::Packages => "compositor: started the packages, and lent them the disk",
             What::Pictures => "compositor: started a picture window, and lent it the disk to read",
+            What::Assistant => {
+                "compositor: started the agent, and lent it the disk to read and nothing to write"
+            }
         }
     ))
     .ok();

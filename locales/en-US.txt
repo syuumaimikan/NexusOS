@@ -138,6 +138,7 @@ shell.updates.installed = {number} updates installed
 shell.settings = Settings
 shell.packages = Packages
 shell.pictures = Pictures
+shell.assist = Assistant
 shell.leave = Log out
 
 file.toolarge = {name} is too large to read safely, so it will not be changed
@@ -201,6 +202,23 @@ view.unreadable = {name} could not be read
 view.showing = {name}, {width} by {height}
 view.which = {at} of {of}: {name} ({kind})
 view.keys = Left and right change the picture. Home and End jump. F5 looks again.
+
+assist.welcome = An agent. Type a question and press Enter.
+assist.notamodel = There is no language model here. It matches words to tools and asks permission for each one.
+assist.hint = Try: what is this machine doing / which packages are installed / find <something>
+assist.cannot = Nothing here answers that.
+assist.using = Using {tool} ({permission})
+assist.needsconfirming = {tool} needs {permission}, and somebody has to confirm it. This window cannot ask.
+assist.privileged = {tool} needs {permission}, which is privileged. This agent does not hold it.
+assist.blocked = {tool} is refused outright. No agent on this machine may do it.
+assist.nomachine = This window was not lent the channel that says what the machine is doing
+assist.nofiles = This window was not lent any files to read
+assist.machine = {used} MiB of {total} MiB used ({percent}%), {processes} processes, {threads} threads on {processors} processors
+assist.packages = {count} packages on record
+assist.nopackages = Nothing is on record as installed
+assist.searched = Read {count} files
+assist.found = {name} is the closest, overlap {overlap} of {size}
+assist.notfound = Nothing read is like that
 
 setup.title = Set up NexusOS
 setup.language = Choose a language

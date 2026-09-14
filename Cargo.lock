@@ -19,6 +19,21 @@ name = "nexus-ai-core"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-assist"
+version = "0.1.0"
+dependencies = [
+ "nexus-ai-core",
+ "nexus-i18n",
+ "nexus-index",
+ "nexus-look",
+ "nexus-machine",
+ "nexus-ui",
+ "nexus-update",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-boot"
 version = "0.1.0"
 dependencies = [

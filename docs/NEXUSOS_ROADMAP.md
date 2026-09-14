@@ -1669,6 +1669,8 @@ in the code.
 
 ### Feasible next, in order of value
 
+| ~~An agent with a capability model~~ | done | A window that picks a tool, asks GPT-6 Astra's permission model, and is refused by name when it may not. No language model, and it says so on its own first line. See [agent.md](agent.md). |
+
 | ~~Network tools~~ | done | `net`, `lookup` and `scan` in the terminal, on the stack that was already there. A connect scan, no raw sockets, and the documentation says so. See [network-tools.md](network-tools.md). |
 | ~~Choosing a font, and soft edges~~ | done | Two faces and a blending switch, both settings. See [appearance-text.md](appearance-text.md). |
 

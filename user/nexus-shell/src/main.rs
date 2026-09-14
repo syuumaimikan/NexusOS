@@ -124,6 +124,8 @@ mod wire {
     pub const PACKAGES: &[u8] = b"pkgs";
     /// Start a window that shows pictures.
     pub const PICTURES: &[u8] = b"pics";
+    /// Start the agent.
+    pub const ASSIST: &[u8] = b"asst";
     /// End the session.
     pub const QUIT: &[u8] = b"quit";
 }
@@ -271,6 +273,18 @@ impl Desktop {
         )
     }
 
+    /// Where the button that opens the agent is.
+    fn assist(&self) -> Rect {
+        let pictures = self.pictures();
+        let width = nexus_ui::measure(nexus_i18n::text("shell.assist")) + GAP * 4;
+        Rect::new(
+            pictures.x + pictures.width + GAP,
+            GAP / 2,
+            width,
+            self.height.saturating_sub(GAP),
+        )
+    }
+
     /// Where the button that ends the session is, and how wide.
     ///
     /// At the far right, which is where a machine's own controls go on every
@@ -293,7 +307,7 @@ impl Desktop {
     /// brought back. A tab that shuffled sideways under the pointer would be a
     /// tab somebody clicked and missed.
     fn tab(&self, slot: usize) -> Rect {
-        let last = self.pictures();
+        let last = self.assist();
         let left = last.x + last.width + GAP;
         let available = self
             .width
@@ -787,6 +801,12 @@ fn clicked(desktop: &Desktop, x: u32, y: u32) -> Option<bool> {
             .map(|_| true);
     }
 
+    if desktop.assist().contains(x, y) {
+        return nexus_user::send(COMPOSITOR, wire::ASSIST, &[])
+            .ok()
+            .map(|_| true);
+    }
+
     if desktop.pictures().contains(x, y) {
         return nexus_user::send(COMPOSITOR, wire::PICTURES, &[])
             .ok()
@@ -959,6 +979,20 @@ fn draw(desktop: &Desktop) {
         pictures,
         nexus_i18n::text("shell.pictures"),
         Colour::rgb(0xD8, 0xF0, 0xF0),
+    );
+
+    // And the one that opens the agent.
+    let assist = desktop.assist();
+    canvas.panel(
+        assist,
+        RADIUS,
+        Colour::rgb(0x2A, 0x14, 0x22),
+        Colour::rgb(0xB0, 0x68, 0x90),
+    );
+    canvas.text_centred(
+        assist,
+        nexus_i18n::text("shell.assist"),
+        Colour::rgb(0xF4, 0xDC, 0xE8),
     );
 
     for slot in 0..desktop.slots {
