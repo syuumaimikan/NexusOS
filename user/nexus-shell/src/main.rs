@@ -474,7 +474,9 @@ extern "C" fn main() -> ! {
         height: read_u32(&buffer, 4),
         owner,
         zone,
-        look: read_look(settings),
+        // The defaults only when there is genuinely nothing to read, which on
+        // a machine nobody has configured is the truth.
+        look: read_look(settings).unwrap_or_default(),
         settings,
         pending: 0,
         installed: 0,
@@ -522,14 +524,21 @@ extern "C" fn main() -> ! {
 /// every failure means the same thing to this program. It has a strip to draw
 /// and it draws it; what it cannot do is report the problem to anyone, since
 /// the thing that would show a message is itself.
-fn read_look(directory: Option<Handle>) -> Look {
-    let Some(directory) = directory else {
-        return Look::default();
-    };
-    match read_text(directory, SETTINGS_NAME) {
-        Some(text) => Look::parse(&text),
-        None => Look::default(),
+fn read_look(directory: Option<Handle>) -> Option<Look> {
+    // `None` means "could not read it", not "it says the defaults".
+    //
+    // Replacing that file means removing the name and making it again, because
+    // there is no truncate, so there is a short window in which the name does
+    // not exist. A strip that answered that window with the defaults would
+    // repaint itself in somebody else's colours for one frame, and -- worse --
+    // would then treat the defaults as the current state and not notice the
+    // colour that was actually written. The wallpaper did exactly that.
+    let directory = directory?;
+    let text = read_text(directory, SETTINGS_NAME)?;
+    if text.is_empty() {
+        return None;
     }
+    Some(Look::parse(&text))
 }
 
 fn read_settings(directory: Handle) -> (Option<String>, &'static Zone, Option<String>) {
@@ -639,7 +648,8 @@ fn run(desktop: &mut Desktop) {
             // updater runs at boot and this is a file, not an event -- and a
             // strip that opened a file fifty times a minute to find the same
             // number would be the polling the rest of this avoids.
-            let now = read_look(desktop.settings);
+            // Left alone when it could not be read.
+            let now = read_look(desktop.settings).unwrap_or(desktop.look);
             if now != desktop.look {
                 desktop.look = now;
                 stale = true;

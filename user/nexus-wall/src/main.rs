@@ -137,7 +137,9 @@ extern "C" fn main() -> ! {
         finish();
     }
 
-    let mut look = read_look(settings);
+    // The defaults only when there is genuinely nothing to read, which on a
+    // machine nobody has configured is the truth.
+    let mut look = read_look(settings).unwrap_or_default();
     nexus_user::log(&alloc::format!(
         "wall: {width}x{height} behind the windows, {} on {}",
         look.style.name(),
@@ -201,7 +203,10 @@ extern "C" fn main() -> ! {
         let now = nexus_user::uptime();
         if now.saturating_sub(last_check) >= RECHECK_MS {
             last_check = now;
-            let fresh = read_look(settings);
+            // Nothing when it could not be read, and the look is left alone.
+            let Some(fresh) = read_look(settings) else {
+                continue;
+            };
             if fresh != look {
                 nexus_user::log(&alloc::format!(
                     "wall: the look changed to {} on {}",
@@ -256,22 +261,32 @@ extern "C" fn main() -> ! {
 }
 
 /// What the settings say this machine should look like.
-fn read_look(settings: Option<Handle>) -> Look {
-    let Some(directory) = settings else {
-        return Look::default();
-    };
-    let Ok(file) = nexus_user::open(directory, SETTINGS_NAME) else {
-        return Look::default();
-    };
+fn read_look(settings: Option<Handle>) -> Option<Look> {
+    let directory = settings?;
+    // `None` means "could not read it", not "it says the defaults".
+    //
+    // The difference is not academic. Replacing a file here means removing the
+    // name and making it again, because there is no truncate -- so there is a
+    // window, short but real, in which the name does not exist. A reader that
+    // answered that window with the defaults would throw away somebody's
+    // wallpaper because another program was half-way through saving it, and
+    // then throw away the *new* setting too by treating the defaults as the
+    // current state.
+    //
+    // That is exactly what happened: the wallpaper reported changing to the
+    // default gradient in the middle of a save, and then never noticed the
+    // style that was actually written.
+    let file = nexus_user::open(directory, SETTINGS_NAME).ok()?;
     let size = nexus_user::size(file).unwrap_or(0).min(SETTINGS_MAX);
     let mut bytes = alloc::vec![0u8; size];
     let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
     nexus_user::close(file).ok();
     bytes.truncate(read);
-    match String::from_utf8(bytes) {
-        Ok(text) => Look::parse(&text),
-        Err(_) => Look::default(),
+    // An empty file is a file being written, not a file asking for defaults.
+    if bytes.is_empty() {
+        return None;
     }
+    String::from_utf8(bytes).ok().map(|text| Look::parse(&text))
 }
 
 /// Draw the whole background.
