@@ -95,8 +95,16 @@ extern "C" fn main() -> ! {
     let mut settings = Settings::new(directory);
     nexus_user::log("settings: a window for what this machine is").ok();
 
-    let frames = window.run(&mut settings);
-    if frames > 0 {
+    let outcome = window.run(&mut settings);
+    if outcome.ended != nexus_window::Ended::Finished
+        && outcome.ended != nexus_window::Ended::Disconnected
+    {
+        // Reported rather than exited over: the window is gone either way, and
+        // which way is the only thing that distinguishes a machine shutting
+        // down from a compositor that stopped answering.
+        failed(&format!("settings: FAILED: {}", outcome.ended));
+    }
+    if outcome.frames > 0 {
         nexus_user::log("settings: showed the machine its own settings").ok();
     }
     finish()
@@ -183,13 +191,29 @@ struct Settings {
     trouble: bool,
     /// What the machine looks like, for drawing this window in its own colours.
     look: nexus_look::Look,
+    /// Whether the settings file could be read when this window opened.
+    ///
+    /// False turns every save into a refusal. A window that could not read the
+    /// file has nothing to merge a change into, and saving anyway would replace
+    /// a file it never saw.
+    readable: bool,
 }
 
 impl Settings {
     fn new(directory: Option<Handle>) -> Self {
-        let text = directory
-            .and_then(|handle| read_text(handle, SETTINGS_NAME))
-            .unwrap_or_default();
+        // What the file says, and separately whether it could be read at all.
+        // A window that could not read the settings must not offer to write
+        // them: the write would be of what it managed to parse, which is
+        // nothing.
+        let read = match directory {
+            Some(handle) => read_text(handle, SETTINGS_NAME),
+            None => Ok(None),
+        };
+        let (text, unreadable) = match read {
+            Ok(Some(text)) => (text, None),
+            Ok(None) => (String::new(), None),
+            Err(why) => (String::new(), Some(why)),
+        };
         let values = nexus_config::Settings::parse(&text);
         let look = nexus_look::Look::parse(&text);
 
@@ -261,10 +285,14 @@ impl Settings {
             said: String::new(),
             trouble: false,
             look,
+            readable: true,
         };
         window.cursor = window.next_row(0, 1).unwrap_or(0);
         if directory.is_none() {
             window.complain(nexus_i18n::text("settings.nofile"));
+        } else if let Some(why) = unreadable {
+            window.readable = false;
+            window.complain(&why);
         }
         window
     }
@@ -320,9 +348,25 @@ impl Settings {
             return;
         };
 
+        if !self.readable {
+            self.complain(nexus_i18n::text("settings.unreadable"));
+            return;
+        }
+        // Read again before writing, and refuse if that read fails.
+        //
+        // Something else may have changed a different line since this window
+        // opened -- the terminal writes the same file -- so the change is
+        // merged into what is there now. And if what is there now cannot be
+        // read, nothing is written: a settings window that answered an I/O
+        // error by replacing the file with one line would destroy every setting
+        // on the machine in order to change one of them.
         let mut latest = match read_text(directory, SETTINGS_NAME) {
-            Some(text) => nexus_config::Settings::parse(&text),
-            None => nexus_config::Settings::new(),
+            Ok(Some(text)) => nexus_config::Settings::parse(&text),
+            Ok(None) => nexus_config::Settings::new(),
+            Err(why) => {
+                self.complain(&why);
+                return;
+            }
         };
         latest.set(key, value);
         match write_text(directory, SETTINGS_NAME, &latest.to_text()) {
@@ -555,15 +599,44 @@ impl Settings {
 
 // -- the file ----------------------------------------------------------------
 
-/// A whole text file out of a directory, if it is there and readable.
-fn read_text(directory: Handle, name: &str) -> Option<String> {
-    let file = nexus_user::open(directory, name).ok()?;
-    let size = nexus_user::size(file).unwrap_or(0).min(MAX_FILE);
-    let mut bytes = alloc::vec![0u8; size];
-    let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
+/// A whole text file out of a directory.
+///
+/// Three answers and not two. `Ok(None)` is "there is no such file", which is
+/// ordinary on a fresh machine; `Err` is "there is one and it could not be
+/// read", which is not ordinary at all and must never be mistaken for the
+/// first. Mistaking them is how a one-key change becomes the deletion of every
+/// other setting: the caller reads nothing, believes the file was empty, and
+/// writes back a file with one line in it.
+///
+/// A short read is an error for the same reason. Half a settings file parses
+/// perfectly well and is missing half the settings.
+fn read_text(directory: Handle, name: &str) -> Result<Option<String>, String> {
+    let file = match nexus_user::open(directory, name) {
+        Ok(file) => file,
+        Err(nexus_user::Error::NotFound) => return Ok(None),
+        Err(error) => return Err(format!("{name}: {error}")),
+    };
+    let outcome = read_open(file, name);
     nexus_user::close(file).ok();
-    bytes.truncate(read);
-    String::from_utf8(bytes).ok()
+    outcome.map(Some)
+}
+
+/// The body of [`read_text`], with the handle already open.
+fn read_open(file: Handle, name: &str) -> Result<String, String> {
+    let size = nexus_user::size(file).map_err(|error| format!("{name}: {error}"))?;
+    if size > MAX_FILE {
+        // Refused rather than truncated. A file this program cannot read whole
+        // is a file it must not rewrite, because rewriting it means writing
+        // back the part it did read and losing the rest.
+        return Err(nexus_i18n::format("file.toolarge", &[("name", &name)]));
+    }
+    let mut bytes = alloc::vec![0u8; size];
+    let read =
+        nexus_user::read_at(file, 0, &mut bytes).map_err(|error| format!("{name}: {error}"))?;
+    if read != size {
+        return Err(nexus_i18n::format("file.short", &[("name", &name)]));
+    }
+    String::from_utf8(bytes).map_err(|_| nexus_i18n::format("file.nottext", &[("name", &name)]))
 }
 
 /// Replace a text file with this content.
@@ -582,7 +655,10 @@ fn write_text(directory: Handle, name: &str, text: &str) -> Result<(), String> {
         match nexus_user::write_at(file, written as u64, &contents[written..]) {
             Ok(0) | Err(_) => {
                 nexus_user::close(file).ok();
-                return Err(format!("{name}: the write stopped at {written} bytes"));
+                return Err(nexus_i18n::format(
+                    "file.stopped",
+                    &[("name", &name), ("bytes", &written)],
+                ));
             }
             Ok(count) => written += count,
         }

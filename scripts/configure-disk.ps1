@@ -106,7 +106,22 @@ try {
         if (-not (Wait-For -Text 'setup: wrote settings' -Seconds 90)) {
             throw 'the wizard never wrote the settings'
         }
-        # And let the filesystem finish with them before the machine stops.
+
+        # And then wait for the machine to stop writing to that same directory.
+        #
+        # The wizard is not the only thing that writes to `system/` on a first
+        # boot: the installer and the updater both run behind it and both leave
+        # a file there. Stopping the machine five seconds after the wizard is
+        # done lands in the middle of that, and a directory that was being grown
+        # when the power went off is a directory that can come back without the
+        # entry the wizard had just put in it -- which shows up two tests later
+        # as a machine that says it has never been set up.
+        if (-not (Wait-For -Text 'the machine is up to date' -Seconds 120)) {
+            if (-not (Wait-For -Text 'update: installed' -Seconds 30)) {
+                Write-Host '    the updater never finished; carrying on' -ForegroundColor DarkYellow
+            }
+        }
+        # And let the filesystem finish with all of it before the machine stops.
         Start-Sleep -Seconds 5
         $writer.WriteLine('quit')
         Start-Sleep -Milliseconds 500

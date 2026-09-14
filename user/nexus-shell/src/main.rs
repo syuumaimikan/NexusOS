@@ -555,6 +555,9 @@ fn run(desktop: &mut Desktop) {
     let mut ticked = false;
     let mut said_updates = false;
     let mut said_missed = false;
+    // What was last said about where the tabs are, so it is said again only
+    // when it is no longer true.
+    let mut said_layout = (0u32, 0usize);
 
     // The channel, watched rather than read directly, because a blocking read
     // is a read with no deadline and the clock needs one.
@@ -654,6 +657,26 @@ fn run(desktop: &mut Desktop) {
             return;
         };
         let message = &message[..received.bytes];
+
+        // Where the tabs are, whenever that changes.
+        //
+        // Written for the tests, and worth having for that reason alone: a
+        // test that clicks a tab has to know where one is, and every time a
+        // button was added to the left of them every such test moved. Reading
+        // the position out of the machine instead of guessing it means a sixth
+        // button costs nothing.
+        if (desktop.width, desktop.slots) != said_layout {
+            said_layout = (desktop.width, desktop.slots);
+            let first = desktop.tab(0);
+            nexus_user::log(&alloc::format!(
+                "shell: {} tabs start at {} and are {} wide, {} apart",
+                desktop.slots,
+                first.x,
+                first.width,
+                first.width + GAP,
+            ))
+            .ok();
+        }
 
         if message == wire::SHOWN {
             in_flight = false;

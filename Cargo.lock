@@ -115,6 +115,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-json"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-kernel"
 version = "0.1.0"
 dependencies = [

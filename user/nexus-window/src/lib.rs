@@ -173,8 +173,26 @@ pub trait App {
 
     /// Woken by the clock, or by one of the extra handles being watched.
     /// Returns whether anything on screen changed.
+    ///
+    /// The simple form, for a window that watches nothing and only wants a
+    /// clock. A program watching more than one handle should implement
+    /// [`woken`](App::woken) instead and look at the key.
     fn ticked(&mut self) -> bool {
         false
+    }
+
+    /// The same, told which of its handles became ready.
+    ///
+    /// `None` is the clock. `Some(key)` is the key the handle was watched
+    /// under, one call per ready handle -- because a program watching three
+    /// services cannot safely find out which one replied by reading all three:
+    /// `receive` blocks, and two of those reads would block for ever.
+    ///
+    /// Defaults to [`ticked`](App::ticked), so a window that does not care
+    /// which it was needs neither.
+    fn woken(&mut self, key: Option<u64>) -> bool {
+        let _ = key;
+        self.ticked()
     }
 
     /// Whether to carry on. Checked after every event.
@@ -194,6 +212,8 @@ pub enum Trouble {
     WouldNotMap,
     /// The surface is smaller than the size that came with it.
     TooSmall,
+    /// The size in the message cannot describe a surface at all.
+    ImpossibleSize,
     /// A wait set could not be made, or something could not be watched.
     CouldNotWait,
 }
@@ -205,9 +225,52 @@ impl core::fmt::Display for Trouble {
             Self::NoSurface => "no surface came with the message",
             Self::WouldNotMap => "the surface would not map",
             Self::TooSmall => "the surface is smaller than the size it was given",
+            Self::ImpossibleSize => "the size that arrived cannot describe a surface",
             Self::CouldNotWait => "could not wait on the compositor",
         };
         out.write_str(said)
+    }
+}
+
+/// Why the frame loop stopped, and how much it drew before it did.
+///
+/// A count of frames on its own cannot tell a window that was closed from one
+/// whose compositor stopped answering, and those call for different reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outcome {
+    pub ended: Ended,
+    pub frames: u32,
+}
+
+/// What ended a frame loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// The program said it was done.
+    Finished,
+    /// The compositor's channel closed.
+    Disconnected,
+    /// A frame was sent and never acknowledged.
+    ///
+    /// Distinct from being disconnected on purpose: a compositor that is alive
+    /// and has stopped answering leaves a client blocked for ever, and a
+    /// program that reported that as an ordinary end would be a program hiding
+    /// the one fault worth reporting.
+    NotAcknowledged,
+    /// A resize arrived and the new surface could not be mapped.
+    LostSurface,
+    /// The loop ran longer than its bound allows.
+    OutOfPatience,
+}
+
+impl core::fmt::Display for Ended {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        out.write_str(match self {
+            Self::Finished => "the program finished",
+            Self::Disconnected => "the compositor went away",
+            Self::NotAcknowledged => "the compositor stopped acknowledging frames",
+            Self::LostSurface => "a new surface could not be mapped",
+            Self::OutOfPatience => "the frame loop ran out of turns",
+        })
     }
 }
 
@@ -233,9 +296,28 @@ const SAID: u64 = 1;
 /// the one this crate uses.
 pub const FIRST_KEY: u64 = 16;
 
-/// A frame loop gives up after this many turns without being told anything. A
-/// window whose compositor has stopped answering would otherwise spin.
+/// A frame loop gives up after this many turns. A bound on the whole life of a
+/// window rather than on any one wait: it is the last line of defence, not the
+/// timeout.
 const PATIENCE: u64 = 8_000_000;
+
+/// How long a frame may go unacknowledged before the compositor is treated as
+/// having stopped answering.
+///
+/// The real timeout, and the one that matters. Ten seconds is far longer than
+/// any composite takes and far shorter than a person will wait at a window that
+/// has stopped redrawing.
+const ACKNOWLEDGE_MS: u64 = 10_000;
+
+/// How many ready keys one wait may report.
+///
+/// Sized for the compositor's own key plus every handle a program is allowed to
+/// add, so that a wake never has to be split across two calls -- a ready key
+/// that did not fit would be a service whose reply was silently not dispatched.
+const READY: usize = 1 + MAX_WATCHED;
+
+/// How many handles of its own a program may watch through this crate.
+pub const MAX_WATCHED: usize = 15;
 
 impl Window {
     /// Take the first message from the compositor: a size, a surface, and
@@ -269,17 +351,38 @@ impl Window {
         let index = read_u32(&buffer, 12);
         let surface = handles[0];
 
+        if !plausible(width, height) {
+            return Err(Trouble::ImpossibleSize);
+        }
         let mapped = nexus_user::memory_map(surface, at, true).map_err(|_| Trouble::WouldNotMap)?;
-        if width as usize * height as usize * 4 > mapped {
+        if !fits(width, height, mapped) {
+            nexus_user::memory_unmap(surface, at).ok();
             return Err(Trouble::TooSmall);
         }
 
         let spare = received.handles - 1;
         let carried = spare.min(lent.len());
         lent[..carried].copy_from_slice(&handles[1..1 + carried]);
+        // Anything that arrived beyond what the caller asked for is closed
+        // rather than kept. A handle nobody named is authority this program was
+        // given and cannot use, and holding it open would keep whatever it
+        // refers to alive for as long as this window runs.
+        for extra in &handles[1 + carried..received.handles] {
+            nexus_user::close(*extra).ok();
+        }
 
-        let set = nexus_user::wait_set().map_err(|_| Trouble::CouldNotWait)?;
-        nexus_user::watch(set, compositor, SAID).map_err(|_| Trouble::CouldNotWait)?;
+        let set = match nexus_user::wait_set() {
+            Ok(set) => set,
+            Err(_) => {
+                nexus_user::memory_unmap(surface, at).ok();
+                return Err(Trouble::CouldNotWait);
+            }
+        };
+        if nexus_user::watch(set, compositor, SAID).is_err() {
+            nexus_user::close(set).ok();
+            nexus_user::memory_unmap(surface, at).ok();
+            return Err(Trouble::CouldNotWait);
+        }
 
         Ok((
             Self {
@@ -325,12 +428,23 @@ impl Window {
     /// Anything that becomes ready arrives as [`App::ticked`], because from the
     /// frame loop's point of view the two are the same event: something
     /// happened, and the program may want to draw.
+    /// Keys below [`FIRST_KEY`] are refused rather than passed on. The
+    /// compositor's own membership lives down there, and a program that
+    /// unwatched key 1 -- by arithmetic, or by counting from zero -- would stop
+    /// its own window from ever being told anything again, with nothing to say
+    /// what had happened.
     pub fn watch(&self, handle: Handle, key: u64) -> Result<(), nexus_user::Error> {
+        if key < FIRST_KEY {
+            return Err(nexus_user::Error::Invalid);
+        }
         nexus_user::watch(self.set, handle, key)
     }
 
     /// Stop watching something.
     pub fn unwatch(&self, key: u64) -> Result<(), nexus_user::Error> {
+        if key < FIRST_KEY {
+            return Err(nexus_user::Error::Invalid);
+        }
         nexus_user::unwatch(self.set, key)
     }
 
@@ -352,55 +466,112 @@ impl Window {
     /// Returns how many frames were drawn, which is the number worth logging:
     /// a window that drew nothing and a window that drew is the difference
     /// between a program that failed and one that ran.
-    pub fn run(mut self, app: &mut impl App) -> u32 {
+    pub fn run(mut self, app: &mut impl App) -> Outcome {
         let mut stale = true;
-        let mut in_flight = false;
+        // When the frame in flight was sent, or `None` when none is.
+        let mut sent_at: Option<u64> = None;
         let mut drawn = 0u32;
+        let mut ended = Ended::OutOfPatience;
 
         for _ in 0..PATIENCE {
             if !app.running() {
+                ended = Ended::Finished;
                 break;
             }
-            if stale && !in_flight {
+            if stale && sent_at.is_none() {
                 let mut canvas = self.canvas();
                 app.draw(&mut canvas);
                 if nexus_user::send(self.compositor, wire::DAMAGED, &[]).is_err() {
+                    ended = Ended::Disconnected;
                     break;
                 }
                 drawn += 1;
                 stale = false;
-                in_flight = true;
+                sent_at = Some(nexus_user::uptime());
             }
 
-            let mut keys = [0u64; 4];
-            let waited = match app.tick_ms() {
+            // The shorter of what the program asked for and what is left of the
+            // frame's patience. Without the second the loop would wait for ever
+            // on a compositor that is alive and has stopped answering, which is
+            // the one failure a window cannot report from inside itself.
+            let ticked = app.tick_ms();
+            let remaining = sent_at
+                .map(|at| ACKNOWLEDGE_MS.saturating_sub(nexus_user::uptime().saturating_sub(at)));
+            let deadline = match (ticked, remaining) {
+                (Some(one), Some(other)) => Some(one.min(other)),
+                (Some(one), None) => Some(one),
+                (None, Some(other)) => Some(other),
+                (None, None) => None,
+            };
+
+            let mut keys = [0u64; READY];
+            let waited = match deadline {
                 Some(milliseconds) => nexus_user::wait_any_until(self.set, &mut keys, milliseconds),
                 None => nexus_user::wait_any(self.set, &mut keys),
             };
             let Ok(ready) = waited else {
+                ended = Ended::Disconnected;
                 break;
             };
+            let ready = ready.min(keys.len());
 
-            // Anything that is not the compositor is this program's own
-            // business: it is told that something happened and looks for
-            // itself, because this crate has no idea what it was watching. A
-            // wake with nothing ready -- the clock -- is the same question.
-            if ready == 0 || !keys[..ready.min(keys.len())].contains(&SAID) {
-                if app.ticked() {
+            // Everything that is ready, and not only the first thing.
+            //
+            // This used to hand the whole wake to the compositor whenever the
+            // compositor was among the keys, and drop the rest. A window
+            // waiting on a service therefore stopped hearing from it for as
+            // long as somebody was typing -- the service was ready, the wake
+            // said so, and the reply was thrown away. Both are dispatched now,
+            // the program's own handles first, because what they carry is what
+            // the next frame is going to draw.
+            let mut said = false;
+            for key in &keys[..ready] {
+                if *key == SAID {
+                    said = true;
+                } else if app.woken(Some(*key)) {
+                    stale = true;
+                }
+            }
+
+            if ready == 0 {
+                // The deadline. Either the program's clock or the frame's
+                // patience, and which one it was is a question of whether a
+                // frame has been waiting too long.
+                if let Some(at) = sent_at {
+                    if nexus_user::uptime().saturating_sub(at) >= ACKNOWLEDGE_MS {
+                        ended = Ended::NotAcknowledged;
+                        break;
+                    }
+                }
+                if app.woken(None) {
                     stale = true;
                 }
                 continue;
             }
 
+            if !said {
+                continue;
+            }
+
             match self.heard(app) {
-                Heard::Shown => in_flight = false,
+                Heard::Shown => sent_at = None,
                 Heard::Changed => stale = true,
                 Heard::Nothing => {}
-                Heard::Gone => break,
+                Heard::Gone => {
+                    ended = Ended::Disconnected;
+                    break;
+                }
+                Heard::LostSurface => {
+                    ended = Ended::LostSurface;
+                    break;
+                }
             }
         }
 
-        drawn
+        Outcome {
+            ended,
+            frames: drawn,
+        }
     }
 
     /// Read one message from the compositor and act on it.
@@ -423,14 +594,20 @@ impl Window {
             nexus_user::memory_unmap(self.surface, self.at).ok();
             nexus_user::close(self.surface).ok();
             self.surface = incoming[0];
-            self.width = read_u32(bytes, 4);
-            self.height = read_u32(bytes, 8);
-            let Ok(mapped) = nexus_user::memory_map(self.surface, self.at, true) else {
-                return Heard::Gone;
-            };
-            if self.width as usize * self.height as usize * 4 > mapped {
-                return Heard::Gone;
+            let width = read_u32(bytes, 4);
+            let height = read_u32(bytes, 8);
+            if !plausible(width, height) {
+                return Heard::LostSurface;
             }
+            let Ok(mapped) = nexus_user::memory_map(self.surface, self.at, true) else {
+                return Heard::LostSurface;
+            };
+            if !fits(width, height, mapped) {
+                nexus_user::memory_unmap(self.surface, self.at).ok();
+                return Heard::LostSurface;
+            }
+            self.width = width;
+            self.height = height;
             app.resized(self.width, self.height);
             return Heard::Changed;
         }
@@ -442,6 +619,21 @@ impl Window {
     }
 }
 
+impl Drop for Window {
+    /// Give back what this window owns, and nothing else.
+    ///
+    /// The surface and the wait set are this crate's; the compositor's channel
+    /// and whatever was lent to the program are not, and closing those would be
+    /// closing somebody else's handle. `run` takes `self`, so this is also what
+    /// tidies up after a window that has finished -- which matters the moment a
+    /// program opens a second one.
+    fn drop(&mut self) {
+        nexus_user::memory_unmap(self.surface, self.at).ok();
+        nexus_user::close(self.surface).ok();
+        nexus_user::close(self.set).ok();
+    }
+}
+
 /// What one message from the compositor turned out to be.
 enum Heard {
     /// The frame is on screen.
@@ -450,8 +642,33 @@ enum Heard {
     Changed,
     /// Nothing this program has to act on.
     Nothing,
-    /// The compositor has gone, or the surface could not be replaced.
+    /// The compositor has gone.
     Gone,
+    /// A resize arrived and the surface could not be replaced.
+    LostSurface,
+}
+
+/// Whether a width and height could describe a surface at all.
+///
+/// Zero is not a window, and a dimension large enough to overflow the byte
+/// count is a malformed message rather than a very large screen. Checked here
+/// so that the arithmetic below cannot wrap: on a build without overflow checks
+/// `width * height * 4` can come back small for enormous dimensions, and the
+/// comparison that is supposed to guard an `unsafe` block would pass.
+fn plausible(width: u32, height: u32) -> bool {
+    width > 0 && height > 0 && bytes_for(width, height).is_some()
+}
+
+/// How many bytes a surface of this size needs, if that is a number.
+fn bytes_for(width: u32, height: u32) -> Option<usize> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+}
+
+/// Whether a mapping of `mapped` bytes is big enough for this size.
+fn fits(width: u32, height: u32, mapped: usize) -> bool {
+    matches!(bytes_for(width, height), Some(needed) if needed <= mapped)
 }
 
 /// Read a little-endian `u32` out of a message.

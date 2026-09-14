@@ -18,13 +18,15 @@
 #>
 [CmdletBinding()]
 param(
-    [int]$Timeout = 240
+    [int]$Timeout = 240,
+    [string]$Shot
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'qemu.ps1')
+. (Join-Path $PSScriptRoot 'capture.ps1')
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
@@ -128,7 +130,32 @@ try {
         Send-Keys @('f2')
         Send-Keys @('f2')
         Send-Keys @('n', 'o', 'p', 'e', 'ret')
-        Start-Sleep -Seconds 3
+
+        # Waited for, not slept through.
+        #
+        # This was three seconds of sleep and it failed about half the time,
+        # which cost an afternoon: the keys are queued by the emulated 8042,
+        # read by the kernel's input thread, forwarded by the compositor and
+        # acted on by a shell that is drawing at the same time, and how long all
+        # of that takes is a property of the host rather than of the guest. A
+        # fixed wait turns a slow host into a failing test, and every marker
+        # this file checks for is one the machine says as soon as it happens.
+        if (-not (Wait-For -Text 'term: ran nope' -Seconds 60)) {
+            Write-Host '    the shell never reported the last command' -ForegroundColor Red
+        }
+
+        # Stopped rather than killed. A machine that is shot loses whatever its
+        # serial line had not got to the file yet, and what it loses is the last
+        # thing that happened -- which is always the thing being tested.
+        if ($Shot) {
+            $Ppm = Join-Path $BuildDir 'terminal.ppm'
+            Invoke-Screendump -Writer $writer -Path $Ppm
+            Convert-PpmToPng -PpmPath $Ppm -PngPath $Shot | Out-Null
+            Write-Host "    Screenshot: $Shot" -ForegroundColor DarkGray
+        }
+
+        $writer.WriteLine('quit')
+        Start-Sleep -Milliseconds 800
     } finally {
         $client.Close()
     }

@@ -125,8 +125,16 @@ extern "C" fn main() -> ! {
     );
     nexus_user::log("store: the packages this machine has, and the ones it could").ok();
 
-    let frames = window.run(&mut store);
-    if frames > 0 {
+    let outcome = window.run(&mut store);
+    if outcome.ended != nexus_window::Ended::Finished
+        && outcome.ended != nexus_window::Ended::Disconnected
+    {
+        // Reported rather than exited over: the window is gone either way, and
+        // which way is the only thing that distinguishes a machine shutting
+        // down from a compositor that stopped answering.
+        failed(&format!("store: FAILED: {}", outcome.ended));
+    }
+    if outcome.frames > 0 {
         nexus_user::log("store: listed what there is to install").ok();
     }
     finish()
@@ -192,6 +200,12 @@ struct Store {
     trouble: bool,
     /// What the machine looks like, so this window matches it.
     look: nexus_look::Look,
+    /// Whether the record of what is installed could be read.
+    ///
+    /// False refuses installing. An install updates that record, and updating a
+    /// record this program could not read means writing one that says nothing
+    /// else is installed.
+    recorded: bool,
 }
 
 impl Store {
@@ -210,6 +224,7 @@ impl Store {
             said: String::new(),
             trouble: false,
             look,
+            recorded: true,
         };
         store.reread();
         if root.is_none() {
@@ -225,13 +240,26 @@ impl Store {
     /// if the package that was installed replaced the installer or the updater —
     /// possibly the files themselves.
     fn reread(&mut self) {
-        self.installed = match self
+        match self
             .settings
-            .and_then(|handle| read_text(handle, INSTALLED_NAME))
+            .map(|handle| read_record(handle, INSTALLED_NAME))
         {
-            Some(text) => nexus_update::Installed::parse(&text),
-            None => nexus_update::Installed::new(),
-        };
+            Some(Ok(Some(text))) => {
+                self.installed = nexus_update::Installed::parse(&text);
+                self.recorded = true;
+            }
+            Some(Ok(None)) | None => {
+                self.installed = nexus_update::Installed::new();
+                self.recorded = true;
+            }
+            Some(Err(why)) => {
+                // Left as it was, and installing is refused. A record that will
+                // not read is not an empty record, and writing a fresh one
+                // would tell the updater that everything here is uninstalled.
+                self.recorded = false;
+                self.complain(&why);
+            }
+        }
         self.rows = self.look_through();
         self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
     }
@@ -298,6 +326,10 @@ impl Store {
         let Some(row) = self.rows.get(self.cursor) else {
             return false;
         };
+        if !self.recorded {
+            self.complain(nexus_i18n::text("store.norecord"));
+            return true;
+        }
         if !row.standing.installable() {
             // Said here rather than attempted and reported, because the
             // installer would refuse it for the same reason and the message
@@ -541,19 +573,50 @@ impl App for Store {
 // -- files -------------------------------------------------------------------
 
 /// A whole file out of a directory, up to `most` bytes.
+///
+/// `None` covers both "no such file" and "it would not read", which is the
+/// right shape *here* and is worth saying why: every caller of this either
+/// lists a package it can then leave out, or reads colours it has a default
+/// for. Neither rewrites the file it just read. The record of what is
+/// installed does, and it goes through [`read_record`] instead.
 fn read_bytes(directory: Handle, name: &str, most: usize) -> Option<Vec<u8>> {
     let file = nexus_user::open(directory, name).ok()?;
-    let size = nexus_user::size(file).unwrap_or(0).min(most);
+    let size = nexus_user::size(file).ok()?;
+    if size > most {
+        nexus_user::close(file).ok();
+        return None;
+    }
     let mut bytes = alloc::vec![0u8; size];
     let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
     nexus_user::close(file).ok();
-    bytes.truncate(read);
+    if read != size {
+        return None;
+    }
     Some(bytes)
 }
 
 /// The same, as text.
 fn read_text(directory: Handle, name: &str) -> Option<String> {
     String::from_utf8(read_bytes(directory, name, 64 * 1024)?).ok()
+}
+
+/// The record of what is installed, with "absent" and "unreadable" kept apart.
+///
+/// This one is rewritten after every install, so the two have to be different
+/// answers: writing a fresh record because the old one would not read would
+/// tell the updater that everything on the machine is uninstalled.
+fn read_record(directory: Handle, name: &str) -> Result<Option<String>, String> {
+    match nexus_user::open(directory, name) {
+        Err(nexus_user::Error::NotFound) => Ok(None),
+        Err(error) => Err(format!("{name}: {error}")),
+        Ok(file) => {
+            nexus_user::close(file).ok();
+            match read_text(directory, name) {
+                Some(text) => Ok(Some(text)),
+                None => Err(nexus_i18n::format("file.unreadable", &[("name", &name)])),
+            }
+        }
+    }
 }
 
 /// Replace a text file with this content.
@@ -572,7 +635,10 @@ fn write_text(directory: Handle, name: &str, text: &str) -> Result<(), String> {
         match nexus_user::write_at(file, written as u64, &contents[written..]) {
             Ok(0) | Err(_) => {
                 nexus_user::close(file).ok();
-                return Err(format!("{name}: the write stopped at {written} bytes"));
+                return Err(nexus_i18n::format(
+                    "file.stopped",
+                    &[("name", &name), ("bytes", &written)],
+                ));
             }
             Ok(count) => written += count,
         }

@@ -208,7 +208,23 @@ try {
         # where the click proves the button arrived and nothing about what it
         # landed on -- which is exactly what it did.
         Move-Pointer -Dx 0 -Dy -3 -Steps 5     # y about 1184: the middle of a tab
-        Move-Pointer -Dx 30 -Dy 0 -Steps 20    # x about 600: the second tab
+
+        # Where the second tab is, read out of the machine rather than guessed.
+        # The desktop says where its tabs are whenever that changes, and it
+        # changes every time a button is added to the left of them -- which is
+        # how this test came to click the first tab while believing it was
+        # clicking the second.
+        $tabs = [regex]::Match(
+            ((Get-Content $SerialLog -Raw -Encoding UTF8) -replace "`0", ''),
+            'shell: \d+ tabs start at (\d+) and are (\d+) wide, (\d+) apart')
+        if (-not $tabs.Success) { throw 'the desktop never said where its tabs are' }
+        $centre = [int]$tabs.Groups[1].Value + [int]$tabs.Groups[3].Value +
+            [int]([int]$tabs.Groups[2].Value / 2)
+        Write-Host "    the second tab is centred at x=$centre" -ForegroundColor DarkGray
+        # In steps of thirty, then whatever is left over, because one large
+        # delta is one the guest can miss under load.
+        Move-Pointer -Dx 30 -Dy 0 -Steps ([int]($centre / 30))
+        Move-Pointer -Dx ($centre % 30) -Dy 0 -Steps 1
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')
@@ -219,7 +235,7 @@ try {
         # started at boot or by another program deciding to. This is a person
         # pressing something.
         Write-Host '==> Starting a program from the desktop' -ForegroundColor Cyan
-        Move-Pointer -Dx -60 -Dy 0 -Steps 12   # back to the left edge
+        Move-Pointer -Dx -60 -Dy 0 -Steps ([int]($centre / 60) + 2)   # back to the left edge
         Move-Pointer -Dx 30 -Dy 0 -Steps 1     # x about 30: the launcher
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 300
