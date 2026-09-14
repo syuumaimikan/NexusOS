@@ -21,6 +21,22 @@ nexus-look = { path = "../../shared/nexus-look" }
 nexus-mm = { path = "../nexus-mm" }
 
 [features]
+# The filesystem's destructive exercises: make blocks, fill them, read them
+# back, leak one on purpose and reclaim it, abandon a transaction and replay it.
+#
+# Off by default, and the reason is not only that they took eleven seconds of a
+# sixteen-second boot. They *write to the disk*. A machine that ran a thousand
+# block writes across somebody's filesystem every time it was switched on would
+# be a machine doing maintenance nobody asked for, on data it has no business
+# touching, before the desktop appears.
+#
+# So they run where they belong: in the test suite, which builds the kernel with
+# this on. The ordinary boot still mounts the store, replays the journal, reads
+# the boot log back and lists the root -- everything that checks the filesystem
+# by *using* it -- and says plainly that the deep checks were not run, so no log
+# can be read as claiming they passed.
+deep-selftest = []
+
 # Fault-injection builds, used by scripts/test-faults.ps1 to verify that the
 # exception path actually works. They are features rather than test code
 # because the only way to prove a fault handler is to take a real fault, and

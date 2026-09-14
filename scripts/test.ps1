@@ -99,7 +99,9 @@ Invoke-Step 'host unit tests' {
 }
 
 Invoke-Step 'boot test' {
-    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'build.ps1')) 'build'
+    # With the filesystem's destructive checks on. This is the one place they
+    # belong: a disk that exists to be tested, in a run somebody is watching.
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'build.ps1'), '-DeepSelfTest') 'build'
     # One boot, on the disk the build just made, with somebody at the keyboard.
     #
     # A fresh disk is a machine nobody has set up, and that is the right thing

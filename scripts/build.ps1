@@ -19,7 +19,13 @@
 [CmdletBinding()]
 param(
     [switch]$Release,
-    [switch]$Clean
+    [switch]$Clean,
+    # Build the kernel with its destructive filesystem checks on.
+    #
+    # What the test suite uses. They write a thousand blocks across the store,
+    # which is worth doing to a disk that exists for testing and is not worth
+    # doing to somebody's machine every time it starts.
+    [switch]$DeepSelfTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +63,7 @@ try {
 
     Write-Host "==> Building nexus-kernel (x86_64-nexus, $Profile)" -ForegroundColor Cyan
     $kernelArgs = @('+nightly', 'kernel') + $ProfileArgs
+    if ($DeepSelfTest) { $kernelArgs += @('--features', 'deep-selftest') }
     & cargo @kernelArgs
     if ($LASTEXITCODE -ne 0) { throw "kernel build failed (exit $LASTEXITCODE)" }
 } finally {

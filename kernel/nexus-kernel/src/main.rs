@@ -895,8 +895,16 @@ fn self_test() {
         ("the filesystem", filesystem_self_test),
         ("NexusFS", nexusfs_self_test),
     ] {
+        // With the clock, because "which self-test is slow" is a question that
+        // cannot be answered from a log without one, and a boot nobody has
+        // timed is a boot nobody can make faster.
+        let started = arch::time::ticks();
         kprintln!("[test] begin {name}");
         run();
+        kprintln!(
+            "[test] end {name}: {} ms",
+            arch::time::ticks().saturating_sub(started)
+        );
     }
 }
 
@@ -981,6 +989,25 @@ fn nexusfs_self_test() {
         }
     }
 
+    deep_filesystem_checks();
+}
+
+/// The filesystem's destructive exercises, when this build asks for them.
+///
+/// Everything above this point checks the filesystem by using it: the store is
+/// mounted, the journal is replayed, the root is listed and the log the last
+/// boot wrote is read back. That is what an ordinary boot should do, and it is
+/// most of what the checks below prove anyway.
+///
+/// What is here writes: a thousand blocks made, filled, read and emptied, one
+/// leaked deliberately and reclaimed, a transaction abandoned and replayed. It
+/// is worth doing and it is not worth doing to somebody's disk every time they
+/// switch the machine on -- and it cost eleven seconds of a sixteen-second boot
+/// while it was.
+#[cfg(feature = "deep-selftest")]
+fn deep_filesystem_checks() {
+    use fs::store;
+
     match store::self_test() {
         Ok(verdict) => kprintln!("[test] {verdict}"),
         Err(error) => kprintln!("[test] FAILED: NexusFS: {error}"),
@@ -995,6 +1022,17 @@ fn nexusfs_self_test() {
         Ok(verdict) => kprintln!("[test] {verdict}"),
         Err(error) => kprintln!("[test] FAILED: the journal: {error}"),
     }
+}
+
+/// Said rather than skipped silently.
+///
+/// A log that simply lacked those three lines would be a log somebody could
+/// read as a machine whose filesystem checks passed quietly. They did not run.
+#[cfg(not(feature = "deep-selftest"))]
+fn deep_filesystem_checks() {
+    kprintln!(
+        "[test] the filesystem's destructive checks did not run;          this build was made without deep-selftest"
+    );
 }
 
 /// The file the filesystem test reads, and what it must contain.
