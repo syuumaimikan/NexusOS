@@ -287,6 +287,8 @@ mod desk {
     pub const SETTINGS: &[u8] = b"sett";
     /// Show what there is to install.
     pub const PACKAGES: &[u8] = b"pkgs";
+    /// Show the pictures on this machine.
+    pub const PICTURES: &[u8] = b"pics";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -399,6 +401,8 @@ const WALLPAPER: &[u8] = b"BIN/WALL.ELF";
 const SETTINGS_WINDOW: &[u8] = b"BIN/SET.ELF";
 /// And the one that shows what is installed and installs more.
 const STORE: &[u8] = b"BIN/STORE.ELF";
+/// And the one that shows pictures.
+const VIEWER: &[u8] = b"BIN/VIEW.ELF";
 /// The program that draws the strip along the bottom and says what a click in
 /// it means.
 const SHELL: &[u8] = b"BIN/SHELL.ELF";
@@ -1627,6 +1631,8 @@ enum What {
     /// The package window, which is given both the filesystem and the record of
     /// what is installed.
     Packages,
+    /// The picture window, which is given the filesystem to read from.
+    Pictures,
 }
 
 /// What reading from the keyboard turned out to be.
@@ -1746,6 +1752,10 @@ fn read_shell(
 
     if message == desk::PACKAGES {
         return open_window(screen, set, tiles, focus, order, What::Packages);
+    }
+
+    if message == desk::PICTURES {
+        return open_window(screen, set, tiles, focus, order, What::Pictures);
     }
 
     if message == desk::QUIT {
@@ -1917,6 +1927,29 @@ fn open_window(
                 &[files, record],
             )?
         }
+        What::Pictures => {
+            // The filesystem, and read-only: a picture viewer that could write
+            // is a picture viewer that can delete a photograph. Transfer as
+            // well, because that is the right a handle needs to cross a channel
+            // at all.
+            let Ok(files) = nexus_user::duplicate(
+                FILESYSTEM,
+                nexus_user::rights::READ | nexus_user::rights::TRANSFER,
+            ) else {
+                failed("compositor: FAILED: could not lend the disk to a picture window");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                VIEWER,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[files],
+            )?
+        }
     };
     if nexus_user::watch(set, tile.channel, channel_key(slot)).is_err()
         || nexus_user::watch(set, tile.process, process_key(slot)).is_err()
@@ -1935,6 +1968,7 @@ fn open_window(
             What::Terminal => "compositor: started a terminal, and lent it the filesystem",
             What::Settings => "compositor: started the settings, and lent them the settings",
             What::Packages => "compositor: started the packages, and lent them the disk",
+            What::Pictures => "compositor: started a picture window, and lent it the disk to read",
         }
     ))
     .ok();

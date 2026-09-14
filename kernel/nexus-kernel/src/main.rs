@@ -1227,6 +1227,11 @@ fn filesystem_self_test() {
 /// Not a special case for one file: every `.NEX` in the image's program
 /// directory is copied. A system that hard-coded one package's name would need
 /// changing to ship two.
+///
+/// Pictures travel the same way, into `PICTURES`, for the same reason: a
+/// machine whose picture viewer had nothing to show on a fresh disk would be a
+/// machine where that program could not be used until somebody had already
+/// used it to put a file somewhere.
 fn seed_packages() {
     let Ok(partitions) = fs::gpt::read() else {
         return;
@@ -1241,21 +1246,30 @@ fn seed_packages() {
         return;
     };
     for entry in files {
-        if entry.is_directory || !entry.name.as_str().ends_with(".NEX") {
+        if entry.is_directory {
             continue;
         }
-        let path = alloc::format!("BIN/{}", entry.name.as_str());
+        let name = entry.name.as_str();
+        // Where each kind of thing belongs once it is off the image. By the
+        // ending, because the image's directory is flat and the store's is not.
+        let into = if name.ends_with(".NEX") {
+            "PKG"
+        } else if name.ends_with(".PNG") || name.ends_with(".BMP") {
+            "PICTURES"
+        } else {
+            continue;
+        };
+        let path = alloc::format!("BIN/{name}");
         let Ok(contents) = volume.read_file(path.as_str()) else {
             kprintln!("[pkg ] {path} is in the image but will not read");
             continue;
         };
-        match fs::store::seed("PKG", entry.name.as_str(), &contents) {
+        match fs::store::seed(into, name, &contents) {
             Ok(true) => kprintln!(
-                "[pkg ] PKG/{} placed on the store from the image, {} bytes",
-                entry.name.as_str(),
+                "[pkg ] {into}/{name} placed on the store from the image, {} bytes",
                 contents.len()
             ),
-            Ok(false) => kprintln!("[pkg ] PKG/{} is already on the store", entry.name.as_str()),
+            Ok(false) => kprintln!("[pkg ] {into}/{name} is already on the store"),
             Err(error) => kprintln!("[pkg ] could not place {path}: {error}"),
         }
     }

@@ -123,6 +123,7 @@ shell.updates.pending = 更新 {number} 件
 shell.updates.installed = 更新 {number} 件を適用しました
 shell.settings = 設定
 shell.packages = パッケージ
+shell.pictures = 画像
 shell.leave = ログアウト
 
 file.toolarge = {name} は大きすぎて安全に読めないため、変更しません
@@ -175,6 +176,15 @@ store.norefuse = 拒否しました: {why}
 store.nobroken = 導入できませんでした: {why}
 store.looked = もう一度調べました
 store.keys = 上下でパッケージを選び、Enter で導入します。F5 で再読み込みします。
+
+view.nofiles = この画面はファイルシステムなしで開かれました
+view.nodirectory = この機械に {name} ディレクトリがありません
+view.nothing = ここに画像はありません
+view.nopicture = 表示するものがありません
+view.unreadable = {name} を読めませんでした
+view.showing = {name}、{width} x {height}
+view.which = {of} 件中 {at}: {name} ({kind})
+view.keys = 左右で画像を切り替え、Home / End で端へ。F5 で再読み込み。
 
 setup.title = NexusOS の初期設定
 setup.language = 言語を選んでください

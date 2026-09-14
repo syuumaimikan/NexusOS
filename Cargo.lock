@@ -104,11 +104,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-image"
+version = "0.1.0"
+dependencies = [
+ "nexus-inflate",
+]
+
+[[package]]
 name = "nexus-ime"
 version = "0.1.0"
 
 [[package]]
 name = "nexus-index"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-inflate"
 version = "0.1.0"
 
 [[package]]
@@ -291,6 +302,18 @@ name = "nexus-user"
 version = "0.1.0"
 dependencies = [
  "nexus-mm",
+]
+
+[[package]]
+name = "nexus-view"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-image",
+ "nexus-look",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
 ]
 
 [[package]]

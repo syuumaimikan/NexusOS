@@ -8,6 +8,8 @@ members = [
     "shared/nexus-i18n",
     "shared/nexus-json",
     "shared/nexus-machine",
+    "shared/nexus-inflate",
+    "shared/nexus-image",
     "shared/nexus-index",
     "shared/nexus-net",
     "shared/nexus-time",
@@ -43,6 +45,7 @@ members = [
     "user/nexus-wall",
     "user/nexus-settings",
     "user/nexus-store",
+    "user/nexus-view",
     "user/nexus-setup",
     "user/nexus-idle",
 ]

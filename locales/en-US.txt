@@ -123,6 +123,7 @@ shell.updates.pending = {number} updates ready
 shell.updates.installed = {number} updates installed
 shell.settings = Settings
 shell.packages = Packages
+shell.pictures = Pictures
 shell.leave = Log out
 
 file.toolarge = {name} is too large to read safely, so it will not be changed
@@ -175,6 +176,15 @@ store.norefuse = Refused: {why}
 store.nobroken = Could not install: {why}
 store.looked = Looked again
 store.keys = Up and down choose a package. Enter installs it. F5 looks again.
+
+view.nofiles = This window was started without the filesystem
+view.nodirectory = There is no {name} directory on this machine
+view.nothing = No pictures here
+view.nopicture = Nothing to show
+view.unreadable = {name} could not be read
+view.showing = {name}, {width} by {height}
+view.which = {at} of {of}: {name} ({kind})
+view.keys = Left and right change the picture. Home and End jump. F5 looks again.
 
 setup.title = Set up NexusOS
 setup.language = Choose a language

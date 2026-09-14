@@ -1,0 +1,14 @@
+[package]
+name = "nexus-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "PNG and BMP, decoded into pixels a surface can hold."
+
+[lib]
+name = "nexus_image"
+path = "src/lib.rs"
+
+[dependencies]
+nexus-inflate = { path = "../nexus-inflate" }
