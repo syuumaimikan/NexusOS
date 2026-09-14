@@ -3,7 +3,7 @@
     Runs the full NexusOS test suite.
 
 .DESCRIPTION
-    Twenty stages, cheapest first, so a failure surfaces as early as possible.
+    Twenty-one stages, cheapest first, so a failure surfaces as early as possible.
 
     The first four run on this machine and take seconds:
 
@@ -32,14 +32,16 @@
      16. the agent
      17. browsing
      18. input, through QEMU's monitor and the same 8042 controller
-     19. power: press the buttons that stop the machine, and require it to
+     19. the launcher: open it with F3, type two letters that only a
+         subsequence match finds, and require the thing named to start
+     20. power: press the buttons that stop the machine, and require it to
          stop -- the one stage whose pass condition is that QEMU exits
-     20. injection: break the kernel one way per build -- a real CPU exception,
+     21. injection: break the kernel one way per build -- a real CPU exception,
          a broken TLB shootdown -- and require each to be reported rather than
          resetting the machine
 
 .PARAMETER SkipFaults
-    Skip stage 20, which is the slowest because it boots QEMU six times.
+    Skip stage 21, which is the slowest because it boots QEMU six times.
 #>
 [CmdletBinding()]
 param(
@@ -111,7 +113,8 @@ $HostTools = @('nexus-pack', 'nexus-collab', 'nexus-linux-example')
 # Programs that run on Nexus, built for the user target.
 $Programs = @(
     'nexus-ai', 'nexus-assist', 'nexus-browser', 'nexus-client', 'nexus-compositor',
-    'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install', 'nexus-settings',
+    'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install', 'nexus-launch',
+    'nexus-settings',
     'nexus-setup', 'nexus-shell', 'nexus-store', 'nexus-term', 'nexus-ui', 'nexus-updater',
     'nexus-view', 'nexus-wall'
 )
@@ -744,6 +747,14 @@ Invoke-Step 'input' {
     # does nothing.
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-input.ps1')) 'input tests'
+}
+
+Invoke-Step 'the launcher' {
+    # Needs a desktop to press F3 at.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-launch.ps1')) 'launcher tests'
 }
 
 Invoke-Step 'power' {

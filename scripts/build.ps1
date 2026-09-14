@@ -141,6 +141,10 @@ $ViewElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-view"
 $StagedView = Publish-Program -Elf $ViewElf -ProgramDir $ProgramDir -Name 'view.elf'
 $viewSize = [math]::Round((Get-Item $StagedView).Length / 1KB, 1)
 
+$LaunchElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-launch"
+$StagedLaunch = Publish-Program -Elf $LaunchElf -ProgramDir $ProgramDir -Name 'launch.elf'
+$launchSize = [math]::Round((Get-Item $StagedLaunch).Length / 1KB, 1)
+
 $StoreElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-store"
 $StagedStore = Publish-Program -Elf $StoreElf -ProgramDir $ProgramDir -Name 'store.elf'
 $storeSize = [math]::Round((Get-Item $StagedStore).Length / 1KB, 1)
@@ -313,6 +317,7 @@ Write-Host "  wallpaper  : $wallSize KiB  -> BIN\WALL.ELF on the disk"
 Write-Host "  settings   : $settingsSize KiB  -> BIN\SET.ELF on the disk"
 Write-Host "  packages   : $storeSize KiB  -> BIN\STORE.ELF on the disk"
 Write-Host "  viewer     : $viewSize KiB  -> BIN\VIEW.ELF on the disk"
+Write-Host "  launcher   : $launchSize KiB  -> BIN\LAUNCH.ELF on the disk"
 Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
 Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
 Write-Host "  picture    : $pictureSize KiB  -> PICTURES\NEXUS.PNG on the disk"

@@ -421,6 +421,14 @@ fn tell_language(channel: Handle) {
 /// so it is a key nothing else uses rather than a chord.
 const LEAVE_KEY: u32 = 10;
 
+/// Which function key opens the launcher.
+///
+/// F3. F1 is the interface language and F2 is the input script, both handled by
+/// the kernel before this program ever sees them, so F3 is the first one free.
+/// The same reasoning as `LEAVE_KEY`: the keyboard decoder reports the key and
+/// not the shift state, so a chord is not available to bind.
+const LAUNCH_KEY: u32 = 3;
+
 /// The program this one gives surfaces to.
 const CLIENT: &[u8] = b"BIN/CLIENT.ELF";
 /// The one it runs instead, once, on a machine nobody has set up.
@@ -433,6 +441,8 @@ const TERMINAL: &[u8] = b"BIN/TERM.ELF";
 const WALLPAPER: &[u8] = b"BIN/WALL.ELF";
 /// And the one that changes the file the other two read.
 const SETTINGS_WINDOW: &[u8] = b"BIN/SET.ELF";
+/// And the one somebody types a name into.
+const LAUNCHER: &[u8] = b"BIN/LAUNCH.ELF";
 /// And the one that shows what is installed and installs more.
 const STORE: &[u8] = b"BIN/STORE.ELF";
 /// And the one that shows pictures.
@@ -1358,6 +1368,16 @@ fn serve(
     // numbers are worth having when the last window closes, which on a machine
     // somebody is using is the middle of the session and not the end of it.
     let mut leaving = false;
+    // Which slot the launcher is in, when one is open. Tracked here rather than
+    // on the tile because it is a property of the session -- there is at most
+    // one -- and a second launcher would be a second thing reading the same
+    // keystrokes.
+    let mut launcher: Option<usize> = None;
+    // What the launcher asked for, acted on after the loop over ready keys.
+    // Not inside it: starting a window takes a slot, and taking a slot while
+    // iterating over the slots is how a program indexes an array it has just
+    // changed the shape of.
+    let mut wanted: Option<Launched> = None;
     // The machine has been told to stop. Everything carries on for the half
     // second it takes, except that the screen says so.
     let mut stopping = false;
@@ -1420,6 +1440,21 @@ fn serve(
         for key in &keys[..count] {
             if *key == KEY_KEYBOARD {
                 match read_key(set, tiles, shell, &mut focus) {
+                    Some(Typed::Launch) => {
+                        // Already open: bring it back rather than start a
+                        // second one. Pressing the key twice is something
+                        // people do, and two launchers reading the same keys
+                        // would be a mess neither of them could see.
+                        if let Some(slot) = launcher {
+                            if matches!(tiles.get(slot), Some(Some(tile)) if tile.live) {
+                                raise(&mut order, slot);
+                                focus = slot;
+                                pending = pending.union(everything(screen));
+                                continue;
+                            }
+                        }
+                        wanted = Some(Launched::Window(What::Launcher));
+                    }
                     Some(typed) => {
                         if matches!(typed, Typed::Forwarded) {
                             forwarded += 1;
@@ -1568,6 +1603,31 @@ fn serve(
                 let mut message = [0u8; 32];
                 let mut none = [Handle(0); 1];
                 match nexus_user::receive(tile.channel, &mut message, &mut none) {
+                    Ok(received) if Some(index) == launcher => {
+                        // The launcher is the one client whose messages are
+                        // read rather than counted. What it sends is one of the
+                        // same four-byte requests the desktop sends, and this
+                        // program does exactly what it does for the desktop --
+                        // decides whether to, which program that means, and
+                        // what to lend it.
+                        //
+                        // Narrow on purpose. `show`, `hide` and the window list
+                        // are the desktop's business and are not accepted here;
+                        // a launcher that could put windows away would be a
+                        // second desktop.
+                        let asked = &message[..received.bytes.min(message.len())];
+                        if let Some(what) = launched(asked) {
+                            wanted = Some(what);
+                        } else {
+                            // Anything else is a frame, which it does draw.
+                            tile.frames += 1;
+                            composited += 1;
+                            if nexus_user::send(tile.channel, b"shown", &[]).is_err() {
+                                stop_listening(set, tile, index);
+                            }
+                            pending = pending.union(region_of(tile));
+                        }
+                    }
                     Ok(_) => {
                         tile.frames += 1;
                         composited += 1;
@@ -1607,6 +1667,45 @@ fn serve(
         // things become ready in the same instant this is one composite instead
         // of three, and the two that were skipped were never on screen long
         // enough for anybody to see them.
+        // What the launcher asked for, now that the loop over ready keys is
+        // done and the tile array is nobody's to index.
+        if let Some(asked) = wanted.take() {
+            match asked {
+                Launched::Window(what) => {
+                    let opening_launcher = matches!(what, What::Launcher);
+                    match open_window(screen, set, tiles, &mut focus, &mut order, what) {
+                        Some(Asked::Opened) => {
+                            opened += 1;
+                            if opening_launcher {
+                                launcher = Some(focus);
+                            }
+                            announce(shell, tiles, focus, &mut reported);
+                            pending = pending.union(everything(screen));
+                        }
+                        Some(_) => {}
+                        None => return,
+                    }
+                }
+                Launched::Leave => leaving = true,
+                Launched::Halt => {
+                    if ask_power(true) {
+                        stopping = true;
+                        pending = pending.union(everything(screen));
+                    }
+                }
+                Launched::Restart => {
+                    if ask_power(false) {
+                        stopping = true;
+                        pending = pending.union(everything(screen));
+                    }
+                }
+                Launched::Sleep => {
+                    asleep = true;
+                    pending = pending.union(everything(screen));
+                }
+            }
+        }
+
         if asleep {
             // Nothing is composited while the screen is out. The damage that
             // built up is kept: waking repaints everything anyway, so what this
@@ -1721,6 +1820,13 @@ enum What {
     /// The agent, which is given the filesystem to read and the machine
     /// snapshot, and nothing that can change anything.
     Assistant,
+    /// The launcher, which is given nothing at all.
+    ///
+    /// It has no spawner, no filesystem and no directory. What it does is ask
+    /// this program for one of the things the desktop's own buttons ask for --
+    /// so the authority it needs is the authority to *ask*, which every client
+    /// already has, and not the authority to start anything.
+    Launcher,
 }
 
 /// What reading from the keyboard turned out to be.
@@ -1732,6 +1838,8 @@ enum Typed {
     Forwarded,
     /// The key that ends the session.
     Leave,
+    /// The key that opens the launcher.
+    Launch,
 }
 
 /// What reading from the desktop turned out to be.
@@ -1752,6 +1860,48 @@ enum Asked {
     Stopping,
     /// It asked for the screen to go out until somebody touches the machine.
     Sleeping,
+}
+
+/// What the launcher asked for, if it asked for anything.
+///
+/// The same tags the desktop uses, and deliberately the same set: the launcher
+/// is a keyboard for a menu that already existed, so there is nothing here the
+/// strip does not already offer. `quit`, `halt`, `rest` and `slep` are included
+/// because they are on the strip too -- and a launcher that could start any
+/// program but not turn the machine off would be a launcher people stopped
+/// using for half of what they wanted.
+fn launched(asked: &[u8]) -> Option<Launched> {
+    if asked.len() < 4 {
+        return None;
+    }
+    Some(match &asked[..4] {
+        tag if tag == desk::OPEN => Launched::Window(What::Client),
+        tag if tag == desk::BROWSE => Launched::Window(What::Browser),
+        tag if tag == desk::TERMINAL => Launched::Window(What::Terminal),
+        tag if tag == desk::SETTINGS => Launched::Window(What::Settings),
+        tag if tag == desk::PACKAGES => Launched::Window(What::Packages),
+        tag if tag == desk::PICTURES => Launched::Window(What::Pictures),
+        tag if tag == desk::ASSIST => Launched::Window(What::Assistant),
+        tag if tag == desk::QUIT => Launched::Leave,
+        tag if tag == desk::HALT => Launched::Halt,
+        tag if tag == desk::RESTART => Launched::Restart,
+        tag if tag == desk::SLEEP => Launched::Sleep,
+        _ => return None,
+    })
+}
+
+/// One of the things the launcher may ask for.
+enum Launched {
+    /// Start a window of this kind.
+    Window(What),
+    /// End the session.
+    Leave,
+    /// Turn the machine off.
+    Halt,
+    /// Restart it.
+    Restart,
+    /// Put the screen out.
+    Sleep,
 }
 
 /// Ask the kernel to stop the machine. Says whether it was accepted.
@@ -1969,9 +2119,44 @@ fn open_window(
     order: &mut [usize; CLIENTS],
     what: What,
 ) -> Option<Asked> {
-    let Some(slot) = tiles.iter().position(Option::is_none) else {
-        nexus_user::log("compositor: the desktop asked for a window and there was no room").ok();
-        return Some(Asked::Nothing);
+    // A slot nothing has ever used, or failing that the one that has been
+    // dead longest.
+    //
+    // A window that ends keeps its slot, on purpose: its tab stays drawn,
+    // because a gap where a tab was is a strip that reshuffles under the
+    // pointer. But *only* looking for an unused slot made the window limit a
+    // limit on how many windows a session could ever open rather than on how
+    // many it could have at once -- four, and then nothing would start. Found
+    // by the launcher, which is the fifth window somebody opens on a machine
+    // that boots with three.
+    let slot = match tiles.iter().position(Option::is_none) {
+        Some(slot) => slot,
+        None => {
+            let Some(slot) = tiles
+                .iter()
+                .position(|tile| matches!(tile, Some(tile) if !tile.live))
+            else {
+                nexus_user::log(
+                    "compositor: something asked for a window and every slot is in use",
+                )
+                .ok();
+                return Some(Asked::Nothing);
+            };
+            // Its handles go back before the slot is taken. A dead tile still
+            // holds a channel, a process and a page of shared memory, and a
+            // compositor that reused the slot without closing them would leak
+            // three handles per window for the life of the session.
+            if let Some(dead) = tiles[slot].take() {
+                nexus_user::memory_unmap(dead.surface, dead.mapped_at).ok();
+                nexus_user::close(dead.surface).ok();
+                nexus_user::close(dead.process).ok();
+                nexus_user::close(dead.channel).ok();
+                nexus_user::unwatch(set, channel_key(slot)).ok();
+                nexus_user::unwatch(set, process_key(slot)).ok();
+                nexus_user::log("compositor: reused the slot of a window that had ended").ok();
+            }
+            slot
+        }
     };
 
     // Offset from the ones before it, so a new window is visibly a new window
@@ -2156,6 +2341,27 @@ fn open_window(
                 &[files, machine],
             )?
         }
+        What::Launcher => {
+            // Nothing lent. Not a narrow set -- none.
+            //
+            // And placed in the middle rather than offset like the others: a
+            // launcher is a thing somebody is looking straight at for two
+            // seconds, and having it appear wherever the next free slot happens
+            // to put it would mean hunting for it every time.
+            let wide = (screen.width / 2).clamp(MIN_SIZE, screen.width.saturating_sub(GAP * 2));
+            let tall = (screen.usable_height() * 2 / 3)
+                .clamp(MIN_SIZE, screen.usable_height().saturating_sub(GAP * 2));
+            start_program(
+                LAUNCHER,
+                slot,
+                screen.x + (screen.width.saturating_sub(wide)) / 2,
+                screen.y + (screen.usable_height().saturating_sub(tall)) / 3,
+                wide,
+                tall,
+                0,
+                &[],
+            )?
+        }
     };
     if nexus_user::watch(set, tile.channel, channel_key(slot)).is_err()
         || nexus_user::watch(set, tile.process, process_key(slot)).is_err()
@@ -2180,6 +2386,7 @@ fn open_window(
             What::Assistant => {
                 "compositor: started the agent, and lent it the disk to read and nothing to write"
             }
+            What::Launcher => "compositor: started the launcher, and lent it nothing at all",
         }
     ))
     .ok();
@@ -2241,6 +2448,15 @@ fn read_key(
     if message[0] == key::FUNCTION && read_u32(&message, 1) == LEAVE_KEY {
         nexus_user::log("compositor: somebody asked to end the session").ok();
         return Some(Typed::Leave);
+    }
+
+    // Not forwarded either, and for the same reason: it is addressed to the
+    // session rather than to whatever happens to have focus. A window that saw
+    // it would be a window that could be confused into thinking F3 was typed
+    // at it.
+    if message[0] == key::FUNCTION && read_u32(&message, 1) == LAUNCH_KEY {
+        nexus_user::log("compositor: somebody asked for the launcher").ok();
+        return Some(Typed::Launch);
     }
 
     if message[0] == key::TAB {

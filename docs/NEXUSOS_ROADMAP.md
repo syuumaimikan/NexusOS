@@ -1698,6 +1698,16 @@ in the code.
 | A real audio card | medium | AC'97 or Intel HD Audio: a DMA engine, a ring of buffers and a mixer. The speaker is one bit and says so. |
 | Loadable drivers | large | The kernel has no module loader, no driver ABI and no way to revoke one. Doing it badly is worse than not doing it. |
 
+* **A vertical seam at the screen's midpoint.** A one-pixel line at
+  `x = screen.width / 2`, running the full height, visible in every screenshot
+  including through windows that should cover it. It is *not* the window
+  ordering: `raise` rotates the raised slot to the end of `order` and the
+  composite loop draws that last, and the launcher's own border and highlight
+  are drawn over the windows behind it correctly. It is not a stride mismatch
+  either -- that would smear diagonally rather than leave one column. Cosmetic,
+  reproducible, and not yet understood; recorded here rather than left for
+  somebody to rediscover.
+
 ### Not feasible as asked, and why
 
 * **Video wallpaper, in a useful sense.** Motion-JPEG plays now, so a
