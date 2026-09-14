@@ -174,11 +174,11 @@ value as its default. See `docs/settings.md`.
 ```
 powershell -File scripts/build.ps1        # kernel, bootloader, programs, disk image
 powershell -File scripts/run.ps1          # boot it
-powershell -File scripts/test.ps1         # the whole suite, sixteen stages
+powershell -File scripts/test.ps1         # the whole suite, eighteen stages
 powershell -File scripts/soak.ps1 -Count 40   # boot repeatedly, catch rare hangs
 ```
 
-Per-crate lint, which is what CI enforces:
+Per-crate lint, for while you are working:
 
 ```
 cargo +nightly clippy -p <crate> --target targets/x86_64-nexus-user.json \
@@ -186,10 +186,24 @@ cargo +nightly clippy -p <crate> --target targets/x86_64-nexus-user.json \
     -Zbuild-std-features=compiler-builtins-mem -- -D warnings
 ```
 
+The suite's own lint stage covers **every crate in the workspace**, and that is
+checked rather than trusted: `Assert-EveryCrateLinted` in `scripts/test.ps1`
+compares its four lists against `cargo metadata` and fails if a crate is on
+none of them, or on two. This exists because the lists were maintained by hand
+and had gone short — the bootloader's `main.rs`, the first code that runs on the
+machine, had never been linted at all, and neither had any of the nineteen
+programs in `user/`. Add a crate to the workspace without adding it to a list
+and stage 2 now stops and names it.
+
+The same was true of the host tests: `nexus-index`, `nexus-net`, `nexus-pkg`
+and `nexus-ai-core` had sixty passing tests between them that the suite never
+ran. It runs every library now.
+
 A new user program needs four registrations: `Cargo.toml` members, the `user`
 alias in `.cargo/config.toml`, a `Publish-Program` line in `scripts/build.ps1`,
 and — if it is a window — a `What` variant and a `desk::` message in the
-compositor plus a button in `user/nexus-shell`.
+compositor plus a button in `user/nexus-shell`. The lint list is a fifth, and
+is the only one of the five the suite will remind you about.
 
 ## House rules that are not negotiable
 
