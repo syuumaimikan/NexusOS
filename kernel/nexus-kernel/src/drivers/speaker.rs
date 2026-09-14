@@ -92,7 +92,7 @@ pub fn start(hertz: u32) {
     let divisor = TIMER_HZ / hertz;
     // Sixteen bits, and never zero: a divisor of zero means 65536 on this
     // hardware, which is a tone nobody asked for.
-    let divisor = (divisor.max(1).min(0xFFFF)) as u16;
+    let divisor = divisor.clamp(1, 0xFFFF) as u16;
 
     let _guard = LOCK.lock();
     // SAFETY: these are the interval timer's channel-two ports and the
