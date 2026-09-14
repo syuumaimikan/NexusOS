@@ -123,6 +123,15 @@ try {
         # And what the machine is doing, which comes from the kernel over a
         # channel rather than from anything this shell knows.
         Send-Keys @('s', 'y', 's', 'ret')
+        # The network tools. `net` says where this machine is; `scan` opens a
+        # connection to a port and closes it, against the machine's own address,
+        # which is the one host a test can rely on being there.
+        Send-Keys @('n', 'e', 't', 'ret')
+        # A dotted address rather than a name: this has to work on a machine
+        # with no route to a real resolver, and what is being checked is that
+        # the command reaches the right answer, not that the internet is up.
+        Send-Keys @('l', 'o', 'o', 'k', 'u', 'p', 'spc', '1', '0', 'dot', '0', 'dot', '2', 'dot', '2', 'ret')
+        Send-Keys @('s', 'c', 'a', 'n', 'spc', '1', '0', 'dot', '0', 'dot', '2', 'dot', '1', '5', 'spc', '8', '0', 'ret')
         # And Japanese. The command word is typed *before* the input method is
         # turned on, because `echo` in kana is not a command -- which is correct
         # behaviour and was a mistake in this test before it was a feature of
@@ -172,7 +181,7 @@ try {
 $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
 
 foreach ($expected in @(
-        'compositor: started a terminal, and lent it the filesystem',
+        'compositor: started a terminal, and lent it the filesystem and the network',
         'term: a terminal, with a shell in it',
         'term: ran help',
         'term: ran ls',
@@ -181,6 +190,11 @@ foreach ($expected in @(
         'term: ran uptime',
         'term: ran beep',
         'term: ran sys',
+        'term: ran net',
+        'term: net 10.0.2.15 via 10.0.2.2 resolving with 10.0.2.3',
+        'term: ran lookup',
+        'term: ran scan',
+        'term: scanned 1 ports of 10.0.2.15,',
         'term: typing now makes ',
         'term: ran echo',
         'term: ran nope',

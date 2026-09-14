@@ -200,7 +200,7 @@ pub fn send(service: Handle, id: u32, bytes: &[u8]) -> Result<usize, Error> {
 /// something back should try again after letting the stack run, not spin: the
 /// reason it did not all fit is that the connection is not open yet or the peer
 /// has not made room.
-pub fn send_all<'a>(service: Handle, id: u32, mut bytes: &'a [u8]) -> Result<&'a [u8], Error> {
+pub fn send_all(service: Handle, id: u32, mut bytes: &[u8]) -> Result<&[u8], Error> {
     while !bytes.is_empty() {
         let taken = send(service, id, bytes)?;
         if taken == 0 {

@@ -1857,11 +1857,19 @@ fn open_window(
             // disk away from the program that lent it.
             let lending =
                 nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
-            let (Ok(files), Ok(spawner), Ok(sound), Ok(machine)) = (
+            // And the network, because a shell is where network tools live on
+            // every system anybody has used. It is the widest thing a terminal
+            // is given and it is worth naming: a shell with the disk, the
+            // spawner and the network can do most of what this machine can do,
+            // which is what a shell is for -- and it is still a decision made
+            // here, by the program that holds those handles, rather than
+            // something the terminal could have helped itself to.
+            let (Ok(files), Ok(spawner), Ok(sound), Ok(machine), Ok(network)) = (
                 nexus_user::duplicate(FILESYSTEM, lending),
                 nexus_user::duplicate(SPAWNER, lending),
                 nexus_user::duplicate(SOUND, lending),
                 nexus_user::duplicate(MACHINE, lending),
+                nexus_user::duplicate(NETWORK, lending),
             ) else {
                 failed("compositor: FAILED: could not lend a terminal what it needs");
                 return Some(Asked::Nothing);
@@ -1874,7 +1882,7 @@ fn open_window(
                 width,
                 height,
                 0,
-                &[files, spawner, sound, machine],
+                &[files, spawner, sound, machine, network],
             )?
         }
         What::Settings => {
@@ -1965,7 +1973,9 @@ fn open_window(
         match what {
             What::Client => "compositor: started a window because someone pressed the desktop",
             What::Browser => "compositor: started a browser, and lent it the network",
-            What::Terminal => "compositor: started a terminal, and lent it the filesystem",
+            What::Terminal => {
+                "compositor: started a terminal, and lent it the filesystem and the network"
+            }
             What::Settings => "compositor: started the settings, and lent them the settings",
             What::Packages => "compositor: started the packages, and lent them the disk",
             What::Pictures => "compositor: started a picture window, and lent it the disk to read",

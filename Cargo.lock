@@ -261,10 +261,12 @@ name = "nexus-term"
 version = "0.1.0"
 dependencies = [
  "nexus-config",
+ "nexus-dns",
  "nexus-i18n",
  "nexus-ime",
  "nexus-look",
  "nexus-machine",
+ "nexus-netclient",
  "nexus-shellwords",
  "nexus-time",
  "nexus-ui",

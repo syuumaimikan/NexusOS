@@ -1669,6 +1669,9 @@ in the code.
 
 ### Feasible next, in order of value
 
+| ~~Network tools~~ | done | `net`, `lookup` and `scan` in the terminal, on the stack that was already there. A connect scan, no raw sockets, and the documentation says so. See [network-tools.md](network-tools.md). |
+| ~~Choosing a font, and soft edges~~ | done | Two faces and a blending switch, both settings. See [appearance-text.md](appearance-text.md). |
+
 | ~~Looking at pictures~~ | done | PNG and BMP, decoded by a DEFLATE written here, in a window given the disk read-only. See [pictures.md](pictures.md). |
 | ~~A faster boot~~ | done | Sixteen seconds to four, by not writing a thousand blocks across somebody's disk every time they switch the machine on. |
 | ~~Asking what the machine is doing~~ | done | A capability-gated snapshot service: memory, processors, processes, threads. No process names. See the kernel's `machine.rs`. |
