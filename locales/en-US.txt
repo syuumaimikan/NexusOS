@@ -140,6 +140,11 @@ shell.packages = Packages
 shell.pictures = Pictures
 shell.assist = Assistant
 shell.leave = Log out
+shell.shutdown = Off
+shell.restart = Restart
+shell.sleep = Sleep
+shell.shuttingdown = Turning this machine off...
+shell.restarting = Restarting...
 
 file.toolarge = {name} is too large to read safely, so it will not be changed
 file.short = {name} could not be read all the way through

@@ -156,6 +156,15 @@ const SOUND: Handle = Handle(8);
 /// it -- so a program can be given the disk and the speaker and not this.
 const MACHINE: Handle = Handle(9);
 
+/// The channel that stops the machine.
+///
+/// Held to pass a request on, and never used on this program's own initiative.
+/// A compositor that could turn the machine off by itself would be a
+/// compositor with an opinion about when somebody has finished, which is not a
+/// decision anything drawing windows should make. The desktop asks; this sends
+/// the ask on.
+const POWER: Handle = Handle(10);
+
 /// The directory the system's settings live in.
 ///
 /// Never read here. This program's whole business is the display, and what it
@@ -298,12 +307,35 @@ mod desk {
     /// except the power switch, and a dock that ended it *itself* would be a
     /// dock deciding when the display stops.
     pub const QUIT: &[u8] = b"quit";
+    /// Turn the machine off.
+    pub const HALT: &[u8] = b"halt";
+    /// Restart it.
+    pub const RESTART: &[u8] = b"rest";
+    /// Put the screen out until somebody touches the machine.
+    pub const SLEEP: &[u8] = b"slep";
 
     /// What state a window can be in, as the desktop is told it.
     pub const GONE: u8 = 0;
     pub const SHOWN: u8 = 1;
     pub const AWAY: u8 = 2;
     pub const FOCUSED: u8 = 3;
+}
+
+/// What the kernel's power service is asked, and answers.
+///
+/// Four-byte tags and a little-endian version, the same shape as every other
+/// service on this machine. The reply is read rather than assumed: a machine
+/// that cannot turn itself off says so, and a button that appeared to work and
+/// did not would be worse than one that said it could not.
+mod power {
+    /// Turn the machine off.
+    pub const OFF: &[u8] = b"off ";
+    /// Restart it.
+    pub const BOOT: &[u8] = b"boot";
+    /// The version of the protocol this program speaks.
+    pub const VERSION: u16 = 1;
+    /// It worked.
+    pub const GOOD: &[u8] = b"ok  ";
 }
 
 /// Where this program maps the framebuffer.
@@ -1326,6 +1358,11 @@ fn serve(
     // numbers are worth having when the last window closes, which on a machine
     // somebody is using is the middle of the session and not the end of it.
     let mut leaving = false;
+    // The machine has been told to stop. Everything carries on for the half
+    // second it takes, except that the screen says so.
+    let mut stopping = false;
+    // The screen is out. Not a power state; see `read_shell`.
+    let mut asleep = false;
     let mut summarised = false;
     // How many frames the wallpaper has drawn, for the summary.
     let mut painted = 0u32;
@@ -1352,6 +1389,16 @@ fn serve(
             break;
         }
 
+        if stopping {
+            // One last frame, over everything, and then this program stops
+            // drawing. The kernel is already on its way; what this is for is
+            // that the last thing on screen says what is happening rather than
+            // being whatever was there when the button was pressed.
+            say_goodnight(screen);
+            nexus_user::log("compositor: stopped drawing; the machine is going").ok();
+            break;
+        }
+
         let mut keys = [0u64; CLIENTS * 2 + 2];
         let Ok(count) = nexus_user::wait_any(set, &mut keys) else {
             failed("compositor: FAILED: could not wait on its clients");
@@ -1359,6 +1406,15 @@ fn serve(
         };
         if count == 0 {
             break;
+        }
+
+        if asleep {
+            // Anything at all: a key, a click, a window finishing. The screen
+            // comes back and the whole of it is repainted, because what is on
+            // the framebuffer is the black rectangle this put there.
+            asleep = false;
+            nexus_user::log("compositor: awake").ok();
+            pending = pending.union(everything(screen));
         }
 
         for key in &keys[..count] {
@@ -1429,6 +1485,23 @@ fn serve(
                     Some(Asked::Opened) => {
                         commanded += 1;
                         opened += 1;
+                        everything(screen)
+                    }
+                    Some(Asked::Stopping) => {
+                        // The kernel has been told and the machine goes in
+                        // about half a second. What is left to do is put
+                        // something on the screen that says so, because a
+                        // machine that appears to have frozen and then turns
+                        // off is indistinguishable from one that crashed.
+                        stopping = true;
+                        everything(screen)
+                    }
+                    Some(Asked::Sleeping) => {
+                        // Not a power state. The screen goes out and this stops
+                        // compositing; the next key or click brings it back.
+                        // `power.rs` explains at length why the honest version
+                        // of sleep on this machine lives here and not there.
+                        asleep = true;
                         everything(screen)
                     }
                     None => return,
@@ -1534,6 +1607,14 @@ fn serve(
         // things become ready in the same instant this is one composite instead
         // of three, and the two that were skipped were never on screen long
         // enough for anybody to see them.
+        if asleep {
+            // Nothing is composited while the screen is out. The damage that
+            // built up is kept: waking repaints everything anyway, so what this
+            // saves is the work of drawing frames nobody can see.
+            go_dark(screen);
+            continue;
+        }
+
         if !pending.is_empty() {
             batched += 1;
             repaint(
@@ -1665,6 +1746,64 @@ enum Asked {
     Changed,
     /// It asked for a program and one was started.
     Opened,
+    /// It asked for the machine to stop, and the kernel has been told. The
+    /// machine goes shortly; what is left to do here is put something on the
+    /// screen that says so and then stop drawing.
+    Stopping,
+    /// It asked for the screen to go out until somebody touches the machine.
+    Sleeping,
+}
+
+/// Ask the kernel to stop the machine. Says whether it was accepted.
+///
+/// The reply is read. The kernel refuses a shutdown on a machine whose firmware
+/// gave it no way to do one -- and the whole reason it refuses rather than
+/// accepting and quietly failing is so that this can tell a person.
+fn ask_power(off: bool) -> bool {
+    let tag = if off { power::OFF } else { power::BOOT };
+    let mut request = [0u8; 6];
+    request[..4].copy_from_slice(tag);
+    request[4..].copy_from_slice(&power::VERSION.to_le_bytes());
+
+    if nexus_user::send(POWER, &request, &[]).is_err() {
+        nexus_user::log("compositor: FAILED: the power service could not be asked").ok();
+        return false;
+    }
+
+    let mut reply = [0u8; 64];
+    let mut lent = [Handle(0); 1];
+    let Ok(received) = nexus_user::receive(POWER, &mut reply, &mut lent) else {
+        nexus_user::log("compositor: FAILED: the power service did not answer").ok();
+        return false;
+    };
+    // Every handle the service sent back is closed, whatever it was. A service
+    // that started lending things would otherwise leak them into this program
+    // one reply at a time.
+    for handle in lent.iter().take(received.handles) {
+        nexus_user::close(*handle).ok();
+    }
+
+    if reply.get(..4) == Some(power::GOOD) {
+        nexus_user::log(if off {
+            "compositor: the machine is being turned off"
+        } else {
+            "compositor: the machine is being restarted"
+        })
+        .ok();
+        return true;
+    }
+
+    // The two-byte reason, said rather than swallowed.
+    let why = if received.bytes >= 6 {
+        u16::from_le_bytes([reply[4], reply[5]])
+    } else {
+        0
+    };
+    nexus_user::log(&alloc::format!(
+        "compositor: the machine will not stop from software (reason {why})"
+    ))
+    .ok();
+    false
 }
 
 /// Tell the desktop which windows exist and what state each is in.
@@ -1772,6 +1911,23 @@ fn read_shell(
     if message == desk::QUIT {
         nexus_user::log("compositor: the desktop asked to end the session").ok();
         return Some(Asked::Ended);
+    }
+
+    if message == desk::HALT || message == desk::RESTART {
+        let off = message == desk::HALT;
+        return Some(if ask_power(off) {
+            Asked::Stopping
+        } else {
+            // The kernel refused, or the channel has gone. Nothing happens and
+            // the log says what. A desktop that showed "shutting down" over a
+            // machine that was not would be lying to the person looking at it.
+            Asked::Nothing
+        });
+    }
+
+    if message == desk::SLEEP {
+        nexus_user::log("compositor: the desktop asked for the screen to go out").ok();
+        return Some(Asked::Sleeping);
     }
 
     if message.len() >= 8 && (message.starts_with(desk::SHOW) || message.starts_with(desk::HIDE)) {
@@ -2486,6 +2642,34 @@ fn clamp(value: i64, low: u32, high: u32) -> u32 {
 /// a compositor that repainted only the damaged window would leave a hole in
 /// whatever was above it, and getting that right needs damage arithmetic this
 /// does not have and does not yet need.
+/// Put the screen out.
+///
+/// Every pixel, because what is wanted is a dark screen and not a dark desktop:
+/// a person who asks for sleep and gets the wallpaper dimmed has not got what
+/// they asked for.
+///
+/// Nothing is saved first. Waking repaints the whole screen from the windows
+/// themselves, which is what a compositor does anyway, and is why this can
+/// throw the framebuffer away rather than keep a copy of it.
+fn go_dark(screen: &Screen) {
+    fill(screen, 0, 0, screen.screen_width, screen.screen_height, 0);
+}
+
+/// The last thing on the screen before the machine stops.
+///
+/// Everything above the strip goes dark; the strip is left alone. The desktop
+/// has already written what is happening into it, and this program draws no
+/// text -- it fills rectangles and copies other people's pixels, and a font in
+/// here would be a font in the one program that has no business having an
+/// opinion about words.
+///
+/// So the division is: the thing that can draw text says what is happening, and
+/// the thing that owns the screen makes sure it is the only thing left on it.
+fn say_goodnight(screen: &Screen) {
+    let above = screen.taskbar_y();
+    fill(screen, 0, 0, screen.screen_width, above, 0x0004_0814);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn repaint(
     screen: &Screen,

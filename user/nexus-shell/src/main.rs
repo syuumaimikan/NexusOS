@@ -128,6 +128,12 @@ mod wire {
     pub const ASSIST: &[u8] = b"asst";
     /// End the session.
     pub const QUIT: &[u8] = b"quit";
+    /// Turn the machine off.
+    pub const HALT: &[u8] = b"halt";
+    /// Restart it.
+    pub const RESTART: &[u8] = b"rest";
+    /// Put the screen out until somebody touches the machine.
+    pub const SLEEP: &[u8] = b"slep";
 }
 
 /// What state a window can be in, as the compositor reports it.
@@ -189,6 +195,13 @@ struct Desktop {
     /// The directory the settings and the update record live in, if this
     /// program was given one.
     settings: Option<Handle>,
+    /// What the machine is doing, when it is stopping.
+    ///
+    /// Drawn across the whole strip in place of the buttons, because the
+    /// buttons are about to stop meaning anything. This is the last text on the
+    /// screen before the machine goes: the compositor darkens everything above
+    /// the strip and leaves this alone.
+    stopping: Option<String>,
     /// How many updates are waiting, and how many were installed this boot.
     ///
     /// Re-read when the minute turns rather than watched, because the updater
@@ -301,6 +314,40 @@ impl Desktop {
         )
     }
 
+    /// Where the button that turns the machine off is.
+    ///
+    /// Inside the session controls at the right, in the order a person reads
+    /// back from the edge: log out, then off, then restart, then sleep. Off is
+    /// nearest the edge of the three because it is the one most often wanted
+    /// and the one a person reaches for without looking.
+    fn shutdown(&self) -> Rect {
+        Self::before(self.leave(), nexus_i18n::text("shell.shutdown"))
+    }
+
+    /// Where the button that restarts the machine is.
+    fn restart(&self) -> Rect {
+        Self::before(self.shutdown(), nexus_i18n::text("shell.restart"))
+    }
+
+    /// Where the button that puts the screen out is.
+    fn sleep(&self) -> Rect {
+        Self::before(self.restart(), nexus_i18n::text("shell.sleep"))
+    }
+
+    /// A button of its own width, immediately left of another.
+    ///
+    /// The width comes from the text, for the same reason `leave` does: these
+    /// are words in two languages and a fixed width clips one of them.
+    fn before(right: Rect, label: &str) -> Rect {
+        let width = nexus_ui::measure(label) + GAP * 3;
+        Rect::new(
+            right.x.saturating_sub(width + GAP),
+            right.y,
+            width,
+            right.height,
+        )
+    }
+
     /// Where a window's tab is.
     ///
     /// By slot, so a tab does not move when another window is put away or
@@ -345,7 +392,14 @@ impl Desktop {
     /// Capped at a third: a strip is for windows, and a name long enough to
     /// take half of it is a name that gets cut instead.
     fn reserved(&self) -> u32 {
-        let mut width = self.leave().width + GAP * 2;
+        // The three power buttons as well as the way out. Without them the
+        // tabs are laid out as though the right-hand end were empty, and the
+        // last tab is drawn underneath them.
+        let mut width = self.leave().width
+            + self.shutdown().width
+            + self.restart().width
+            + self.sleep().width
+            + GAP * 5;
         if let Some(text) = self.update_line() {
             width += nexus_ui::measure(&text) + GAP * 3;
         }
@@ -478,6 +532,7 @@ extern "C" fn main() -> ! {
         // a machine nobody has configured is the truth.
         look: read_look(settings).unwrap_or_default(),
         settings,
+        stopping: None,
         pending: 0,
         installed: 0,
         clock: String::new(),
@@ -804,7 +859,7 @@ fn run(desktop: &mut Desktop) {
 /// Returns `None` if it landed on nothing, and otherwise whether it started a
 /// program. Nothing is changed here: this program says what should happen and
 /// the compositor decides whether it does.
-fn clicked(desktop: &Desktop, x: u32, y: u32) -> Option<bool> {
+fn clicked(desktop: &mut Desktop, x: u32, y: u32) -> Option<bool> {
     if desktop.terminal().contains(x, y) {
         return nexus_user::send(COMPOSITOR, wire::TERMINAL, &[])
             .ok()
@@ -844,6 +899,38 @@ fn clicked(desktop: &Desktop, x: u32, y: u32) -> Option<bool> {
     if desktop.leave().contains(x, y) {
         nexus_user::log("shell: somebody pressed the button that ends the session").ok();
         return nexus_user::send(COMPOSITOR, wire::QUIT, &[])
+            .ok()
+            .map(|_| false);
+    }
+
+    // Off and restart both stop the machine, so both say what is happening in
+    // the strip *before* the message goes. The compositor darkens everything
+    // above this strip and leaves it alone, so this line is the last thing on
+    // the screen -- which is the whole reason it is written here, by the one
+    // program in the session that draws text.
+    if desktop.shutdown().contains(x, y) {
+        nexus_user::log("shell: somebody pressed the button that turns the machine off").ok();
+        desktop.stopping = Some(nexus_i18n::text("shell.shuttingdown").to_string());
+        draw(desktop);
+        nexus_user::send(COMPOSITOR, wire::DAMAGED, &[]).ok();
+        return nexus_user::send(COMPOSITOR, wire::HALT, &[])
+            .ok()
+            .map(|_| false);
+    }
+
+    if desktop.restart().contains(x, y) {
+        nexus_user::log("shell: somebody pressed the button that restarts the machine").ok();
+        desktop.stopping = Some(nexus_i18n::text("shell.restarting").to_string());
+        draw(desktop);
+        nexus_user::send(COMPOSITOR, wire::DAMAGED, &[]).ok();
+        return nexus_user::send(COMPOSITOR, wire::RESTART, &[])
+            .ok()
+            .map(|_| false);
+    }
+
+    if desktop.sleep().contains(x, y) {
+        nexus_user::log("shell: somebody pressed the button that puts the screen out").ok();
+        return nexus_user::send(COMPOSITOR, wire::SLEEP, &[])
             .ok()
             .map(|_| false);
     }
@@ -905,6 +992,15 @@ fn draw(desktop: &Desktop) {
     let ink = Colour::rgb(0xC8, 0xD4, 0xE8);
 
     canvas.fill(canvas.bounds(), ground);
+
+    // A machine that is stopping has nothing else worth saying. The buttons are
+    // about to stop meaning anything, so they are not drawn -- a strip full of
+    // things to press, over a screen that has gone dark, invites somebody to
+    // press one.
+    if let Some(what) = &desktop.stopping {
+        canvas.text_centred(canvas.bounds(), what, Colour::rgb(0xE6, 0xEC, 0xF5));
+        return;
+    }
 
     // The launcher, which is the only thing on this machine that starts a
     // program by being pressed.
@@ -1046,6 +1142,20 @@ fn draw(desktop: &Desktop) {
         Colour::rgb(0xF0, 0xD8, 0xD8),
     );
 
+    // The three that stop the machine, quieter than the way out: they are
+    // reversible in a way it is not -- a machine that has been turned off can
+    // be turned on again, and a session that has ended has taken the windows
+    // with it.
+    for (rect, label) in [
+        (desktop.shutdown(), "shell.shutdown"),
+        (desktop.restart(), "shell.restart"),
+        (desktop.sleep(), "shell.sleep"),
+    ] {
+        canvas.fill(rect, Colour::rgb(0x18, 0x22, 0x36));
+        canvas.outline(rect, 1, Colour::rgb(0x38, 0x4A, 0x68));
+        canvas.text_centred(rect, nexus_i18n::text(label), Colour::rgb(0xC8, 0xD4, 0xE6));
+    }
+
     // The right-hand end, in the order a person reads back from the edge: the
     // clock, then whose machine this is, then what is running. Each is drawn
     // only if it fits in what is left after the one outside it, and the whole
@@ -1053,7 +1163,7 @@ fn draw(desktop: &Desktop) {
     // cannot be read.
     let last = desktop.tab(desktop.slots.saturating_sub(1));
     let floor = last.x + last.width;
-    let mut right = leave.x.saturating_sub(GAP * 2);
+    let mut right = desktop.sleep().x.saturating_sub(GAP * 2);
     let baseline = GAP / 2 + 2;
 
     if !desktop.clock.is_empty() {

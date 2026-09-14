@@ -1233,6 +1233,12 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
     // to lend a program everything else and not this.
     let machine = crate::machine::endpoint();
 
+    // And the one that stops the machine. Last, and held to pass on like the
+    // rest: a compositor that could turn the machine off by itself would be a
+    // compositor with an opinion about when somebody has finished, which is not
+    // a decision anything drawing windows should be making.
+    let power = crate::power::endpoint();
+
     let filesystem = match fs::store::root() {
         Ok(node) => Some(node),
         Err(error) => {
@@ -1244,7 +1250,8 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
     // In this order, because the program names them by the numbers they get:
     // the channel the display arrives on, the one it asks for clients on, the
     // two that carry keys and pointer movements, the settings directory, the
-    // network, the filesystem, the speaker, and what the machine is doing.
+    // network, the filesystem, the speaker, what the machine is doing, and what
+    // stops it.
     let mut endowments = alloc::vec![
         (ipc::Object::Channel(client), ipc::Rights::ALL),
         (ipc::Object::Channel(spawner), ipc::Rights::ALL),
@@ -1277,6 +1284,7 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
     }
     endowments.push((ipc::Object::Channel(sound), ipc::Rights::ALL));
     endowments.push((ipc::Object::Channel(machine), ipc::Rights::ALL));
+    endowments.push((ipc::Object::Channel(power), ipc::Rights::ALL));
 
     // SAFETY: as above.
     unsafe {

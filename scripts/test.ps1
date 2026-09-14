@@ -3,7 +3,7 @@
     Runs the full NexusOS test suite.
 
 .DESCRIPTION
-    Nineteen stages, cheapest first, so a failure surfaces as early as possible.
+    Twenty stages, cheapest first, so a failure surfaces as early as possible.
 
     The first four run on this machine and take seconds:
 
@@ -32,12 +32,14 @@
      16. the agent
      17. browsing
      18. input, through QEMU's monitor and the same 8042 controller
-     19. injection: break the kernel one way per build -- a real CPU exception,
+     19. power: press the buttons that stop the machine, and require it to
+         stop -- the one stage whose pass condition is that QEMU exits
+     20. injection: break the kernel one way per build -- a real CPU exception,
          a broken TLB shootdown -- and require each to be reported rather than
          resetting the machine
 
 .PARAMETER SkipFaults
-    Skip stage 19, which is the slowest because it boots QEMU six times.
+    Skip stage 20, which is the slowest because it boots QEMU six times.
 #>
 [CmdletBinding()]
 param(
@@ -742,6 +744,17 @@ Invoke-Step 'input' {
     # does nothing.
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-input.ps1')) 'input tests'
+}
+
+Invoke-Step 'power' {
+    # After everything that needs a running machine, because this is the one
+    # stage that deliberately stops one. Outside the `-SkipFaults` guard: it is
+    # not a fault-injection test, and somebody skipping the slow six-boot stage
+    # should not also lose the check that the machine can be turned off.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-power.ps1')) 'power tests'
 }
 
 if (-not $SkipFaults) {

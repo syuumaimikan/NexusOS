@@ -140,6 +140,11 @@ shell.packages = パッケージ
 shell.pictures = 画像
 shell.assist = アシスタント
 shell.leave = ログアウト
+shell.shutdown = 電源を切る
+shell.restart = 再起動
+shell.sleep = スリープ
+shell.shuttingdown = 電源を切っています...
+shell.restarting = 再起動しています...
 
 file.toolarge = {name} は大きすぎて安全に読めないため、変更しません
 file.short = {name} を最後まで読めませんでした

@@ -33,6 +33,7 @@ mod machine;
 mod memory;
 mod net;
 mod panic;
+mod power;
 
 mod process;
 mod sched;
@@ -174,6 +175,10 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     let acpi_info = match unsafe { acpi::init(boot_info.acpi_rsdp) } {
         Ok(info) => {
             acpi::report(&info);
+            // Before the APIC, because this only reads what was already parsed
+            // and a machine that cannot start its other processors should still
+            // be able to turn itself off.
+            power::init(&info);
             adopt_local_apic(&info);
             bring_up_device_interrupts(&info);
             start_other_processors(&info);
@@ -311,6 +316,7 @@ fn start_system_threads() {
     // is not looking at the screen can hear.
     sound::start_thread();
     machine::start_thread();
+    power::start_thread();
 
     display::progress(5, BOOT_STEPS);
 
@@ -339,6 +345,16 @@ fn monitor_thread(_argument: usize) {
     let mut reported = 0u64;
     loop {
         sched::sleep_ms(5000);
+
+        // Nothing is worth saying about a machine that is stopping, and the
+        // last lines of its log should be why it stopped rather than how many
+        // context switches it had got through. Reaping still happens: a thread
+        // that finished still has a stack to give back, and the machine may
+        // yet be told to carry on.
+        if power::stopping() {
+            sched::reap_finished();
+            continue;
+        }
 
         let reaped = sched::reap_finished();
         let stats = sched::stats();
@@ -521,6 +537,13 @@ fn monitor_thread(_argument: usize) {
                     kprintln!(
                         "[mon ] machine {asked} snapshots answered, {denied} requests refused"
                     );
+                }
+                let (offs, reboots) = power::statistics();
+                if offs + reboots > 0 {
+                    // Only ever seen once, on the last report before the
+                    // machine goes -- which is exactly when it is worth having
+                    // in the log, because it says the request was heard.
+                    kprintln!("[mon ] power {offs} shutdowns and {reboots} restarts asked for");
                 }
             }
             let (served, turned_down) = net::service::statistics();

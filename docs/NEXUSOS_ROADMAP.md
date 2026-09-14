@@ -1692,6 +1692,7 @@ in the code.
 | ~~A package manager window~~ | done | A list of what is in `PKG/`, what each one's signature is worth, and how it compares with what is installed — with Enter bound to the same `install` the updater calls. See [packages.md](packages.md). |
 | ~~A settings window~~ | done | A window with one row per key that something actually reads, given the settings directory and nothing else. See [settings.md](settings.md). |
 | ~~A tool for the shared state two agents keep~~ | done | `nexus-collab`: atomic writes, validation before every write, sixteen backups, stale-lock reporting, and a refusal to release the other agent's lock that has no `--force` behind it. Host-side, no dependencies but this project's own JSON. See [collaboration.md](collaboration.md). |
+| ~~Turning the machine off, restarting it, standing it down~~ | done | ACPI's fixed registers, reached through a channel the compositor is lent and hands on. The test's pass condition is that QEMU **exits**. Battery and S3 are both AML, and both absent by name. See [power.md](power.md). |
 | A text editor | medium | The terminal's line editing, a file, and a scrollback that can be written into. |
 | Standard output for programs | medium | The thing that would let `ls` stop being built into the terminal. A channel a child inherits, and a pipe. |
 | A real audio card | medium | AC'97 or Intel HD Audio: a DMA engine, a ring of buffers and a mixer. The speaker is one bit and says so. |

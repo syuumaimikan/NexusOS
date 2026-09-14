@@ -150,6 +150,63 @@ pub struct IoApic {
     pub gsi_base: u32,
 }
 
+/// Where a register is, in whichever address space it lives in.
+///
+/// ACPI's Generic Address Structure: twelve bytes saying which space, how wide
+/// the register is, and where. Only the two spaces that matter here are
+/// distinguished, because a reset register in a space this kernel cannot reach
+/// is a reset register it must not pretend to have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Register {
+    /// An x86 I/O port.
+    Port(u16),
+    /// A physical memory address.
+    Memory(u64),
+    /// Somewhere this kernel does not know how to write: PCI configuration
+    /// space, the embedded controller, SMBus. Named rather than silently
+    /// dropped, so that a failure to reboot can say why.
+    Elsewhere,
+}
+
+/// Turn twelve bytes of Generic Address Structure into a register.
+fn read_address(bytes: &[u8], at: usize) -> Option<Register> {
+    let space = *bytes.get(at)?;
+    let address = read_u64(bytes, at + 4)?;
+    Some(match space {
+        0 => Register::Memory(address),
+        // An I/O port above 0xFFFF is not one; the field is 64 bits and the
+        // space is 16.
+        1 if address <= u64::from(u16::MAX) => Register::Port(address as u16),
+        _ => Register::Elsewhere,
+    })
+}
+
+/// What the Fixed ACPI Description Table says about turning the machine off.
+///
+/// Everything here is a *fixed* register: a port number in a table, not a
+/// method to be interpreted. That is the whole reason power management is
+/// reachable without an AML interpreter, and it is also the boundary -- the
+/// battery, the lid switch and the thermal zones are all AML methods and none
+/// of them are here. See `power.rs`.
+#[derive(Debug, Clone, Copy)]
+pub struct Fadt {
+    /// Where to write to enter a sleep state. Zero when the firmware offers no
+    /// PM1a control block, which means no ACPI shutdown.
+    pub pm1a_control: u16,
+    /// A second block, on machines that have one. Zero when there is not.
+    pub pm1b_control: u16,
+    /// The port to poke to ask firmware to hand ACPI over, and the value.
+    /// Both zero on a machine that is in ACPI mode already, which is every
+    /// machine booted through UEFI.
+    pub smi_command: u32,
+    pub acpi_enable: u8,
+    /// The reset register and the value to write to it, when the firmware says
+    /// it has one.
+    pub reset: Option<(Register, u8)>,
+    /// Physical address of the DSDT, which is where `\_S5_` lives.
+    pub dsdt: u64,
+}
+
 /// What the kernel learned from ACPI.
 pub struct AcpiInfo {
     /// Physical address of the local APIC register window.
@@ -163,6 +220,11 @@ pub struct AcpiInfo {
     /// Whether the firmware says a legacy 8259 PIC is present and must be
     /// masked before the APIC is used.
     pub has_legacy_pic: bool,
+    /// What the FADT said, when there was one. A machine without it can still
+    /// run; it just cannot be turned off politely.
+    pub fadt: Option<Fadt>,
+    /// The sleep type values for S5, from the DSDT. See `read_s5`.
+    pub s5: Option<(u8, u8)>,
 }
 
 impl AcpiInfo {
@@ -283,9 +345,12 @@ pub unsafe fn init(rsdp_address: u64) -> Result<AcpiInfo, AcpiError> {
         (root_table.bytes.len() - SDT_HEADER_LEN) / pointer_width
     );
 
-    // Walk the root table's pointers looking for the MADT.
+    // Walk the root table's pointers looking for the tables that are wanted.
+    // Both, in one pass: the walk maps and checksums every table it touches,
+    // and doing it twice would do that work twice.
     let entries = &root_table.bytes[SDT_HEADER_LEN..];
     let mut madt: Option<Table> = None;
+    let mut fadt: Option<Fadt> = None;
 
     for chunk in entries.chunks_exact(pointer_width) {
         let address = if pointer_width == 8 {
@@ -303,14 +368,163 @@ pub unsafe fn init(rsdp_address: u64) -> Result<AcpiInfo, AcpiError> {
         let Some(table) = (unsafe { read_table(address) }) else {
             continue;
         };
-        if &table.signature == b"APIC" {
+        if &table.signature == b"APIC" && madt.is_none() {
             madt = Some(table);
+        } else if &table.signature == b"FACP" && fadt.is_none() {
+            fadt = parse_fadt(&table);
+        }
+        if madt.is_some() && fadt.is_some() {
             break;
         }
     }
 
     let madt = madt.ok_or(AcpiError::NoMadt)?;
-    Ok(parse_madt(&madt))
+    let mut info = parse_madt(&madt);
+    // SAFETY: the DSDT address came from a checksum-validated FADT, and the
+    // direct map covers firmware memory.
+    info.s5 = fadt.and_then(|fadt| unsafe { read_s5(fadt.dsdt) });
+    info.fadt = fadt;
+    Ok(info)
+}
+
+/// Pull the fixed power registers out of a FADT.
+///
+/// Offsets are from the ACPI specification and are the same in every revision
+/// from 1.0 onwards; the 64-bit forms that follow them are ignored, because
+/// every one of these registers is an I/O port on every machine that has them
+/// and the wide forms exist for architectures this kernel does not run on.
+fn parse_fadt(table: &Table) -> Option<Fadt> {
+    let bytes = table.bytes;
+
+    // A port number wider than sixteen bits is not one. Zero means "there is
+    // no such block", which is a legitimate answer and not an error.
+    let port = |at: usize| -> u16 {
+        match read_u32(bytes, at) {
+            Some(value) if value <= u32::from(u16::MAX) => value as u16,
+            _ => 0,
+        }
+    };
+
+    // The 64-bit DSDT pointer, when the table is long enough to have one and
+    // it is not zero. A table that predates it, or has left it empty, still
+    // has the 32-bit field at offset 40.
+    let dsdt = match read_u64(bytes, 140) {
+        Some(wide) if wide != 0 => wide,
+        _ => u64::from(read_u32(bytes, 40)?),
+    };
+
+    // Bit 10 of the flags is RESET_REG_SUP: the firmware saying it has a reset
+    // register at all. Without it the register bytes are meaningless, and a
+    // kernel that wrote to them anyway would be writing an arbitrary value to
+    // an arbitrary port.
+    let flags = read_u32(bytes, 112).unwrap_or(0);
+    let reset = if flags & (1 << 10) != 0 {
+        match (read_address(bytes, 116), bytes.get(128).copied()) {
+            (Some(Register::Elsewhere), _) | (None, _) => None,
+            (Some(register), Some(value)) => Some((register, value)),
+            (Some(_), None) => None,
+        }
+    } else {
+        None
+    };
+
+    Some(Fadt {
+        pm1a_control: port(64),
+        pm1b_control: port(68),
+        smi_command: read_u32(bytes, 48).unwrap_or(0),
+        acpi_enable: bytes.get(52).copied().unwrap_or(0),
+        reset,
+        dsdt,
+    })
+}
+
+/// Find the sleep type values for S5 in the DSDT.
+///
+/// # What this is, honestly
+///
+/// `\_S5_` is an AML object, and reading AML properly means writing an
+/// interpreter: a bytecode machine with a namespace, method invocation,
+/// operation regions and a mutex model. That is thousands of lines and it is
+/// what would be needed for the battery, the lid switch and the thermal zones.
+/// It is not here.
+///
+/// What *is* here is the narrow thing that does not need it. `\_S5_` is a
+/// package of constants -- it has to be, because firmware evaluates it during
+/// shutdown when almost nothing else is running -- so it can be found by
+/// looking for its name and read by parsing the handful of bytes after it.
+/// This is a well-worn shortcut and it is a shortcut; it is written down as one
+/// rather than dressed up as an ACPI implementation.
+///
+/// Every step is checked and any surprise gives `None`, because the thing being
+/// parsed is bytecode that this does not otherwise understand. A wrong answer
+/// here writes a wrong value to a hardware register.
+///
+/// # Safety
+///
+/// `dsdt` must be a DSDT address from a checksum-validated FADT.
+unsafe fn read_s5(dsdt: u64) -> Option<(u8, u8)> {
+    if dsdt == 0 {
+        return None;
+    }
+    // SAFETY: upheld by the caller.
+    let table = unsafe { read_table(dsdt) }?;
+    if &table.signature != b"DSDT" {
+        return None;
+    }
+    let bytes = table.bytes;
+
+    // The name, anywhere in the block. There is only ever one.
+    let at = bytes.windows(4).position(|window| window == b"_S5_")?;
+    let mut at = at + 4;
+
+    // A PackageOp, possibly after the NameOp's own bookkeeping. Two bytes of
+    // slack covers both spellings seen in the wild without turning this into a
+    // scan that could find a package belonging to something else.
+    let package = (0..3).find(|skip| bytes.get(at + skip) == Some(&0x12))?;
+    at += package + 1;
+
+    // PkgLength: the top two bits say how many extra bytes follow. Its value is
+    // not needed -- what follows is read positionally -- but its width is,
+    // because it says where the element count is.
+    let lead = *bytes.get(at)?;
+    at += 1 + usize::from(lead >> 6);
+
+    let elements = *bytes.get(at)?;
+    if elements < 2 {
+        return None;
+    }
+    at += 1;
+
+    // Two integers. AML spells a small one three ways, and all three appear in
+    // real firmware.
+    let integer = |at: &mut usize| -> Option<u8> {
+        let value = match *bytes.get(*at)? {
+            0x00 => {
+                *at += 1;
+                0
+            }
+            0x01 => {
+                *at += 1;
+                1
+            }
+            0x0A => {
+                let byte = *bytes.get(*at + 1)?;
+                *at += 2;
+                byte
+            }
+            // Anything else is an expression rather than a constant, which
+            // means this is not the simple package this can read.
+            _ => return None,
+        };
+        // SLP_TYP is three bits wide. A value that does not fit is a value this
+        // has misread, and writing it would set bits in the control register
+        // that mean something else entirely.
+        (value <= 0b111).then_some(value)
+    };
+
+    let a = integer(&mut at)?;
+    let b = integer(&mut at)?;
+    Some((a, b))
 }
 
 /// Parse the Multiple APIC Description Table.
@@ -407,6 +621,11 @@ fn parse_madt(madt: &Table) -> AcpiInfo {
         io_apics,
         interrupt_overrides,
         has_legacy_pic,
+        // Filled in by the caller, which is the only thing that has read the
+        // FADT. Here rather than threaded through `parse_madt`, which is about
+        // interrupt controllers and has no business knowing about sleep.
+        fadt: None,
+        s5: None,
     }
 }
 
