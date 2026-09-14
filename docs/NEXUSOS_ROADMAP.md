@@ -1669,6 +1669,8 @@ in the code.
 
 ### Feasible next, in order of value
 
+| `remove` should unlink | small | It refuses while anybody holds the file open, so replacing a file another program is reading on a clock fails at random. Every caller that rewrites a file therefore retries, which is a mitigation and not a fix: the answer is to take the name away now and free the blocks when the last handle closes. The store already counts the handles — the message says "open by 1 handle(s)". |
+
 | ~~An agent with a capability model~~ | done | A window that picks a tool, asks GPT-6 Astra's permission model, and is refused by name when it may not. No language model, and it says so on its own first line. See [agent.md](agent.md). |
 
 | ~~Network tools~~ | done | `net`, `lookup` and `scan` in the terminal, on the stack that was already there. A connect scan, no raw sockets, and the documentation says so. See [network-tools.md](network-tools.md). |

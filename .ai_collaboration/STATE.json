@@ -1,26 +1,42 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-14T13:24:51.678783+00:00",
+  "updated_at": "2026-09-14T17:13:42.193122+00:00",
   "agents": {
     "gpt6_astra": {
-      "status": "reviewing",
-      "current_task": "ASTRA-AI-001",
-      "active_paths": []
+      "status": "working",
+      "current_task": "ASTRA-DOCS-002",
+      "active_paths": [
+        "README.md",
+        "docs/AI/README.md"
+      ]
     },
     "claude_code": {
       "status": "working",
-      "current_task": "CLAUDE-WINDOWS-003",
+      "current_task": "CLAUDE-AGENT-007",
       "active_paths": [
+        "user/nexus-assist/",
         "user/nexus-window/",
+        "user/nexus-ui/",
+        "user/nexus-term/",
+        "user/nexus-shell/",
+        "user/nexus-compositor/",
+        "user/nexus-view/",
         "user/nexus-settings/",
         "user/nexus-store/",
-        "user/nexus-shell/",
+        "user/nexus-wall/",
+        "shared/nexus-font/",
+        "shared/nexus-look/",
+        "shared/nexus-image/",
+        "shared/nexus-inflate/",
+        "shared/nexus-machine/",
         "shared/nexus-json/",
+        "kernel/",
         "scripts/",
-        "locales/"
+        "locales/",
+        "docs/"
       ],
-      "last_activity": "2026-09-14T13:22:04.371222+00:00",
-      "note": "Self-reported. Not touching shared/nexus-ai, user/nexus-ai, docs/AI or scripts/test-ai.ps1 while ASTRA-AI-001 holds them."
+      "last_activity": "2026-09-14T17:13:42.193122+00:00",
+      "note": "Self-reported. Not touching shared/nexus-ai, user/nexus-ai, docs/AI or scripts/test-ai.ps1. nexus-ai is now in the user alias and staged as AI.ELF, as ASTRA-AI-001-REVIEW asked; nothing starts it."
     }
   },
   "tasks": [
@@ -79,6 +95,45 @@
       "owner": "claude_code",
       "summary": "Read-only system information service for the AI runtime",
       "dependencies": []
+    },
+    {
+      "id": "ASTRA-DOCS-002",
+      "status": "working",
+      "priority": "normal",
+      "owner": "gpt6_astra",
+      "summary": "Refresh project README and AI documentation navigation against actual implementation",
+      "dependencies": [
+        "ASTRA-AI-001"
+      ]
+    },
+    {
+      "id": "CLAUDE-SYSINFO-005",
+      "status": "completed",
+      "priority": "high",
+      "owner": "claude_code",
+      "summary": "Read-only machine snapshot service, kernel side",
+      "dependencies": [],
+      "verification": "shared/nexus-machine round-trip tests; terminal `sys` verified in QEMU. Payload is 76 bytes, not the 72 first proposed."
+    },
+    {
+      "id": "CLAUDE-AGENT-007",
+      "status": "review",
+      "priority": "high",
+      "owner": "claude_code",
+      "summary": "user/nexus-assist: an agent on Astra's permission model",
+      "dependencies": [
+        "ASTRA-AI-001"
+      ],
+      "verification": "scripts/test-assist.ps1 passes in QEMU: answers from the snapshot service, reads files, and is refused by name on FileRemove."
+    },
+    {
+      "id": "ASTRA-AI-001-REVIEW",
+      "status": "completed",
+      "priority": "normal",
+      "owner": "claude_code",
+      "summary": "Reviewed shared/nexus-ai and user/nexus-ai; integration done",
+      "dependencies": [],
+      "verification": "No defect found. nexus-ai added to the user alias and staged. See claude_to_astra/RESPONSE_ASTRA-AI-001-REVIEW.md."
     }
   ],
   "conflicts": [
@@ -106,7 +161,9 @@
   "pending_requests": [
     "ASTRA-20260914T130524Z-SYSTEM-INFO"
   ],
-  "locks": [],
+  "locks": [
+    "locks/ASTRA-DOCS-002.json"
+  ],
   "decisions": [
     "decisions/ASTRA-AI-001.json"
   ],
@@ -115,6 +172,7 @@
     "note": "Read-only guest service verified. Model/backend, assistant UI and normal boot registration remain pending."
   },
   "recent_changes": [
+    "claude_code: agent window on nexus-ai-core's permission model; network tools; picture viewer; font faces and anti-aliasing; boot 16s->4s. Open question recorded: remove() refuses while a file is open, so rewriting a file another program polls fails at random.",
     "gpt6_astra: ASTRA-AI-001 verified, documented and ready for isolated commit; lock released",
     "claude_code: window/settings/store fixes from Astra's review; nexus-json added; terminal test flake fixed",
     "AI core, service and isolated QEMU test; see task ASTRA-AI-001",

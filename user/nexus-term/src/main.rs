@@ -1642,9 +1642,30 @@ fn read_text(directory: Handle, name: &str) -> Option<String> {
 fn write_text(directory: Handle, name: &str, text: &str) -> Result<(), String> {
     // Removed first: the filesystem has no truncate, so a shorter file written
     // over a longer one would keep the old ending.
-    match nexus_user::remove(directory, name) {
-        Ok(()) | Err(nexus_user::Error::NotFound) => {}
-        Err(error) => return Err(format!("{name}: {error}")),
+    //
+    // Retried, because a remove fails while anybody else has the file open and
+    // several programs here read this one on a clock -- the wallpaper every two
+    // seconds, the desktop every second. Their reads take microseconds and the
+    // collision is rare, which is exactly what makes it worth handling: a
+    // setting that silently failed to save one time in fifty would be blamed on
+    // everything except the truth.
+    //
+    // This is a mitigation and not the fix. The fix is for `remove` to unlink
+    // -- take the name away now and free the blocks when the last handle closes
+    // -- which is what every filesystem that has faced this does, and which is
+    // recorded in the roadmap.
+    let mut attempt = 0;
+    loop {
+        match nexus_user::remove(directory, name) {
+            Ok(()) | Err(nexus_user::Error::NotFound) => break,
+            Err(error) => {
+                attempt += 1;
+                if attempt >= 10 {
+                    return Err(format!("{name}: {error}"));
+                }
+                nexus_user::sleep(20).ok();
+            }
+        }
     }
     let file = nexus_user::create(directory, name, Kind::File)
         .map_err(|error| format!("{name}: {error}"))?;

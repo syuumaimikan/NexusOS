@@ -155,7 +155,23 @@ try {
                     -Seconds 90 -Process $machine.Process)) {
             $failures += 'the wizard never wrote the settings'
         }
-        # And let the filesystem finish with them before the machine is stopped.
+        # And then wait for the machine to stop writing to that same directory.
+        #
+        # The wizard is not the only thing writing to `system/` on a first boot:
+        # the installer and the updater both run behind it and both leave a file
+        # there, and the kernel copies the image's pictures onto the store at
+        # the same time. Stopping five seconds after the wizard lands in the
+        # middle of all of it -- and the symptom is not a warning, it is the
+        # next boot finding no settings and running the wizard again.
+        #
+        # `configure-disk.ps1` had exactly this and was fixed the same way.
+        if (-not (Wait-For -Log $FirstLog -Text 'the machine is up to date' `
+                    -Seconds 120 -Process $machine.Process)) {
+            if (-not (Wait-For -Log $FirstLog -Text 'update: installed' `
+                        -Seconds 30 -Process $machine.Process)) {
+                Write-Host '    the updater never finished; carrying on' -ForegroundColor DarkYellow
+            }
+        }
         Start-Sleep -Seconds 5
         $writer.WriteLine('quit')
         Start-Sleep -Milliseconds 500
