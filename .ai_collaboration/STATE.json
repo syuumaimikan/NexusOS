@@ -1,14 +1,12 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-14T17:13:42.193122+00:00",
+  "updated_at": "2026-09-14T21:26:44.212200+00:00",
   "agents": {
     "gpt6_astra": {
-      "status": "working",
-      "current_task": "ASTRA-DOCS-002",
-      "active_paths": [
-        "README.md",
-        "docs/AI/README.md"
-      ]
+      "status": "idle",
+      "current_task": null,
+      "active_paths": [],
+      "last_activity": "2026-09-14T21:26:44.212200+00:00"
     },
     "claude_code": {
       "status": "working",
@@ -134,6 +132,25 @@
       "summary": "Reviewed shared/nexus-ai and user/nexus-ai; integration done",
       "dependencies": [],
       "verification": "No defect found. nexus-ai added to the user alias and staged. See claude_to_astra/RESPONSE_ASTRA-AI-001-REVIEW.md."
+    },
+    {
+      "id": "ASTRA-AI-002",
+      "status": "completed",
+      "priority": "high",
+      "owner": "gpt6_astra",
+      "summary": "Separate policy classification from service availability; address Claude review",
+      "dependencies": [
+        "ASTRA-AI-001"
+      ],
+      "verification": "15 host tests passed; host and native clippy -D warnings passed; isolated QEMU IPC/policy/teardown passed",
+      "files": [
+        "shared/nexus-ai/src/lib.rs",
+        "shared/nexus-ai/src/tests.rs",
+        "shared/nexus-ai/src/wire.rs",
+        "docs/AI/POLICY.md"
+      ],
+      "qemu": "build/ai-3ad2ff38cea44b04978fc7ba8eadf316/serial.log",
+      "completed_at": "2026-09-14T21:26:44.212200+00:00"
     }
   ],
   "conflicts": [
@@ -150,16 +167,17 @@
     "ai_user_target": "passed"
   },
   "tests": {
-    "ai_core": "13 passed; 0 failed",
+    "ai_core": "15 passed; 0 failed",
     "ai_clippy": "host + native target passed with -D warnings"
   },
   "qemu": {
     "ai_smoke": "passed",
-    "evidence": "build/ai-249dc3631db7438bb9e16b0aa348743f/serial.log",
+    "evidence": "build/ai-3ad2ff38cea44b04978fc7ba8eadf316/serial.log",
     "final_hardening": "passed"
   },
   "pending_requests": [
-    "ASTRA-20260914T130524Z-SYSTEM-INFO"
+    "ASTRA-20260914T130524Z-SYSTEM-INFO",
+    "ASTRA-AI-002-REVIEW"
   ],
   "locks": [
     "locks/ASTRA-DOCS-002.json"
@@ -172,6 +190,7 @@
     "note": "Read-only guest service verified. Model/backend, assistant UI and normal boot registration remain pending."
   },
   "recent_changes": [
+    "gpt6_astra: ASTRA-AI-002 policy/service API separation verified; Claude review requested; task lock released",
     "claude_code: agent window on nexus-ai-core's permission model; network tools; picture viewer; font faces and anti-aliasing; boot 16s->4s. Open question recorded: remove() refuses while a file is open, so rewriting a file another program polls fails at random.",
     "gpt6_astra: ASTRA-AI-001 verified, documented and ready for isolated commit; lock released",
     "claude_code: window/settings/store fixes from Astra's review; nexus-json added; terminal test flake fixed",

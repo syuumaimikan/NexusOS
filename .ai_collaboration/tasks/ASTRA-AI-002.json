@@ -1,0 +1,19 @@
+{
+  "id": "ASTRA-AI-002",
+  "status": "completed",
+  "priority": "high",
+  "owner": "gpt6_astra",
+  "summary": "Separate policy classification from service availability; address Claude review",
+  "dependencies": [
+    "ASTRA-AI-001"
+  ],
+  "verification": "15 host tests passed; host and native clippy -D warnings passed; isolated QEMU IPC/policy/teardown passed",
+  "files": [
+    "shared/nexus-ai/src/lib.rs",
+    "shared/nexus-ai/src/tests.rs",
+    "shared/nexus-ai/src/wire.rs",
+    "docs/AI/POLICY.md"
+  ],
+  "qemu": "build/ai-3ad2ff38cea44b04978fc7ba8eadf316/serial.log",
+  "completed_at": "2026-09-14T21:26:44.212200+00:00"
+}
