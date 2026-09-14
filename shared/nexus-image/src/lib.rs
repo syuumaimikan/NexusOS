@@ -36,6 +36,7 @@
 
 extern crate alloc;
 
+pub mod avi;
 pub mod jpeg;
 
 use alloc::vec::Vec;
@@ -118,6 +119,14 @@ pub fn kind(bytes: &[u8]) -> Option<&'static str> {
     }
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return Some("jpeg");
+    }
+    // A recording rather than a picture. Named here because this is the one
+    // place that says what a file is, and a caller listing a directory wants
+    // one answer per file -- not "a picture, or else ask the video reader".
+    // `decode` still refuses it: it is not a picture and cannot be made into
+    // one, and the caller that wants it goes to `avi`.
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"AVI " {
+        return Some("avi");
     }
     None
 }
@@ -581,12 +590,106 @@ impl<'a> Samples<'a> {
 mod tests {
     use super::*;
 
+    /// Decode one of the fixtures and say how far it is from what ffmpeg made
+    /// of the same file.
+    ///
+    /// The fixtures are the only tests here that were not written by this
+    /// project. `fixtures/tiny*.jpg` came out of ffmpeg's MJPEG encoder and
+    /// `fixtures/tiny*.rgb` out of its decoder, which makes this the one test
+    /// that can catch a decoder that is *consistently* wrong -- the failure a
+    /// decoder checked against its own encoder cannot see, because both halves
+    /// share the mistake.
+    ///
+    /// Returns (mean absolute error, worst absolute error) over every channel
+    /// of every pixel.
+    fn against_ffmpeg(jpeg: &[u8], reference: &[u8], width: usize, height: usize) -> (u32, u32) {
+        let picture = decode(jpeg, 0x000000, MOST_PIXELS).expect("the fixture should decode");
+        assert_eq!(picture.width as usize, width);
+        assert_eq!(picture.height as usize, height);
+        assert_eq!(reference.len(), width * height * 3);
+
+        let mut total = 0u64;
+        let mut worst = 0u32;
+        for (index, pixel) in picture.pixels.iter().enumerate() {
+            let mine = [
+                ((pixel >> 16) & 0xFF) as i32,
+                ((pixel >> 8) & 0xFF) as i32,
+                (pixel & 0xFF) as i32,
+            ];
+            for channel in 0..3 {
+                let theirs = i32::from(reference[index * 3 + channel]);
+                let off = (mine[channel] - theirs).unsigned_abs();
+                total += u64::from(off);
+                worst = worst.max(off);
+            }
+        }
+        ((total / (width * height * 3) as u64) as u32, worst)
+    }
+
+    #[test]
+    fn a_444_jpeg_from_ffmpeg_decodes_to_what_ffmpeg_decodes_it_to() {
+        // No chroma subsampling, so there is no upsampling rule to disagree
+        // about: every difference here is the inverse transform or the colour
+        // conversion, and both should be within a level or two of anyone's.
+        let (mean, worst) = against_ffmpeg(
+            include_bytes!("../fixtures/tiny444.jpg"),
+            include_bytes!("../fixtures/tiny444.rgb"),
+            64,
+            48,
+        );
+        assert!(mean <= 1, "mean error {mean} against ffmpeg is too large");
+        assert!(
+            worst <= 8,
+            "worst error {worst} against ffmpeg is too large"
+        );
+    }
+
+    #[test]
+    fn a_422_jpeg_from_ffmpeg_decodes_close_to_what_ffmpeg_decodes_it_to() {
+        // Chroma is half width here. This decoder repeats the nearest sample
+        // where ffmpeg may interpolate, which was expected to show up as large
+        // differences either side of a sharp colour edge -- and does not, on
+        // this content, at four levels out of two hundred and fifty-five. The
+        // bound is deliberately not loosened to allow for a difference that
+        // was not measured.
+        let (mean, worst) = against_ffmpeg(
+            include_bytes!("../fixtures/tiny422.jpg"),
+            include_bytes!("../fixtures/tiny422.rgb"),
+            64,
+            48,
+        );
+        assert!(mean <= 1, "mean error {mean} against ffmpeg is too large");
+        assert!(
+            worst <= 8,
+            "worst error {worst} against ffmpeg is too large"
+        );
+    }
+
+    #[test]
+    fn a_420_jpeg_from_ffmpeg_decodes_close_to_what_ffmpeg_decodes_it_to() {
+        // Half width and half height. This is what a camera and every
+        // Motion-JPEG stream produces, so it is the one that has to work.
+        let (mean, worst) = against_ffmpeg(
+            include_bytes!("../fixtures/tiny.jpg"),
+            include_bytes!("../fixtures/tiny.rgb"),
+            64,
+            48,
+        );
+        assert!(mean <= 1, "mean error {mean} against ffmpeg is too large");
+        assert!(
+            worst <= 8,
+            "worst error {worst} against ffmpeg is too large"
+        );
+    }
+
     /// A four-by-two bitmap, written by hand: red, green, blue, white on the
     /// top row and black, grey, red, red on the bottom. Bottom-up, as bitmaps
     /// are, so the file has the black row first.
     fn a_bitmap() -> Vec<u8> {
         let mut file = Vec::new();
-        let stride = 4 * 3 + 0; // twelve bytes, already a multiple of four
+        // Four pixels of three bytes: twelve, already a multiple of four, so
+        // there is no row padding to write.
+        let stride = 4 * 3;
         let data_at = 54u32;
         let size = data_at + (stride * 2) as u32;
         file.extend_from_slice(b"BM");
@@ -666,8 +769,21 @@ mod tests {
         assert_eq!(kind(&a_bitmap()), Some("bmp"));
         assert_eq!(kind(&PNG_MAGIC), Some("png"));
         assert_eq!(kind(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpeg"));
+        assert_eq!(kind(include_bytes!("../fixtures/clip.avi")), Some("avi"));
         assert_eq!(kind(b"not a picture"), None);
         assert_eq!(kind(b""), None);
+        // RIFF is a family, not a format: a sound file starts the same way and
+        // is not a recording this plays.
+        assert_eq!(kind(b"RIFF    WAVEfmt "), None);
+    }
+
+    #[test]
+    fn a_recording_is_named_but_not_decoded_as_a_picture() {
+        // `kind` says what it is so a directory listing can show it. `decode`
+        // refuses, because a film is not a picture and returning its first
+        // frame would be this deciding on the caller's behalf.
+        let clip = include_bytes!("../fixtures/clip.avi");
+        assert_eq!(decode(clip, 0, MOST_PIXELS), Err(Trouble::NotAPicture));
     }
 
     #[test]

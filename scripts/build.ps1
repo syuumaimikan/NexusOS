@@ -232,6 +232,13 @@ $Picture = Join-Path $ProgramDir 'nexus.png'
 if ($LASTEXITCODE -ne 0) { throw "could not draw the picture (exit $LASTEXITCODE)" }
 $pictureSize = [math]::Round((Get-Item $Picture).Length / 1KB, 1)
 
+# And a recording, for the same reason and by the same route: `.AVI` is copied
+# out of the image's program directory into PICTURES alongside the stills.
+$Video = Join-Path $ProgramDir 'nexus.avi'
+& powershell -NoProfile -File (Join-Path $PSScriptRoot 'make-video.ps1') -OutputFile $Video | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "could not draw the recording (exit $LASTEXITCODE)" }
+$videoSize = [math]::Round((Get-Item $Video).Length / 1KB, 1)
+
 $Package = Join-Path $ProgramDir 'demo.nex'
 $SigningKey = Join-Path $RepoRoot 'keys\development.key'
 & $PackExe $Package $SigningKey 'demo' '1.0.0' "demo/hello.txt=$greeting" "demo/notes.txt=$notes"
@@ -309,6 +316,7 @@ Write-Host "  viewer     : $viewSize KiB  -> BIN\VIEW.ELF on the disk"
 Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
 Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
 Write-Host "  picture    : $pictureSize KiB  -> PICTURES\NEXUS.PNG on the disk"
+Write-Host "  recording  : $videoSize KiB  -> PICTURES\NEXUS.AVI on the disk"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
 Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1.1.0, signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"

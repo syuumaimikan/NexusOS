@@ -202,6 +202,14 @@ view.unreadable = {name} could not be read
 view.showing = {name}, {width} by {height}
 view.which = {at} of {of}: {name} ({kind})
 view.keys = Left and right change the picture. Home and End jump. F5 looks again.
+view.videokeys = Space plays and pauses. Left and right change file. F5 reloads.
+view.video = {name}, {width} x {height}, {count} frames at {fps} a second
+view.frame = frame {at} of {count}
+view.paused = paused, frame {at} of {count}
+view.videohead = {name}: the headers run further into the file than this looks
+view.novideoframes = {name}: a recording with no frames in it
+view.videostopped = The recording stops here: a frame is not all there.
+view.videoframe = Frame {at} would not decode: {why}
 
 assist.welcome = An agent. Type a question and press Enter.
 assist.notamodel = There is no language model here. It matches words to tools and asks permission for each one.

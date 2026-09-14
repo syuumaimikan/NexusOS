@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Opens the picture window from the desktop and shows a picture in it.
+    Opens the picture window from the desktop, shows a picture, and plays a
+    recording.
 
 .DESCRIPTION
     The viewer is a window; the decoding is not. `shared/nexus-image` and
@@ -14,6 +15,13 @@
     It is also the first test of the DEFLATE decoder against something larger
     than a fixture, which is worth saying: the picture is thirteen kilobytes of
     dynamic Huffman blocks.
+
+    The recording is the part that cannot be checked any other way. A host test
+    can decode twenty-four frames; only this can say whether a machine decodes
+    them *fast enough*, holding a file open, reading each frame through the
+    filesystem, and handing each to the compositor on a clock. The viewer logs
+    what it actually managed, and this requires it to have gone all the way
+    round the loop.
 
 .PARAMETER Timeout
     How long to wait for each stage, in seconds.
@@ -114,10 +122,43 @@ try {
             throw 'the picture window never started'
         }
 
-        # The image ships the same mark twice, as a PNG and as a JPEG, and the
-        # viewer sorts by name -- so the JPEG is the one it opens with. Both are
-        # waited for, because they are two decoders and only one of them has
-        # been exercised in the guest before now.
+        # The image ships the mark three times -- a recording, a JPEG and a PNG
+        # -- and the viewer sorts by name, so NEXUS.AVI is what it opens with.
+        if (-not (Wait-For -Text 'view: playing NEXUS.AVI' -Seconds 60)) {
+            $failures += 'the viewer never opened the recording the image ships'
+        }
+
+        # And then all the way round it. This is the assertion that matters:
+        # twenty-four frames read one at a time through an open handle and
+        # decoded, which cannot happen if the container reader has the offsets
+        # wrong, if a frame is read short, or if the clock never fires.
+        #
+        # Waited for rather than slept through. Two seconds of recording takes
+        # two seconds only if the machine keeps up, and the whole point of the
+        # line being waited for is that it says whether it did.
+        if (-not (Wait-For -Text 'view: played 24 frames' -Seconds 90)) {
+            $failures += 'the recording never played a whole time round'
+        }
+
+        # The space bar stops it where it is -- and a stopped frame is what a
+        # screenshot can be taken of. A playing one would catch the compositor
+        # part-way through a composite as often as not, which looks exactly
+        # like a drawing bug and is not one.
+        Write-Host '==> Pausing the recording' -ForegroundColor Cyan
+        Send-Keys @('spc')
+        Start-Sleep -Seconds 3
+
+        if ($Shot) {
+            $Ppm = Join-Path $BuildDir 'playing.ppm'
+            Invoke-Screendump -Writer $writer -Path $Ppm
+            $frozen = [System.IO.Path]::ChangeExtension($Shot, $null) + 'playing.png'
+            Convert-PpmToPng -PpmPath $Ppm -PngPath $frozen | Out-Null
+            Write-Host "    Screenshot: $frozen" -ForegroundColor DarkGray
+        }
+
+        # Then the two stills, which are the two picture decoders.
+        Write-Host '==> Stepping to the stills' -ForegroundColor Cyan
+        Send-Keys @('right')
         if (-not (Wait-For -Text 'view: showed NEXUS.JPG' -Seconds 60)) {
             $failures += 'the viewer never decoded the JPEG the image ships'
         }
@@ -152,10 +193,12 @@ $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
 foreach ($expected in @(
         'compositor: started a picture window, and lent it the disk to read',
         'view: a window for looking at pictures',
+        'view: playing NEXUS.AVI, 240x180, 24 frames at 12.0 a second',
         'view: showed NEXUS.JPG',
         'view: showed NEXUS.PNG',
         'PICTURES/NEXUS.PNG',
-        'PICTURES/NEXUS.JPG'
+        'PICTURES/NEXUS.JPG',
+        'PICTURES/NEXUS.AVI'
     )) {
     if ($output.Contains($expected)) {
         Write-Host "    ok   $expected" -ForegroundColor DarkGray
@@ -164,10 +207,21 @@ foreach ($expected in @(
     }
 }
 
+# What the machine actually managed, said out loud. Not an assertion about a
+# number -- QEMU on a loaded build machine is not a benchmark, and a threshold
+# here would fail for reasons that have nothing to do with this code -- but a
+# figure a person reading the output can see going the wrong way.
+if ($output -match 'view: played (\d+) frames, decoding at ([\d.]+) a second, asked for ([\d.]+)') {
+    Write-Host "    ok   decoded $($Matches[2]) frames a second, asked for $($Matches[3])" -ForegroundColor DarkGray
+} else {
+    $failures += 'the viewer never said what frame rate it managed'
+}
+
 # The tampered package must never have been installed, and nothing may have
 # fallen over. The first of those is the whole point of signing a package.
 foreach ($bad in @(
         'view: could not show',
+        'view: could not play',
         'view: FAILED',
         'view: PANIC',
         'KERNEL PANIC'

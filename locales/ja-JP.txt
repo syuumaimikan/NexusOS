@@ -202,6 +202,14 @@ view.unreadable = {name} を読めませんでした
 view.showing = {name}、{width} x {height}
 view.which = {of} 件中 {at}: {name} ({kind})
 view.keys = 左右で画像を切り替え、Home / End で端へ。F5 で再読み込み。
+view.videokeys = スペースで再生と一時停止。左右でファイルを切り替え、F5 で再読み込み。
+view.video = {name}、{width} x {height}、{count} フレーム、毎秒 {fps} フレーム
+view.frame = {count} フレーム中 {at}
+view.paused = 一時停止中、{count} フレーム中 {at}
+view.videohead = {name}：ヘッダがここで読む範囲より先にあります
+view.novideoframes = {name}：フレームのない録画です
+view.videostopped = フレームが欠けているため、ここで再生を止めます。
+view.videoframe = フレーム {at} を復号できませんでした：{why}
 
 assist.welcome = エージェントです。質問を入力して Enter を押してください。
 assist.notamodel = ここに言語モデルはありません。語句を道具に対応させ、その都度許可を求めます。
