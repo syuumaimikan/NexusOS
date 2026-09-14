@@ -7,6 +7,18 @@ name = "nexus-abi"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-ai"
+version = "0.1.0"
+dependencies = [
+ "nexus-ai-core",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-ai-core"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-boot"
 version = "0.1.0"
 dependencies = [

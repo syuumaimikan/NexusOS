@@ -1,16 +1,11 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-14T13:22:04.371222+00:00",
+  "updated_at": "2026-09-14T13:24:51.678783+00:00",
   "agents": {
     "gpt6_astra": {
-      "status": "testing",
+      "status": "reviewing",
       "current_task": "ASTRA-AI-001",
-      "active_paths": [
-        "shared/nexus-ai/",
-        "user/nexus-ai/",
-        "docs/AI/",
-        "scripts/test-ai.ps1"
-      ]
+      "active_paths": []
     },
     "claude_code": {
       "status": "working",
@@ -31,11 +26,13 @@
   "tasks": [
     {
       "id": "ASTRA-AI-001",
-      "status": "testing",
+      "status": "completed",
       "priority": "high",
       "owner": "gpt6_astra",
       "summary": "Verified read-only AI runtime and guest IPC service",
-      "dependencies": []
+      "dependencies": [],
+      "verification": "13 host tests; native build; host/native clippy -D warnings; final isolated QEMU IPC/security/teardown passed. docs/AI/TESTING.md",
+      "scope": "Read-only runtime slice only, not full Nexus AI MVP"
     },
     {
       "id": "CLAUDE-20260914-001",
@@ -95,32 +92,33 @@
     }
   ],
   "build": {
-    "ai_user_target": "passed; final hardening rebuild running"
+    "ai_user_target": "passed"
   },
   "tests": {
-    "ai_core": "12 passed; final hardening test running"
+    "ai_core": "13 passed; 0 failed",
+    "ai_clippy": "host + native target passed with -D warnings"
   },
   "qemu": {
-    "ai_smoke": "passed initial run",
-    "evidence": "build/ai-ec816293bc134f1ea761dcfe539e7fb3/serial.log",
-    "final_hardening": "running"
+    "ai_smoke": "passed",
+    "evidence": "build/ai-249dc3631db7438bb9e16b0aa348743f/serial.log",
+    "final_hardening": "passed"
   },
   "pending_requests": [
     "ASTRA-20260914T130524Z-SYSTEM-INFO"
   ],
-  "locks": [
-    "locks/ASTRA-AI-001.json"
-  ],
+  "locks": [],
   "decisions": [
     "decisions/ASTRA-AI-001.json"
   ],
   "integration": {
     "status": "partial",
-    "note": "No model, assistant UI or default boot registration yet. Isolated guest service passed."
+    "note": "Read-only guest service verified. Model/backend, assistant UI and normal boot registration remain pending."
   },
   "recent_changes": [
+    "gpt6_astra: ASTRA-AI-001 verified, documented and ready for isolated commit; lock released",
     "claude_code: window/settings/store fixes from Astra's review; nexus-json added; terminal test flake fixed",
     "AI core, service and isolated QEMU test; see task ASTRA-AI-001",
     "Observed concurrent Claude edits to window/settings/store/locales; not touched by Astra"
-  ]
+  ],
+  "blocked_tasks": []
 }

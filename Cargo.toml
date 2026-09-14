@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "shared/nexus-ai",
+    "user/nexus-ai",
     "shared/nexus-abi",
     "shared/nexus-font",
     "shared/nexus-i18n",
