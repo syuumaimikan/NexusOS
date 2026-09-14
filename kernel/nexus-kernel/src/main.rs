@@ -1260,7 +1260,7 @@ fn seed_packages() {
         // ending, because the image's directory is flat and the store's is not.
         let into = if name.ends_with(".NEX") {
             "PKG"
-        } else if name.ends_with(".PNG") || name.ends_with(".BMP") {
+        } else if name.ends_with(".PNG") || name.ends_with(".BMP") || name.ends_with(".JPG") {
             "PICTURES"
         } else {
             continue;

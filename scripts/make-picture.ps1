@@ -93,6 +93,18 @@ try {
         New-Item -ItemType Directory -Force -Path $parent | Out-Null
     }
     $bitmap.Save($OutputFile, [System.Drawing.Imaging.ImageFormat]::Png)
+
+    # And the same picture as a JPEG, so the viewer has one of each to show and
+    # the decoder is exercised on a real file rather than only on a fixture.
+    # Quality 92: high enough that the mark stays clean, low enough that the
+    # file is genuinely compressed rather than nearly raw.
+    $jpeg = [System.IO.Path]::ChangeExtension($OutputFile, 'jpg')
+    $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() |
+        Where-Object { $_.MimeType -eq 'image/jpeg' }
+    $settings = New-Object System.Drawing.Imaging.EncoderParameters(1)
+    $settings.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
+        [System.Drawing.Imaging.Encoder]::Quality, [long]92)
+    $bitmap.Save($jpeg, $codec, $settings)
 } finally {
     $graphics.Dispose()
     $bitmap.Dispose()

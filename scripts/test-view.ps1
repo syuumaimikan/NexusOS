@@ -114,15 +114,18 @@ try {
             throw 'the picture window never started'
         }
 
-        # The picture the image ships, decoded inside the guest.
-        if (-not (Wait-For -Text 'view: showed NEXUS.PNG' -Seconds 60)) {
-            $failures += 'the viewer never decoded the picture the image ships'
+        # The image ships the same mark twice, as a PNG and as a JPEG, and the
+        # viewer sorts by name -- so the JPEG is the one it opens with. Both are
+        # waited for, because they are two decoders and only one of them has
+        # been exercised in the guest before now.
+        if (-not (Wait-For -Text 'view: showed NEXUS.JPG' -Seconds 60)) {
+            $failures += 'the viewer never decoded the JPEG the image ships'
         }
-
-        # And the keys that move between pictures. There is only one, so this
-        # checks that asking for the next one does not fall over rather than
-        # that it lands somewhere new.
-        Send-Keys @('right', 'left', 'f5')
+        Send-Keys @('right')
+        if (-not (Wait-For -Text 'view: showed NEXUS.PNG' -Seconds 60)) {
+            $failures += 'the viewer never decoded the PNG the image ships'
+        }
+        Send-Keys @('left', 'f5')
         # Long enough for the window to have settled: a screendump taken while
         # the compositor is part-way through a full-screen composite catches
         # half a frame, which looks exactly like a drawing bug and is not one.
@@ -149,8 +152,10 @@ $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
 foreach ($expected in @(
         'compositor: started a picture window, and lent it the disk to read',
         'view: a window for looking at pictures',
+        'view: showed NEXUS.JPG',
         'view: showed NEXUS.PNG',
-        'PICTURES/NEXUS.PNG'
+        'PICTURES/NEXUS.PNG',
+        'PICTURES/NEXUS.JPG'
     )) {
     if ($output.Contains($expected)) {
         Write-Host "    ok   $expected" -ForegroundColor DarkGray

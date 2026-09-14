@@ -4,7 +4,7 @@ The machine can show a picture. What that took, from the bottom:
 
 ```
 shared/nexus-inflate    DEFLATE and zlib          RFC 1951, RFC 1950
-shared/nexus-image      PNG and BMP               into 0x00RRGGBB pixels
+shared/nexus-image      PNG, BMP and JPEG         into 0x00RRGGBB pixels
 user/nexus-view         a window                  chooses, fits, draws
 ```
 
@@ -31,7 +31,32 @@ everything here, for a feature almost nothing writes any more.
 is. Palettised and run-length encoded bitmaps are refused by name rather than
 guessed at.
 
-**JPEG** is recognised and refused by name. It is the next one worth doing.
+**JPEG**: baseline sequential, greyscale and YCbCr, with 4:4:4, 4:2:2 and 4:2:0
+chroma sampling and restart markers. That is what every camera, every screenshot
+tool and every Motion-JPEG stream produces.
+
+Progressive JPEG is refused by name. It is the same coefficients sent in several
+passes, which needs the whole coefficient array held and refined rather than one
+block decoded and finished — a second decoder wearing the first one's clothes.
+Arithmetic coding, twelve-bit samples and CMYK are refused for the same reason:
+real, rare, and not worth guessing at.
+
+### The transform, and a mistake worth recording
+
+The inverse cosine transform is integer — a table of cosines scaled by 2^11,
+applied down the columns and then across the rows. This system's kernel does not
+enable the floating-point unit, so a decoder that needed one could not run here;
+and the integer form is what the reference implementations use anyway, because
+it gives the same answer on every machine.
+
+The table is the definition rather than a factored butterfly. The first version
+of that file *was* factored, written from memory, and decoded every photograph
+to a flat grey — every coefficient cancelling to nothing. The table is slower and
+is obviously the thing the specification says, which is what matters first.
+
+The tests are what caught it: a greyscale ramp, which a flat result fails
+immediately, and four flat colour quadrants, which catch a decoder with its
+chroma channels crossed. Red and blue swapped looks perfect on grey.
 
 The kind is read from the first bytes and never from the name. A file called
 `.png` that is a bitmap is a file somebody renamed, and the bytes are the only
@@ -75,9 +100,14 @@ plainly what happened if even that fails.
 ## Where the picture comes from
 
 `scripts/make-picture.ps1` draws the Nexus mark with `System.Drawing` on the
-build machine and saves it as a PNG. The kernel copies it onto the store at
-boot, the same way it copies packages: anything ending `.PNG` or `.BMP` in the
-image's program directory goes to `PICTURES/`.
+build machine and saves it **twice**, as a PNG and as a JPEG at quality 92. The
+kernel copies both onto the store at boot, the same way it copies packages:
+anything ending `.PNG`, `.BMP` or `.JPG` in the image's program directory goes
+to `PICTURES/`.
+
+Two files of the same picture on purpose: the viewer opens with the JPEG, and
+one press of the right arrow shows the PNG. If they look the same, both decoders
+are right.
 
 It is written by a reference encoder on purpose. A decoder checked only against
 pictures written by its own encoder is a decoder that agrees with itself.

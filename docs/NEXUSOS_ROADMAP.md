@@ -1669,6 +1669,9 @@ in the code.
 
 ### Feasible next, in order of value
 
+| ~~JPEG~~ | done | Baseline sequential, greyscale and YCbCr, 4:4:4 / 4:2:2 / 4:2:0, restart markers. Integer transform, because the kernel has no FPU. Progressive refused by name. |
+| Motion-JPEG video | medium | A sequence of JPEGs and a clock. Now that one decodes, this is a container reader and a frame budget rather than a codec. Real video — H.264, VP9 — is still tens of thousands of lines and years of patent history. |
+
 | ~~`remove` should unlink~~ | done | It refused while anybody held the file open, so replacing a file another program read on a clock failed at random. The name now goes at once and the blocks go when the last handle closes. `init` proves the property that refusal was protecting: after the name has gone, a handle that was already open still reads the same bytes. |
 
 | ~~An agent with a capability model~~ | done | A window that picks a tool, asks GPT-6 Astra's permission model, and is refused by name when it may not. No language model, and it says so on its own first line. See [agent.md](agent.md). |
