@@ -154,6 +154,13 @@ struct Terminal {
     ime: nexus_ime::Ime,
     /// The channel that says what the machine is doing, if this shell has one.
     machine: Option<Handle>,
+    /// The face to draw in, and whether to soften its edges.
+    ///
+    /// Read once, when the window opens. Unlike the wallpaper this does not
+    /// watch the settings file: a terminal that changed face mid-session would
+    /// reflow every line of scrollback under somebody's cursor, and opening a
+    /// new one is both cheap and what a person would do anyway.
+    style: (nexus_ui::font::Face, bool),
 }
 
 #[unsafe(naked)]
@@ -218,7 +225,9 @@ extern "C" fn main() -> ! {
         recalled: None,
         scrolled: 0,
         ime: nexus_ime::Ime::new(),
+        style: (nexus_ui::font::Face::Crisp, false),
     };
+    terminal.style = terminal.read_style();
 
     terminal.note(nexus_i18n::text("term.welcome"));
     if terminal.root.is_none() {
@@ -1081,6 +1090,22 @@ impl Terminal {
         self.note(&choices);
     }
 
+    /// What the settings file says text should look like.
+    fn read_style(&self) -> (nexus_ui::font::Face, bool) {
+        let Some(directory) = self.system() else {
+            return (nexus_ui::font::Face::Crisp, false);
+        };
+        let look = match read_text(directory, SETTINGS_NAME) {
+            Some(text) => nexus_look::Look::parse(&text),
+            None => nexus_look::Look::default(),
+        };
+        nexus_user::close(directory).ok();
+        (
+            nexus_ui::font::Face::parse(Some(look.font.name())),
+            look.smooth,
+        )
+    }
+
     /// `sys`
     ///
     /// What the machine is doing. The numbers come from the kernel over a
@@ -1225,6 +1250,7 @@ impl Terminal {
         // `width * height * 4` bytes -- checked when it was taken and again
         // after every replacement.
         let mut canvas = unsafe { Canvas::packed(SURFACE_AT, self.width, self.height) };
+        canvas.set_text_style(self.style.0, self.style.1);
 
         let ground = Colour::rgb(0x07, 0x0B, 0x12);
         let plain = Colour::rgb(0xCF, 0xD8, 0xE6);

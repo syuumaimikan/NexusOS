@@ -35,6 +35,47 @@ pub mod key {
     pub const BOTTOM: &str = "look.bottom";
     /// What is picked out: focus rings, buttons, the things that can be pressed.
     pub const ACCENT: &str = "look.accent";
+    /// Which face text is drawn in.
+    pub const FONT: &str = "look.font";
+    /// Whether text has soft edges.
+    pub const SMOOTH: &str = "look.smooth";
+}
+
+/// Which face text is drawn in.
+///
+/// The same two names [`nexus_font::Face`] uses, kept here so that a program
+/// reading the settings file does not have to depend on the font crate to know
+/// what the value means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Font {
+    /// Hinted and sharp: every pixel is on or off.
+    #[default]
+    Crisp,
+    /// Anti-aliased: sixteen levels of coverage a pixel, softer edges.
+    Smooth,
+}
+
+impl Font {
+    /// The face this text names, or the default.
+    #[must_use]
+    pub fn parse(text: Option<&str>) -> Self {
+        match text.map(str::trim) {
+            Some("smooth") => Self::Smooth,
+            _ => Self::Crisp,
+        }
+    }
+
+    /// How it is written down.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Crisp => "crisp",
+            Self::Smooth => "smooth",
+        }
+    }
+
+    /// Every face there is, for something that lists them.
+    pub const ALL: [Self; 2] = [Self::Crisp, Self::Smooth];
 }
 
 /// What is drawn behind the windows.
@@ -175,6 +216,13 @@ pub struct Look {
     pub top: Colour,
     pub bottom: Colour,
     pub accent: Colour,
+    pub font: Font,
+    /// Whether text is drawn with soft edges.
+    ///
+    /// Separate from the face because they answer different questions, and
+    /// because somebody who wants the crisp face and no blending is asking for
+    /// what this machine did before either existed.
+    pub smooth: bool,
 }
 
 impl Default for Look {
@@ -187,6 +235,11 @@ impl Default for Look {
             top: Colour::new(0x0B, 0x14, 0x28),
             bottom: Colour::new(0x04, 0x08, 0x14),
             accent: Colour::new(0x38, 0x8B, 0xE8),
+            // Off by default, so a machine nobody has changed looks exactly as
+            // it did before there was a choice. Turning it on is a decision
+            // somebody makes, not one made for them by an upgrade.
+            font: Font::Crisp,
+            smooth: false,
         }
     }
 }
@@ -225,6 +278,10 @@ impl Look {
                         look.accent = colour;
                     }
                 }
+                key::FONT => look.font = Font::parse(Some(value)),
+                // Anything that is not "yes" is no, which is how every other
+                // yes-or-no setting in this system reads.
+                key::SMOOTH => look.smooth = value.eq_ignore_ascii_case("yes"),
                 _ => {}
             }
         }
@@ -322,6 +379,72 @@ mod tests {
         let look = Look::parse("look.accent = not-a-colour\nlook.style = grid\n");
         assert_eq!(look.accent, Look::default().accent);
         assert_eq!(look.style, Style::Grid);
+    }
+
+    #[test]
+    fn a_face_is_named_and_read_back() {
+        for font in Font::ALL {
+            assert_eq!(Font::parse(Some(font.name())), font);
+        }
+        assert_eq!(Font::parse(None), Font::Crisp);
+        assert_eq!(Font::parse(Some("something else")), Font::Crisp);
+    }
+
+    #[test]
+    fn smoothing_is_off_unless_it_says_yes() {
+        assert!(!Look::default().smooth);
+        assert!(
+            Look::parse(
+                "look.smooth = yes
+"
+            )
+            .smooth
+        );
+        assert!(
+            Look::parse(
+                "look.smooth = YES
+"
+            )
+            .smooth
+        );
+        assert!(
+            !Look::parse(
+                "look.smooth = no
+"
+            )
+            .smooth
+        );
+        assert!(
+            !Look::parse(
+                "look.smooth = 
+"
+            )
+            .smooth
+        );
+        assert!(
+            !Look::parse(
+                "look.smooth = perhaps
+"
+            )
+            .smooth
+        );
+    }
+
+    #[test]
+    fn the_face_and_the_smoothing_are_separate_settings() {
+        let look = Look::parse(
+            "look.font = smooth
+",
+        );
+        assert_eq!(look.font, Font::Smooth);
+        assert!(!look.smooth, "choosing a face must not turn blending on");
+
+        let look = Look::parse(
+            "look.smooth = yes
+",
+        );
+        assert_eq!(look.font, Font::Crisp);
+        assert!(look.smooth);
     }
 
     #[test]

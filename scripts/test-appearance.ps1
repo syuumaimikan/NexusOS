@@ -126,6 +126,18 @@ try {
         Write-Host '==> Changing how the machine looks' -ForegroundColor Cyan
         Send-Text 'look'
         Send-Keys @('ret')
+
+        # Put the machine in a known state first, because it remembers: this
+        # test used to type `set look.style stars` on a machine the settings
+        # test had already left on stars, and then waited for a change that had
+        # no reason to happen. Setting it to something else and waiting for the
+        # wallpaper to say so makes the second change real whatever came before.
+        Send-Text 'set look.style gradient'
+        Send-Keys @('ret')
+        if (-not (Wait-For -Text 'wall: the look changed to gradient' -Seconds 60)) {
+            $failures += 'the wallpaper never went back to a gradient'
+        }
+
         Send-Text 'set look.style stars'
         Send-Keys @('ret')
         Send-Text 'set look.accent 40d090'
@@ -145,7 +157,15 @@ try {
         Send-Keys @('f2')
         Send-Text 'konnichiha'
         Send-Keys @('ret')
-        Start-Sleep -Seconds 3
+
+        # Waited for, not slept through. How long a keystroke takes to cross
+        # the emulated 8042, the kernel's input thread, the compositor and a
+        # shell that is drawing at the same time is a property of the host, and
+        # a fixed wait turns a busy host into a failing test. This is the same
+        # mistake `test-terminal.ps1` had, found the same way.
+        if (-not (Wait-For -Text 'term: ran echo' -Seconds 60)) {
+            Write-Host '    the shell never reported the command' -ForegroundColor Red
+        }
     } finally {
         $client.Close()
     }
@@ -159,7 +179,11 @@ try {
 $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
 
 foreach ($expected in @(
-        'wall: 1920x1164 behind the windows, gradient',
+        # Whatever style the machine happened to start on. The size is the
+        # claim worth checking here: the wallpaper is given the screen minus the
+        # strip, and a wallpaper that drew the whole screen would cover it.
+        'wall: 1920x1164 behind the windows,',
+        'wall: the look changed to gradient',
         'term: ran look',
         'term: ran set',
         'wall: the look changed to stars',

@@ -424,6 +424,13 @@ fn judge(directory: Handle, file: &str) -> Found {
 
 impl App for Store {
     fn draw(&mut self, canvas: &mut Canvas) {
+        // Both together, and from the settings file: the face and whether its
+        // edges are blended are what a person chose, and a window that ignored
+        // them would be a window that looks like it came from somewhere else.
+        canvas.set_text_style(
+            nexus_ui::font::Face::parse(Some(self.look.font.name())),
+            self.look.smooth,
+        );
         let top = Colour(self.look.top.packed());
         let bottom = Colour(self.look.bottom.packed());
         let accent = Colour(self.look.accent.packed());
@@ -488,8 +495,9 @@ impl App for Store {
             }
             let chosen = index == self.cursor;
             if chosen {
-                canvas.fill(
+                canvas.fill_rounded(
                     Rect::new(line.x, line.y, line.width, line.height),
+                    4,
                     blend(bottom, accent, 64),
                 );
             }

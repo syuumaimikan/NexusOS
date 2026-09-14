@@ -246,6 +246,21 @@ impl Settings {
             Item::Row(
                 Row::typed(nexus_look::key::ACCENT, "settings.accent", "388be8").into_colour()
             ),
+            Item::Row(Row::choice(
+                nexus_look::key::FONT,
+                "settings.font",
+                nexus_look::Font::ALL
+                    .iter()
+                    .map(|font| font.name().to_string())
+                    .collect(),
+                "crisp"
+            )),
+            Item::Row(Row::choice(
+                nexus_look::key::SMOOTH,
+                "settings.smooth",
+                alloc::vec!["no".to_string(), "yes".to_string()],
+                "no"
+            )),
             Item::Heading("settings.machine"),
             Item::Row(Row::choice(
                 key::LANGUAGE,
@@ -385,6 +400,13 @@ impl Settings {
 
 impl App for Settings {
     fn draw(&mut self, canvas: &mut Canvas) {
+        // Both together, and from the settings file: the face and whether its
+        // edges are blended are what a person chose, and a window that ignored
+        // them would be a window that looks like it came from somewhere else.
+        canvas.set_text_style(
+            nexus_ui::font::Face::parse(Some(self.look.font.name())),
+            self.look.smooth,
+        );
         let top = Colour(self.look.top.packed());
         let bottom = Colour(self.look.bottom.packed());
         let accent = Colour(self.look.accent.packed());
@@ -419,8 +441,9 @@ impl App for Settings {
                         // A band behind the row rather than a different ink, so
                         // that the row the keys act on is obvious from across a
                         // desk and not only from a foot away.
-                        canvas.fill(
+                        canvas.fill_rounded(
                             Rect::new(line.x, line.y, line.width, line.height),
+                            4,
                             blend(bottom, accent, 64),
                         );
                     }

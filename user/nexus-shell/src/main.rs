@@ -154,6 +154,12 @@ const LAUNCH_WIDTH: u32 = 72;
 /// Pixels between things in the strip.
 const GAP: u32 = 4;
 
+/// How round the corners of a button or a tab are.
+///
+/// Five pixels on a thirty-two pixel button: enough to read as rounded at a
+/// glance and not so much that a short label sits in a lozenge.
+const RADIUS: u32 = 5;
+
 /// Everything this program knows about the desktop.
 struct Desktop {
     /// How many window slots the compositor has.
@@ -848,6 +854,13 @@ fn draw(desktop: &Desktop) {
     // first frame.
     let mut canvas = unsafe { Canvas::packed(SURFACE_AT, desktop.width, desktop.height) };
 
+    // The face and the blending a person chose, from the same settings file the
+    // colours come from.
+    canvas.set_text_style(
+        nexus_ui::font::Face::parse(Some(desktop.look.font.name())),
+        desktop.look.smooth,
+    );
+
     // The strip is a darker version of the background's bottom, so a machine
     // with a warm wallpaper does not have a cold bar under it; everything that
     // can be pressed is the accent.
@@ -866,8 +879,12 @@ fn draw(desktop: &Desktop) {
     // The launcher, which is the only thing on this machine that starts a
     // program by being pressed.
     let launcher = desktop.launcher();
-    canvas.fill(launcher, accent.blend(Colour::rgb(0, 0, 0), 120));
-    canvas.outline(launcher, 1, accent);
+    canvas.panel(
+        launcher,
+        RADIUS,
+        accent.blend(Colour::rgb(0, 0, 0), 120),
+        accent,
+    );
     canvas.text_centred(
         launcher,
         nexus_i18n::text("shell.launch"),
@@ -876,8 +893,12 @@ fn draw(desktop: &Desktop) {
 
     // The button that opens a page, next to the one that starts a program.
     let web = desktop.web();
-    canvas.fill(web, accent.blend(Colour::rgb(0, 0, 0), 150));
-    canvas.outline(web, 1, accent.blend(ground, 90));
+    canvas.panel(
+        web,
+        RADIUS,
+        accent.blend(Colour::rgb(0, 0, 0), 150),
+        accent.blend(ground, 90),
+    );
     canvas.text_centred(
         web,
         nexus_i18n::text("shell.web"),
@@ -886,8 +907,12 @@ fn draw(desktop: &Desktop) {
 
     // And the one that opens a prompt.
     let terminal = desktop.terminal();
-    canvas.fill(terminal, Colour::rgb(0x10, 0x20, 0x18));
-    canvas.outline(terminal, 1, Colour::rgb(0x4E, 0x8E, 0x5C));
+    canvas.panel(
+        terminal,
+        RADIUS,
+        Colour::rgb(0x10, 0x20, 0x18),
+        Colour::rgb(0x4E, 0x8E, 0x5C),
+    );
     canvas.text_centred(
         terminal,
         nexus_i18n::text("shell.term"),
@@ -896,8 +921,12 @@ fn draw(desktop: &Desktop) {
 
     // And the one that opens the machine's own settings.
     let settings = desktop.settings();
-    canvas.fill(settings, Colour::rgb(0x22, 0x1C, 0x30));
-    canvas.outline(settings, 1, Colour::rgb(0x7A, 0x6C, 0xA8));
+    canvas.panel(
+        settings,
+        RADIUS,
+        Colour::rgb(0x22, 0x1C, 0x30),
+        Colour::rgb(0x7A, 0x6C, 0xA8),
+    );
     canvas.text_centred(
         settings,
         nexus_i18n::text("shell.settings"),
@@ -906,8 +935,12 @@ fn draw(desktop: &Desktop) {
 
     // And the one that opens what there is to install.
     let packages = desktop.packages();
-    canvas.fill(packages, Colour::rgb(0x2A, 0x20, 0x14));
-    canvas.outline(packages, 1, Colour::rgb(0xA8, 0x8C, 0x54));
+    canvas.panel(
+        packages,
+        RADIUS,
+        Colour::rgb(0x2A, 0x20, 0x14),
+        Colour::rgb(0xA8, 0x8C, 0x54),
+    );
     canvas.text_centred(
         packages,
         nexus_i18n::text("shell.packages"),
@@ -916,8 +949,12 @@ fn draw(desktop: &Desktop) {
 
     // And the one that opens the pictures.
     let pictures = desktop.pictures();
-    canvas.fill(pictures, Colour::rgb(0x14, 0x26, 0x26));
-    canvas.outline(pictures, 1, Colour::rgb(0x54, 0x9C, 0x9C));
+    canvas.panel(
+        pictures,
+        RADIUS,
+        Colour::rgb(0x14, 0x26, 0x26),
+        Colour::rgb(0x54, 0x9C, 0x9C),
+    );
     canvas.text_centred(
         pictures,
         nexus_i18n::text("shell.pictures"),
@@ -931,9 +968,9 @@ fn draw(desktop: &Desktop) {
         }
         let state = desktop.windows[slot];
         if state == state::GONE {
-            // Drawn as an outline: the slot is there and empty, which is not
+            // An empty slot is the ground with an edge around it, which is not
             // the same thing as the strip being shorter.
-            canvas.outline(tab, 1, ground.blend(ink, 40));
+            canvas.panel(tab, RADIUS, ground, ground.blend(ink, 40));
             continue;
         }
 
@@ -942,10 +979,14 @@ fn draw(desktop: &Desktop) {
             state::FOCUSED => Colour::rgb(0x19, 0x33, 0x50),
             _ => Colour::rgb(0x11, 0x1E, 0x30),
         };
-        canvas.fill(tab, colour);
-        if state == state::FOCUSED {
-            canvas.outline(tab, 1, accent);
-        }
+        // The focused window's tab is the only one with the accent around it,
+        // which is what makes it findable without reading any of them.
+        let edge = if state == state::FOCUSED {
+            accent
+        } else {
+            colour
+        };
+        canvas.panel(tab, RADIUS, colour, edge);
         let label = nexus_i18n::format("shell.window", &[("number", &(slot + 1))]);
         canvas.text_centred(tab, &label, ink);
     }

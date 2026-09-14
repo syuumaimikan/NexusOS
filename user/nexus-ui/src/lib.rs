@@ -125,6 +125,13 @@ pub struct Canvas {
     base: usize,
     width: u32,
     height: u32,
+    /// Which face text is drawn in, and whether its edges are softened.
+    ///
+    /// On the canvas rather than passed to every call, because it is a property
+    /// of the surface being drawn on and not of one string: a window with two
+    /// labels in different faces would be a window nobody asked for.
+    face: font::Face,
+    antialias: bool,
     /// Pixels per row. Equal to the width for a packed surface, and not equal
     /// for a framebuffer whose scanlines the hardware padded.
     stride: u32,
@@ -144,6 +151,8 @@ impl Canvas {
             width,
             height,
             stride: width,
+            face: font::Face::Crisp,
+            antialias: false,
         }
     }
 
@@ -159,7 +168,28 @@ impl Canvas {
             width,
             height,
             stride,
+            face: font::Face::Crisp,
+            antialias: false,
         }
+    }
+
+    /// Choose the face and whether its edges are softened.
+    ///
+    /// Both together, because they are not independent: the crisp face is
+    /// stored as full coverage everywhere it has ink, so blending it changes
+    /// nothing, and asking for the smooth face without blending gives a
+    /// thresholded version of a face designed to be blended, which looks worse
+    /// than either. A program passes what the settings file says and lets the
+    /// two travel together.
+    pub const fn set_text_style(&mut self, face: font::Face, antialias: bool) {
+        self.face = face;
+        self.antialias = antialias;
+    }
+
+    /// What the text style is now.
+    #[must_use]
+    pub const fn text_style(&self) -> (font::Face, bool) {
+        (self.face, self.antialias)
     }
 
     #[must_use]
@@ -194,6 +224,130 @@ impl Canvas {
         unsafe {
             core::ptr::write_volatile((self.base + offset) as *mut u32, colour.0);
         }
+    }
+
+    /// Read a pixel back, if it is on the canvas.
+    ///
+    /// Needed because blending is a read: putting half a colour somewhere means
+    /// knowing what is already there. Nothing else in this crate reads the
+    /// surface, and it is worth saying why that is safe -- the canvas owns the
+    /// surface for as long as it exists, and the compositor is not reading it,
+    /// which is what the `damaged`/`shown` handshake establishes.
+    #[must_use]
+    pub fn get(&self, x: u32, y: u32) -> Option<Colour> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let offset = (y as usize * self.stride as usize + x as usize) * 4;
+        // SAFETY: as `set`, and reading rather than writing.
+        let value = unsafe { core::ptr::read_volatile((self.base + offset) as *const u32) };
+        Some(Colour(value))
+    }
+
+    /// Put part of a colour down, mixed with whatever is already there.
+    ///
+    /// `alpha` is how much of the new colour to use, 0 to 255. Fully opaque
+    /// skips the read, because the common case should not pay for the rare one.
+    pub fn blend(&mut self, x: u32, y: u32, colour: Colour, alpha: u8) {
+        match alpha {
+            0 => {}
+            255 => self.set(x, y, colour),
+            alpha => {
+                let Some(under) = self.get(x, y) else {
+                    return;
+                };
+                self.set(x, y, under.blend(colour, alpha));
+            }
+        }
+    }
+
+    /// Fill a rectangle with rounded corners.
+    ///
+    /// The corners are anti-aliased whatever the text setting says, and it is
+    /// worth saying why the two are not the same switch. Text is drawn from a
+    /// face that is *designed* hard-edged, so softening it is a matter of taste
+    /// and belongs to whoever is reading it. A quarter-circle is not designed
+    /// at all: at this size an un-softened one is four or five visible steps,
+    /// which is not a style, it is a staircase.
+    ///
+    /// Coverage is counted rather than computed: each corner pixel is sampled
+    /// on a four-by-four grid and the fraction inside the curve is its alpha.
+    /// Sixteen comparisons a pixel, on about `radius * radius` pixels a corner,
+    /// which is nothing next to filling the rectangle itself -- and it needs no
+    /// square root, which this system has no floating point for.
+    pub fn fill_rounded(&mut self, rect: Rect, radius: u32, colour: Colour) {
+        let radius = radius.min(rect.width / 2).min(rect.height / 2);
+        if radius == 0 {
+            self.fill(rect, colour);
+            return;
+        }
+
+        // The middle band and the two side bands are square, so they are filled
+        // outright; only the four corner squares need sampling.
+        self.fill(
+            Rect::new(
+                rect.x + radius,
+                rect.y,
+                rect.width - radius * 2,
+                rect.height,
+            ),
+            colour,
+        );
+        self.fill(
+            Rect::new(rect.x, rect.y + radius, radius, rect.height - radius * 2),
+            colour,
+        );
+        self.fill(
+            Rect::new(
+                rect.x + rect.width - radius,
+                rect.y + radius,
+                radius,
+                rect.height - radius * 2,
+            ),
+            colour,
+        );
+
+        for (corner_x, corner_y, towards_x, towards_y) in [
+            (rect.x, rect.y, 1i32, 1i32),
+            (rect.x + rect.width - radius, rect.y, -1, 1),
+            (rect.x, rect.y + rect.height - radius, 1, -1),
+            (
+                rect.x + rect.width - radius,
+                rect.y + rect.height - radius,
+                -1,
+                -1,
+            ),
+        ] {
+            for down in 0..radius {
+                for across in 0..radius {
+                    // Distance from the centre of the curve, in the corner's
+                    // own orientation.
+                    let (from_x, from_y) = if towards_x > 0 {
+                        (radius - across, radius - down)
+                    } else {
+                        (across + 1, radius - down)
+                    };
+                    let (from_x, from_y) = if towards_y > 0 {
+                        (from_x, from_y)
+                    } else {
+                        (from_x, down + 1)
+                    };
+                    let alpha = corner_coverage(from_x, from_y, radius);
+                    self.blend(corner_x + across, corner_y + down, colour, alpha);
+                }
+            }
+        }
+    }
+
+    /// A rounded panel with a one-pixel edge: a button, a tab, a card.
+    ///
+    /// Two rounded fills rather than a fill and an outline, because a square
+    /// outline drawn around a rounded fill puts the corners back -- which is
+    /// what the first version of this did, and it looked like a rounded button
+    /// that somebody had drawn a box around.
+    pub fn panel(&mut self, rect: Rect, radius: u32, fill: Colour, edge: Colour) {
+        self.fill_rounded(rect, radius, edge);
+        self.fill_rounded(rect.inset(1), radius.saturating_sub(1), fill);
     }
 
     /// Fill a rectangle.
@@ -237,12 +391,17 @@ impl Canvas {
     /// half-width one is eight, and a caller that assumed either would lay out
     /// one of the two scripts wrongly.
     pub fn glyph(&mut self, x: u32, y: u32, character: char, colour: Colour) -> u32 {
-        let glyph = font::glyph(character);
-        for (row, bits) in glyph.rows.iter().enumerate() {
+        let glyph = font::glyph_of(self.face, character);
+        for row in 0..font::CELL_HEIGHT {
             for column in 0..glyph.advance {
-                // Most significant bit leftmost, in a sixteen-bit row.
-                if bits & (0x8000 >> column) != 0 {
-                    self.set(x + column, y + row as u32, colour);
+                let alpha = glyph.alpha(column, row);
+                if self.antialias {
+                    self.blend(x + column, y + row, colour, alpha);
+                } else if alpha >= 128 {
+                    // Thresholded rather than blended. Half coverage is the
+                    // fairest place to put the edge: below it the pixel is
+                    // mostly background and above it mostly ink.
+                    self.set(x + column, y + row, colour);
                 }
             }
         }
@@ -287,17 +446,25 @@ impl Canvas {
         scale: u32,
     ) -> u32 {
         let scale = scale.max(1);
-        let glyph = font::glyph(character);
-        for (row, bits) in glyph.rows.iter().enumerate() {
+        let glyph = font::glyph_of(self.face, character);
+        for row in 0..font::CELL_HEIGHT {
             for column in 0..glyph.advance {
-                if bits & (0x8000 >> column) == 0 {
+                let alpha = glyph.alpha(column, row);
+                if alpha == 0 {
+                    continue;
+                }
+                if !self.antialias && alpha < 128 {
                     continue;
                 }
                 let left = x + column * scale;
-                let top = y + row as u32 * scale;
+                let top = y + row * scale;
                 for down in 0..scale {
                     for across in 0..scale {
-                        self.set(left + across, top + down, colour);
+                        if self.antialias {
+                            self.blend(left + across, top + down, colour, alpha);
+                        } else {
+                            self.set(left + across, top + down, colour);
+                        }
                     }
                 }
             }
@@ -390,6 +557,31 @@ impl Column {
     }
 }
 
+/// How much of one corner pixel falls inside the curve, 0 to 255.
+///
+/// `x` and `y` are the pixel's far corner measured from the centre of the
+/// quarter-circle, so the pixel covers `(x-1, y-1)` to `(x, y)`.
+fn corner_coverage(x: u32, y: u32, radius: u32) -> u8 {
+    // Wholly outside the bounding box of the curve: nothing to sample.
+    if x > radius || y > radius {
+        return 0;
+    }
+    const SAMPLES: u32 = 4;
+    let limit = (radius * SAMPLES) * (radius * SAMPLES);
+    let mut inside = 0;
+    for down in 0..SAMPLES {
+        for across in 0..SAMPLES {
+            // The centre of each sub-pixel, in quarter-pixel units.
+            let sample_x = (x - 1) * SAMPLES + across * 2 / 2 + 1;
+            let sample_y = (y - 1) * SAMPLES + down * 2 / 2 + 1;
+            if sample_x * sample_x + sample_y * sample_y <= limit {
+                inside += 1;
+            }
+        }
+    }
+    (inside * 255 / (SAMPLES * SAMPLES)) as u8
+}
+
 /// Break text into lines that fit a width.
 ///
 /// At spaces where there is one and mid-word where there is not, because a word
@@ -449,4 +641,85 @@ pub fn wrap(text: &str, width: u32) -> Vec<&str> {
         lines.push(&text[start..]);
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The corner is a quarter-circle, so the pixel at the very tip of the
+    /// curve is mostly outside it and the one against the straight edge is
+    /// wholly inside. Getting this backwards draws a notch instead of a corner,
+    /// which is the mistake this test exists to catch.
+    #[test]
+    fn corner_coverage_runs_from_none_to_all() {
+        const RADIUS: u32 = 8;
+        // Far corner, diagonally outside the curve.
+        assert_eq!(corner_coverage(RADIUS, RADIUS, RADIUS), 0);
+        // Hard against the middle of the shape: wholly inside.
+        assert_eq!(corner_coverage(1, 1, RADIUS), 255);
+        // On the curve itself, somewhere in between.
+        let edge = corner_coverage(RADIUS, 1, RADIUS);
+        assert!(edge > 0 && edge < 255, "edge coverage was {edge}");
+    }
+
+    #[test]
+    fn coverage_never_increases_going_outwards() {
+        const RADIUS: u32 = 12;
+        for y in 1..=RADIUS {
+            let mut last = 255;
+            for x in 1..=RADIUS {
+                let here = corner_coverage(x, y, RADIUS);
+                assert!(
+                    here <= last,
+                    "coverage rose from {last} to {here} at ({x}, {y})"
+                );
+                last = here;
+            }
+        }
+    }
+
+    #[test]
+    fn a_pixel_outside_the_radius_is_never_covered() {
+        assert_eq!(corner_coverage(9, 1, 8), 0);
+        assert_eq!(corner_coverage(1, 9, 8), 0);
+    }
+
+    /// A quarter-circle of radius r has area pi*r*r/4. Summing the coverage of
+    /// every pixel in the corner square should come to about that, which is the
+    /// one check that the sampling is measuring the right shape rather than
+    /// merely being monotonic.
+    #[test]
+    fn the_coverage_adds_up_to_a_quarter_circle() {
+        const RADIUS: u32 = 16;
+        let mut total = 0u32;
+        for y in 1..=RADIUS {
+            for x in 1..=RADIUS {
+                total += u32::from(corner_coverage(x, y, RADIUS));
+            }
+        }
+        let pixels = total / 255;
+        // pi * 16 * 16 / 4 = 201.06
+        assert!(
+            (196..=206).contains(&pixels),
+            "the corner covered {pixels} pixels, expected about 201"
+        );
+    }
+
+    #[test]
+    fn a_colour_blends_towards_the_other() {
+        let black = Colour::rgb(0, 0, 0);
+        let white = Colour::rgb(255, 255, 255);
+        assert_eq!(black.blend(white, 0), black);
+        assert_eq!(black.blend(white, 255), white);
+        let half = black.blend(white, 128);
+        assert!(((120..=135).contains(&((half.0 >> 16) & 0xFF))));
+    }
+
+    #[test]
+    fn a_rectangle_insets_without_wrapping() {
+        let small = Rect::new(0, 0, 4, 4);
+        let inset = small.inset(10);
+        assert_eq!((inset.width, inset.height), (0, 0));
+    }
 }

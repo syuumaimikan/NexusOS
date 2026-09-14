@@ -201,17 +201,18 @@ impl Framebuffer {
         let glyph = font::glyph(character);
         let scale = scale.max(1);
 
-        for (row_index, row) in glyph.rows.iter().enumerate() {
-            if *row == 0 {
-                continue;
-            }
+        for row in 0..font::CELL_HEIGHT {
             for column in 0..glyph.advance {
-                // Bit 15 is the leftmost pixel of the cell.
-                if row & (0x8000 >> column) == 0 {
+                // Thresholded rather than blended. The kernel draws on the
+                // panel and the boot logo, where reading what it says matters
+                // more than how the edges look -- and blending would mean
+                // reading the framebuffer back, which is a great deal slower
+                // over an uncached mapping than writing to it.
+                if glyph.alpha(column, row) < 128 {
                     continue;
                 }
                 let pixel_x = x + column * scale;
-                let pixel_y = y + row_index as u32 * scale;
+                let pixel_y = y + row * scale;
                 if scale == 1 {
                     self.put_pixel(pixel_x, pixel_y, color);
                 } else {
