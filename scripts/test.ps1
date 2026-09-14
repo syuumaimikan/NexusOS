@@ -199,6 +199,7 @@ Invoke-Step 'boot test' {
         'starts holding directory handle',
         'init: made a directory and a file',
         'init: appended to a file and changed four bytes in the middle',
+        'init: a name was taken away and the open file went on reading',
         'process lifetime verified',
         'wait set verified',
         'one wait covered a channel and a process, and reported both',

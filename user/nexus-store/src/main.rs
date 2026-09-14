@@ -632,30 +632,16 @@ fn write_text(directory: Handle, name: &str, text: &str) -> Result<(), String> {
     // Removed first: the filesystem has no truncate, so a shorter file written
     // over a longer one would keep the old ending.
     //
-    // Retried, because a remove fails while anybody else has the file open and
-    // several programs here read this one on a clock -- the wallpaper every two
-    // seconds, the desktop every second. Their reads take microseconds and the
-    // collision is rare, which is exactly what makes it worth handling: a
-    // setting that silently failed to save one time in fifty would be blamed on
-    // everything except the truth.
-    //
-    // This is a mitigation and not the fix. The fix is for `remove` to unlink
-    // -- take the name away now and free the blocks when the last handle closes
-    // -- which is what every filesystem that has faced this does, and which is
-    // recorded in the roadmap.
-    let mut attempt = 0;
-    loop {
-        match nexus_user::remove(directory, name) {
-            Ok(()) | Err(nexus_user::Error::NotFound) => break,
-            Err(error) => {
-                attempt += 1;
-                if attempt >= 10 {
-                    return Err(format!("{name}: {error}"));
-                }
-                nexus_user::sleep(20).ok();
-            }
-        }
+    // No longer a race. `remove` used to refuse while anybody held the file
+    // open, and several programs here read this one on a clock, so this failed
+    // at random and had to be retried. It unlinks now -- the name goes at once
+    // and the blocks go when the last handle closes -- so the retry that was
+    // here has gone with the reason for it.
+    match nexus_user::remove(directory, name) {
+        Ok(()) | Err(nexus_user::Error::NotFound) => {}
+        Err(error) => return Err(format!("{name}: {error}")),
     }
+
     let file = nexus_user::create(directory, name, Kind::File)
         .map_err(|error| format!("{name}: {error}"))?;
     let contents = text.as_bytes();

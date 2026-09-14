@@ -431,6 +431,12 @@ fn monitor_thread(_argument: usize) {
                     drivers::virtio_blk::capacity(),
                     if blocking { "block" } else { "spin" }
                 );
+                let pending = fs::store::pending_removals();
+                if pending > 0 {
+                    // Names taken away from files somebody still holds. A number that
+                    // grows and never falls is a handle nobody is closing.
+                    kprintln!("[mon ] {pending} removed name(s) still held open");
+                }
                 let (hits, misses, writes, evictions) = fs::cache::statistics();
                 kprintln!(
                     "[mon ] block cache {}% of {} reads served from memory,              {writes} written through, {evictions} evicted",

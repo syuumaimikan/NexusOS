@@ -138,6 +138,23 @@ tensor code, and no network client an agent may use. There is a working TCP
 stack and an HTTP client (`shared/nexus-http`, `shared/nexus-dns`) that the
 browser uses; an agent would have to be *lent* the network handle to reach it.
 
+## Removing a file
+
+`remove` unlinks. The name goes at once; the blocks go when the last handle
+closes. It used to refuse while anybody held the file open, and that cost more
+than it was worth: several programs read the settings file on a clock, their
+reads take microseconds, and replacing that file therefore failed at random with
+an error no program could do anything sensible about.
+
+The property the refusal protected is still guaranteed and is now checked
+directly by `init`: **after a name has gone, a handle that was already open
+still reads the same bytes.** An inode freed under a live handle would leave
+that handle naming a number the filesystem is free to give the next file.
+
+If the machine stops between the name going and the blocks being freed, the
+inode leaks. That is the safe direction, and the filesystem's own check finds
+and reclaims exactly that.
+
 ## Text, and where strings live
 
 Every string a person sees is in `locales/en-US.txt` and `locales/ja-JP.txt`,

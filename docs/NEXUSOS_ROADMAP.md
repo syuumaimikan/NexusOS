@@ -1669,7 +1669,7 @@ in the code.
 
 ### Feasible next, in order of value
 
-| `remove` should unlink | small | It refuses while anybody holds the file open, so replacing a file another program is reading on a clock fails at random. Every caller that rewrites a file therefore retries, which is a mitigation and not a fix: the answer is to take the name away now and free the blocks when the last handle closes. The store already counts the handles — the message says "open by 1 handle(s)". |
+| ~~`remove` should unlink~~ | done | It refused while anybody held the file open, so replacing a file another program read on a clock failed at random. The name now goes at once and the blocks go when the last handle closes. `init` proves the property that refusal was protecting: after the name has gone, a handle that was already open still reads the same bytes. |
 
 | ~~An agent with a capability model~~ | done | A window that picks a tool, asks GPT-6 Astra's permission model, and is refused by name when it may not. No language model, and it says so on its own first line. See [agent.md](agent.md). |
 

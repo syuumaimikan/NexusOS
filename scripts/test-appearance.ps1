@@ -206,6 +206,12 @@ foreach ($expected in @(
         'wall: 1920x1164 behind the windows,',
         'term: ran look',
         'term: ran set',
+        # That the write actually landed, and not merely that the command ran.
+        # The difference mattered: a suite run showed three `ran set` lines and
+        # a wallpaper that never saw the style, and there was no way from the
+        # log to tell a failed write from a reader that missed it.
+        'term: set look.style to stars',
+        'term: set look.accent to 40d090',
         'term: typing now makes ',
         'term: ran echo'
     )) {
