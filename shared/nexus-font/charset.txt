@@ -15,3 +15,24 @@
 
 # nexus-client, which draws a panel saying what it is.
 画面には触れていません。
+# The input method, which can produce any kana at all.
+#
+# Every other entry in this file is a sentence some program draws. This one is
+# not: `shared/nexus-ime` turns romaji into kana, so the set of characters that
+# can appear in a line somebody has typed is the whole of both syllabaries --
+# not the subset the interface's own translations happen to use.
+#
+# That was visible before it was fixed. Typing `konnichiha` produced こんに□は,
+# because ち appears in no translated string and therefore had no glyph, and a
+# character with no glyph draws as a hollow box. An input method that can enter
+# a character the screen cannot show is an input method that half works.
+#
+# Bounded, unlike the rest of Japanese: a hundred and eighty glyphs for both
+# syllabaries and their marks, against forty thousand for the kanji. Kanji
+# conversion is not here, and when it is it will need a different answer than a
+# list in a text file.
+ぁあぃいぅうぇえぉおかがきぎくぐけげこごさざしじすずせぜそぞただちぢっつづてでとどなにぬねのはばぱひびぴふぶぷへべぺほぼぽまみむめもゃやゅゆょよらりるれろゎわゐゑをんゔゕゖ
+゛゜ゝゞ
+ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲンヴヵヶヷヸヹヺ
+・ーヽヾヿ
+、。「」・ー〜

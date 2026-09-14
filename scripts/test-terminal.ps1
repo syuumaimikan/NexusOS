@@ -120,6 +120,9 @@ try {
         Send-Keys @('c', 'a', 't', 'spc', 'n', 'o', 't', 'e', 'ret')
         Send-Keys @('u', 'p', 't', 'i', 'm', 'e', 'ret')
         Send-Keys @('b', 'e', 'e', 'p', 'ret')
+        # And what the machine is doing, which comes from the kernel over a
+        # channel rather than from anything this shell knows.
+        Send-Keys @('s', 'y', 's', 'ret')
         # And Japanese. The command word is typed *before* the input method is
         # turned on, because `echo` in kana is not a command -- which is correct
         # behaviour and was a mistake in this test before it was a feature of
@@ -177,6 +180,7 @@ foreach ($expected in @(
         'term: ran cat',
         'term: ran uptime',
         'term: ran beep',
+        'term: ran sys',
         'term: typing now makes ',
         'term: ran echo',
         'term: ran nope',

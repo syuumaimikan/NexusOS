@@ -1,0 +1,11 @@
+[package]
+name = "nexus-machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The wire shape of the kernel's machine-information service."
+
+[lib]
+name = "nexus_machine"
+path = "src/lib.rs"

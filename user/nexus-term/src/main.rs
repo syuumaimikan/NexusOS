@@ -152,6 +152,8 @@ struct Terminal {
     scrolled: usize,
     /// Turns romaji into kana, when it is asked to.
     ime: nexus_ime::Ime,
+    /// The channel that says what the machine is doing, if this shell has one.
+    machine: Option<Handle>,
 }
 
 #[unsafe(naked)]
@@ -177,7 +179,7 @@ extern "C" fn main() -> ! {
     // window with a prompt in it, and a copy started without them says so
     // rather than failing at the first command.
     let mut buffer = [0u8; 32];
-    let mut handles = [Handle(0); 4];
+    let mut handles = [Handle(0); 5];
     let Ok(received) = nexus_user::receive(COMPOSITOR, &mut buffer, &mut handles) else {
         failed("term: FAILED: nothing arrived to draw on");
         finish();
@@ -206,6 +208,7 @@ extern "C" fn main() -> ! {
         here: (received.handles >= 2).then(|| handles[1]),
         spawner: (received.handles >= 3).then(|| handles[2]),
         sound: (received.handles >= 4).then(|| handles[3]),
+        machine: (received.handles >= 5).then(|| handles[4]),
         width,
         height,
         lines: Vec::new(),
@@ -579,6 +582,7 @@ impl Terminal {
             "beep" => self.beep(words.argument(0), words.argument(1)),
             "set" => self.set(words.argument(0), words.argument(1)),
             "look" => self.look(),
+            "sys" | "top" => self.sys(),
             "uptime" => {
                 let milliseconds = nexus_user::uptime();
                 let text = nexus_i18n::format(
@@ -624,6 +628,7 @@ impl Terminal {
             "term.help.beep",
             "term.help.set",
             "term.help.look",
+            "term.help.sys",
             "term.help.uptime",
             "term.help.history",
             "term.help.clear",
@@ -1074,6 +1079,81 @@ impl Terminal {
         self.plain(&text);
         let choices = nexus_i18n::format("term.look.styles", &[("styles", &styles.join(" "))]);
         self.note(&choices);
+    }
+
+    /// `sys`
+    ///
+    /// What the machine is doing. The numbers come from the kernel over a
+    /// channel this shell was lent -- there is no call that answers them, and a
+    /// shell started without that channel says so rather than making something
+    /// up.
+    ///
+    /// `top` is the same command, because that is what a person who has used
+    /// another system will type.
+    fn sys(&mut self) {
+        let Some(machine) = self.machine else {
+            self.trouble(nexus_i18n::text("term.nomachine"));
+            return;
+        };
+
+        let asked = nexus_machine::request();
+        if nexus_user::send(machine, &asked, &[]).is_err() {
+            self.trouble(nexus_i18n::text("term.nomachine"));
+            return;
+        }
+
+        let mut reply = [0u8; 128];
+        let mut none = [Handle(0); 1];
+        let Ok(received) = nexus_user::receive(machine, &mut reply, &mut none) else {
+            self.trouble(nexus_i18n::text("term.nomachine"));
+            return;
+        };
+
+        let snapshot = match nexus_machine::Snapshot::of(&reply[..received.bytes]) {
+            Ok(snapshot) => snapshot,
+            Err(why) => {
+                self.trouble(&alloc::format!("{why}"));
+                return;
+            }
+        };
+
+        let mebibytes = |bytes: u64| bytes / (1024 * 1024);
+        let lines = [
+            nexus_i18n::format(
+                "term.sys.memory",
+                &[
+                    ("used", &mebibytes(snapshot.memory_used())),
+                    ("total", &mebibytes(snapshot.memory_total)),
+                    ("percent", &snapshot.memory_percent()),
+                ],
+            ),
+            nexus_i18n::format(
+                "term.sys.heap",
+                &[
+                    ("used", &(snapshot.heap_used / 1024)),
+                    ("total", &(snapshot.heap_total / 1024)),
+                ],
+            ),
+            nexus_i18n::format(
+                "term.sys.processes",
+                &[
+                    ("running", &snapshot.processes_running),
+                    ("started", &snapshot.processes_started),
+                    ("ended", &snapshot.processes_ended),
+                ],
+            ),
+            nexus_i18n::format(
+                "term.sys.threads",
+                &[
+                    ("threads", &snapshot.threads),
+                    ("processors", &snapshot.processors),
+                    ("switches", &snapshot.context_switches),
+                ],
+            ),
+        ];
+        for line in lines {
+            self.plain(&line);
+        }
     }
 
     /// `beep`

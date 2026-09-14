@@ -153,6 +153,10 @@ name = "nexus-look"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-machine"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-mm"
 version = "0.1.0"
 dependencies = [
@@ -249,6 +253,7 @@ dependencies = [
  "nexus-i18n",
  "nexus-ime",
  "nexus-look",
+ "nexus-machine",
  "nexus-shellwords",
  "nexus-time",
  "nexus-ui",

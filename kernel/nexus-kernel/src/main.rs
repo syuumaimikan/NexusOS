@@ -29,9 +29,11 @@ mod fs;
 mod i18n;
 mod input;
 mod ipc;
+mod machine;
 mod memory;
 mod net;
 mod panic;
+
 mod process;
 mod sched;
 mod selftest;
@@ -308,6 +310,7 @@ fn start_system_threads() {
     // The speaker, which says the machine is up in the one way a person who
     // is not looking at the screen can hear.
     sound::start_thread();
+    machine::start_thread();
 
     display::progress(5, BOOT_STEPS);
 
@@ -507,6 +510,12 @@ fn monitor_thread(_argument: usize) {
                     "[mon ] sound {notes} notes played, {hushed} refused,              {tones} tones on the speaker{}",
                     if speaker { "" } else { " (never used)" }
                 );
+                let (asked, denied) = machine::statistics();
+                if asked + denied > 0 {
+                    kprintln!(
+                        "[mon ] machine {asked} snapshots answered, {denied} requests refused"
+                    );
+                }
             }
             let (served, turned_down) = net::service::statistics();
             if served > 0 || turned_down > 0 {

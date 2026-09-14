@@ -32,7 +32,11 @@ use core::arch::asm;
 /// Longest message a channel will carry.
 pub const MAX_MESSAGE: usize = 256;
 /// Most handles one message may carry.
-pub const MAX_HANDLES: usize = 4;
+///
+/// The same number the kernel enforces in `ipc::MAX_HANDLES`. It is also, in
+/// practice, how many kinds of authority a program may be given: everything a
+/// program is lent arrives in the message that starts it.
+pub const MAX_HANDLES: usize = 8;
 
 /// What a call returned when it did not succeed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

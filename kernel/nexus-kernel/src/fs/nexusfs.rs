@@ -654,6 +654,10 @@ impl Volume {
 
     /// Inodes the filesystem has, and how many are free.
     #[must_use]
+    // Compiled always and called only by the build that runs the destructive
+    // filesystem checks. Kept rather than gated so that the code the test suite
+    // exercises is the same code the shipped kernel contains.
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
     pub fn inodes(&self) -> (u64, u64) {
         (self.superblock.inode_count, self.superblock.free_inodes)
     }
@@ -666,6 +670,10 @@ impl Volume {
 
     /// The sector the filesystem starts at, which is how it is found again.
     #[must_use]
+    // Compiled always and called only by the build that runs the destructive
+    // filesystem checks. Kept rather than gated so that the code the test suite
+    // exercises is the same code the shipped kernel contains.
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
     pub const fn start_lba(&self) -> u64 {
         self.start_lba
     }
@@ -1666,6 +1674,10 @@ impl Volume {
     /// It also requires the check to be *quiet* first and quiet again after, so
     /// that a check which reported damage on every filesystem it saw could not
     /// pass this by accident.
+    // Compiled always and called only by the build that runs the destructive
+    // filesystem checks. Kept rather than gated so that the code the test suite
+    // exercises is the same code the shipped kernel contains.
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
     pub fn check_self_test(&mut self) -> Result<String, FsError> {
         let before = self.check()?;
         if !before.clean() {
@@ -1730,6 +1742,10 @@ impl Volume {
     /// cannot be proved by reading it, and the state it recovers from cannot be
     /// produced by a machine that is working -- so the machine is given a way
     /// to stop half way on purpose. Nothing calls it but the test below.
+    // Compiled always and called only by the build that runs the destructive
+    // filesystem checks. Kept rather than gated so that the code the test suite
+    // exercises is the same code the shipped kernel contains.
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
     fn commit_and_stop(&mut self) -> Result<(), FsError> {
         let Some(pending) = self.pending.take() else {
             return Ok(());
@@ -1749,6 +1765,10 @@ impl Volume {
     /// that replayed nothing -- it would finish operations that never happened.
     ///
     /// Returns what it did, for the log.
+    // Compiled always and called only by the build that runs the destructive
+    // filesystem checks. Kept rather than gated so that the code the test suite
+    // exercises is the same code the shipped kernel contains.
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
     pub fn journal_self_test(&mut self) -> Result<String, FsError> {
         const NAME: &str = "journal-test";
         const BEFORE: &[u8] = b"the contents before the crash";

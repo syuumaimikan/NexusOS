@@ -281,6 +281,9 @@ pub fn boot_log() -> Result<String, StoreError> {
 /// that allocates a block it then forgets about.
 ///
 /// Returns a line describing what happened, or the error that stopped it.
+// Compiled always and called only by the build that runs the destructive
+// filesystem checks; see `deep-selftest`.
+#[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
 pub fn self_test() -> Result<String, StoreError> {
     let mut guard = VOLUME.lock();
     let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
@@ -417,6 +420,9 @@ pub fn self_test() -> Result<String, StoreError> {
 /// allocator and then nothing is done with it. That is exactly what a kernel
 /// with a bug in its write path leaves behind, and there is no other way to
 /// produce it on a machine that is working.
+// Compiled always and called only by the build that runs the destructive
+// filesystem checks; see `deep-selftest`.
+#[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
 pub fn check_self_test() -> Result<String, StoreError> {
     let mut guard = VOLUME.lock();
     let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
@@ -429,6 +435,9 @@ pub fn check_self_test() -> Result<String, StoreError> {
 /// one says the filesystem does what it is asked; this one says it survives not
 /// being allowed to finish -- which cannot be shown by using it correctly, only
 /// by stopping it half way on purpose.
+// Compiled always and called only by the build that runs the destructive
+// filesystem checks; see `deep-selftest`.
+#[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
 pub fn journal_self_test() -> Result<String, StoreError> {
     let mut guard = VOLUME.lock();
     let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
@@ -436,6 +445,9 @@ pub fn journal_self_test() -> Result<String, StoreError> {
 }
 
 /// Remove a name and everything under it.
+// Compiled always and called only by the build that runs the destructive
+// filesystem checks; see `deep-selftest`.
+#[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
 fn remove_tree(volume: &mut Volume, parent: u32, name: &str) -> Result<(), FsError> {
     let entry = volume.lookup(parent, name)?;
     if entry.kind == Kind::Directory {

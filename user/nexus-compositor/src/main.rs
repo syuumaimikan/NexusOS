@@ -148,6 +148,13 @@ const FILESYSTEM: Handle = Handle(7);
 /// opinion about when a machine should beep, and that belongs to whatever the
 /// person is actually using.
 const SOUND: Handle = Handle(8);
+/// And what the machine is doing: memory, processors, processes.
+///
+/// Lent to the terminal, which is where somebody asks a machine about itself.
+/// Held separately from everything else because it is the one endowment that
+/// describes the person using the machine rather than what a program may do to
+/// it -- so a program can be given the disk and the speaker and not this.
+const MACHINE: Handle = Handle(9);
 
 /// The directory the system's settings live in.
 ///
@@ -1840,10 +1847,11 @@ fn open_window(
             // disk away from the program that lent it.
             let lending =
                 nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
-            let (Ok(files), Ok(spawner), Ok(sound)) = (
+            let (Ok(files), Ok(spawner), Ok(sound), Ok(machine)) = (
                 nexus_user::duplicate(FILESYSTEM, lending),
                 nexus_user::duplicate(SPAWNER, lending),
                 nexus_user::duplicate(SOUND, lending),
+                nexus_user::duplicate(MACHINE, lending),
             ) else {
                 failed("compositor: FAILED: could not lend a terminal what it needs");
                 return Some(Asked::Nothing);
@@ -1856,7 +1864,7 @@ fn open_window(
                 width,
                 height,
                 0,
-                &[files, spawner, sound],
+                &[files, spawner, sound, machine],
             )?
         }
         What::Settings => {
