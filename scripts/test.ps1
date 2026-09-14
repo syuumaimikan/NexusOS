@@ -76,7 +76,7 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
 
         # And the kernel, which needs its own target and core rebuilt for it,
         # and so was left out until it had accumulated a dozen findings nobody
@@ -94,7 +94,7 @@ Invoke-Step 'clippy' {
 Invoke-Step 'host unit tests' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-crypto', '-p', 'nexus-user', '--lib') 'unit tests'
+        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-crypto', '-p', 'nexus-user', '--lib') 'unit tests'
     } finally { Pop-Location }
 }
 
@@ -118,7 +118,7 @@ Invoke-Step 'boot test' {
     # about a machine's *first* boot -- the store being seeded from the image,
     # `init` making its directory rather than finding it.
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'run.ps1'), '-Headless', '-Timeout', '600',
-        '-PressAfter', 'setup: this machine has not been set up;compositor: composited every frame its clients drew',
+        '-PressAfter', 'setup: this machine has not been set up;client: drew every frame into a surface it was given',
         '-Press', 'ret ret n e x u s ret p a s s w o r d ret p a s s w o r d ret ret;f10',
         '-Until', 'compositor: the session ended') 'boot'
 
@@ -238,7 +238,10 @@ Invoke-Step 'boot test' {
         'rectangle at (',
         'client: drew every frame into a surface it was given',
         'compositor: composited every frame its clients drew',
-        'compositor: every window has closed; the desktop is empty',
+        'update: demo 1.1.0 is new',
+        'update: demo is now at 1.1.0',
+        'init: the machine checked itself for updates',
+        'desktop: 0 update(s) waiting, 1 installed this boot',
         'compositor: the session ended',
         'seconds since 1970',
         'desktop: welcome, nexus',
@@ -536,6 +539,14 @@ Invoke-Step 'persistence' {
 
 Invoke-Step 'network' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-network.ps1')) 'network tests'
+}
+
+Invoke-Step 'updates' {
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-update.ps1')) 'update tests'
+}
+
+Invoke-Step 'first-run setup' {
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-setup.ps1')) 'setup tests'
 }
 
 Invoke-Step 'input' {

@@ -8,6 +8,7 @@ members = [
     "shared/nexus-net",
     "shared/nexus-time",
     "shared/nexus-config",
+    "shared/nexus-update",
     "shared/nexus-crypto",
     "shared/nexus-pkg",
     "tools/nexus-pack",
@@ -24,6 +25,7 @@ members = [
     "user/nexus-shell",
     "user/nexus-install",
     "user/nexus-find",
+    "user/nexus-update",
     "user/nexus-setup",
     "user/nexus-idle",
 ]

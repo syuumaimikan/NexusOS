@@ -49,6 +49,8 @@ shell.window = Window {number}
 shell.hidden = {number} away
 shell.none = nothing running
 shell.owner = {name}
+shell.updates.pending = {number} updates ready
+shell.updates.installed = {number} updates installed
 shell.leave = Log out
 
 setup.title = Set up NexusOS

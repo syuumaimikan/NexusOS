@@ -163,6 +163,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-update"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-updater"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-install",
+ "nexus-pkg",
+ "nexus-update",
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-user"
 version = "0.1.0"
 dependencies = [

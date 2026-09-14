@@ -221,7 +221,77 @@ extern "C" fn main() -> ! {
     }
 
     nexus_user::log("client: drew every frame into a surface it was given").ok();
+
+    // And then it stays. A window that closed itself after twelve seconds was
+    // fine while this was a demonstration of compositing and wrong the moment
+    // it became a desktop: somebody who puts a window away and goes to make tea
+    // should find it in the strip when they come back, and somebody driving the
+    // pointer at a title bar should find a title bar there.
+    //
+    // What ends it is the compositor closing the channel, which happens when
+    // the session does. So this waits, answers what it is sent, and redraws
+    // when there is a reason to -- which is what every other program on this
+    // machine does and what this one should have been doing all along.
+    live(width, height, tint, &mut surface);
     finish()
+}
+
+/// Keep the window, until there is nobody to keep it for.
+///
+/// Draws on a reason rather than on a timer: a key arrived, or the window was
+/// given a new surface. An idle window costs one blocked thread, which is
+/// nothing, and a window that repainted while nobody touched it would cost a
+/// composite a frame for a picture that had not changed.
+fn live(mut width: u32, mut height: u32, tint: u32, surface: &mut Handle) {
+    let mut frame = FRAMES;
+    // Bounded, because this is a loop around a call that can return without
+    // blocking. The bound is a backstop and not a schedule: at one turn per
+    // keystroke it is more keys than anybody will press at one window.
+    for _ in 0..1_000_000u32 {
+        let mut message = [0u8; 32];
+        let mut incoming = [Handle(0); 1];
+        let Ok(received) = nexus_user::receive(COMPOSITOR, &mut message, &mut incoming) else {
+            // The compositor has gone, which is how a session ends. Not a
+            // failure: there is no display to draw on any more.
+            return;
+        };
+        if received.bytes == 0 {
+            return;
+        }
+
+        if &message[..received.bytes] == SHOWN {
+            continue;
+        }
+
+        let mut redraw = false;
+        if received.bytes >= 12 && &message[..4] == RESIZED && received.handles == 1 {
+            nexus_user::memory_unmap(*surface, SURFACE_AT).ok();
+            nexus_user::close(*surface).ok();
+            *surface = incoming[0];
+            width = read_u32(&message, 4);
+            height = read_u32(&message, 8);
+            let Ok(mapped) = nexus_user::memory_map(*surface, SURFACE_AT, true) else {
+                failed("client: FAILED: could not map the surface it was given");
+                return;
+            };
+            if (width as usize) * (height as usize) * 4 > mapped {
+                failed("client: FAILED: the new surface is smaller than its size");
+                return;
+            }
+            redraw = true;
+        } else if received.bytes >= key::SIZE {
+            heard(&message[..received.bytes]);
+            redraw = true;
+        }
+
+        if redraw {
+            frame = frame.wrapping_add(1);
+            draw(width, height, tint, frame);
+            if nexus_user::send(COMPOSITOR, b"damaged", &[]).is_err() {
+                return;
+            }
+        }
+    }
 }
 
 /// Note a key that was sent to this program.

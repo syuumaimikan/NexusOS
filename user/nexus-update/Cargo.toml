@@ -1,0 +1,19 @@
+[package]
+name = "nexus-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Finds packages newer than what is installed, checks them, and installs them."
+
+[[bin]]
+name = "nexus-updater"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-pkg = { path = "../../shared/nexus-pkg" }
+nexus-update = { path = "../../shared/nexus-update" }
+nexus-config = { path = "../../shared/nexus-config" }
+nexus-install = { path = "../nexus-install" }

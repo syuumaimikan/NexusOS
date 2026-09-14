@@ -111,6 +111,10 @@ $SetupElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-setup"
 $StagedSetup = Publish-Program -Elf $SetupElf -ProgramDir $ProgramDir -Name 'setup.elf'
 $setupSize = [math]::Round((Get-Item $StagedSetup).Length / 1KB, 1)
 
+$UpdateElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-updater"
+$StagedUpdate = Publish-Program -Elf $UpdateElf -ProgramDir $ProgramDir -Name 'updt.elf'
+$updateSize = [math]::Round((Get-Item $StagedUpdate).Length / 1KB, 1)
+
 $FindElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-find"
 $StagedFind = Publish-Program -Elf $FindElf -ProgramDir $ProgramDir -Name 'find.elf'
 $findSize = [math]::Round((Get-Item $StagedFind).Length / 1KB, 1)
@@ -184,6 +188,20 @@ $SigningKey = Join-Path $RepoRoot 'keys\development.key'
 if ($LASTEXITCODE -ne 0) { throw 'could not pack the package' }
 $packageSize = [math]::Round((Get-Item $Package).Length / 1KB, 1)
 
+# And the same package one release on, which is what an update actually is: the
+# same name, a higher version, and a file that says something new. The machine
+# has both on its disk and has to work out that one of them supersedes the
+# other -- and, on the boot after that, that the older one no longer does.
+$NewNotes = Join-Path $PackageDir 'notes-1.1.txt'
+[System.IO.File]::WriteAllText($NewNotes, @'
+A second file, so that the entry table has to be walked rather than guessed.
+And a third line, which is what changed in release 1.1.0.
+'@, $utf8)
+$Newer = Join-Path $ProgramDir 'demo11.nex'
+& $PackExe $Newer $SigningKey 'demo' '1.1.0' "demo/hello.txt=$greeting" "demo/notes.txt=$NewNotes"
+if ($LASTEXITCODE -ne 0) { throw 'could not pack the newer package' }
+$newerSize = [math]::Round((Get-Item $Newer).Length / 1KB, 1)
+
 # And a second package that is the first one with a byte changed after it was
 # signed. Nothing about it is special: it is what a package looks like when
 # somebody with no key alters it in transit, and the machine has to refuse it.
@@ -231,7 +249,9 @@ Write-Host "  shell      : $shellSize KiB  -> BIN\SHELL.ELF on the disk"
 Write-Host "  installer  : $installSize KiB  -> BIN\INST.ELF on the disk"
 Write-Host "  finder     : $findSize KiB  -> BIN\FIND.ELF on the disk"
 Write-Host "  setup      : $setupSize KiB  -> BIN\SETUP.ELF on the disk"
+Write-Host "  updater    : $updateSize KiB  -> BIN\UPDT.ELF on the disk"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
+Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1.1.0, signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"
 Write-Host "  linux      : $linuxSize bytes of static Linux ELF -> BIN\HELLO.LX on the disk"
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"

@@ -42,6 +42,14 @@ pub mod key {
     pub const CONFIGURED_AT: &str = "system.configured_at";
     /// The version of the system that is installed.
     pub const VERSION: &str = "system.version";
+    /// Whether the machine installs updates by itself.
+    ///
+    /// `automatic`, which is the default and what an unset or unreadable value
+    /// is read as, or `ask`. A machine that quietly stopped updating because
+    /// somebody mistyped a setting would be the worst of the three outcomes.
+    pub const UPDATES: &str = "system.updates";
+    /// When the machine last looked for updates, as seconds since 1970.
+    pub const UPDATES_CHECKED: &str = "system.updates_checked";
 
     /// Who uses this machine.
     pub const USER_NAME: &str = "user.name";

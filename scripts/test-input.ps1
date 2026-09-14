@@ -146,8 +146,12 @@ try {
         # without this script having to know where the pointer was.
         Write-Host '==> Resizing a window by its corner' -ForegroundColor Cyan
         Reset-Pointer -Dx -60 -Dy 60
-        Move-Pointer -Dx 0 -Dy -33 -Steps 1    # up out of the strip, into the grip
-        Move-Pointer -Dx 95 -Dy 0 -Steps 10    # x about 950: the tile's right edge
+        # Aimed at the middle of the grip rather than its edge, and in small
+        # steps: under load the guest can miss a packet, and a movement made of
+        # one large delta loses all of it where one made of twenty loses a
+        # twentieth.
+        Move-Pointer -Dx 0 -Dy -11 -Steps 4    # y about 1155, inside the grip
+        Move-Pointer -Dx 50 -Dy 0 -Steps 19    # x about 950, likewise
         Start-Sleep -Milliseconds 150
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 200
@@ -198,8 +202,13 @@ try {
         # height and right past the button that starts a program.
         Write-Host '==> Bringing a window back from the desktop' -ForegroundColor Cyan
         Reset-Pointer -Dx -60 -Dy 60
-        Move-Pointer -Dx 0 -Dy -8 -Steps 1     # inside the tabs, not below them
-        Move-Pointer -Dx 60 -Dy 0 -Steps 10    # x about 600: the second tab
+        # Up into the middle of the tabs rather than just inside their bottom
+        # edge, in several small steps rather than one. A single delta that the
+        # guest misses under load leaves the pointer below the tabs entirely,
+        # where the click proves the button arrived and nothing about what it
+        # landed on -- which is exactly what it did.
+        Move-Pointer -Dx 0 -Dy -3 -Steps 5     # y about 1184: the middle of a tab
+        Move-Pointer -Dx 30 -Dy 0 -Steps 20    # x about 600: the second tab
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')

@@ -118,6 +118,13 @@ extern "C" fn main() -> ! {
     // before it could touch anything at all.
     install_a_package();
 
+    // And then the same disk looked at as a whole: what is on it, what is
+    // available, and whether any of the second is newer than the first. That is
+    // an update, and it runs at every boot for the same reason a desktop
+    // machine checks at every login -- a machine that only updates when asked
+    // is a machine that does not update.
+    look_for_updates();
+
     // And a program built for a different operating system entirely.
     run_a_linux_program();
 
@@ -778,6 +785,89 @@ fn ask_to_install(package: &[u8], expected: bool) -> bool {
         nexus_user::log("init: the installer finished, and said it worked").ok();
     }
     true
+}
+
+/// Start the updater, hand it the filesystem and the settings, and wait.
+///
+/// Two handles, because it has two jobs that need different places: the root,
+/// to read packages and write what is in them, and the directory the machine's
+/// own record lives in, so that what it installed this time is what it compares
+/// against next time. Neither is ambient -- a program that was handed neither
+/// could not update anything, and one handed only the first could update the
+/// machine and then forget it had.
+fn look_for_updates() {
+    const UPDATER: &[u8] = b"BIN/UPDT.ELF";
+    const SETTINGS: &str = "system";
+
+    // Made if it is not there. On a machine that has been through setup it
+    // always is; on one that has not, the updater still has somewhere to write
+    // what it found, which is what somebody reads afterwards to find out why
+    // nothing happened.
+    let settings = match nexus_user::open(ROOT, SETTINGS) {
+        Ok(handle) => handle,
+        Err(_) => match nexus_user::create(ROOT, SETTINGS, nexus_user::Kind::Directory) {
+            Ok(handle) => handle,
+            Err(_) => {
+                failed("init: FAILED: no settings directory to update against");
+                return;
+            }
+        },
+    };
+
+    if nexus_user::send(SPAWNER, UPDATER, &[]).is_err() {
+        failed("init: FAILED: could not ask for the updater");
+        return;
+    }
+    let mut buffer = [0u8; 64];
+    let mut handles = [nexus_user::Handle(0); 2];
+    let received = match nexus_user::receive(SPAWNER, &mut buffer, &mut handles) {
+        Ok(received) => received,
+        Err(_) => {
+            failed("init: FAILED: the spawn service did not answer about the updater");
+            return;
+        }
+    };
+    if received.handles != 2 {
+        let text = core::str::from_utf8(&buffer[..received.bytes]).unwrap_or("<not text>");
+        nexus_user::log(text).ok();
+        failed("init: FAILED: the updater did not start");
+        return;
+    }
+    let child = handles[0];
+    let process = handles[1];
+
+    let rights =
+        nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
+    let (Ok(their_root), Ok(their_settings)) = (
+        nexus_user::duplicate(ROOT, rights),
+        nexus_user::duplicate(settings, rights),
+    ) else {
+        failed("init: FAILED: could not lend the updater what it needs");
+        return;
+    };
+
+    // One message with both, because a program that had to read two would have
+    // to know there were two -- and one started without the second would block
+    // for ever waiting for something nobody was going to send.
+    if nexus_user::send(child, b"update", &[their_root, their_settings]).is_err() {
+        failed("init: FAILED: could not give the updater the filesystem");
+        return;
+    }
+
+    match nexus_user::wait(process) {
+        Ok(nexus_user::Ending::Exited(0)) => {
+            nexus_user::log("init: the machine checked itself for updates").ok();
+        }
+        Ok(nexus_user::Ending::Exited(status)) => {
+            failed(&alloc::format!(
+                "init: FAILED: the updater ended with status {status}"
+            ));
+        }
+        _ => failed("init: FAILED: the updater did not finish"),
+    }
+    nexus_user::close(settings).ok();
+    nexus_user::close(child).ok();
+    nexus_user::close(process).ok();
 }
 
 /// Read one of the installed files back, through this program's own handle.

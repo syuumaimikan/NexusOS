@@ -67,6 +67,14 @@ const SURFACE_AT: usize = 0x0000_0000_1000_0000;
 /// What the settings file is called inside the directory this is handed.
 const SETTINGS_NAME: &str = "settings.txt";
 
+/// And what the updater leaves there, saying what it found and what it did.
+///
+/// Read and never written. What this program knows about updating is one
+/// number; the deciding, the checking and the installing happen in a program
+/// that holds the filesystem, and a dock that could install software would be a
+/// dock with the run of the disk.
+const UPDATES_NAME: &str = "updates.txt";
+
 /// Longest settings file this will read.
 ///
 /// A bound rather than a trust, on a file that is a few hundred bytes when it
@@ -153,6 +161,16 @@ struct Desktop {
     owner: Option<String>,
     /// The timezone the clock is shown in.
     zone: &'static Zone,
+    /// The directory the settings and the update record live in, if this
+    /// program was given one.
+    settings: Option<Handle>,
+    /// How many updates are waiting, and how many were installed this boot.
+    ///
+    /// Re-read when the minute turns rather than watched, because the updater
+    /// runs once at boot and there is nothing to watch: a file that changes
+    /// twice in a machine's life does not need a channel.
+    pending: u32,
+    installed: u32,
     /// What the clock said when the strip was last drawn.
     ///
     /// Kept so that a wake-up with nothing to show for it costs a string
@@ -227,6 +245,9 @@ impl Desktop {
     /// take half of it is a name that gets cut instead.
     fn reserved(&self) -> u32 {
         let mut width = self.leave().width + GAP * 2;
+        if let Some(text) = self.update_line() {
+            width += nexus_ui::measure(&text) + GAP * 3;
+        }
         if !self.clock.is_empty() {
             width += nexus_ui::measure(&self.clock) + GAP * 3;
         }
@@ -235,6 +256,49 @@ impl Desktop {
                 nexus_ui::measure(&nexus_i18n::format("shell.owner", &[("name", name)])) + GAP * 3;
         }
         width.min(self.width / 2)
+    }
+
+    /// What to say about updates, if there is anything to say.
+    ///
+    /// What is waiting takes precedence over what was installed, because one is
+    /// something somebody still has to do and the other is news.
+    fn update_line(&self) -> Option<String> {
+        if self.pending > 0 {
+            return Some(nexus_i18n::format(
+                "shell.updates.pending",
+                &[("number", &self.pending)],
+            ));
+        }
+        if self.installed > 0 {
+            return Some(nexus_i18n::format(
+                "shell.updates.installed",
+                &[("number", &self.installed)],
+            ));
+        }
+        None
+    }
+
+    /// What the update record says now.
+    ///
+    /// Zero and zero for a machine with no record, which is every machine until
+    /// the first check has finished. That reads as "nothing to say", which is
+    /// the truth: not knowing is not the same as being up to date, and the
+    /// strip shows nothing either way.
+    fn updates(&self) -> (u32, u32) {
+        let Some(directory) = self.settings else {
+            return (0, 0);
+        };
+        let Some(text) = read_text(directory, UPDATES_NAME) else {
+            return (0, 0);
+        };
+        let number = |name: &str| -> u32 {
+            text.lines()
+                .filter_map(|line| line.split_once('='))
+                .find(|(key, _)| key.trim() == name)
+                .and_then(|(_, value)| value.trim().parse::<u32>().ok())
+                .unwrap_or(0)
+        };
+        (number("pending"), number("installed"))
     }
 
     /// What the clock says now, in the machine's timezone.
@@ -309,6 +373,9 @@ extern "C" fn main() -> ! {
         height: read_u32(&buffer, 4),
         owner,
         zone,
+        settings,
+        pending: 0,
+        installed: 0,
         clock: String::new(),
     };
     let surface = handles[0];
@@ -356,18 +423,8 @@ extern "C" fn main() -> ! {
 fn read_settings(directory: Handle) -> (Option<String>, &'static Zone, Option<String>) {
     let utc = &nexus_time::ZONES[0];
 
-    let Ok(file) = nexus_user::open(directory, SETTINGS_NAME) else {
-        nexus_user::log("shell: no settings file; showing the strip without a name").ok();
-        return (None, utc, None);
-    };
-    let size = nexus_user::size(file).unwrap_or(0).min(SETTINGS_MAX);
-    let mut bytes = alloc::vec![0u8; size];
-    let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
-    nexus_user::close(file).ok();
-    bytes.truncate(read);
-
-    let Ok(text) = String::from_utf8(bytes) else {
-        nexus_user::log("shell: the settings file is not text; ignoring it").ok();
+    let Some(text) = read_text(directory, SETTINGS_NAME) else {
+        nexus_user::log("shell: no settings to read; showing the strip without a name").ok();
         return (None, utc, None);
     };
     let settings = Settings::parse(&text);
@@ -388,6 +445,22 @@ fn read_settings(directory: Handle) -> (Option<String>, &'static Zone, Option<St
     (owner, zone, language)
 }
 
+/// A whole text file out of a directory, if it is there and readable.
+///
+/// Every failure is the same answer, because every failure means the same thing
+/// to this program: there is nothing to show. It has a strip to draw either
+/// way, and what it cannot do is report the problem to anyone -- the thing that
+/// would show a message is itself.
+fn read_text(directory: Handle, name: &str) -> Option<String> {
+    let file = nexus_user::open(directory, name).ok()?;
+    let size = nexus_user::size(file).unwrap_or(0).min(SETTINGS_MAX);
+    let mut bytes = alloc::vec![0u8; size];
+    let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
+    nexus_user::close(file).ok();
+    bytes.truncate(read);
+    String::from_utf8(bytes).ok()
+}
+
 /// Draw, say so, and act on whatever comes back.
 ///
 /// Event-driven with one exception. This program redraws when something it
@@ -402,6 +475,8 @@ fn run(desktop: &mut Desktop) {
     let mut acted = 0u32;
     let mut announced = false;
     let mut ticked = false;
+    let mut said_updates = false;
+    let mut said_missed = false;
 
     // The channel, watched rather than read directly, because a blocking read
     // is a read with no deadline and the clock needs one.
@@ -444,6 +519,26 @@ fn run(desktop: &mut Desktop) {
         if ready == 0 {
             // Nothing was said. The only thing that can have changed is the
             // time, so ask it, and draw only if the answer is different.
+            // The minute turning is also when the update record is looked at
+            // again. Once a minute rather than once a second, because the
+            // updater runs at boot and this is a file, not an event -- and a
+            // strip that opened a file fifty times a minute to find the same
+            // number would be the polling the rest of this avoids.
+            let seen = desktop.updates();
+            if seen != (desktop.pending, desktop.installed) {
+                desktop.pending = seen.0;
+                desktop.installed = seen.1;
+                if !said_updates {
+                    said_updates = true;
+                    nexus_user::log(&alloc::format!(
+                        "desktop: {} update(s) waiting, {} installed this boot",
+                        desktop.pending,
+                        desktop.installed
+                    ))
+                    .ok();
+                }
+                stale = true;
+            }
             if desktop.now() != desktop.clock {
                 stale = true;
                 // Said once, the first time the clock moves on its own. It is
@@ -502,7 +597,26 @@ fn run(desktop: &mut Desktop) {
         if message.starts_with(wire::CLICK) && message.len() >= 11 {
             let x = read_u32(message, 3);
             let y = read_u32(message, 7);
-            if let Some(sent) = clicked(desktop, x, y) {
+            let acted_on = clicked(desktop, x, y);
+            if acted_on.is_none() && !said_missed {
+                // Once, and with the numbers. A press that lands on nothing is
+                // ordinary -- there is space between the tabs -- but a press
+                // that lands on nothing *when somebody meant it to land on
+                // something* is the hardest thing here to work out afterwards,
+                // because the only evidence is a click that did not happen.
+                said_missed = true;
+                nexus_user::log(&alloc::format!(
+                    "shell: a press at ({x}, {y}) in a {}x{} strip landed on nothing;                      the launcher is at {}..{}, tabs start at {} and are {} wide",
+                    desktop.width,
+                    desktop.height,
+                    desktop.launcher().x,
+                    desktop.launcher().x + desktop.launcher().width,
+                    desktop.tab(0).x,
+                    desktop.tab(0).width
+                ))
+                .ok();
+            }
+            if let Some(sent) = acted_on {
                 // Logged the first time rather than counted up and reported at
                 // the end: this program ends when the compositor does, and a
                 // claim that only appears at shutdown is a claim nothing can
@@ -646,6 +760,15 @@ fn draw(desktop: &Desktop) {
         if right.saturating_sub(width) > floor {
             right -= width;
             canvas.text(right, baseline, &desktop.clock, ink);
+            right = right.saturating_sub(GAP * 3);
+        }
+    }
+
+    if let Some(text) = desktop.update_line() {
+        let width = nexus_ui::measure(&text);
+        if right.saturating_sub(width) > floor {
+            right -= width;
+            canvas.text(right, baseline, &text, accent);
             right = right.saturating_sub(GAP * 3);
         }
     }

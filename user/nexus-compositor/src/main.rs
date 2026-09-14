@@ -360,14 +360,24 @@ const GAP: u32 = 8;
 /// fourteen pixels a client was going to fill with its own border anyway.
 const TITLE: u32 = 14;
 /// How large the corner is that resizes a window.
-const GRIP: u32 = 12;
+///
+/// Twenty and not twelve. Twelve was chosen when this program owned a fifth of
+/// the display and every window was a few hundred pixels across; on a screen
+/// nineteen hundred wide it is a target a hand has to be told about to find,
+/// and the test that drives the pointer into it was the first thing to notice.
+const GRIP: u32 = 20;
 /// How tall the strip along the bottom is.
 ///
 /// Reserved: windows are laid out and clamped above it, so the one place that
 /// brings a minimised window back cannot be covered by another window. Tall
 /// enough for a line of text, because what is in it is drawn by a program with
 /// a font and not by this one with rectangles.
-const TASKBAR: u32 = 24;
+///
+/// Thirty-six and not twenty-four, for the same reason the grip grew: the
+/// strip was sized when it lived at the bottom of a fifth of the display, and
+/// on a screen twelve hundred tall a twenty-four-pixel bar with twenty-pixel
+/// tabs in it is a row of targets a hand has to aim at.
+const TASKBAR: u32 = 36;
 
 /// The smallest a window may be made.
 ///
