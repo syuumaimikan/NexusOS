@@ -67,6 +67,38 @@ pub enum Error {
     Unknown(u64),
 }
 
+impl core::fmt::Display for Error {
+    /// What to tell a person.
+    ///
+    /// Sentences rather than names, because these end up in a terminal, in a
+    /// status line and in a log that somebody reads. `{error:?}` gives
+    /// "NotFound", which is a Rust variant; this gives "there is no such file
+    /// or directory", which is an answer.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotImplemented => f.write_str("this system does not do that yet"),
+            Self::Invalid => f.write_str("that is not a request this system understands"),
+            Self::BadHandle => f.write_str("that is not something this program holds"),
+            Self::Denied => f.write_str("this program was not given the right to do that"),
+            Self::Closed => f.write_str("the other end has gone"),
+            Self::Again => f.write_str("the other end is full; try again"),
+            Self::TooLong => f.write_str("that message is longer than a channel will carry"),
+            Self::NotAProcess => f.write_str("only a process may ask that"),
+            Self::NotFound => f.write_str("there is no such file or directory"),
+            Self::Exists => f.write_str("that name is already taken"),
+            Self::TooBig => f.write_str("that does not fit in the space given for it"),
+            Self::Filesystem => {
+                f.write_str("the filesystem refused: it is full, damaged, busy, or absent")
+            }
+            Self::NoDevice => f.write_str("this machine has no such device"),
+            Self::Unknown(value) => write!(
+                f,
+                "the kernel answered with {value}, which this runtime does not know"
+            ),
+        }
+    }
+}
+
 /// Values at or above this are errors rather than results.
 const ERROR_BASE: u64 = u64::MAX - 15;
 

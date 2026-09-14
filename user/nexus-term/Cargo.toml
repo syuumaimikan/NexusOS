@@ -1,0 +1,19 @@
+[package]
+name = "nexus-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A terminal window, and a shell to type into it."
+
+[[bin]]
+name = "nexus-term"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+nexus-time = { path = "../../shared/nexus-time" }
+nexus-shellwords = { path = "../../shared/nexus-shellwords" }

@@ -113,6 +113,10 @@ mod wire {
     pub const HIDE: &[u8] = b"hide";
     /// Start another program.
     pub const OPEN: &[u8] = b"open";
+    /// Start a window that can fetch a page.
+    pub const BROWSE: &[u8] = b"web ";
+    /// Start a window with a prompt in it.
+    pub const TERMINAL: &[u8] = b"term";
     /// End the session.
     pub const QUIT: &[u8] = b"quit";
 }
@@ -185,6 +189,33 @@ impl Desktop {
         Rect::new(GAP, GAP / 2, LAUNCH_WIDTH, self.height.saturating_sub(GAP))
     }
 
+    /// Where the button that opens a page is.
+    ///
+    /// Beside the one that starts a program, because they are the same kind of
+    /// thing: both ask the compositor for a window, and which program goes in
+    /// it is the compositor's decision and not this one's.
+    fn web(&self) -> Rect {
+        let width = nexus_ui::measure(nexus_i18n::text("shell.web")) + GAP * 4;
+        Rect::new(
+            GAP * 2 + LAUNCH_WIDTH,
+            GAP / 2,
+            width,
+            self.height.saturating_sub(GAP),
+        )
+    }
+
+    /// Where the button that opens a terminal is.
+    fn terminal(&self) -> Rect {
+        let web = self.web();
+        let width = nexus_ui::measure(nexus_i18n::text("shell.term")) + GAP * 4;
+        Rect::new(
+            web.x + web.width + GAP,
+            GAP / 2,
+            width,
+            self.height.saturating_sub(GAP),
+        )
+    }
+
     /// Where the button that ends the session is, and how wide.
     ///
     /// At the far right, which is where a machine's own controls go on every
@@ -207,7 +238,8 @@ impl Desktop {
     /// brought back. A tab that shuffled sideways under the pointer would be a
     /// tab somebody clicked and missed.
     fn tab(&self, slot: usize) -> Rect {
-        let left = GAP * 2 + LAUNCH_WIDTH;
+        let terminal = self.terminal();
+        let left = terminal.x + terminal.width + GAP;
         let available = self
             .width
             .saturating_sub(left + GAP)
@@ -648,6 +680,18 @@ fn run(desktop: &mut Desktop) {
 /// program. Nothing is changed here: this program says what should happen and
 /// the compositor decides whether it does.
 fn clicked(desktop: &Desktop, x: u32, y: u32) -> Option<bool> {
+    if desktop.terminal().contains(x, y) {
+        return nexus_user::send(COMPOSITOR, wire::TERMINAL, &[])
+            .ok()
+            .map(|_| true);
+    }
+
+    if desktop.web().contains(x, y) {
+        return nexus_user::send(COMPOSITOR, wire::BROWSE, &[])
+            .ok()
+            .map(|_| true);
+    }
+
     if desktop.leave().contains(x, y) {
         nexus_user::log("shell: somebody pressed the button that ends the session").ok();
         return nexus_user::send(COMPOSITOR, wire::QUIT, &[])
@@ -706,6 +750,26 @@ fn draw(desktop: &Desktop) {
         launcher,
         nexus_i18n::text("shell.launch"),
         Colour::rgb(0xF0, 0xF4, 0xFF),
+    );
+
+    // The button that opens a page, next to the one that starts a program.
+    let web = desktop.web();
+    canvas.fill(web, accent.blend(Colour::rgb(0, 0, 0), 150));
+    canvas.outline(web, 1, accent.blend(ground, 90));
+    canvas.text_centred(
+        web,
+        nexus_i18n::text("shell.web"),
+        Colour::rgb(0xE8, 0xF0, 0xFF),
+    );
+
+    // And the one that opens a prompt.
+    let terminal = desktop.terminal();
+    canvas.fill(terminal, Colour::rgb(0x10, 0x20, 0x18));
+    canvas.outline(terminal, 1, Colour::rgb(0x4E, 0x8E, 0x5C));
+    canvas.text_centred(
+        terminal,
+        nexus_i18n::text("shell.term"),
+        Colour::rgb(0xD8, 0xF0, 0xDC),
     );
 
     for slot in 0..desktop.slots {

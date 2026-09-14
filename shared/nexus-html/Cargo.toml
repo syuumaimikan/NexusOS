@@ -1,0 +1,11 @@
+[package]
+name = "nexus-html"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Turning a page of HTML into blocks of text a renderer can lay out."
+
+[lib]
+name = "nexus_html"
+path = "src/lib.rs"

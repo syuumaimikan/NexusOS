@@ -36,6 +36,7 @@ mod process;
 mod sched;
 mod selftest;
 mod serial;
+mod sound;
 mod sync;
 mod user;
 mod waitset;
@@ -251,7 +252,13 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         arch::halt_forever();
     }
 
+    // The line under the logo, moved along as bring-up passes each of its
+    // steps. Counted rather than timed, so a machine that is slow because its
+    // disk is slow shows a bar that pauses in the same place every time.
+    display::progress(1, BOOT_STEPS);
+
     self_test();
+    display::progress(2, BOOT_STEPS);
     inject_fault_if_requested();
 
     kprintln!();
@@ -267,6 +274,13 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     sched::exit()
 }
 
+/// How many steps of bring-up the line under the logo is divided into.
+///
+/// A count of the things that actually happen rather than a guess at how long
+/// they take: the scheduler, the self-test, the clock, the keyboard, the
+/// network, and the first program that is not the kernel's.
+const BOOT_STEPS: u32 = 6;
+
 /// Spawn the long-lived threads and hand the processor over to them.
 fn start_system_threads() {
     display::start_thread();
@@ -277,7 +291,10 @@ fn start_system_threads() {
     // ports.
     unsafe { drivers::rtc::init() };
 
+    display::progress(3, BOOT_STEPS);
+
     input::start_thread();
+    display::progress(4, BOOT_STEPS);
 
     // And the network, which has to be a thread: getting an address means
     // sending a broadcast and waiting for an answer, and waiting is something
@@ -288,9 +305,16 @@ fn start_system_threads() {
     // fails: the system is less of a system without it, but it is still one.
     // SAFETY: the heap and the scheduler are both running by now, and this is
     // the only call.
+    // The speaker, which says the machine is up in the one way a person who
+    // is not looking at the screen can hear.
+    sound::start_thread();
+
+    display::progress(5, BOOT_STEPS);
+
     if let Err(error) = unsafe { user::start() } {
         kprintln!("[user] could not start user mode: {error}");
     }
+    display::progress(BOOT_STEPS, BOOT_STEPS);
     match sched::spawn(
         "monitor",
         sched::thread::Priority::Interactive,
@@ -453,6 +477,41 @@ fn monitor_thread(_argument: usize) {
             if accepted > 0 || resets > 0 {
                 kprintln!(
                     "[mon ] tcp {accepted} connections accepted, {answered} answered,              {resets} reset, {retried} segments resent"
+                );
+            }
+            // The other direction, reported separately because it is a
+            // different program: one answers connections and one makes them,
+            // and a single line adding the two together would hide which.
+            let (opened, out, back, refused) = net::stream::statistics();
+            if opened > 0 {
+                kprintln!(
+                    "[mon ] client {opened} connections opened, {out} bytes out, {back} in,              {refused} came to nothing"
+                );
+            }
+            let (datagrams_out, datagrams_in, datagrams_lost) = net::datagram::statistics();
+            if datagrams_out > 0 || datagrams_in > 0 {
+                kprintln!(
+                    "[mon ] datagrams {datagrams_out} sent, {datagrams_in} received,              {datagrams_lost} dropped for want of room"
+                );
+            }
+            let (looped, loop_dropped) = net::loopback_statistics();
+            if looped > 0 {
+                kprintln!(
+                    "[mon ] loopback {looped} packets this machine sent to itself,              {loop_dropped} dropped for want of room"
+                );
+            }
+            let (notes, hushed) = sound::statistics();
+            let (tones, speaker) = drivers::speaker::statistics();
+            if notes > 0 || hushed > 0 || tones > 0 {
+                kprintln!(
+                    "[mon ] sound {notes} notes played, {hushed} refused,              {tones} tones on the speaker{}",
+                    if speaker { "" } else { " (never used)" }
+                );
+            }
+            let (served, turned_down) = net::service::statistics();
+            if served > 0 || turned_down > 0 {
+                kprintln!(
+                    "[mon ] network service {served} requests answered, {turned_down} refused"
                 );
             }
         }

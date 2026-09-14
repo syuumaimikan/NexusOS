@@ -679,14 +679,16 @@ pub fn receive(into: &mut [u8]) -> Option<usize> {
     Some(taken)
 }
 
-/// Block until something has arrived, or return at once if something already
-/// has.
-pub fn wait_for_frame() {
-    let generation = ARRIVED.generation();
-    if has_frame() {
-        return;
-    }
-    ARRIVED.wait_if_unchanged(generation);
+/// Whether a frame is waiting to be taken.
+///
+/// Public because the network thread waits on more than this card, and
+/// something that waits on several things has to be able to ask each of them
+/// whether it already has work. There is deliberately no `wait_for_frame` any
+/// more: a thread that waited on this queue alone would sleep through a program
+/// asking it to open a connection, which is the other half of its job.
+#[must_use]
+pub fn has_frame_waiting() -> bool {
+    has_frame()
 }
 
 /// Whether a frame is waiting to be taken.
@@ -734,6 +736,11 @@ pub unsafe fn on_interrupt() {
     // cheaper to wake both than to work it out and be wrong.
     ARRIVED.wake_all();
     SENT.wake_all();
+    // And the network thread, which since it began answering programs waits on
+    // a set rather than on this queue. Both are woken because both have
+    // waiters: the thread is on one of them and whatever is sending a frame is
+    // on the other.
+    crate::net::service::signal();
 }
 
 /// Take the card's interrupt into use, if it has proved itself.

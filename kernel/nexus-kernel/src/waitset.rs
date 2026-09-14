@@ -190,6 +190,35 @@ impl WaitSet {
         self.len() == 0
     }
 
+    /// How many times this set has been signalled.
+    ///
+    /// Read *before* testing anything else, and handed back to
+    /// [`wait_since`](Self::wait_since). What that buys is the same thing the
+    /// wait queue's own counter buys: a signal that lands between the test and
+    /// the wait is seen as a change rather than slept through.
+    #[must_use]
+    pub fn change_count(&self) -> u64 {
+        self.changed.generation()
+    }
+
+    /// Wait until this set is signalled, or until `deadline_ticks`.
+    ///
+    /// Different from [`wait`](Self::wait) in what ends it: that one returns
+    /// when a *member* is ready, and this one returns when anything signalled
+    /// the set at all. It is for a caller that is waiting on more than this set
+    /// -- the network thread waits on its card as well -- and therefore has to
+    /// be woken to go and look at the other thing, whether or not this one has
+    /// anything to report.
+    ///
+    /// Without it, such a caller blocks for ever on a set nobody writes to
+    /// while the thing it was really waiting for arrives on the other side.
+    pub fn wait_since(&self, seen: u64, deadline_ticks: Option<u64>) {
+        match deadline_ticks {
+            Some(deadline) => self.changed.wait_if_unchanged_until(seen, deadline),
+            None => self.changed.wait_if_unchanged(seen),
+        }
+    }
+
     /// The keys of every member that is ready now.
     #[must_use]
     pub fn poll(&self) -> Vec<u64> {

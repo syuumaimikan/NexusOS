@@ -111,6 +111,14 @@ $SetupElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-setup"
 $StagedSetup = Publish-Program -Elf $SetupElf -ProgramDir $ProgramDir -Name 'setup.elf'
 $setupSize = [math]::Round((Get-Item $StagedSetup).Length / 1KB, 1)
 
+$TermElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-term"
+$StagedTerm = Publish-Program -Elf $TermElf -ProgramDir $ProgramDir -Name 'term.elf'
+$termSize = [math]::Round((Get-Item $StagedTerm).Length / 1KB, 1)
+
+$BrowserElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-browser"
+$StagedBrowser = Publish-Program -Elf $BrowserElf -ProgramDir $ProgramDir -Name 'browse.elf'
+$browserSize = [math]::Round((Get-Item $StagedBrowser).Length / 1KB, 1)
+
 $UpdateElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-updater"
 $StagedUpdate = Publish-Program -Elf $UpdateElf -ProgramDir $ProgramDir -Name 'updt.elf'
 $updateSize = [math]::Round((Get-Item $StagedUpdate).Length / 1KB, 1)
@@ -250,6 +258,8 @@ Write-Host "  installer  : $installSize KiB  -> BIN\INST.ELF on the disk"
 Write-Host "  finder     : $findSize KiB  -> BIN\FIND.ELF on the disk"
 Write-Host "  setup      : $setupSize KiB  -> BIN\SETUP.ELF on the disk"
 Write-Host "  updater    : $updateSize KiB  -> BIN\UPDT.ELF on the disk"
+Write-Host "  browser    : $browserSize KiB  -> BIN\BROWSE.ELF on the disk"
+Write-Host "  terminal   : $termSize KiB  -> BIN\TERM.ELF on the disk"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
 Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1.1.0, signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"

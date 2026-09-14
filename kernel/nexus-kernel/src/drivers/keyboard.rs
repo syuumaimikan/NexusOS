@@ -139,8 +139,27 @@ pub enum Key {
     Escape,
     /// A function key, numbered from 1.
     Function(u8),
+    /// One of the keys that moves through something rather than typing into it.
+    ///
+    /// These arrive with a 0xE0 prefix and share their scancodes with the
+    /// number pad, which is why they were dropped until something needed to
+    /// scroll: without the prefix, "page down" and "3" are the same byte.
+    Move(Movement),
     /// A key this decoder does not name, kept so nothing is silently lost.
     Unknown(u8),
+}
+
+/// Which way a movement key goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Movement {
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+    Home,
+    End,
 }
 
 /// Modifier state, which is what makes decoding stateful.
@@ -286,6 +305,18 @@ pub fn next_key() -> Option<Key> {
         0x3B..=0x44 => Key::Function(code - 0x3B + 1),
         0x57 => Key::Function(11),
         0x58 => Key::Function(12),
+        // The extended set, which is where the arrows and the page keys live.
+        // Only meaningful with the prefix: the same scancodes without it are
+        // the number pad, and a machine that read them either way would scroll
+        // when somebody typed a digit.
+        0x48 if extended => Key::Move(Movement::Up),
+        0x50 if extended => Key::Move(Movement::Down),
+        0x4B if extended => Key::Move(Movement::Left),
+        0x4D if extended => Key::Move(Movement::Right),
+        0x49 if extended => Key::Move(Movement::PageUp),
+        0x51 if extended => Key::Move(Movement::PageDown),
+        0x47 if extended => Key::Move(Movement::Home),
+        0x4F if extended => Key::Move(Movement::End),
         _ if extended => Key::Unknown(code),
         _ => {
             let index = code as usize;

@@ -30,6 +30,9 @@
 //! the roadmap; none of them is stubbed out here, because a stub that returns
 //! success is worse than a function that does not exist.
 
+pub mod datagram;
+pub mod service;
+pub mod stream;
 pub mod tcp;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -174,23 +177,95 @@ fn network_thread(_argument: usize) {
     // to be going on, and that failure looks exactly like a broken cable.
     loop {
         drain();
+        // Everything that happens on a clock rather than on a packet: a SYN
+        // resent, a segment that was not acknowledged, a connection that timed
+        // out. Done here because this is the thread that owns the stack, and a
+        // timer that touched it from anywhere else would be a second thread in
+        // a module written for one.
+        stream::poll();
+        // And then whatever programs have asked. After the two above, so that
+        // an answer about a connection is about the connection as it is now
+        // rather than as it was before this turn's frames arrived.
+        service::serve();
         if virtio_net::adopt_interrupt() {
             kprintln!("[net ] the card's interrupt arrived; the thread now blocks between frames");
         }
+        // How long to wait depends on what there is to wait for. A machine
+        // with a connection open has to move it along on a clock -- a segment
+        // that was not acknowledged is not an event anything will signal -- and
+        // one with nothing open waits to be woken and costs nothing between
+        // frames.
+        let deadline = if stream::anything_open() {
+            Some(20)
+        } else {
+            None
+        };
         if virtio_net::is_blocking() {
-            virtio_net::wait_for_frame();
+            service::wait_for_work(deadline);
         } else {
             sched::sleep_ms(20);
         }
     }
 }
 
-/// Take every frame the card has.
+/// Packets this machine addressed to itself.
+///
+/// Queued rather than handled where they are sent, because handling one sends
+/// the next: a connection to this machine's own address would otherwise walk a
+/// whole TCP handshake down one kernel stack, and the stack is not the place to
+/// find out how deep that goes.
+static LOOPBACK: IrqSpinLock<alloc::collections::VecDeque<alloc::vec::Vec<u8>>> =
+    IrqSpinLock::new(alloc::collections::VecDeque::new());
+
+/// How many packets may be waiting to come back round.
+///
+/// A bound rather than a policy. Everything here is produced by this machine,
+/// so a queue that grew without limit would be this machine's own bug rather
+/// than somebody's attack -- which is exactly the kind of bug worth catching.
+const MAX_LOOPBACK: usize = 64;
+
+/// Packets sent to this machine's own address, and ones that would not fit.
+static LOOPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static LOOP_DROPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Packets looped back, packets dropped for want of room.
+#[must_use]
+pub fn loopback_statistics() -> (u64, u64) {
+    (
+        LOOPED.load(Ordering::Relaxed),
+        LOOP_DROPPED.load(Ordering::Relaxed),
+    )
+}
+
+/// Take every frame the card has, and everything this machine sent to itself.
+///
+/// Both, and until both are empty, because one produces the other: a segment
+/// looped back is answered with a segment that is also looped back, and a drain
+/// that took one pass would leave a handshake half finished until the next
+/// frame happened to arrive.
 fn drain() {
     let mut frame = [0u8; MTU];
-    while let Some(length) = virtio_net::receive(&mut frame) {
-        FRAMES_IN.fetch_add(1, Ordering::Relaxed);
-        handle(&frame[..length]);
+    // Bounded, because a connection to this machine's own address is a
+    // conversation that can go on for as long as both ends have something to
+    // say -- and both ends are here.
+    for _ in 0..256 {
+        let mut did_something = false;
+
+        while let Some(length) = virtio_net::receive(&mut frame) {
+            FRAMES_IN.fetch_add(1, Ordering::Relaxed);
+            handle(&frame[..length]);
+            did_something = true;
+        }
+
+        let looped = LOOPBACK.lock().pop_front();
+        if let Some(packet) = looped {
+            handle_ipv4(&packet);
+            did_something = true;
+        }
+
+        if !did_something {
+            return;
+        }
     }
 }
 
@@ -271,11 +346,34 @@ fn handle_ipv4(bytes: &[u8]) {
     match packet.protocol {
         wire::protocol::ICMP => handle_icmp(&interface, packet.from, packet.payload),
         wire::protocol::UDP => handle_udp(packet.from, packet.payload),
-        wire::protocol::TCP => tcp::receive(packet.from, packet.to, packet.payload),
+        // Split by port, because there are two TCP implementations here and
+        // they are different programs: one answers connections and one makes
+        // them. A segment for the port this machine listens on belongs to the
+        // first; everything else belongs to a connection this machine started,
+        // or to nothing at all.
+        wire::protocol::TCP => {
+            if destination_port(packet.payload) == Some(tcp::PORT) {
+                tcp::receive(packet.from, packet.to, packet.payload);
+            } else {
+                stream::receive(packet.from, packet.payload, packet.to);
+            }
+        }
         _ => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// Which port a TCP segment is addressed to, without parsing the rest of it.
+///
+/// Read straight out of the header rather than through `parse_tcp`, because
+/// this decides *which* implementation parses it -- and parsing twice to find
+/// out who should parse it once is work with nothing behind it.
+fn destination_port(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    Some(wire::be16(bytes, 2))
 }
 
 /// An ICMP message: answer an echo, and notice a reply to one of ours.
@@ -321,14 +419,21 @@ fn handle_icmp(interface: &Interface, from: Ipv4, bytes: &[u8]) {
 }
 
 /// A UDP datagram. Only the DHCP client is listening.
-fn handle_udp(_from: Ipv4, bytes: &[u8]) {
-    let Some(datagram) = wire::parse_udp(bytes) else {
+fn handle_udp(from: Ipv4, bytes: &[u8]) {
+    let Some(parsed) = wire::parse_udp(bytes) else {
         return;
     };
-    if datagram.destination == wire::DHCP_CLIENT_PORT {
-        if let Some(message) = wire::parse_dhcp(datagram.payload) {
+    if parsed.destination == wire::DHCP_CLIENT_PORT {
+        if let Some(message) = wire::parse_dhcp(parsed.payload) {
             *OFFER.lock() = Some(message);
         }
+        return;
+    }
+    // A port a program has taken. Checked after the kernel's own, so that a
+    // program cannot take 68 out from under the DHCP client by asking for it --
+    // which it cannot anyway, because the range it is given from is elsewhere,
+    // and this order means it would still not work if that ever changed.
+    if datagram::receive(from, parsed.source, parsed.destination, parsed.payload) {
         return;
     }
     UNKNOWN.fetch_add(1, Ordering::Relaxed);
@@ -362,6 +467,34 @@ fn send_frame(to: Mac, kind: u16, payload: &[u8]) -> Result<(), virtio_net::NetE
 /// interface: a routing table is what this becomes when there are two.
 pub fn send_ipv4(to: Ipv4, protocol: u8, payload: &[u8]) -> Result<(), virtio_net::NetError> {
     let interface = *INTERFACE.lock();
+
+    // This machine talking to itself. It never reaches the card: a packet whose
+    // destination is the address the card answers to would go out, be routed by
+    // whatever is on the other side of the link, and come back if it came back
+    // at all. So it is handed straight to the receive path instead -- which is
+    // what makes `http://<this machine>/` work, and what makes the whole stack
+    // testable without anything else being on the network.
+    if to == interface.ip && interface.ip != wire::UNSPECIFIED {
+        let mut packet = alloc::vec![0u8; wire::IPV4_HEADER + payload.len()];
+        packet[wire::IPV4_HEADER..].copy_from_slice(payload);
+        let identification = LOOPED.fetch_add(1, Ordering::Relaxed) as u16;
+        wire::ipv4(
+            &mut packet,
+            interface.ip,
+            to,
+            protocol,
+            payload.len(),
+            identification,
+        );
+        let mut queue = LOOPBACK.lock();
+        if queue.len() >= MAX_LOOPBACK {
+            LOOP_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return Err(virtio_net::NetError::NoDevice);
+        }
+        queue.push_back(packet);
+        return Ok(());
+    }
+
     let next = if to == wire::BROADCAST_IPV4 || interface.is_local(to) {
         to
     } else {

@@ -1201,18 +1201,73 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
         }
     };
 
+    // And the network, held for the same reason as the settings directory: to
+    // pass on. The compositor does not open a connection and has no business
+    // doing so; what it has is the authority to give the network to a program
+    // whose business it is, which on this machine is the browser. A compositor
+    // that could not would be a machine where nothing started from the desktop
+    // could ever reach the wire.
+    let network = crate::net::service::endpoint();
+
+    // And the filesystem, held for the same reason and read no more than the
+    // others: to pass on. The terminal is the program that needs it -- a shell
+    // with no files is a prompt and nothing else -- and the compositor is what
+    // starts a terminal when somebody presses the button for one.
+    //
+    // This is the widest authority the compositor is given, and it is worth
+    // saying why it is acceptable: a compositor that could not lend the
+    // filesystem would be a machine where nothing started from the desktop
+    // could open a file, and the alternative -- every program asking the kernel
+    // for the filesystem by name -- is ambient authority with more steps.
+    // And the speaker, on the same terms as the rest: held to pass on. A
+    // compositor that made a noise of its own would be a compositor with an
+    // opinion about when a machine should beep, which is a decision for
+    // whatever the person is using and not for the thing drawing the windows.
+    let sound = crate::sound::endpoint();
+
+    let filesystem = match fs::store::root() {
+        Ok(node) => Some(node),
+        Err(error) => {
+            kprintln!("[user] the compositor gets no filesystem to lend: {error}");
+            None
+        }
+    };
+
     // In this order, because the program names them by the numbers they get:
     // the channel the display arrives on, the one it asks for clients on, the
-    // two that carry keys and pointer movements, and the settings directory.
+    // two that carry keys and pointer movements, the settings directory, the
+    // network, the filesystem, and the speaker.
     let mut endowments = alloc::vec![
         (ipc::Object::Channel(client), ipc::Rights::ALL),
         (ipc::Object::Channel(spawner), ipc::Rights::ALL),
         (ipc::Object::Channel(keys_there), ipc::Rights::ALL),
         (ipc::Object::Channel(pointer_there), ipc::Rights::ALL),
     ];
+    // Pushed before the network so that the numbers do not move when a machine
+    // has no settings directory: the settings are always there in practice --
+    // `store::directory` makes one -- and a layout that depended on that would
+    // be a layout that breaks the first time it is not.
     if let Some(settings) = settings {
         endowments.push((ipc::Object::Node(settings), ipc::Rights::ALL));
+    } else {
+        // A placeholder with no rights, so that the network keeps its number on
+        // a machine whose store could not be read. Everything the compositor
+        // tries with it is refused, which is the truth about such a machine.
+        endowments.push((
+            ipc::Object::Channel(ipc::Endpoint::pair().0),
+            ipc::Rights::from_bits(0),
+        ));
     }
+    endowments.push((ipc::Object::Channel(network), ipc::Rights::ALL));
+    if let Some(filesystem) = filesystem {
+        endowments.push((ipc::Object::Node(filesystem), ipc::Rights::ALL));
+    } else {
+        endowments.push((
+            ipc::Object::Channel(ipc::Endpoint::pair().0),
+            ipc::Rights::from_bits(0),
+        ));
+    }
+    endowments.push((ipc::Object::Channel(sound), ipc::Rights::ALL));
 
     // SAFETY: as above.
     unsafe {

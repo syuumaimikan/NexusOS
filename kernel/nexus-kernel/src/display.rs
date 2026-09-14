@@ -145,8 +145,144 @@ pub unsafe fn init(info: &FramebufferInfo) -> bool {
 
     *DISPLAY.lock() = Some(framebuffer);
     *GEOMETRY.lock() = Some(*info);
-    paint_chrome();
+    // The logo first, and the diagnostics panel when the display thread's first
+    // pass comes round. Between the two is the whole of bring-up -- the memory
+    // map, the processors, the disk, the card -- so the mark is on screen for
+    // as long as the machine is actually starting, which is what a boot logo is
+    // for. It is not a timed splash and there is no timer behind it.
+    paint_logo();
     true
+}
+
+/// The mark this machine shows while it is starting.
+///
+/// Drawn from primitives rather than loaded from a file, because at this point
+/// in the boot there is no filesystem: the disk has not been found, the block
+/// cache does not exist and the heap is the only thing that works. A logo that
+/// needed a file would be a logo that could only appear after the machine was
+/// already up, which is the one moment it is not wanted.
+///
+/// What it draws is a nexus: lines converging on a point from every side, which
+/// is what the name means and what the system is -- a kernel everything else
+/// reaches through one interface.
+fn paint_logo() {
+    let name = i18n::text("os.name");
+    let version = i18n::format("os.subtitle", &[("version", &env!("CARGO_PKG_VERSION"))]);
+
+    with(|fb| {
+        let width = fb.width();
+        let height = fb.height();
+        fb.vertical_gradient(BACKGROUND_TOP, Color(0x0002_0610));
+
+        let centre_x = width / 2;
+        let centre_y = height * 2 / 5;
+        // Sized against the smaller side, so the mark is the same shape on a
+        // wide screen and a tall one.
+        let radius = (width.min(height) / 6).max(40);
+
+        // Twelve spokes, converging. Drawn as points along each line rather
+        // than with a line routine, because there is no line routine here and
+        // twelve of these is less code than one that is general.
+        for spoke in 0..12u32 {
+            // A twelfth of a turn each, as sixteenths of a right angle in a
+            // fixed-point table: there is no floating point in the kernel and
+            // a table of twelve directions is smaller than the arithmetic that
+            // would avoid it.
+            const DIRECTIONS: [(i32, i32); 12] = [
+                (1000, 0),
+                (866, 500),
+                (500, 866),
+                (0, 1000),
+                (-500, 866),
+                (-866, 500),
+                (-1000, 0),
+                (-866, -500),
+                (-500, -866),
+                (0, -1000),
+                (500, -866),
+                (866, -500),
+            ];
+            let (dx, dy) = DIRECTIONS[spoke as usize];
+            // The inner end is short of the middle, so the lines converge on a
+            // node rather than crossing in a smear.
+            let inner = radius / 4;
+            for step in inner..radius {
+                let x = centre_x as i32 + dx * step as i32 / 1000;
+                let y = centre_y as i32 + dy * step as i32 / 1000;
+                if x < 0 || y < 0 {
+                    continue;
+                }
+                // Brighter towards the middle, which is where the eye goes.
+                let fade = 255 - (step - inner) * 200 / radius.max(1);
+                let colour = Color::BLACK.blend(ACCENT, fade as u8);
+                // Two pixels thick, so the mark reads at any size the firmware
+                // happens to have given us.
+                fb.put_pixel(x as u32, y as u32, colour);
+                fb.put_pixel((x + 1) as u32, y as u32, colour);
+            }
+        }
+
+        // The node itself.
+        let node = (radius / 10).max(3);
+        fb.fill_rect(
+            centre_x.saturating_sub(node),
+            centre_y.saturating_sub(node),
+            node * 2,
+            node * 2,
+            TEXT,
+        );
+
+        let scale = (width / 240).clamp(3, 10);
+        let name_y = centre_y + radius + radius / 3;
+        fb.draw_text_centered(name_y, name, TEXT, scale);
+        let version_y = name_y + Framebuffer::line_height(scale) + 10;
+        fb.draw_text_centered(version_y, &version, MUTED, (scale / 2).max(2));
+
+        // A line under it all, which is the only part that will move: the
+        // machine is starting and something on screen should say so.
+        let bar_width = radius * 3;
+        let bar_y = version_y + Framebuffer::line_height(2) + radius / 2;
+        fb.fill_rect(
+            centre_x.saturating_sub(bar_width / 2),
+            bar_y,
+            bar_width,
+            2,
+            PANEL,
+        );
+    });
+}
+
+/// Move the line under the logo along.
+///
+/// `done` and `total` are steps of bring-up, not time. A progress bar driven by
+/// a timer is a decoration; this one is the machine saying what it has got
+/// through, so a machine that is slow because its disk is slow shows a bar that
+/// is slow in the same place every time.
+pub fn progress(done: u32, total: u32) {
+    if !is_ours() {
+        return;
+    }
+    with(|fb| {
+        let width = fb.width();
+        let height = fb.height();
+        let centre_x = width / 2;
+        let centre_y = height * 2 / 5;
+        let radius = (width.min(height) / 6).max(40);
+        let scale = (width / 240).clamp(3, 10);
+        let name_y = centre_y + radius + radius / 3;
+        let version_y = name_y + Framebuffer::line_height(scale) + 10;
+        let bar_width = radius * 3;
+        let bar_y = version_y + Framebuffer::line_height(2) + radius / 2;
+
+        let filled = bar_width * done.min(total) / total.max(1);
+        fb.fill_rect(
+            centre_x.saturating_sub(bar_width / 2),
+            bar_y,
+            filled,
+            2,
+            ACCENT,
+        );
+    });
 }
 
 /// Whether a display is available.

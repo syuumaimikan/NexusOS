@@ -1652,3 +1652,53 @@ Carried alongside the phases rather than scheduled as one:
   throughput, allocator throughput — measured from the phase that introduces
   each, so regressions are visible immediately.
 - **Documentation.** A design document per subsystem, written with the code.
+
+---
+
+## Where it has got to, and what is not here
+
+The machine boots to a logo, asks who you are, keeps a desktop, fetches a page
+over its own TCP, runs a shell, updates itself and makes a noise. Thirteen test
+stages, run on a real machine under emulation, cover all of it.
+
+What follows is an honest list of what has been asked for and is *not* here,
+with the reason and the size of the job. Nothing on it is pretended at anywhere
+in the code.
+
+### Feasible next, in order of value
+
+| What | Size | What it needs |
+| --- | --- | --- |
+| Wallpaper and theming | small | A wallpaper program given the bottom surface; the compositor composites it first. Policy stays out of the compositor. |
+| Japanese input | medium | Romaji to kana is a table. Kanji conversion needs a dictionary and a candidate window; the table is the easy half. |
+| A package manager window | small | The mechanism exists — `nexus-pkg`, the installer, the updater. What is missing is a window that shows it. |
+| A settings window | small | Everything it would set is already a key in `system/settings.txt`. |
+| A text editor | medium | The terminal's line editing, a file, and a scrollback that can be written into. |
+| Standard output for programs | medium | The thing that would let `ls` stop being built into the terminal. A channel a child inherits, and a pipe. |
+| Loadable drivers | large | The kernel has no module loader, no driver ABI and no way to revoke one. Doing it badly is worse than not doing it. |
+
+### Not feasible as asked, and why
+
+* **Video wallpaper.** A video is a codec — H.264 or VP9 — which is tens of
+  thousands of lines and years of patent history. An *animated* wallpaper drawn
+  procedurally is a weekend; a video one is not this machine's next step.
+* **Running Windows software.** A PE loader is a fortnight. The Win32 subsystem
+  behind it — the window manager, GDI, the registry, COM — is what Wine has been
+  writing since 1993. The Linux translation layer here is real and small because
+  Linux's boundary is a few hundred system calls; Windows' is not a boundary of
+  that kind.
+* **A compiler on the machine.** Writing software *for* NexusOS works today,
+  from another machine. Writing it *on* NexusOS needs an editor, an assembler
+  and a linker that run here. The editor is close; the rest is a language
+  implementation.
+* **USB storage.** xHCI, then USB enumeration, then mass storage, then SCSI.
+  Four layers, each of which is a driver on its own. The disk this machine uses
+  is virtio, which is one.
+
+### What "everyday use" means here
+
+It means the parts that are here work when you use them rather than when a test
+runs: the desktop keeps its windows, the machine remembers who you are, the
+browser fetches a page you typed, the shell writes a file you can read back on
+the next boot. Each of those was a bug at some point in this repository's
+history, and each is now a test.

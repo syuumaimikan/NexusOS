@@ -1,0 +1,15 @@
+[package]
+name = "nexus-netclient"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Talking to the kernel's network service from a program."
+
+[lib]
+name = "nexus_netclient"
+path = "src/lib.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../../user/nexus-user" }

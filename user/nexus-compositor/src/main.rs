@@ -131,6 +131,24 @@ const SPAWNER: Handle = Handle(2);
 const KEYS: Handle = Handle(3);
 /// The channel pointer movements arrive on.
 const POINTER: Handle = Handle(4);
+/// The network.
+///
+/// Held for the same reason as the settings directory, and read no more than
+/// that one is: this program's business is the display. What it does with this
+/// is hand it to the browser, and a compositor that could not would be a
+/// machine where nothing started from the desktop could reach the wire.
+const NETWORK: Handle = Handle(6);
+
+/// The filesystem, held to lend to a terminal and read by nothing here.
+const FILESYSTEM: Handle = Handle(7);
+
+/// The speaker, held on the same terms and never used by this program.
+///
+/// A compositor that made a noise of its own would be a compositor with an
+/// opinion about when a machine should beep, and that belongs to whatever the
+/// person is actually using.
+const SOUND: Handle = Handle(8);
+
 /// The directory the system's settings live in.
 ///
 /// Never read here. This program's whole business is the display, and what it
@@ -252,6 +270,10 @@ mod desk {
     pub const HIDE: &[u8] = b"hide";
     /// Start another program.
     pub const OPEN: &[u8] = b"open";
+    /// Start a window that can fetch a page.
+    pub const BROWSE: &[u8] = b"web ";
+    /// Start a window with a prompt in it.
+    pub const TERMINAL: &[u8] = b"term";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -333,6 +355,10 @@ const LEAVE_KEY: u32 = 10;
 const CLIENT: &[u8] = b"BIN/CLIENT.ELF";
 /// The one it runs instead, once, on a machine nobody has set up.
 const SETUP: &[u8] = b"BIN/SETUP.ELF";
+/// And the one that fetches a page, which is the only client given the network.
+const BROWSER: &[u8] = b"BIN/BROWSE.ELF";
+/// And the one with a prompt in it, which is the only client given the disk.
+const TERMINAL: &[u8] = b"BIN/TERM.ELF";
 /// The program that draws the strip along the bottom and says what a click in
 /// it means.
 const SHELL: &[u8] = b"BIN/SHELL.ELF";
@@ -1429,6 +1455,22 @@ fn summarise(screen: &Screen, composited: u32, batched: u32) {
     nexus_user::log("compositor: composited every frame its clients drew").ok();
 }
 
+/// Which program a new window is for.
+///
+/// Not a path, because the caller is the desktop and the desktop must not be
+/// able to name a program: a dock that could ask for any executable on the disk
+/// would be a dock that can run anything, through a compositor that would hand
+/// it the network.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum What {
+    /// The demonstration client.
+    Client,
+    /// The browser, which is given the network.
+    Browser,
+    /// The terminal, which is given the filesystem and a way to start programs.
+    Terminal,
+}
+
 /// What reading from the keyboard turned out to be.
 enum Typed {
     /// Nothing a client has to see: a language change, a focus move, a key for
@@ -1529,7 +1571,15 @@ fn read_shell(
     }
 
     if message == desk::OPEN {
-        return open_window(screen, set, tiles, focus, order);
+        return open_window(screen, set, tiles, focus, order, What::Client);
+    }
+
+    if message == desk::BROWSE {
+        return open_window(screen, set, tiles, focus, order, What::Browser);
+    }
+
+    if message == desk::TERMINAL {
+        return open_window(screen, set, tiles, focus, order, What::Terminal);
     }
 
     if message == desk::QUIT {
@@ -1574,6 +1624,7 @@ fn open_window(
     tiles: &mut [Option<Tile>; CLIENTS],
     focus: &mut usize,
     order: &mut [usize; CLIENTS],
+    what: What,
 ) -> Option<Asked> {
     let Some(slot) = tiles.iter().position(Option::is_none) else {
         nexus_user::log("compositor: the desktop asked for a window and there was no room").ok();
@@ -1593,13 +1644,63 @@ fn open_window(
     // Reported by `start_client` if it fails; a compositor that stopped because
     // a program would not start would be a compositor a missing file could take
     // the screen away with.
-    let tile = start_client(
-        slot,
-        screen.x + GAP + step,
-        screen.y + GAP + step,
-        width,
-        height,
-    )?;
+    let tile = match what {
+        What::Client => start_client(
+            slot,
+            screen.x + GAP + step,
+            screen.y + GAP + step,
+            width,
+            height,
+        )?,
+        What::Browser => {
+            // The network goes with the surface, in the same message. Read and
+            // write and transfer, because it has to ask and be answered and be
+            // given the handle at all -- and not close, so that a browser
+            // cannot take the network away from the program that lent it.
+            let Ok(theirs) = nexus_user::duplicate(
+                NETWORK,
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+            ) else {
+                failed("compositor: FAILED: could not lend the network to a browser");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                BROWSER,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[theirs],
+            )?
+        }
+        What::Terminal => {
+            // The filesystem and a way to start programs. Read, write and
+            // transfer on the first; not close, so a terminal cannot take the
+            // disk away from the program that lent it.
+            let lending =
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
+            let (Ok(files), Ok(spawner), Ok(sound)) = (
+                nexus_user::duplicate(FILESYSTEM, lending),
+                nexus_user::duplicate(SPAWNER, lending),
+                nexus_user::duplicate(SOUND, lending),
+            ) else {
+                failed("compositor: FAILED: could not lend a terminal what it needs");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                TERMINAL,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[files, spawner, sound],
+            )?
+        }
+    };
     if nexus_user::watch(set, tile.channel, channel_key(slot)).is_err()
         || nexus_user::watch(set, tile.process, process_key(slot)).is_err()
     {
@@ -1609,7 +1710,15 @@ fn open_window(
     tiles[slot] = Some(tile);
     raise(order, slot);
     *focus = slot;
-    nexus_user::log("compositor: started a window because someone pressed the desktop").ok();
+    nexus_user::log(&alloc::format!(
+        "{} in slot {slot}, {width}x{height}",
+        match what {
+            What::Client => "compositor: started a window because someone pressed the desktop",
+            What::Browser => "compositor: started a browser, and lent it the network",
+            What::Terminal => "compositor: started a terminal, and lent it the filesystem",
+        }
+    ))
+    .ok();
     Some(Asked::Opened)
 }
 

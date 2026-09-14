@@ -232,16 +232,42 @@ for ($fat = 0; $fat -lt $FatCount; $fat++) {
     Set-U32 -Offset ($offset + 4) -Value ([uint32]0x0FFFFFFF)
 }
 
-# The root directory is one cluster. That bounds how many entries it can hold,
-# which is checked when one is added.
+# A directory is a chain of clusters of 32-byte entries. `$script:DirNext`
+# tracks how many entries each holds and `$script:DirClusters` which clusters
+# they are in, both keyed by the directory's first cluster.
+#
+# It grows. It did not, once: one cluster meant sixteen entries, and the
+# sixteenth program added to the image was the one that turned "make the disk"
+# into "the directory is full". A directory that cannot grow is a limit that
+# shows up as a build failure years after the decision.
+$script:DirNext = @{}
+$script:DirClusters = @{}
+
 $rootCluster = New-ClusterChain -Count 1
 if ($rootCluster -ne 2) { throw "the root directory landed on cluster $rootCluster, not 2" }
 Clear-Range -Offset (Get-ClusterOffset $rootCluster) -Length $ClusterBytes
-
-# A directory is a cluster of 32-byte entries. `$script:DirNext` tracks how full
-# each one is, keyed by its first cluster.
-$script:DirNext = @{}
 $script:DirNext[$rootCluster] = 0
+$script:DirClusters[$rootCluster] = @($rootCluster)
+
+# Add another cluster to a directory's chain, and say which.
+#
+# The FAT entry of what was the last cluster is pointed at the new one, which is
+# the whole of what makes a chain a chain. Allocation is sequential here, so the
+# new cluster is never one already in use.
+function Expand-Directory {
+    param([int]$Directory)
+
+    $clusters = $script:DirClusters[$Directory]
+    $last = $clusters[$clusters.Count - 1]
+    $next = New-ClusterChain -Count 1
+    Clear-Range -Offset (Get-ClusterOffset $next) -Length $ClusterBytes
+    for ($fat = 0; $fat -lt $FatCount; $fat++) {
+        $offset = ($FatStart + $fat * $FatSectors) * $SectorSize + $last * 4
+        Set-U32 -Offset $offset -Value ([uint32]$next)
+    }
+    $script:DirClusters[$Directory] = $clusters + @($next)
+    return $next
+}
 
 function Add-DirectoryEntry {
     param(
@@ -254,15 +280,23 @@ function Add-DirectoryEntry {
     )
 
     $index = $script:DirNext[$Directory]
-    # One cluster per directory, so the capacity is however many 32-byte entries
-    # fit in one. A tree that outgrows it says so rather than overwriting the
-    # cluster after.
-    if ($index -ge $ClusterBytes / 32) {
-        throw "the directory is full at $index entries"
+    $perCluster = [int]($ClusterBytes / 32)
+    # `[math]::Floor` and not `[int]`. PowerShell's `/` on two integers gives a
+    # double, and casting a double to `[int]` *rounds* -- so entry nine of
+    # sixteen became `[int]0.5625`, which is one, and the tenth file added to a
+    # directory was written into a cluster that did not exist yet. The first
+    # cluster then ended in zeroes, which is how FAT says "nothing after this",
+    # and every program past the ninth vanished from the disk.
+    $which = [int][math]::Floor($index / $perCluster)
+    # Another cluster when this one is full, rather than a failure. A directory
+    # is a chain and this is where it grows.
+    while ($which -ge $script:DirClusters[$Directory].Count) {
+        Expand-Directory -Directory $Directory | Out-Null
     }
     $script:DirNext[$Directory] = $index + 1
 
-    $entry = (Get-ClusterOffset $Directory) + $index * 32
+    $cluster = $script:DirClusters[$Directory][$which]
+    $entry = (Get-ClusterOffset $cluster) + ($index % $perCluster) * 32
     Set-Bytes -Offset $entry -Value ([System.Text.Encoding]::ASCII.GetBytes($ShortName))
     Set-Bytes -Offset ($entry + 8) -Value ([System.Text.Encoding]::ASCII.GetBytes($Extension))
     $image[$entry + 11] = $Attributes
@@ -296,6 +330,7 @@ function New-Directory {
     $cluster = New-ClusterChain -Count 1
     Clear-Range -Offset (Get-ClusterOffset $cluster) -Length $ClusterBytes
     $script:DirNext[$cluster] = 0
+    $script:DirClusters[$cluster] = @($cluster)
 
     $parts = Split-ShortName -Name $Name
     Add-DirectoryEntry -Directory $Parent -ShortName $parts[0] -Extension $parts[1] `

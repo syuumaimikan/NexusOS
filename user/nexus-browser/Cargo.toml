@@ -1,0 +1,21 @@
+[package]
+name = "nexus-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A window that fetches a page over HTTP and shows what is in it."
+
+[[bin]]
+name = "nexus-browser"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+nexus-netclient = { path = "../../shared/nexus-netclient" }
+nexus-dns = { path = "../../shared/nexus-dns" }
+nexus-http = { path = "../../shared/nexus-http" }
+nexus-html = { path = "../../shared/nexus-html" }

@@ -14,6 +14,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-browser"
+version = "0.1.0"
+dependencies = [
+ "nexus-dns",
+ "nexus-html",
+ "nexus-http",
+ "nexus-i18n",
+ "nexus-netclient",
+ "nexus-ui",
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-client"
 version = "0.1.0"
 dependencies = [
@@ -37,6 +50,10 @@ name = "nexus-crypto"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-dns"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-find"
 version = "0.1.0"
 dependencies = [
@@ -54,6 +71,14 @@ version = "0.1.0"
 dependencies = [
  "nexus-user",
 ]
+
+[[package]]
+name = "nexus-html"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-http"
+version = "0.1.0"
 
 [[package]]
 name = "nexus-i18n"
@@ -114,6 +139,13 @@ name = "nexus-net"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-netclient"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-pack"
 version = "0.1.0"
 dependencies = [
@@ -146,6 +178,21 @@ version = "0.1.0"
 dependencies = [
  "nexus-config",
  "nexus-i18n",
+ "nexus-time",
+ "nexus-ui",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-shellwords"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-term"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-shellwords",
  "nexus-time",
  "nexus-ui",
  "nexus-user",

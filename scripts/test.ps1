@@ -76,7 +76,7 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
 
         # And the kernel, which needs its own target and core rebuilt for it,
         # and so was left out until it had accumulated a dozen findings nobody
@@ -94,7 +94,7 @@ Invoke-Step 'clippy' {
 Invoke-Step 'host unit tests' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-crypto', '-p', 'nexus-user', '--lib') 'unit tests'
+        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-crypto', '-p', 'nexus-user', '--lib') 'unit tests'
     } finally { Pop-Location }
 }
 
@@ -242,6 +242,7 @@ Invoke-Step 'boot test' {
         'update: demo is now at 1.1.0',
         'init: the machine checked itself for updates',
         'desktop: 0 update(s) waiting, 1 installed this boot',
+        'snd ] played the start-up chime',
         'compositor: the session ended',
         'seconds since 1970',
         'desktop: welcome, nexus',
@@ -547,6 +548,18 @@ Invoke-Step 'updates' {
 
 Invoke-Step 'first-run setup' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-setup.ps1')) 'setup tests'
+}
+
+Invoke-Step 'the terminal' {
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-terminal.ps1')) 'terminal tests'
+}
+
+Invoke-Step 'browsing' {
+    # Needs a machine somebody has set up, because there is no desktop to press
+    # until the wizard has been answered.
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-browser.ps1')) 'browser tests'
 }
 
 Invoke-Step 'input' {
