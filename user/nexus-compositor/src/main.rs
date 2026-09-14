@@ -880,13 +880,32 @@ extern "C" fn main() -> ! {
 /// one; a machine that refused to show a desktop because a decoration failed
 /// would be trading everything for nothing.
 fn start_wallpaper(screen: &Screen) -> Option<Tile> {
-    let Ok(theirs) = nexus_user::duplicate(
-        SETTINGS,
-        nexus_user::rights::READ | nexus_user::rights::TRANSFER,
-    ) else {
+    let reading = nexus_user::rights::READ | nexus_user::rights::TRANSFER;
+    let Ok(theirs) = nexus_user::duplicate(SETTINGS, reading) else {
         nexus_user::log("compositor: no settings to lend the wallpaper; it will draw the default")
             .ok();
         return None;
+    };
+
+    // And the disk, **read-only**, so that a picture or a recording can be put
+    // behind everything. Read and transfer, and neither write nor close: a
+    // wallpaper that could write to the disk would be the program with the
+    // least reason to and the most time in which to.
+    //
+    // It is given the root rather than PICTURES because opening a named child
+    // is what a directory handle is for, and narrowing it here would mean this
+    // program deciding that a wallpaper can only ever come from one place --
+    // which is true today and is the wallpaper's own rule, written in its own
+    // file, where somebody changing it can see it.
+    let lent: alloc::vec::Vec<Handle> = match nexus_user::duplicate(FILESYSTEM, reading) {
+        Ok(files) => alloc::vec![theirs, files],
+        Err(_) => {
+            // Not fatal. Without it the wallpaper draws a pattern, which is
+            // what it did before it could draw anything else.
+            nexus_user::log("compositor: no disk to lend the wallpaper; it can draw patterns only")
+                .ok();
+            alloc::vec![theirs]
+        }
     };
 
     let tile = start_program(
@@ -899,7 +918,7 @@ fn start_wallpaper(screen: &Screen) -> Option<Tile> {
         screen.width,
         screen.usable_height(),
         0,
-        &[theirs],
+        &lent,
     );
     if tile.is_none() {
         nexus_user::log("compositor: the wallpaper would not start; the background stays plain")

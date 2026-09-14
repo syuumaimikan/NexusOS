@@ -3,7 +3,7 @@
     Runs the full NexusOS test suite.
 
 .DESCRIPTION
-    Twenty-one stages, cheapest first, so a failure surfaces as early as possible.
+    Twenty-two stages, cheapest first, so a failure surfaces as early as possible.
 
     The first four run on this machine and take seconds:
 
@@ -32,16 +32,17 @@
      16. the agent
      17. browsing
      18. input, through QEMU's monitor and the same 8042 controller
-     19. the launcher: open it with F3, type two letters that only a
+     19. the wallpaper: put a picture and then a recording behind everything
+     20. the launcher: open it with F3, type two letters that only a
          subsequence match finds, and require the thing named to start
-     20. power: press the buttons that stop the machine, and require it to
+     21. power: press the buttons that stop the machine, and require it to
          stop -- the one stage whose pass condition is that QEMU exits
-     21. injection: break the kernel one way per build -- a real CPU exception,
+     22. injection: break the kernel one way per build -- a real CPU exception,
          a broken TLB shootdown -- and require each to be reported rather than
          resetting the machine
 
 .PARAMETER SkipFaults
-    Skip stage 21, which is the slowest because it boots QEMU six times.
+    Skip stage 22, which is the slowest because it boots QEMU six times.
 #>
 [CmdletBinding()]
 param(
@@ -747,6 +748,13 @@ Invoke-Step 'input' {
     # does nothing.
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-input.ps1')) 'input tests'
+}
+
+Invoke-Step 'the wallpaper' {
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-wallpaper.ps1')) 'wallpaper tests'
 }
 
 Invoke-Step 'the launcher' {

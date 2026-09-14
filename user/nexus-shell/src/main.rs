@@ -704,7 +704,7 @@ fn run(desktop: &mut Desktop) {
             // strip that opened a file fifty times a minute to find the same
             // number would be the polling the rest of this avoids.
             // Left alone when it could not be read.
-            let now = read_look(desktop.settings).unwrap_or(desktop.look);
+            let now = read_look(desktop.settings).unwrap_or_else(|| desktop.look.clone());
             if now != desktop.look {
                 desktop.look = now;
                 stale = true;

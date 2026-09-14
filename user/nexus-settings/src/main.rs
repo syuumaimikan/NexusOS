@@ -261,6 +261,21 @@ impl Settings {
                 alloc::vec!["no".to_string(), "yes".to_string()],
                 "no"
             )),
+            // A name rather than a list. The pictures on a machine are not
+            // something this window can enumerate -- it is lent the settings
+            // directory and nothing else, which is the right shape for what it
+            // does and means this is typed.
+            Item::Row(Row::typed(nexus_look::key::PICTURE, "settings.picture", "")),
+            Item::Row(Row::choice(
+                nexus_look::key::FIT,
+                "settings.fit",
+                alloc::vec![
+                    "fill".to_string(),
+                    "whole".to_string(),
+                    "middle".to_string()
+                ],
+                "fill"
+            )),
             Item::Heading("settings.machine"),
             Item::Row(Row::choice(
                 key::LANGUAGE,
