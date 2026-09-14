@@ -575,6 +575,14 @@ Invoke-Step 'settings' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-settings.ps1')) 'settings tests'
 }
 
+Invoke-Step 'packages' {
+    # The window over the installing machinery, and the two answers a package
+    # manager has to get right: a signature that does not hold is refused, and
+    # one that does is installed and recorded.
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-store.ps1')) 'package tests'
+}
+
 Invoke-Step 'browsing' {
     # Needs a machine somebody has set up, because there is no desktop to press
     # until the wizard has been answered.

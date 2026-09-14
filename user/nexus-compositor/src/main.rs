@@ -278,6 +278,8 @@ mod desk {
     pub const TERMINAL: &[u8] = b"term";
     /// Show this machine its own settings.
     pub const SETTINGS: &[u8] = b"sett";
+    /// Show what there is to install.
+    pub const PACKAGES: &[u8] = b"pkgs";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -388,6 +390,8 @@ const TERMINAL: &[u8] = b"BIN/TERM.ELF";
 const WALLPAPER: &[u8] = b"BIN/WALL.ELF";
 /// And the one that changes the file the other two read.
 const SETTINGS_WINDOW: &[u8] = b"BIN/SET.ELF";
+/// And the one that shows what is installed and installs more.
+const STORE: &[u8] = b"BIN/STORE.ELF";
 /// The program that draws the strip along the bottom and says what a click in
 /// it means.
 const SHELL: &[u8] = b"BIN/SHELL.ELF";
@@ -1613,6 +1617,9 @@ enum What {
     Terminal,
     /// The settings window, which is given the settings directory to write.
     Settings,
+    /// The package window, which is given both the filesystem and the record of
+    /// what is installed.
+    Packages,
 }
 
 /// What reading from the keyboard turned out to be.
@@ -1728,6 +1735,10 @@ fn read_shell(
 
     if message == desk::SETTINGS {
         return open_window(screen, set, tiles, focus, order, What::Settings);
+    }
+
+    if message == desk::PACKAGES {
+        return open_window(screen, set, tiles, focus, order, What::Packages);
     }
 
     if message == desk::QUIT {
@@ -1872,6 +1883,32 @@ fn open_window(
                 &[theirs],
             )?
         }
+        What::Packages => {
+            // The filesystem, because installing writes files, and the settings
+            // directory, because the record of what is installed lives there
+            // and an install that did not update it would be an install the
+            // updater would do again. Two handles and no spawner: this window
+            // installs software and cannot start any.
+            let lending =
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
+            let (Ok(files), Ok(record)) = (
+                nexus_user::duplicate(FILESYSTEM, lending),
+                nexus_user::duplicate(SETTINGS, lending),
+            ) else {
+                failed("compositor: FAILED: could not lend a package window what it needs");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                STORE,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[files, record],
+            )?
+        }
     };
     if nexus_user::watch(set, tile.channel, channel_key(slot)).is_err()
         || nexus_user::watch(set, tile.process, process_key(slot)).is_err()
@@ -1889,6 +1926,7 @@ fn open_window(
             What::Browser => "compositor: started a browser, and lent it the network",
             What::Terminal => "compositor: started a terminal, and lent it the filesystem",
             What::Settings => "compositor: started the settings, and lent them the settings",
+            What::Packages => "compositor: started the packages, and lent them the disk",
         }
     ))
     .ok();

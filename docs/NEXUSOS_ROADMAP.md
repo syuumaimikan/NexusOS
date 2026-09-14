@@ -1659,8 +1659,9 @@ Carried alongside the phases rather than scheduled as one:
 
 The machine boots to a logo, asks who you are, keeps a desktop, fetches a page
 over its own TCP, runs a shell, changes how it looks from a window of its own,
-updates itself and makes a noise. Fifteen test stages, run on a real machine
-under emulation, cover all of it.
+installs signed software and refuses tampered software from another, updates
+itself and makes a noise. Sixteen test stages, run on a real machine under
+emulation, cover all of it.
 
 What follows is an honest list of what has been asked for and is *not* here,
 with the reason and the size of the job. Nothing on it is pretended at anywhere
@@ -1673,7 +1674,7 @@ in the code.
 | ~~Wallpaper and theming~~ | done | A wallpaper program given the bottom surface; the compositor composites it first and never reads a setting. |
 | ~~Japanese input~~ | kana done | Romaji to kana is a table and it is here. Kanji conversion needs a dictionary and a candidate window, and is not. |
 | Damage rectangles on a client's frame | small | A program saying *which* part of its surface changed. An animated wallpaper is a full-screen composite per frame without it, which is why it is capped at four a second. |
-| A package manager window | small | The mechanism exists — `nexus-pkg`, the installer, the updater. What is missing is a window that shows it. |
+| ~~A package manager window~~ | done | A list of what is in `PKG/`, what each one's signature is worth, and how it compares with what is installed — with Enter bound to the same `install` the updater calls. See [packages.md](packages.md). |
 | ~~A settings window~~ | done | A window with one row per key that something actually reads, given the settings directory and nothing else. See [settings.md](settings.md). |
 | A text editor | medium | The terminal's line editing, a file, and a scrollback that can be written into. |
 | Standard output for programs | medium | The thing that would let `ls` stop being built into the terminal. A channel a child inherits, and a pipe. |

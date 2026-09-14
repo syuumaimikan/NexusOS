@@ -211,6 +211,21 @@ name = "nexus-shellwords"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-store"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-i18n",
+ "nexus-install",
+ "nexus-look",
+ "nexus-pkg",
+ "nexus-ui",
+ "nexus-update",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-term"
 version = "0.1.0"
 dependencies = [

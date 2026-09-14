@@ -120,6 +120,8 @@ mod wire {
     pub const TERMINAL: &[u8] = b"term";
     /// Start a window that changes what this machine is.
     pub const SETTINGS: &[u8] = b"sett";
+    /// Start a window that shows what there is to install.
+    pub const PACKAGES: &[u8] = b"pkgs";
     /// End the session.
     pub const QUIT: &[u8] = b"quit";
 }
@@ -237,6 +239,18 @@ impl Desktop {
         )
     }
 
+    /// Where the button that opens the packages is.
+    fn packages(&self) -> Rect {
+        let settings = self.settings();
+        let width = nexus_ui::measure(nexus_i18n::text("shell.packages")) + GAP * 4;
+        Rect::new(
+            settings.x + settings.width + GAP,
+            GAP / 2,
+            width,
+            self.height.saturating_sub(GAP),
+        )
+    }
+
     /// Where the button that ends the session is, and how wide.
     ///
     /// At the far right, which is where a machine's own controls go on every
@@ -259,7 +273,7 @@ impl Desktop {
     /// brought back. A tab that shuffled sideways under the pointer would be a
     /// tab somebody clicked and missed.
     fn tab(&self, slot: usize) -> Rect {
-        let last = self.settings();
+        let last = self.packages();
         let left = last.x + last.width + GAP;
         let available = self
             .width
@@ -730,6 +744,12 @@ fn clicked(desktop: &Desktop, x: u32, y: u32) -> Option<bool> {
             .map(|_| true);
     }
 
+    if desktop.packages().contains(x, y) {
+        return nexus_user::send(COMPOSITOR, wire::PACKAGES, &[])
+            .ok()
+            .map(|_| true);
+    }
+
     if desktop.settings().contains(x, y) {
         return nexus_user::send(COMPOSITOR, wire::SETTINGS, &[])
             .ok()
@@ -839,6 +859,16 @@ fn draw(desktop: &Desktop) {
         settings,
         nexus_i18n::text("shell.settings"),
         Colour::rgb(0xE4, 0xDE, 0xF4),
+    );
+
+    // And the one that opens what there is to install.
+    let packages = desktop.packages();
+    canvas.fill(packages, Colour::rgb(0x2A, 0x20, 0x14));
+    canvas.outline(packages, 1, Colour::rgb(0xA8, 0x8C, 0x54));
+    canvas.text_centred(
+        packages,
+        nexus_i18n::text("shell.packages"),
+        Colour::rgb(0xF4, 0xEA, 0xD4),
     );
 
     for slot in 0..desktop.slots {

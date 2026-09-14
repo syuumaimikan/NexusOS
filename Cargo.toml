@@ -38,6 +38,7 @@ members = [
     "user/nexus-term",
     "user/nexus-wall",
     "user/nexus-settings",
+    "user/nexus-store",
     "user/nexus-setup",
     "user/nexus-idle",
 ]
