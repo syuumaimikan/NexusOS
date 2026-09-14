@@ -1,22 +1,18 @@
 [package]
-name = "nexus-term"
+name = "nexus-wall"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "A terminal window, and a shell to type into it."
+description = "What is behind the windows, and what decides it."
 
 [[bin]]
-name = "nexus-term"
+name = "nexus-wall"
 path = "src/main.rs"
 test = false
 
 [dependencies]
 nexus-user = { path = "../nexus-user" }
 nexus-ui = { path = "../nexus-ui" }
-nexus-i18n = { path = "../../shared/nexus-i18n" }
-nexus-time = { path = "../../shared/nexus-time" }
-nexus-shellwords = { path = "../../shared/nexus-shellwords" }
 nexus-config = { path = "../../shared/nexus-config" }
 nexus-look = { path = "../../shared/nexus-look" }
-nexus-ime = { path = "../../shared/nexus-ime" }

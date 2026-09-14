@@ -50,6 +50,7 @@ use alloc::string::{String, ToString as _};
 use core::panic::PanicInfo;
 
 use nexus_config::{key, Settings};
+use nexus_look::Look;
 use nexus_time::Zone;
 use nexus_ui::{Canvas, Colour, Rect};
 use nexus_user::Handle;
@@ -165,6 +166,12 @@ struct Desktop {
     owner: Option<String>,
     /// The timezone the clock is shown in.
     zone: &'static Zone,
+    /// What this machine picks things out in.
+    ///
+    /// Read once at startup and again whenever the settings change, on the same
+    /// minute tick as the clock -- because somebody changing the accent expects
+    /// the strip to follow the windows, and the windows follow it already.
+    look: Look,
     /// The directory the settings and the update record live in, if this
     /// program was given one.
     settings: Option<Handle>,
@@ -405,6 +412,7 @@ extern "C" fn main() -> ! {
         height: read_u32(&buffer, 4),
         owner,
         zone,
+        look: read_look(settings),
         settings,
         pending: 0,
         installed: 0,
@@ -452,6 +460,16 @@ extern "C" fn main() -> ! {
 /// every failure means the same thing to this program. It has a strip to draw
 /// and it draws it; what it cannot do is report the problem to anyone, since
 /// the thing that would show a message is itself.
+fn read_look(directory: Option<Handle>) -> Look {
+    let Some(directory) = directory else {
+        return Look::default();
+    };
+    match read_text(directory, SETTINGS_NAME) {
+        Some(text) => Look::parse(&text),
+        None => Look::default(),
+    }
+}
+
 fn read_settings(directory: Handle) -> (Option<String>, &'static Zone, Option<String>) {
     let utc = &nexus_time::ZONES[0];
 
@@ -556,20 +574,32 @@ fn run(desktop: &mut Desktop) {
             // updater runs at boot and this is a file, not an event -- and a
             // strip that opened a file fifty times a minute to find the same
             // number would be the polling the rest of this avoids.
+            let now = read_look(desktop.settings);
+            if now != desktop.look {
+                desktop.look = now;
+                stale = true;
+            }
+
             let seen = desktop.updates();
-            if seen != (desktop.pending, desktop.installed) {
+            let changed = seen != (desktop.pending, desktop.installed);
+            if changed {
                 desktop.pending = seen.0;
                 desktop.installed = seen.1;
-                if !said_updates {
-                    said_updates = true;
-                    nexus_user::log(&alloc::format!(
-                        "desktop: {} update(s) waiting, {} installed this boot",
-                        desktop.pending,
-                        desktop.installed
-                    ))
-                    .ok();
-                }
                 stale = true;
+            }
+            // Said on the first look and again whenever it changes, rather than
+            // only on the first *change*. The updater runs while this window is
+            // already up, so the first look is often at a record it has not
+            // written yet -- and a line that only appeared when the number
+            // moved would be missing on a machine that had nothing to install.
+            if changed || !said_updates {
+                said_updates = true;
+                nexus_user::log(&alloc::format!(
+                    "desktop: {} update(s) waiting, {} installed this boot",
+                    desktop.pending,
+                    desktop.installed
+                ))
+                .ok();
             }
             if desktop.now() != desktop.clock {
                 stale = true;
@@ -735,8 +765,17 @@ fn draw(desktop: &Desktop) {
     // first frame.
     let mut canvas = unsafe { Canvas::packed(SURFACE_AT, desktop.width, desktop.height) };
 
-    let ground = Colour::rgb(0x06, 0x0D, 0x1A);
-    let accent = Colour::rgb(0x38, 0x8B, 0xE8);
+    // The strip is a darker version of the background's bottom, so a machine
+    // with a warm wallpaper does not have a cold bar under it; everything that
+    // can be pressed is the accent.
+    let ground = Colour(
+        desktop
+            .look
+            .bottom
+            .towards(nexus_look::Colour::new(0, 0, 0), 90)
+            .packed(),
+    );
+    let accent = Colour(desktop.look.accent.packed());
     let ink = Colour::rgb(0xC8, 0xD4, 0xE8);
 
     canvas.fill(canvas.bounds(), ground);

@@ -17,6 +17,7 @@ nexus-i18n = { path = "../../shared/nexus-i18n" }
 nexus-net = { path = "../../shared/nexus-net" }
 nexus-time = { path = "../../shared/nexus-time" }
 nexus-config = { path = "../../shared/nexus-config" }
+nexus-look = { path = "../../shared/nexus-look" }
 nexus-mm = { path = "../nexus-mm" }
 
 [features]

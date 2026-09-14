@@ -76,7 +76,7 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-look', '-p', 'nexus-ime', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
 
         # And the kernel, which needs its own target and core rebuilt for it,
         # and so was left out until it had accumulated a dozen findings nobody
@@ -94,7 +94,7 @@ Invoke-Step 'clippy' {
 Invoke-Step 'host unit tests' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-crypto', '-p', 'nexus-user', '--lib') 'unit tests'
+        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-look', '-p', 'nexus-ime', '-p', 'nexus-crypto', '-p', 'nexus-user', '--lib') 'unit tests'
     } finally { Pop-Location }
 }
 
@@ -118,6 +118,11 @@ Invoke-Step 'boot test' {
     # about a machine's *first* boot -- the store being seeded from the image,
     # `init` making its directory rather than finding it.
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'run.ps1'), '-Headless', '-Timeout', '600',
+        # The second marker is the *latest* of the things this test looks for,
+        # which is a client finishing its frames. Ending the session on an
+        # earlier one leaves whatever comes after it unreported -- and every
+        # marker below has to have happened by the time the session ends,
+        # because the session ending is what stops the machine.
         '-PressAfter', 'setup: this machine has not been set up;client: drew every frame into a surface it was given',
         '-Press', 'ret ret n e x u s ret p a s s w o r d ret p a s s w o r d ret ret;f10',
         '-Until', 'compositor: the session ended') 'boot'
@@ -243,6 +248,8 @@ Invoke-Step 'boot test' {
         'init: the machine checked itself for updates',
         'desktop: 0 update(s) waiting, 1 installed this boot',
         'snd ] played the start-up chime',
+        'wall: ',
+        'frames of wallpaper from a program it does not read',
         'compositor: the session ended',
         'seconds since 1970',
         'desktop: welcome, nexus',
@@ -553,6 +560,11 @@ Invoke-Step 'first-run setup' {
 Invoke-Step 'the terminal' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-terminal.ps1')) 'terminal tests'
+}
+
+Invoke-Step 'appearance' {
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-appearance.ps1')) 'appearance tests'
 }
 
 Invoke-Step 'browsing' {

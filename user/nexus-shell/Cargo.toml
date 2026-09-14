@@ -17,3 +17,4 @@ nexus-ui = { path = "../nexus-ui" }
 nexus-i18n = { path = "../../shared/nexus-i18n" }
 nexus-time = { path = "../../shared/nexus-time" }
 nexus-config = { path = "../../shared/nexus-config" }
+nexus-look = { path = "../../shared/nexus-look" }

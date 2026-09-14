@@ -1,17 +1,21 @@
 <#
 .SYNOPSIS
-    Opens a terminal from the desktop and types commands into it.
+    Changes how the machine looks, from inside it, and checks that it changed.
 
 .DESCRIPTION
-    The path a person takes: press the button, get a window with a prompt, type
-    something, and have the machine do it. Every step of that crosses a boundary
-    -- the desktop asks the compositor, the compositor starts the program and
-    lends it the filesystem, the kernel routes the keys, the shell reads them
-    and asks the filesystem -- and none of those can be checked from inside any
-    one of them.
+    One command typed at a prompt has to reach four programs: the terminal
+    writes the settings file, the wallpaper notices and redraws, the desktop
+    notices and re-colours its strip, and the compositor -- which is told the
+    accent by the kernel rather than reading it -- keeps the colour it was given
+    until the next session.
 
-    What it types makes a file and reads it back, because that is the shortest
-    command that proves the handle it was lent actually reaches a disk.
+    Nothing tells any of them. They look, on the clock they already have. That
+    is the property worth testing: a machine where changing a setting needs
+    something to be restarted is a machine where settings are a restart.
+
+    It also types Japanese, because the terminal's input method is the other
+    thing a person changes with a keypress and the only way to see from outside
+    that it converted anything is to have the shell echo back what it received.
 
 .PARAMETER Timeout
     How long to wait for each stage, in seconds.
@@ -29,7 +33,7 @@ Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
 $EspDir = Join-Path $BuildDir 'esp'
-$Log = Join-Path $BuildDir 'terminal-test.log'
+$Log = Join-Path $BuildDir 'appearance-test.log'
 
 if (-not (Test-Path (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI'))) {
     throw 'no staged ESP; run build.ps1 first'
@@ -41,11 +45,11 @@ $FirmwareCode = Join-Path $BuildDir 'edk2-x86_64-code.fd'
 if (-not (Test-Path $FirmwareCode)) {
     Copy-Item (Join-Path $QemuDir 'share\edk2-x86_64-code.fd') $FirmwareCode -Force
 }
-$FirmwareVars = Join-Path $BuildDir 'vars-terminal.fd'
+$FirmwareVars = Join-Path $BuildDir 'vars-appearance.fd'
 Copy-Item (Join-Path $QemuDir 'share\edk2-i386-vars.fd') $FirmwareVars -Force
 if (Test-Path $Log) { Remove-Item $Log -Force }
 
-$MonitorPort = Get-Random -Minimum 33000 -Maximum 34999
+$MonitorPort = Get-Random -Minimum 37000 -Maximum 38999
 $QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $Log `
     -MonitorPort $MonitorPort -Headless
@@ -87,20 +91,30 @@ try {
             }
         }
         function Send-Keys {
-            param([string[]]$Keys, [int]$Pause = 150)
+            param([string[]]$Keys, [int]$Pause = 140)
             foreach ($key in $Keys) {
                 $writer.WriteLine("sendkey $key")
                 Start-Sleep -Milliseconds $Pause
             }
         }
+        # A word, one letter per key, since QEMU names keys and not text.
+        function Send-Text {
+            param([string]$Text)
+            $keys = @()
+            foreach ($character in $Text.ToCharArray()) {
+                switch ($character) {
+                    ' ' { $keys += 'spc' }
+                    '.' { $keys += 'dot' }
+                    default { $keys += [string]$character }
+                }
+            }
+            Send-Keys -Keys $keys
+        }
 
-        # The button that opens a terminal sits past the launcher and the one
-        # that opens a page. Driven into the corner first, where the pointer
-        # clamps, so nothing here has to know where it was.
-        Write-Host '==> Pressing the button that opens a terminal' -ForegroundColor Cyan
+        Write-Host '==> Opening a terminal' -ForegroundColor Cyan
         Move-Pointer -Dx -60 -Dy 60 -Steps 40 -Pause 20
         Move-Pointer -Dx 0 -Dy -3 -Steps 5
-        Move-Pointer -Dx 20 -Dy 0 -Steps 8      # x about 160: past Open and Web
+        Move-Pointer -Dx 20 -Dy 0 -Steps 8
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')
@@ -109,25 +123,28 @@ try {
             throw 'the terminal never started'
         }
 
-        # And type at it. A file written and read back is the shortest command
-        # that proves the directory handle reaches a real disk.
-        Write-Host '==> Typing at the prompt' -ForegroundColor Cyan
-        Send-Keys @('h', 'e', 'l', 'p', 'ret')
-        Send-Keys @('l', 's', 'ret')
-        Send-Keys @('w', 'r', 'i', 't', 'e', 'spc', 'n', 'o', 't', 'e', 'spc', 'h', 'i', 'ret')
-        Send-Keys @('c', 'a', 't', 'spc', 'n', 'o', 't', 'e', 'ret')
-        Send-Keys @('u', 'p', 't', 'i', 'm', 'e', 'ret')
-        Send-Keys @('b', 'e', 'e', 'p', 'ret')
-        # And Japanese. The command word is typed *before* the input method is
-        # turned on, because `echo` in kana is not a command -- which is correct
-        # behaviour and was a mistake in this test before it was a feature of
-        # the shell.
-        Send-Keys @('e', 'c', 'h', 'o', 'spc')
+        Write-Host '==> Changing how the machine looks' -ForegroundColor Cyan
+        Send-Text 'look'
+        Send-Keys @('ret')
+        Send-Text 'set look.style stars'
+        Send-Keys @('ret')
+        Send-Text 'set look.accent 40d090'
+        Send-Keys @('ret')
+
+        # The wallpaper looks every two seconds and the desktop on its minute
+        # tick; both are waited for rather than slept through.
+        if (-not (Wait-For -Text 'wall: the look changed to stars' -Seconds 60)) {
+            $failures += 'the wallpaper never noticed the setting'
+        }
+
+        # The command word is typed *before* the input method is turned on,
+        # because `echo` in kana is not a command -- which is correct behaviour
+        # and was a mistake in this test before it was a feature of the shell.
+        Write-Host '==> Typing Japanese' -ForegroundColor Cyan
+        Send-Text 'echo '
         Send-Keys @('f2')
-        Send-Keys @('k', 'o', 'n', 'n', 'i', 'c', 'h', 'i', 'h', 'a', 'ret')
-        Send-Keys @('f2')
-        Send-Keys @('f2')
-        Send-Keys @('n', 'o', 'p', 'e', 'ret')
+        Send-Text 'konnichiha'
+        Send-Keys @('ret')
         Start-Sleep -Seconds 3
     } finally {
         $client.Close()
@@ -142,18 +159,12 @@ try {
 $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
 
 foreach ($expected in @(
-        'compositor: started a terminal, and lent it the filesystem',
-        'term: a terminal, with a shell in it',
-        'term: ran help',
-        'term: ran ls',
-        'term: ran write',
-        'term: ran cat',
-        'term: ran uptime',
-        'term: ran beep',
+        'wall: 1920x1164 behind the windows, gradient',
+        'term: ran look',
+        'term: ran set',
+        'wall: the look changed to stars',
         'term: typing now makes ',
-        'term: ran echo',
-        'term: ran nope',
-        'snd ] played the start-up chime'
+        'term: ran echo'
     )) {
     if ($output.Contains($expected)) {
         Write-Host "    ok   $expected" -ForegroundColor DarkGray
@@ -162,13 +173,13 @@ foreach ($expected in @(
     }
 }
 
-if ($output.Contains('term: PANIC')) { $failures += 'the terminal panicked' }
-if ($output.Contains('term: FAILED')) { $failures += 'the terminal reported a failure' }
-if ($output.Contains('KERNEL PANIC')) { $failures += 'the kernel panicked' }
+foreach ($bad in @('wall: PANIC', 'term: PANIC', 'KERNEL PANIC', 'wall: FAILED')) {
+    if ($output.Contains($bad)) { $failures += "saw $bad" }
+}
 
 Write-Host ''
 if ($failures.Count -eq 0) {
-    Write-Host 'Terminal tests passed.' -ForegroundColor Green
+    Write-Host 'Appearance tests passed.' -ForegroundColor Green
     exit 0
 } else {
     foreach ($failure in $failures) {

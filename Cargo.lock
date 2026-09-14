@@ -92,6 +92,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-ime"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-index"
 version = "0.1.0"
 
@@ -118,6 +122,7 @@ dependencies = [
  "nexus-config",
  "nexus-font",
  "nexus-i18n",
+ "nexus-look",
  "nexus-mm",
  "nexus-net",
  "nexus-time",
@@ -125,6 +130,10 @@ dependencies = [
 
 [[package]]
 name = "nexus-linux-example"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-look"
 version = "0.1.0"
 
 [[package]]
@@ -178,6 +187,7 @@ version = "0.1.0"
 dependencies = [
  "nexus-config",
  "nexus-i18n",
+ "nexus-look",
  "nexus-time",
  "nexus-ui",
  "nexus-user",
@@ -191,7 +201,10 @@ version = "0.1.0"
 name = "nexus-term"
 version = "0.1.0"
 dependencies = [
+ "nexus-config",
  "nexus-i18n",
+ "nexus-ime",
+ "nexus-look",
  "nexus-shellwords",
  "nexus-time",
  "nexus-ui",
@@ -229,4 +242,14 @@ name = "nexus-user"
 version = "0.1.0"
 dependencies = [
  "nexus-mm",
+]
+
+[[package]]
+name = "nexus-wall"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-look",
+ "nexus-ui",
+ "nexus-user",
 ]

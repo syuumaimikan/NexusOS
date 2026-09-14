@@ -1282,7 +1282,7 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
     // *says* is the business of whoever displays it.
     let configured = is_configured();
 
-    let mut message = [0u8; 36];
+    let mut message = [0u8; 40];
     for (index, value) in [
         x,
         y,
@@ -1293,6 +1293,7 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
         info.width,
         info.height,
         u32::from(configured),
+        accent_colour(),
     ]
     .iter()
     .enumerate()
@@ -1598,6 +1599,28 @@ unsafe fn system_v_stack(stack: u64, name: &str) -> u64 {
 /// file, an unreadable one, a machine with no disk. Guessing the other way would
 /// skip setup on a machine that has never had any, which means no account and no
 /// password on something that then carries on as though it were configured.
+fn settings_text() -> Option<alloc::string::String> {
+    let root = fs::store::root().ok()?;
+    let folder = fs::store::open_child(&root, "system").ok()?;
+    let file = fs::store::open_child(&folder, "settings.txt").ok()?;
+    let bytes = fs::store::read_node(&file).ok()?;
+    alloc::string::String::from_utf8(bytes).ok()
+}
+
+/// What colour this machine picks things out in.
+///
+/// Read here because the compositor draws title bars and focus rings and the
+/// compositor does not read the settings: it is handed the answer, as one
+/// number, in the same message that hands it the framebuffer. A compositor that
+/// opened the settings file would be a compositor with an opinion about what a
+/// setting means, which is the thing this system keeps out of it.
+fn accent_colour() -> u32 {
+    settings_text().map_or_else(
+        || nexus_look::Look::default().accent.packed(),
+        |text| nexus_look::Look::parse(&text).accent.packed(),
+    )
+}
+
 fn is_configured() -> bool {
     let Ok(root) = fs::store::root() else {
         return false;

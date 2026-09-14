@@ -1669,12 +1669,14 @@ in the code.
 
 | What | Size | What it needs |
 | --- | --- | --- |
-| Wallpaper and theming | small | A wallpaper program given the bottom surface; the compositor composites it first. Policy stays out of the compositor. |
-| Japanese input | medium | Romaji to kana is a table. Kanji conversion needs a dictionary and a candidate window; the table is the easy half. |
+| ~~Wallpaper and theming~~ | done | A wallpaper program given the bottom surface; the compositor composites it first and never reads a setting. |
+| ~~Japanese input~~ | kana done | Romaji to kana is a table and it is here. Kanji conversion needs a dictionary and a candidate window, and is not. |
+| Damage rectangles on a client's frame | small | A program saying *which* part of its surface changed. An animated wallpaper is a full-screen composite per frame without it, which is why it is capped at four a second. |
 | A package manager window | small | The mechanism exists — `nexus-pkg`, the installer, the updater. What is missing is a window that shows it. |
-| A settings window | small | Everything it would set is already a key in `system/settings.txt`. |
+| A settings window | small | Everything it would set is already a key in `system/settings.txt`, and the terminal's `set` already writes them. |
 | A text editor | medium | The terminal's line editing, a file, and a scrollback that can be written into. |
 | Standard output for programs | medium | The thing that would let `ls` stop being built into the terminal. A channel a child inherits, and a pipe. |
+| A real audio card | medium | AC'97 or Intel HD Audio: a DMA engine, a ring of buffers and a mixer. The speaker is one bit and says so. |
 | Loadable drivers | large | The kernel has no module loader, no driver ABI and no way to revoke one. Doing it badly is worse than not doing it. |
 
 ### Not feasible as asked, and why

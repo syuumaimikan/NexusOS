@@ -78,8 +78,15 @@ mod key {
     pub const ENTER: u8 = 3;
     pub const ESCAPE: u8 = 4;
     pub const TAB: u8 = 5;
+    pub const FUNCTION: u8 = 6;
     pub const LANGUAGE: u8 = 7;
     pub const MOVE: u8 = 8;
+
+    /// The function key that changes what typing produces.
+    ///
+    /// F2, because F1 is the kernel's own language switch and a key that two
+    /// things listen to is a key that does two things nobody asked for.
+    pub const SCRIPT: u32 = 2;
     pub const SIZE: usize = 5;
 
     pub const UP: u32 = 0;
@@ -143,6 +150,8 @@ struct Terminal {
     recalled: Option<usize>,
     /// How far the view is scrolled back, in lines from the bottom.
     scrolled: usize,
+    /// Turns romaji into kana, when it is asked to.
+    ime: nexus_ime::Ime,
 }
 
 #[unsafe(naked)]
@@ -205,6 +214,7 @@ extern "C" fn main() -> ! {
         history: Vec::new(),
         recalled: None,
         scrolled: 0,
+        ime: nexus_ime::Ime::new(),
     };
 
     terminal.note(nexus_i18n::text("term.welcome"));
@@ -329,9 +339,16 @@ impl Terminal {
         self.print(text, Kindness::Trouble);
     }
 
-    /// What the prompt looks like: where this shell is.
+    /// What the prompt looks like: where this shell is, and what typing makes.
+    ///
+    /// The script is only shown when it is not the plain one, so a machine
+    /// nobody is typing Japanese on has a prompt with nothing extra in it.
     fn prompt(&self) -> String {
-        format!("/{}> ", self.path.join("/"))
+        let here = self.path.join("/");
+        match self.ime.script() {
+            nexus_ime::Script::Direct => format!("/{here}> "),
+            script => format!("[{}] /{here}> ", script.name()),
+        }
     }
 
     // -- keys -----------------------------------------------------------------
@@ -348,17 +365,43 @@ impl Terminal {
                 }
                 true
             }
+            key::FUNCTION if value == key::SCRIPT => {
+                // Whatever was half-typed goes into the line rather than being
+                // thrown away: the letters were typed, and a mode change that
+                // ate them would be a mode change that loses work.
+                let left = self.ime.cycle();
+                self.insert(&left);
+                let said =
+                    nexus_i18n::format("term.script", &[("script", &self.ime.script().name())]);
+                self.note(&said);
+                // Said on the log as well as in the window. What the window
+                // shows is for the person typing; this is the only way anything
+                // outside the machine can tell that the key arrived and did
+                // something -- and "did the keyboard reach the program" is
+                // exactly the question a test about typing has to answer.
+                nexus_user::log(&format!(
+                    "term: typing now makes {}",
+                    self.ime.script().name()
+                ))
+                .ok();
+                true
+            }
             key::CHARACTER => {
                 let Some(character) = char::from_u32(value) else {
                     return false;
                 };
-                let at = self.byte_of(self.caret);
-                self.typing.insert(at, character);
-                self.caret += 1;
+                let output = self.ime.push(character);
+                self.insert(&output.committed);
                 self.recalled = None;
                 true
             }
             key::BACKSPACE => {
+                // The romaji being decided first, which is what backspace does
+                // in every input method: it un-types the letters before it
+                // touches the kana they would have become.
+                if self.ime.backspace() {
+                    return true;
+                }
                 if self.caret == 0 {
                     return false;
                 }
@@ -368,6 +411,8 @@ impl Terminal {
                 true
             }
             key::ENTER => {
+                let left = self.ime.finish();
+                self.insert(&left);
                 let line = core::mem::take(&mut self.typing);
                 self.caret = 0;
                 self.recalled = None;
@@ -383,6 +428,7 @@ impl Terminal {
                 true
             }
             key::ESCAPE => {
+                self.ime.clear();
                 self.typing.clear();
                 self.caret = 0;
                 self.recalled = None;
@@ -464,6 +510,16 @@ impl Terminal {
         }
     }
 
+    /// Put text in at the caret, and leave the caret after it.
+    fn insert(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let at = self.byte_of(self.caret);
+        self.typing.insert_str(at, text);
+        self.caret += text.chars().count();
+    }
+
     /// Where a character position is, in bytes.
     ///
     /// Not the same number the moment anything is typed in Japanese, and
@@ -521,6 +577,8 @@ impl Terminal {
             "run" => self.start(&words),
             "date" => self.date(),
             "beep" => self.beep(words.argument(0), words.argument(1)),
+            "set" => self.set(words.argument(0), words.argument(1)),
+            "look" => self.look(),
             "uptime" => {
                 let milliseconds = nexus_user::uptime();
                 let text = nexus_i18n::format(
@@ -564,6 +622,8 @@ impl Terminal {
             "term.help.echo",
             "term.help.date",
             "term.help.beep",
+            "term.help.set",
+            "term.help.look",
             "term.help.uptime",
             "term.help.history",
             "term.help.clear",
@@ -940,6 +1000,82 @@ impl Terminal {
         self.note(&said);
     }
 
+    /// Where the machine's own settings live, from the root this shell holds.
+    ///
+    /// Opened from the root each time rather than kept, because a shell that
+    /// held it open would be a shell that stops the settings file from being
+    /// replaced -- which is exactly what changing a setting does.
+    fn system(&self) -> Option<Handle> {
+        nexus_user::open(self.root?, "system").ok()
+    }
+
+    /// `set <key> <value>`
+    ///
+    /// Changes one line of the settings file and leaves the rest alone. Written
+    /// through the same parser the rest of the system reads it with, so a value
+    /// this accepts is a value everything else will.
+    fn set(&mut self, key: Option<&str>, value: Option<&str>) {
+        let (Some(key), Some(value)) = (key, value) else {
+            self.trouble(nexus_i18n::text("term.needsetting"));
+            return;
+        };
+        let Some(directory) = self.system() else {
+            self.trouble(nexus_i18n::text("term.nosettings"));
+            return;
+        };
+
+        let mut settings = match read_text(directory, SETTINGS_NAME) {
+            Some(text) => nexus_config::Settings::parse(&text),
+            None => nexus_config::Settings::new(),
+        };
+        settings.set(key, value);
+        let written = write_text(directory, SETTINGS_NAME, &settings.to_text());
+        nexus_user::close(directory).ok();
+
+        match written {
+            Ok(()) => {
+                let said = nexus_i18n::format("term.setting", &[("key", &key), ("value", &value)]);
+                self.note(&said);
+            }
+            Err(why) => self.trouble(&why),
+        }
+    }
+
+    /// `look`
+    ///
+    /// What the machine looks like, and what it could look like. Here rather
+    /// than in a window of its own because the shell is where somebody already
+    /// is when they want to change it, and `set look.style stars` is shorter
+    /// than anything a window would ask them to click.
+    fn look(&mut self) {
+        let Some(directory) = self.system() else {
+            self.trouble(nexus_i18n::text("term.nosettings"));
+            return;
+        };
+        let look = match read_text(directory, SETTINGS_NAME) {
+            Some(text) => nexus_look::Look::parse(&text),
+            None => nexus_look::Look::default(),
+        };
+        nexus_user::close(directory).ok();
+
+        let styles: Vec<&str> = nexus_look::Style::ALL
+            .iter()
+            .map(|style| style.name())
+            .collect();
+        let text = nexus_i18n::format(
+            "term.look",
+            &[
+                ("style", &look.style.name()),
+                ("top", &look.top.to_text()),
+                ("bottom", &look.bottom.to_text()),
+                ("accent", &look.accent.to_text()),
+            ],
+        );
+        self.plain(&text);
+        let choices = nexus_i18n::format("term.look.styles", &[("styles", &styles.join(" "))]);
+        self.note(&choices);
+    }
+
     /// `beep`
     ///
     /// A frequency and a length, both optional. What it proves is that a
@@ -1055,6 +1191,10 @@ impl Terminal {
         if self.caret >= self.typing.chars().count() {
             current.push('\u{2588}');
         }
+        // The letters the input method has not decided about yet, after the
+        // caret. Shown because they have been typed and are not in the line:
+        // without them the keyboard would look like it was dropping letters.
+        current.push_str(self.ime.pending());
         for piece in nexus_ui::wrap(&current, width) {
             rows.push((piece.to_string(), typed));
         }
@@ -1077,6 +1217,45 @@ impl Terminal {
             canvas.text_centred(strip, &text, ground);
         }
     }
+}
+
+/// What the settings file is called.
+const SETTINGS_NAME: &str = "settings.txt";
+
+/// A whole text file out of a directory, if it is there and readable.
+fn read_text(directory: Handle, name: &str) -> Option<String> {
+    let file = nexus_user::open(directory, name).ok()?;
+    let size = nexus_user::size(file).unwrap_or(0).min(MAX_FILE);
+    let mut bytes = alloc::vec![0u8; size];
+    let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
+    nexus_user::close(file).ok();
+    bytes.truncate(read);
+    String::from_utf8(bytes).ok()
+}
+
+/// Replace a text file with this content.
+fn write_text(directory: Handle, name: &str, text: &str) -> Result<(), String> {
+    // Removed first: the filesystem has no truncate, so a shorter file written
+    // over a longer one would keep the old ending.
+    match nexus_user::remove(directory, name) {
+        Ok(()) | Err(nexus_user::Error::NotFound) => {}
+        Err(error) => return Err(format!("{name}: {error}")),
+    }
+    let file = nexus_user::create(directory, name, Kind::File)
+        .map_err(|error| format!("{name}: {error}"))?;
+    let contents = text.as_bytes();
+    let mut written = 0;
+    while written < contents.len() {
+        match nexus_user::write_at(file, written as u64, &contents[written..]) {
+            Ok(0) | Err(_) => {
+                nexus_user::close(file).ok();
+                return Err(format!("{name}: the write stopped at {written} bytes"));
+            }
+            Ok(count) => written += count,
+        }
+    }
+    nexus_user::close(file).ok();
+    Ok(())
 }
 
 /// Read a little-endian `u32` out of a message.

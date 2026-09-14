@@ -11,6 +11,8 @@ members = [
     "shared/nexus-update",
     "shared/nexus-netclient",
     "shared/nexus-shellwords",
+    "shared/nexus-look",
+    "shared/nexus-ime",
     "shared/nexus-dns",
     "shared/nexus-http",
     "shared/nexus-html",
@@ -33,6 +35,7 @@ members = [
     "user/nexus-update",
     "user/nexus-browser",
     "user/nexus-term",
+    "user/nexus-wall",
     "user/nexus-setup",
     "user/nexus-idle",
 ]

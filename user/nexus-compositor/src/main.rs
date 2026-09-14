@@ -168,6 +168,8 @@ const KEY_POINTER: u64 = 0xFFFE;
 /// And the desktop's, whose channel and process are watched like a client's.
 const KEY_SHELL: u64 = 0xFFFD;
 const KEY_SHELL_ENDED: u64 = 0xFFFC;
+/// The wallpaper's channel, which carries only "I have drawn".
+const KEY_WALL: u64 = 0xFFFB;
 
 /// The pointer, and what it is over.
 ///
@@ -312,6 +314,27 @@ const SURFACE_STRIDE: usize = 0x0200_0000;
 /// The largest a surface may be, which is what bounds how large a window is.
 const MAX_SURFACE: usize = SURFACE_STRIDE / 2;
 
+/// The colour this machine picks things out in.
+///
+/// Set once, from the message that hands over the framebuffer. A static rather
+/// than a field because the three places that draw chrome are free functions --
+/// they take a tile and a rectangle, not the whole of this program's state --
+/// and threading one colour through all of them would be threading it for the
+/// sake of avoiding a word.
+static ACCENT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x0038_8BE8);
+
+/// What that colour is, and shades of it.
+///
+/// Every piece of chrome is the same hue at a different weight, so a machine
+/// with a green accent has a green title bar and a green focus ring rather than
+/// a green button on a blue window.
+fn accent(weight: u8) -> u32 {
+    let colour = ACCENT.load(core::sync::atomic::Ordering::Relaxed);
+    let (red, green, blue) = ((colour >> 16) & 0xFF, (colour >> 8) & 0xFF, colour & 0xFF);
+    let weight = u32::from(weight);
+    ((red * weight / 255) << 16) | ((green * weight / 255) << 8) | (blue * weight / 255)
+}
+
 /// The interface language the kernel last announced, or `NO_LANGUAGE`.
 ///
 /// Remembered because it is a fact about the machine and it is announced as an
@@ -359,6 +382,8 @@ const SETUP: &[u8] = b"BIN/SETUP.ELF";
 const BROWSER: &[u8] = b"BIN/BROWSE.ELF";
 /// And the one with a prompt in it, which is the only client given the disk.
 const TERMINAL: &[u8] = b"BIN/TERM.ELF";
+/// And the one that draws what is behind everything else.
+const WALLPAPER: &[u8] = b"BIN/WALL.ELF";
 /// The program that draws the strip along the bottom and says what a click in
 /// it means.
 const SHELL: &[u8] = b"BIN/SHELL.ELF";
@@ -512,6 +537,11 @@ impl Region {
 /// The whole of the rectangle this program owns.
 fn everything(screen: &Screen) -> Region {
     Region::of(screen.x, screen.y, screen.width, screen.height)
+}
+
+/// Where the wallpaper is: everything above the strip.
+fn region_of_wallpaper(screen: &Screen) -> Region {
+    Region::of(screen.x, screen.y, screen.width, screen.usable_height())
 }
 
 /// The strip along the bottom.
@@ -717,6 +747,12 @@ extern "C" fn main() -> ! {
         finish();
     }
 
+    // What is behind the windows. Started first, so that the first frame
+    // anything draws already has something under it -- and given a surface the
+    // size of the area windows may occupy, because a wallpaper that included
+    // the strip would be a wallpaper drawn over by the desktop every minute.
+    let mut wallpaper = start_wallpaper(&screen);
+
     let mut tiles: [Option<Tile>; CLIENTS] = [const { None }; CLIENTS];
     for (index, slot) in tiles.iter_mut().enumerate().take(STARTED) {
         let x = screen.x + GAP + (tile_width + GAP) * index as u32;
@@ -768,8 +804,43 @@ extern "C" fn main() -> ! {
         }
     };
 
-    serve(&screen, &mut tiles, &mut shell);
+    serve(&screen, &mut tiles, &mut shell, &mut wallpaper);
     finish()
+}
+
+/// Start the program that draws the background.
+///
+/// Not fatal if it will not start. A machine with no wallpaper is a machine
+/// with a plain background, which is what this program painted before there was
+/// one; a machine that refused to show a desktop because a decoration failed
+/// would be trading everything for nothing.
+fn start_wallpaper(screen: &Screen) -> Option<Tile> {
+    let Ok(theirs) = nexus_user::duplicate(
+        SETTINGS,
+        nexus_user::rights::READ | nexus_user::rights::TRANSFER,
+    ) else {
+        nexus_user::log("compositor: no settings to lend the wallpaper; it will draw the default")
+            .ok();
+        return None;
+    };
+
+    let tile = start_program(
+        WALLPAPER,
+        // Past every window and past the desktop, so its surface does not sit
+        // where one of theirs will go.
+        CLIENTS + 2,
+        screen.x,
+        screen.y,
+        screen.width,
+        screen.usable_height(),
+        0,
+        &[theirs],
+    );
+    if tile.is_none() {
+        nexus_user::log("compositor: the wallpaper would not start; the background stays plain")
+            .ok();
+    }
+    tile
 }
 
 /// Run the first-run wizard, and wait for it.
@@ -941,6 +1012,14 @@ fn take_the_display() -> Option<Screen> {
         configured: received.bytes >= 36 && read_u32(&buffer, 32) != 0,
     };
 
+    // What this machine picks things out in, read by the kernel out of the
+    // settings and handed over as one number. This program does not open the
+    // settings file: a compositor with an opinion about what a setting means is
+    // a compositor deciding what a desktop looks like.
+    if received.bytes >= 40 {
+        ACCENT.store(read_u32(&buffer, 36), core::sync::atomic::Ordering::Relaxed);
+    }
+
     if screen.bytes_per_pixel != 4 {
         failed("compositor: FAILED: this program only understands 32-bit pixels");
         return None;
@@ -1105,7 +1184,12 @@ fn start_program(
 /// One wait over every client's channel and every client's process. A client
 /// saying it has drawn and a client dying arrive the same way, which is the
 /// only arrangement in which neither can be starved by the other.
-fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Option<Tile>) {
+fn serve(
+    screen: &Screen,
+    tiles: &mut [Option<Tile>; CLIENTS],
+    shell: &mut Option<Tile>,
+    wallpaper: &mut Option<Tile>,
+) {
     let Ok(set) = nexus_user::wait_set() else {
         failed("compositor: FAILED: could not make a wait set");
         return;
@@ -1129,6 +1213,16 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
             || nexus_user::watch(set, shell.process, KEY_SHELL_ENDED).is_err()
         {
             failed("compositor: FAILED: could not watch the desktop");
+            return;
+        }
+    }
+
+    if let Some(wallpaper) = wallpaper.as_ref() {
+        // Its channel only. Whether the *process* has ended does not matter:
+        // a wallpaper that stopped leaves its last frame on screen, which is a
+        // background, and there is nothing to rearrange when it goes.
+        if nexus_user::watch(set, wallpaper.channel, KEY_WALL).is_err() {
+            failed("compositor: FAILED: could not watch the wallpaper");
             return;
         }
     }
@@ -1195,6 +1289,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
         screen,
         tiles,
         shell,
+        wallpaper,
         &order,
         focus,
         &mut cursor,
@@ -1208,6 +1303,8 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
     // somebody is using is the middle of the session and not the end of it.
     let mut leaving = false;
     let mut summarised = false;
+    // How many frames the wallpaper has drawn, for the summary.
+    let mut painted = 0u32;
 
     // Bounded, so a client that neither draws nor dies cannot hang the machine.
     // The bound is a backstop and not a schedule, and it is large because this
@@ -1317,6 +1414,34 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                 continue;
             }
 
+            if *key == KEY_WALL {
+                // It has drawn. Everything above it has to be drawn again over
+                // the part that changed, which is what `repaint` does anyway --
+                // so the damage is the wallpaper's rectangle and the order
+                // takes care of the rest.
+                let mut message = [0u8; 32];
+                let mut none = [Handle(0); 1];
+                match wallpaper
+                    .as_ref()
+                    .map(|tile| nexus_user::receive(tile.channel, &mut message, &mut none))
+                {
+                    Some(Ok(_)) => {
+                        if let Some(tile) = wallpaper.as_mut() {
+                            tile.frames += 1;
+                            if nexus_user::send(tile.channel, b"shown", &[]).is_err() {
+                                nexus_user::unwatch(set, KEY_WALL).ok();
+                            }
+                        }
+                        painted += 1;
+                        pending = pending.union(region_of_wallpaper(screen));
+                    }
+                    _ => {
+                        nexus_user::unwatch(set, KEY_WALL).ok();
+                    }
+                }
+                continue;
+            }
+
             if *key == KEY_SHELL_ENDED {
                 // The desktop has gone. The windows have not, and a compositor
                 // that stopped with them on screen would be throwing away
@@ -1391,6 +1516,7 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
                 screen,
                 tiles,
                 shell,
+                wallpaper,
                 &order,
                 focus,
                 &mut cursor,
@@ -1401,7 +1527,12 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
         }
     }
 
-    for tile in tiles.iter().flatten().chain(shell.iter()) {
+    for tile in tiles
+        .iter()
+        .flatten()
+        .chain(shell.iter())
+        .chain(wallpaper.iter())
+    {
         nexus_user::close(tile.surface).ok();
         nexus_user::close(tile.channel).ok();
         nexus_user::close(tile.process).ok();
@@ -1430,6 +1561,12 @@ fn serve(screen: &Screen, tiles: &mut [Option<Tile>; CLIENTS], shell: &mut Optio
     }
     if opened > 0 {
         nexus_user::log("compositor: started a program because the desktop asked").ok();
+    }
+    if painted > 0 {
+        nexus_user::log(&alloc::format!(
+            "compositor: composited {painted} frames of wallpaper from a program it does not read"
+        ))
+        .ok();
     }
     nexus_user::log("compositor: the session ended").ok();
 }
@@ -2183,6 +2320,7 @@ fn repaint(
     screen: &Screen,
     tiles: &[Option<Tile>; CLIENTS],
     shell: &Option<Tile>,
+    wallpaper: &Option<Tile>,
     order: &[usize; CLIENTS],
     focus: usize,
     cursor: &mut Pointer,
@@ -2217,6 +2355,10 @@ fn repaint(
     // so the cursor is forgotten rather than restored.
     cursor.drawn = None;
 
+    // The background. A colour underneath in case the wallpaper has not drawn
+    // yet, and then the wallpaper over it -- which is one program's surface
+    // composited exactly as a window's is, by a compositor that has no idea
+    // what is in it.
     fill(
         screen,
         screen.x,
@@ -2225,6 +2367,9 @@ fn repaint(
         screen.height,
         BACKGROUND,
     );
+    if let Some(wallpaper) = wallpaper {
+        composite(screen, wallpaper);
+    }
 
     for &index in order {
         let Some(tile) = tiles.get(index).and_then(Option::as_ref) else {
@@ -2270,7 +2415,7 @@ fn repaint(
 /// and does not say so is a corner nobody grabs, and one that is grabbed by
 /// accident is worse.
 fn grip(screen: &Screen, tile: &Tile, focused: bool) {
-    let colour = if focused { 0x0088_B4E8 } else { 0x0038_4A60 };
+    let colour = if focused { accent(220) } else { accent(90) };
     for line in 1..4u32 {
         let inset = line * 3;
         if inset + 1 >= tile.width || inset + 1 >= tile.height {
@@ -2319,7 +2464,7 @@ fn fill(screen: &Screen, x: u32, y: u32, width: u32, height: u32, colour: u32) {
 /// is also what there is to take hold of -- a window with no bar is a window
 /// that cannot be picked up without picking up whatever is inside it.
 fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
-    let colour = if focused { 0x0021_5C99 } else { 0x0018_2334 };
+    let colour = if focused { accent(150) } else { accent(52) };
     fill(
         screen,
         tile.x,
@@ -2354,7 +2499,7 @@ fn read_i32(buffer: &[u8], offset: usize) -> i32 {
 /// draw, cannot draw, and cannot remove -- a client that could paint its own
 /// focus ring could claim focus it does not have.
 fn outline(screen: &Screen, tile: &Tile, focused: bool) {
-    let colour = if focused { 0x0046_C8FF } else { 0x0020_2C3C };
+    let colour = if focused { accent(255) } else { accent(60) };
 
     for row in 0..tile.height {
         let edge = row < 2 || row + 2 >= tile.height;
