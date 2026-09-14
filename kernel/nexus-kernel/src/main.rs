@@ -875,16 +875,29 @@ fn self_test() {
     }
 
     selftest::run();
-    memory_self_test();
-    heap_self_test();
-    scheduler_self_test();
-    tlb_self_test();
-    ipc_self_test();
-    process_self_test();
-    waitset_self_test();
-    disk_self_test();
-    filesystem_self_test();
-    nexusfs_self_test();
+
+    // Named here rather than inside each test, because what this buys is only
+    // worth anything when a test does not return: a machine that goes silent
+    // between two of them otherwise has no last known position, and the line
+    // before the silence belongs to whichever test happened to print last.
+    //
+    // Every one of these has been seen to stop a boot at some point in this
+    // repository's history. One of them did it once in seven boots.
+    for (name, run) in [
+        ("memory", memory_self_test as fn()),
+        ("the heap", heap_self_test),
+        ("the scheduler", scheduler_self_test),
+        ("TLB shootdown", tlb_self_test),
+        ("IPC", ipc_self_test),
+        ("processes", process_self_test),
+        ("wait sets", waitset_self_test),
+        ("the disk", disk_self_test),
+        ("the filesystem", filesystem_self_test),
+        ("NexusFS", nexusfs_self_test),
+    ] {
+        kprintln!("[test] begin {name}");
+        run();
+    }
 }
 
 /// Bring up the system's own filesystem, and prove it works.
@@ -2106,6 +2119,20 @@ fn tlb_self_test() {
     deadline = arch::time::ticks() + 2000;
     while tlb_test::RUNNING.load(Ordering::Relaxed) > 0 && arch::time::ticks() < deadline {
         sched::sleep_ms(1);
+    }
+
+    // A reader that has not stopped is a reader still dereferencing this page.
+    // Unmapping it under one would fault on another processor; handing its
+    // frames back would give the allocator memory somebody is still reading,
+    // which is precisely the corruption this test exists to detect and would be
+    // a poor way for the test to end. Two frames are leaked instead, and the
+    // machine is told why.
+    let reading = tlb_test::RUNNING.load(Ordering::Relaxed);
+    if reading > 0 {
+        kprintln!(
+            "[test] FAILED: {reading} readers were still on the test page; its frames are left              mapped rather than handed back to the allocator"
+        );
+        return;
     }
 
     let stale = tlb_test::STALE.load(Ordering::Relaxed);

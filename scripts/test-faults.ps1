@@ -18,7 +18,10 @@
 #>
 [CmdletBinding()]
 param(
-    [int]$Timeout = 180
+    [int]$Timeout = 180,
+    # One case, by name or by feature, when a single failure is being chased.
+    # Running all six to look at one of them costs six kernel builds.
+    [string]$Only = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -140,6 +143,11 @@ if (-not (Test-Path $FirmwareCode)) {
 }
 
 $failures = 0
+
+if ($Only -ne '') {
+    $Cases = @($Cases | Where-Object { $_.Name -eq $Only -or $_.Feature -eq $Only })
+    if ($Cases.Count -eq 0) { throw "no injection case called $Only" }
+}
 
 foreach ($case in $Cases) {
     Write-Host ''
