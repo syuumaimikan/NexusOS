@@ -116,11 +116,33 @@ try {
         if (-not (Wait-For -Text 'browse: showed' -Seconds 120)) {
             $failures += 'the browser never showed a page'
         }
+
+        # The figures below come from the kernel's monitor thread, which reports
+        # every five seconds. This used to sleep a fixed six seconds and hope,
+        # and it was a coin toss: a page that finished just after a report left
+        # the next one nearly five seconds away, and the log was cut before it
+        # arrived. That is not a browser failing -- the fetch above had already
+        # passed -- but it failed the run, which is worse than useless, because
+        # a suite that cries wolf is a suite people stop reading.
+        #
+        # So wait for the lines themselves. If they never come, that *is* a
+        # finding: the stack did the work without counting it.
+        if (-not (Wait-For -Text '[mon ] loopback ' -Seconds 30)) {
+            $failures += 'the kernel never reported the loopback figures'
+        }
+        if (-not (Wait-For -Text '[mon ] client ' -Seconds 30)) {
+            $failures += 'the kernel never reported the client figures'
+        }
+
+        # And stop the machine through the monitor rather than killing it, so
+        # the serial file is closed with everything in it. Killing QEMU has cost
+        # this repository at least two failures that looked like product bugs
+        # and were the last few lines of a log going missing.
+        $writer.WriteLine('quit')
+        Start-Sleep -Milliseconds 800
     } finally {
         $client.Close()
     }
-    # One more monitor report, which is what carries the figures.
-    Start-Sleep -Seconds 6
 } finally {
     if (-not $process.HasExited) {
         try { $process.Kill() } catch { }

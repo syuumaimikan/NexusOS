@@ -382,10 +382,8 @@ impl Browser {
                 continue;
             }
 
-            if received.bytes >= key::SIZE {
-                if self.key(bytes) {
-                    stale = true;
-                }
+            if received.bytes >= key::SIZE && self.key(bytes) {
+                stale = true;
             }
         }
 

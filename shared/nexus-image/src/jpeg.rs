@@ -511,22 +511,16 @@ fn scan(
             }
             since_restart += 1;
 
-            for index in 0..components.len() {
-                let (across_blocks, down_blocks) =
-                    (components[index].across, components[index].down);
+            for part in components.iter_mut() {
+                let (across_blocks, down_blocks) = (part.across, part.down);
                 for vertical in 0..down_blocks {
                     for horizontal in 0..across_blocks {
                         decode_block(
-                            &mut bits,
-                            &mut components[index],
-                            quantisers,
-                            dc_tables,
-                            ac_tables,
-                            &mut block,
+                            &mut bits, part, quantisers, dc_tables, ac_tables, &mut block,
                         )?;
                         idct(&mut block);
                         place(
-                            &mut components[index],
+                            part,
                             &block,
                             (column * across_blocks + horizontal) * 8,
                             (row * down_blocks + vertical) * 8,
@@ -708,9 +702,9 @@ fn to_pixels(components: &[Component], width: usize, height: usize, count: usize
                 let luma = sample(&components[0], x, y);
                 let blue_difference = sample(&components[1], x, y) - 128;
                 let red_difference = sample(&components[2], x, y) - 128;
-                let red = luma + (91881 * red_difference >> 16);
+                let red = luma + ((91881 * red_difference) >> 16);
                 let green = luma - ((22554 * blue_difference + 46802 * red_difference) >> 16);
-                let blue = luma + (116130 * blue_difference >> 16);
+                let blue = luma + ((116130 * blue_difference) >> 16);
                 (red.clamp(0, 255) as u32) << 16
                     | (green.clamp(0, 255) as u32) << 8
                     | blue.clamp(0, 255) as u32

@@ -3,26 +3,40 @@
     Runs the full NexusOS test suite.
 
 .DESCRIPTION
-    Eight layers, cheapest first, so a failure surfaces as early as possible:
+    Eighteen stages, cheapest first, so a failure surfaces as early as possible.
+
+    The first three run on this machine and take seconds:
 
       1. formatting
-      2. lints, over every crate including the kernel
-      3. host unit tests (UEFI layouts, ELF parsing, memory-map normalization,
-         descriptor encoding)
-      4. a boot test: build, boot in QEMU, and require the serial log to contain
-         every marker a healthy boot produces
-      5. a boot from the disk image alone, which is the only run where the
-         firmware reads the partition table and filesystem this project writes
-      6. a persistence test, which boots twice on one disk and requires the
-         second boot to find what the first one wrote
-      7. an input test, which sends real keystrokes through QEMU's monitor and
-         checks what the kernel made of them
-      8. injection tests, which break the kernel one way per build -- a real
-         CPU exception, a broken TLB shootdown -- and check that
-         each is reported rather than resetting the machine
+      2. lints, over every crate in the workspace -- which is checked, not
+         assumed; see Assert-EveryCrateLinted
+      3. host unit tests: every library, plus the drawing code
+
+    The rest boot a real machine under QEMU and read its serial log. Nothing
+    below is verified by having compiled:
+
+      4. a boot test, with the filesystem's destructive checks on
+      5. a boot from the disk image alone, the only run where the firmware
+         reads the partition table and filesystem this project writes
+      6. persistence: boot twice on one disk, and require the second boot to
+         find what the first one wrote
+      7. the network: DHCP, DNS and a fetch
+      8. updates
+      9. first-run setup, answered with the keys a person would press
+     10. the terminal
+     11. appearance: change the look and watch the desktop follow
+     12. settings
+     13. packages, including one whose signature does not hold
+     14. pictures: a PNG and a JPEG, decoded by this system's own decoders
+     15. the agent
+     16. browsing
+     17. input, through QEMU's monitor and the same 8042 controller
+     18. injection: break the kernel one way per build -- a real CPU exception,
+         a broken TLB shootdown -- and require each to be reported rather than
+         resetting the machine
 
 .PARAMETER SkipFaults
-    Skip layer 8, which is the slowest because it boots QEMU six times.
+    Skip stage 18, which is the slowest because it boots QEMU six times.
 #>
 [CmdletBinding()]
 param(
@@ -73,28 +87,130 @@ Invoke-Step 'formatting' {
     } finally { Pop-Location }
 }
 
+# Every crate in the workspace, sorted into the target it is built for. These
+# lists are checked against `cargo metadata` below, which is the point of them:
+# the bootloader -- the first code that runs on the machine -- went unlinted
+# because nobody had put it on a list, and the whole of user space went unlinted
+# for the same reason. A list maintained only by hand will eventually be short
+# by one crate, and nothing will say so.
+$HostLibraries = @(
+    'nexus-abi', 'nexus-ai-core', 'nexus-config', 'nexus-crypto', 'nexus-dns', 'nexus-font',
+    'nexus-html', 'nexus-http', 'nexus-i18n', 'nexus-image', 'nexus-ime', 'nexus-index',
+    'nexus-inflate', 'nexus-json', 'nexus-look', 'nexus-machine', 'nexus-mm', 'nexus-net',
+    'nexus-netclient', 'nexus-pkg', 'nexus-shellwords', 'nexus-time', 'nexus-update',
+    'nexus-user', 'nexus-window'
+)
+
+# Programs that run on the development machine rather than on Nexus: the package
+# signer, and the example guest binary.
+$HostTools = @('nexus-pack', 'nexus-linux-example')
+
+# Programs that run on Nexus, built for the user target.
+$Programs = @(
+    'nexus-ai', 'nexus-assist', 'nexus-browser', 'nexus-client', 'nexus-compositor',
+    'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install', 'nexus-settings',
+    'nexus-setup', 'nexus-shell', 'nexus-store', 'nexus-term', 'nexus-ui', 'nexus-updater',
+    'nexus-view', 'nexus-wall'
+)
+
+# The two that stand alone, each with its own target.
+$Bootloader = 'nexus-boot'
+$Kernel = 'nexus-kernel'
+
+<#
+.SYNOPSIS
+    Fail if any workspace crate is on none of the lists above, or on two.
+#>
+function Assert-EveryCrateLinted {
+    $covered = @($HostLibraries) + @($HostTools) + @($Programs) + @($Bootloader) + @($Kernel)
+
+    $twice = $covered | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name }
+    if ($twice) {
+        throw "listed more than once, so one of the lists is wrong: $($twice -join ', ')"
+    }
+
+    $metadata = & cargo metadata --no-deps --format-version 1 2>$null | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
+    $members = $metadata.packages | ForEach-Object { $_.name }
+
+    $missing = $members | Where-Object { $covered -notcontains $_ }
+    if ($missing) {
+        throw ("in the workspace and on no lint list: {0}. " -f ($missing -join ', ')) +
+        'Add each to $HostLibraries, $HostTools or $Programs in scripts/test.ps1.'
+    }
+
+    $ghosts = $covered | Where-Object { $members -notcontains $_ }
+    if ($ghosts) {
+        throw ("on a lint list and not in the workspace: {0}" -f ($ghosts -join ', '))
+    }
+
+    Write-Host "    every one of $($members.Count) crates is on a list" -ForegroundColor DarkGray
+}
+
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-look', '-p', 'nexus-ime', '-p', 'nexus-user', '-p', 'nexus-window', '-p', 'nexus-json', '-p', 'nexus-machine', '-p', 'nexus-inflate', '-p', 'nexus-image', '--lib', '--', '-D', 'warnings') 'clippy'
+        Assert-EveryCrateLinted
 
-        # And the kernel, which needs its own target and core rebuilt for it,
-        # and so was left out until it had accumulated a dozen findings nobody
-        # had seen. It is the largest crate in the tree; leaving the biggest
-        # thing unlinted made the step read as passing when it covered a third
-        # of the code.
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-kernel',
+        # The libraries and their tests. `--tests` is not decoration: a lint
+        # error in test code failed nothing here until a stray `--all-targets`
+        # run turned two of them up, and test code is code -- this suite's own
+        # reliability rests on it.
+        $arguments = @('+nightly', 'clippy')
+        foreach ($crate in $HostLibraries) { $arguments += @('-p', $crate) }
+        $arguments += @('--lib', '--tests', '--', '-D', 'warnings')
+        Invoke-Native 'cargo' $arguments 'clippy (libraries)'
+
+        $arguments = @('+nightly', 'clippy')
+        foreach ($crate in $HostTools) { $arguments += @('-p', $crate) }
+        $arguments += @('--', '-D', 'warnings')
+        Invoke-Native 'cargo' $arguments 'clippy (tools)'
+
+        # The bootloader is a UEFI binary. It was on the library list with
+        # `--lib`, which matched its small library and quietly checked none of
+        # `main.rs` -- five findings, in the file that runs first.
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', $Bootloader, '--',
+            '-D', 'warnings') 'clippy (boot)'
+
+        # The kernel, which needs its own target and core rebuilt for it, and so
+        # was left out until it had accumulated a dozen findings nobody had seen.
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', $Kernel,
             '--target', 'targets/x86_64-nexus.json',
             '-Zbuild-std=core,compiler_builtins,alloc',
             '-Zbuild-std-features=compiler-builtins-mem',
             '--', '-D', 'warnings') 'clippy (kernel)'
+
+        # And every program a person actually uses. These had been linted by
+        # hand as each was written -- the whole of user space turned up exactly
+        # one finding when it was first checked together, which is the good news
+        # -- but linting by hand is a habit, and a habit is one bad afternoon
+        # from lapsing.
+        $arguments = @('+nightly', 'clippy')
+        foreach ($crate in $Programs) { $arguments += @('-p', $crate) }
+        $arguments += @('--target', 'targets/x86_64-nexus-user.json',
+            '-Zbuild-std=core,compiler_builtins,alloc',
+            '-Zbuild-std-features=compiler-builtins-mem',
+            '--', '-D', 'warnings')
+        Invoke-Native 'cargo' $arguments 'clippy (programs)'
     } finally { Pop-Location }
 }
 
 Invoke-Step 'host unit tests' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-look', '-p', 'nexus-ime', '-p', 'nexus-crypto', '-p', 'nexus-user', '-p', 'nexus-json', '-p', 'nexus-machine', '-p', 'nexus-inflate', '-p', 'nexus-image', '--lib') 'unit tests'
+        # Every library, rather than the subset that happened to be listed.
+        # nexus-index, nexus-net, nexus-pkg and nexus-ai-core between them had
+        # sixty tests this suite had never run, all of them passing -- which is
+        # the worst way for that to be true, because nobody would have noticed
+        # when they stopped.
+        #
+        # nexus-ui is a program rather than a library, but its tests run on the
+        # host and it is the drawing code every window goes through, so it runs
+        # here too.
+        $arguments = @('+nightly', 'test')
+        foreach ($crate in $HostLibraries) { $arguments += @('-p', $crate) }
+        $arguments += @('-p', $Bootloader, '-p', 'nexus-ui', '--lib')
+        Invoke-Native 'cargo' $arguments 'unit tests'
     } finally { Pop-Location }
 }
 
