@@ -211,6 +211,7 @@ assist.using = {tool} を使います（{permission}）
 assist.needsconfirming = {tool} には {permission} が必要で、誰かの確認が要ります。この画面では求められません。
 assist.privileged = {tool} には特権 {permission} が必要です。このエージェントは持っていません。
 assist.blocked = {tool} は明確に拒否されます。この機械のどのエージェントにも許されません。
+assist.refusedunknown = {tool} は拒否されました：{reason}。この窓にはこれ以上平易な言い方がありません。
 assist.nomachine = この画面は機械の状態を尋ねる手段を渡されていません
 assist.nofiles = この画面は読めるファイルを渡されていません
 assist.machine = {total} MiB 中 {used} MiB 使用（{percent}%）、プロセス {processes}、スレッド {threads}、プロセッサ {processors}

@@ -16,7 +16,7 @@
 //!
 //! # Permission is not this program's decision
 //!
-//! Every action goes through [`nexus_ai_core::authorize`], which is GPT-6
+//! Every action goes through [`nexus_ai_core::permitted`], which is GPT-6
 //! Astra's: it says which tools are safe, which need somebody to confirm, which
 //! are privileged and which are refused outright. This window asks and obeys.
 //!
@@ -51,7 +51,7 @@ use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
-use nexus_ai_core::{Level, Tool};
+use nexus_ai_core::{Status, Tool};
 use nexus_ui::{Canvas, Colour, Rect};
 use nexus_user::{Handle, Kind};
 use nexus_window::{App, Key, Movement, Window};
@@ -207,26 +207,39 @@ impl Assistant {
 
     /// Ask whether a tool may be used, and say what the answer was.
     ///
-    /// The policy is not this program's: `nexus_ai_core::requirement` says what
-    /// permission each tool needs and how far an agent may go without somebody
-    /// confirming it. This window asks and obeys.
+    /// The policy is not this program's: `nexus_ai_core::permitted` decides,
+    /// and this window asks and obeys.
     ///
-    /// It asks `requirement` and not `authorize`, and the difference matters.
+    /// It asks `permitted` and not `authorize`, and the difference matters.
     /// `authorize` answers "may Astra's service execute this", which folds two
     /// questions into one: whether an agent is allowed to, and whether that
     /// service has implemented it. This window does its own reading, with its
     /// own read-only handle, so the second question is not about it -- and
     /// asking `authorize` made it report that looking through files was "not
-    /// built yet" while doing exactly that.
+    /// built yet" while doing exactly that. `permitted` is the first question
+    /// on its own, which is the one an agent holding its own capabilities has
+    /// any business asking.
     ///
-    /// A refusal names the level, because "no" without a reason is a bug report
+    /// It asks `permitted` and not `requirement(tool).1` either, though that
+    /// was what it did first and the two agree today. `requirement` is the
+    /// policy *data*; `permitted` is the policy *decision*. A caller that
+    /// re-derives the decision from the data has quietly made itself a second
+    /// place where policy lives, and the day those two disagree is the day an
+    /// agent does something the policy said it must not.
+    ///
+    /// `requirement` is still asked, for the name of the permission alone --
+    /// that is description, not decision, and a refusal that cannot say what
+    /// was being asked for is a worse refusal.
+    ///
+    /// A refusal names the reason, because "no" without one is a bug report
     /// waiting to be filed against the wrong thing.
     fn may(&mut self, tool: Tool) -> bool {
-        let (permission, level) = nexus_ai_core::requirement(tool);
+        let (permission, _) = nexus_ai_core::requirement(tool);
         let named = format!("{permission:?}");
         let tool_name = format!("{tool:?}");
-        let key = match level {
-            Level::Safe => {
+
+        let status = match nexus_ai_core::permitted(tool) {
+            Ok(()) => {
                 let did = nexus_i18n::format(
                     "assist.using",
                     &[("tool", &tool_name), ("permission", &named)],
@@ -234,11 +247,38 @@ impl Assistant {
                 self.say(&did, Kindness::Did);
                 return true;
             }
-            Level::ConfirmRequired => "assist.needsconfirming",
-            Level::Privileged => "assist.privileged",
-            Level::Blocked => "assist.blocked",
+            Err(status) => status,
         };
-        let why = nexus_i18n::format(key, &[("tool", &tool_name), ("permission", &named)]);
+
+        // `permitted` returns one of three today, and `Status` has ten
+        // variants. The last arm is not padding and is not unreachable in the
+        // sense that matters: it is what happens when Astra adds a reason to
+        // refuse and this window has not been taught to phrase it. Refusing
+        // and naming the raw status is right; the alternative is a match that
+        // has to be edited in lockstep with somebody else's crate, and the
+        // failure mode of forgetting is an agent that does the thing.
+        let status_name = format!("{status:?}");
+        // Typed, because binding the list to a name loses the unsizing that
+        // happens for free when it is written out at the call.
+        let (key, fields): (&str, [(&str, &dyn core::fmt::Display); 2]) = match status {
+            Status::ConfirmRequired => (
+                "assist.needsconfirming",
+                [("tool", &tool_name), ("permission", &named)],
+            ),
+            Status::Privileged => (
+                "assist.privileged",
+                [("tool", &tool_name), ("permission", &named)],
+            ),
+            Status::Blocked => (
+                "assist.blocked",
+                [("tool", &tool_name), ("permission", &named)],
+            ),
+            _ => (
+                "assist.refusedunknown",
+                [("tool", &tool_name), ("reason", &status_name)],
+            ),
+        };
+        let why = nexus_i18n::format(key, &fields);
         self.say(&why, Kindness::Refused);
         false
     }
