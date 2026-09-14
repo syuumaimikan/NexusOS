@@ -71,6 +71,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-collab"
+version = "0.1.0"
+dependencies = [
+ "nexus-json",
+]
+
+[[package]]
 name = "nexus-compositor"
 version = "0.1.0"
 dependencies = [

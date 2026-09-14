@@ -1670,7 +1670,7 @@ in the code.
 ### Feasible next, in order of value
 
 | ~~JPEG~~ | done | Baseline sequential, greyscale and YCbCr, 4:4:4 / 4:2:2 / 4:2:0, restart markers. Integer transform, because the kernel has no FPU. Progressive refused by name. |
-| Motion-JPEG video | medium | A sequence of JPEGs and a clock. Now that one decodes, this is a container reader and a frame budget rather than a codec. Real video — H.264, VP9 — is still tens of thousands of lines and years of patent history. |
+| ~~Motion-JPEG video~~ | done | A sequence of JPEGs and a clock, which is what it turned out to be. The file is **not** read: only its table of contents, sixteen bytes a frame, walked with an eight-byte read apiece — because the kernel will not make a memory object larger than sixteen mebibytes, and a player that held the recording would be a player with a running time compiled into it. Fifty to sixty-six frames a second decoded, for a recording that asks for twelve. See [video.md](video.md). Real video — H.264, VP9 — is still tens of thousands of lines and years of patent history. |
 
 | ~~`remove` should unlink~~ | done | It refused while anybody held the file open, so replacing a file another program read on a clock failed at random. The name now goes at once and the blocks go when the last handle closes. `init` proves the property that refusal was protecting: after the name has gone, a handle that was already open still reads the same bytes. |
 
@@ -1691,6 +1691,7 @@ in the code.
 | Damage rectangles on a client's frame | small | A program saying *which* part of its surface changed. An animated wallpaper is a full-screen composite per frame without it, which is why it is capped at four a second. |
 | ~~A package manager window~~ | done | A list of what is in `PKG/`, what each one's signature is worth, and how it compares with what is installed — with Enter bound to the same `install` the updater calls. See [packages.md](packages.md). |
 | ~~A settings window~~ | done | A window with one row per key that something actually reads, given the settings directory and nothing else. See [settings.md](settings.md). |
+| ~~A tool for the shared state two agents keep~~ | done | `nexus-collab`: atomic writes, validation before every write, sixteen backups, stale-lock reporting, and a refusal to release the other agent's lock that has no `--force` behind it. Host-side, no dependencies but this project's own JSON. See [collaboration.md](collaboration.md). |
 | A text editor | medium | The terminal's line editing, a file, and a scrollback that can be written into. |
 | Standard output for programs | medium | The thing that would let `ls` stop being built into the terminal. A channel a child inherits, and a pipe. |
 | A real audio card | medium | AC'97 or Intel HD Audio: a DMA engine, a ring of buffers and a mixer. The speaker is one bit and says so. |
@@ -1698,9 +1699,13 @@ in the code.
 
 ### Not feasible as asked, and why
 
-* **Video wallpaper.** A video is a codec — H.264 or VP9 — which is tens of
-  thousands of lines and years of patent history. An *animated* wallpaper drawn
-  procedurally is a weekend; a video one is not this machine's next step.
+* **Video wallpaper, in a useful sense.** Motion-JPEG plays now, so a
+  Motion-JPEG wallpaper is a small piece of work — but it would be a wallpaper
+  that costs a full-screen composite per frame, because there are still no
+  per-client damage rectangles, and is therefore capped at four frames a
+  second. That is a slideshow with extra steps. The honest order is damage
+  rectangles first. A wallpaper in a *real* video format is still a codec:
+  H.264 or VP9, tens of thousands of lines and years of patent history.
 * **Running Windows software.** A PE loader is a fortnight. The Win32 subsystem
   behind it — the window manager, GDI, the registry, COM — is what Wine has been
   writing since 1993. The Linux translation layer here is real and small because

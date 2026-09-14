@@ -3,40 +3,41 @@
     Runs the full NexusOS test suite.
 
 .DESCRIPTION
-    Eighteen stages, cheapest first, so a failure surfaces as early as possible.
+    Nineteen stages, cheapest first, so a failure surfaces as early as possible.
 
-    The first three run on this machine and take seconds:
+    The first four run on this machine and take seconds:
 
       1. formatting
       2. lints, over every crate in the workspace -- which is checked, not
          assumed; see Assert-EveryCrateLinted
       3. host unit tests: every library, plus the drawing code
+      4. the collaboration tool, driven as a binary rather than as a library
 
     The rest boot a real machine under QEMU and read its serial log. Nothing
     below is verified by having compiled:
 
-      4. a boot test, with the filesystem's destructive checks on
-      5. a boot from the disk image alone, the only run where the firmware
+      5. a boot test, with the filesystem's destructive checks on
+      6. a boot from the disk image alone, the only run where the firmware
          reads the partition table and filesystem this project writes
-      6. persistence: boot twice on one disk, and require the second boot to
+      7. persistence: boot twice on one disk, and require the second boot to
          find what the first one wrote
-      7. the network: DHCP, DNS and a fetch
-      8. updates
-      9. first-run setup, answered with the keys a person would press
-     10. the terminal
-     11. appearance: change the look and watch the desktop follow
-     12. settings
-     13. packages, including one whose signature does not hold
-     14. pictures: a PNG and a JPEG, decoded by this system's own decoders
-     15. the agent
-     16. browsing
-     17. input, through QEMU's monitor and the same 8042 controller
-     18. injection: break the kernel one way per build -- a real CPU exception,
+      8. the network: DHCP, DNS and a fetch
+      9. updates
+     10. first-run setup, answered with the keys a person would press
+     11. the terminal
+     12. appearance: change the look and watch the desktop follow
+     13. settings
+     14. packages, including one whose signature does not hold
+     15. pictures and a recording, decoded by this system's own decoders
+     16. the agent
+     17. browsing
+     18. input, through QEMU's monitor and the same 8042 controller
+     19. injection: break the kernel one way per build -- a real CPU exception,
          a broken TLB shootdown -- and require each to be reported rather than
          resetting the machine
 
 .PARAMETER SkipFaults
-    Skip stage 18, which is the slowest because it boots QEMU six times.
+    Skip stage 19, which is the slowest because it boots QEMU six times.
 #>
 [CmdletBinding()]
 param(
@@ -103,7 +104,7 @@ $HostLibraries = @(
 
 # Programs that run on the development machine rather than on Nexus: the package
 # signer, and the example guest binary.
-$HostTools = @('nexus-pack', 'nexus-linux-example')
+$HostTools = @('nexus-pack', 'nexus-collab', 'nexus-linux-example')
 
 # Programs that run on Nexus, built for the user target.
 $Programs = @(
@@ -212,6 +213,15 @@ Invoke-Step 'host unit tests' {
         $arguments += @('-p', $Bootloader, '-p', 'nexus-ui', '--lib')
         Invoke-Native 'cargo' $arguments 'unit tests'
     } finally { Pop-Location }
+}
+
+Invoke-Step 'the collaboration tool' {
+    # Its own tests cover the library; this drives the real binary through a
+    # session and checks what it refuses to do. Here rather than at the end
+    # because it needs no machine and takes two seconds, and the suite is
+    # ordered cheapest first.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-collab.ps1')) 'collaboration tool tests'
 }
 
 Invoke-Step 'boot test' {

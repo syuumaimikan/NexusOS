@@ -25,6 +25,7 @@ members = [
     "shared/nexus-crypto",
     "shared/nexus-pkg",
     "tools/nexus-pack",
+    "tools/nexus-collab",
     "tools/nexus-linux-example",
     "boot/nexus-boot",
     "kernel/nexus-mm",
