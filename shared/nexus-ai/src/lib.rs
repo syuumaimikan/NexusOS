@@ -1,7 +1,12 @@
-//! Bounded read-only tool runtime. No inference, ambient I/O or grant API.
+//! Bounded read-only tool runtime and optional local inference. No ambient I/O or grant API.
 #![no_std]
 
 pub mod wire;
+
+#[cfg(feature = "model")]
+extern crate alloc;
+#[cfg(feature = "model")]
+pub mod model;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]

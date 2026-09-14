@@ -1,12 +1,18 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-14T21:26:44.212200+00:00",
+  "updated_at": "2026-09-14T21:43:38.321002+00:00",
   "agents": {
     "gpt6_astra": {
-      "status": "idle",
-      "current_task": null,
-      "active_paths": [],
-      "last_activity": "2026-09-14T21:26:44.212200+00:00"
+      "status": "working",
+      "current_task": "ASTRA-MODEL-001",
+      "active_paths": [
+        "shared/nexus-ai/",
+        "user/nexus-ai/",
+        "tools/nexus-model/",
+        "docs/AI/MODEL_RUNTIME.md",
+        "Cargo.lock"
+      ],
+      "last_activity": "2026-09-14T21:43:38.321002+00:00"
     },
     "claude_code": {
       "status": "working",
@@ -151,6 +157,33 @@
       ],
       "qemu": "build/ai-3ad2ff38cea44b04978fc7ba8eadf316/serial.log",
       "completed_at": "2026-09-14T21:26:44.212200+00:00"
+    },
+    {
+      "id": "ASTRA-MODEL-001",
+      "status": "completed",
+      "priority": "high",
+      "owner": "gpt6_astra",
+      "summary": "Real local pretrained transformer inference in NexusOS with bounded model sessions",
+      "dependencies": [
+        "ASTRA-AI-002"
+      ],
+      "completed_at": "2026-09-14T21:43:38.321002+00:00",
+      "files": [
+        "Cargo.lock",
+        "shared/nexus-ai/",
+        "user/nexus-ai/",
+        "tools/nexus-model/",
+        "docs/AI/MODEL_RUNTIME.md"
+      ],
+      "verification": "25 host tests passed (20 unit + 5 checkpoint); host/native model Clippy -D warnings; isolated QEMU inference/IPC/oracle/cancellation/invalid inputs/capability teardown passed",
+      "qemu": "build/model-92a1db5cb0a641f786ffee13ca4180ae/serial.log",
+      "artifacts": {
+        "build/model-92a1db5cb0a641f786ffee13ca4180ae/serial.log": "e04aefc227552cfa3bd0c8d7b9e4534e81a14d0f7f0c7a0e4fa92f9fdb41ae11",
+        "build/model-92a1db5cb0a641f786ffee13ca4180ae/programs/model.elf": "132552138a6c31339157271578666fc27dacce2d137d565c91b294d156dd3b26",
+        "build/model-92a1db5cb0a641f786ffee13ca4180ae/programs/init.elf": "d0da1c16c36b2c162b5bfad1c6ccc6b975599103fa4b5540f50432280c13c8a8",
+        "build/model-92a1db5cb0a641f786ffee13ca4180ae/esp/nexus/kernel.elf": "8db826ec9ea311568aaefb16392b353a74c99dcc03171d270d0e547d62e4ef93"
+      },
+      "scope": "Pretrained tiny English completion model in native isolated worker. Not Japanese assistant quality, UI integration, training or full MVP."
     }
   ],
   "conflicts": [
@@ -164,32 +197,38 @@
     }
   ],
   "build": {
-    "ai_user_target": "passed"
+    "ai_user_target": "passed",
+    "model_user_target": "passed"
   },
   "tests": {
     "ai_core": "15 passed; 0 failed",
-    "ai_clippy": "host + native target passed with -D warnings"
+    "ai_clippy": "host + native target passed with -D warnings",
+    "model": "25 passed (20 unit + 5 integration); host/native Clippy -D warnings passed"
   },
   "qemu": {
     "ai_smoke": "passed",
     "evidence": "build/ai-3ad2ff38cea44b04978fc7ba8eadf316/serial.log",
-    "final_hardening": "passed"
+    "final_hardening": "passed",
+    "model_smoke": "passed",
+    "model_evidence": "build/model-92a1db5cb0a641f786ffee13ca4180ae/serial.log"
   },
   "pending_requests": [
     "ASTRA-20260914T130524Z-SYSTEM-INFO",
-    "ASTRA-AI-002-REVIEW"
+    "ASTRA-MODEL-001-REVIEW"
   ],
   "locks": [
-    "locks/ASTRA-DOCS-002.json"
+    "locks/ASTRA-DOCS-002.json",
+    "locks/ASTRA-MODEL-001.json"
   ],
   "decisions": [
     "decisions/ASTRA-AI-001.json"
   ],
   "integration": {
     "status": "partial",
-    "note": "Read-only guest service verified. Model/backend, assistant UI and normal boot registration remain pending."
+    "note": "Read-only service and separate pretrained local model worker verified. Model worker is opt-in and not connected to default boot or assistant UI; English tiny story model only."
   },
   "recent_changes": [
+    "gpt6_astra: ASTRA-MODEL-001 real pretrained inference verified in QEMU; model review/integration request sent; ASTRA-AI-002 review accepted",
     "gpt6_astra: ASTRA-AI-002 policy/service API separation verified; Claude review requested; task lock released",
     "claude_code: agent window on nexus-ai-core's permission model; network tools; picture viewer; font faces and anti-aliasing; boot 16s->4s. Open question recorded: remove() refuses while a file is open, so rewriting a file another program polls fails at random.",
     "gpt6_astra: ASTRA-AI-001 verified, documented and ready for isolated commit; lock released",

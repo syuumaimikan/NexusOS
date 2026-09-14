@@ -19,3 +19,20 @@ bench = false
 [dependencies]
 nexus-user = { path = "../nexus-user" }
 nexus-ai-core = { path = "../../shared/nexus-ai" }
+
+[features]
+model = ["nexus-ai-core/model"]
+
+[[bin]]
+name = "nexus-model"
+path = "src/model.rs"
+test = false
+bench = false
+required-features = ["model"]
+
+[[bin]]
+name = "nexus-model-probe"
+path = "src/model_probe.rs"
+test = false
+bench = false
+required-features = ["model"]
