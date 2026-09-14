@@ -118,6 +118,8 @@ mod wire {
     pub const BROWSE: &[u8] = b"web ";
     /// Start a window with a prompt in it.
     pub const TERMINAL: &[u8] = b"term";
+    /// Start a window that changes what this machine is.
+    pub const SETTINGS: &[u8] = b"sett";
     /// End the session.
     pub const QUIT: &[u8] = b"quit";
 }
@@ -223,6 +225,18 @@ impl Desktop {
         )
     }
 
+    /// Where the button that opens the settings is.
+    fn settings(&self) -> Rect {
+        let terminal = self.terminal();
+        let width = nexus_ui::measure(nexus_i18n::text("shell.settings")) + GAP * 4;
+        Rect::new(
+            terminal.x + terminal.width + GAP,
+            GAP / 2,
+            width,
+            self.height.saturating_sub(GAP),
+        )
+    }
+
     /// Where the button that ends the session is, and how wide.
     ///
     /// At the far right, which is where a machine's own controls go on every
@@ -245,8 +259,8 @@ impl Desktop {
     /// brought back. A tab that shuffled sideways under the pointer would be a
     /// tab somebody clicked and missed.
     fn tab(&self, slot: usize) -> Rect {
-        let terminal = self.terminal();
-        let left = terminal.x + terminal.width + GAP;
+        let last = self.settings();
+        let left = last.x + last.width + GAP;
         let available = self
             .width
             .saturating_sub(left + GAP)
@@ -716,6 +730,12 @@ fn clicked(desktop: &Desktop, x: u32, y: u32) -> Option<bool> {
             .map(|_| true);
     }
 
+    if desktop.settings().contains(x, y) {
+        return nexus_user::send(COMPOSITOR, wire::SETTINGS, &[])
+            .ok()
+            .map(|_| true);
+    }
+
     if desktop.web().contains(x, y) {
         return nexus_user::send(COMPOSITOR, wire::BROWSE, &[])
             .ok()
@@ -809,6 +829,16 @@ fn draw(desktop: &Desktop) {
         terminal,
         nexus_i18n::text("shell.term"),
         Colour::rgb(0xD8, 0xF0, 0xDC),
+    );
+
+    // And the one that opens the machine's own settings.
+    let settings = desktop.settings();
+    canvas.fill(settings, Colour::rgb(0x22, 0x1C, 0x30));
+    canvas.outline(settings, 1, Colour::rgb(0x7A, 0x6C, 0xA8));
+    canvas.text_centred(
+        settings,
+        nexus_i18n::text("shell.settings"),
+        Colour::rgb(0xE4, 0xDE, 0xF4),
     );
 
     for slot in 0..desktop.slots {

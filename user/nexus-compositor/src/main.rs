@@ -276,6 +276,8 @@ mod desk {
     pub const BROWSE: &[u8] = b"web ";
     /// Start a window with a prompt in it.
     pub const TERMINAL: &[u8] = b"term";
+    /// Show this machine its own settings.
+    pub const SETTINGS: &[u8] = b"sett";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -384,6 +386,8 @@ const BROWSER: &[u8] = b"BIN/BROWSE.ELF";
 const TERMINAL: &[u8] = b"BIN/TERM.ELF";
 /// And the one that draws what is behind everything else.
 const WALLPAPER: &[u8] = b"BIN/WALL.ELF";
+/// And the one that changes the file the other two read.
+const SETTINGS_WINDOW: &[u8] = b"BIN/SET.ELF";
 /// The program that draws the strip along the bottom and says what a click in
 /// it means.
 const SHELL: &[u8] = b"BIN/SHELL.ELF";
@@ -846,8 +850,9 @@ fn start_wallpaper(screen: &Screen) -> Option<Tile> {
 /// Run the first-run wizard, and wait for it.
 ///
 /// One client, the whole rectangle, and nothing else running. It is given the
-/// settings directory as well as its surface -- the only client that ever is,
-/// and the reason this program holds that handle at all.
+/// settings directory as well as its surface, with write on it -- one of the
+/// two programs that get it that way, the other being the settings window, and
+/// between them the reason this program holds that handle at all.
 fn run_setup(screen: &Screen) {
     let Ok(theirs) = nexus_user::duplicate(
         SETTINGS,
@@ -1606,6 +1611,8 @@ enum What {
     Browser,
     /// The terminal, which is given the filesystem and a way to start programs.
     Terminal,
+    /// The settings window, which is given the settings directory to write.
+    Settings,
 }
 
 /// What reading from the keyboard turned out to be.
@@ -1717,6 +1724,10 @@ fn read_shell(
 
     if message == desk::TERMINAL {
         return open_window(screen, set, tiles, focus, order, What::Terminal);
+    }
+
+    if message == desk::SETTINGS {
+        return open_window(screen, set, tiles, focus, order, What::Settings);
     }
 
     if message == desk::QUIT {
@@ -1837,6 +1848,30 @@ fn open_window(
                 &[files, spawner, sound],
             )?
         }
+        What::Settings => {
+            // The settings directory, and this time with write on it. The
+            // wizard is the only other program that gets it that way, and for
+            // the same reason: changing the machine is what it is for. Not
+            // close, so that a settings window cannot take the directory away
+            // from the compositor that lent it.
+            let Ok(theirs) = nexus_user::duplicate(
+                SETTINGS,
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+            ) else {
+                failed("compositor: FAILED: could not lend the settings to a settings window");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                SETTINGS_WINDOW,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[theirs],
+            )?
+        }
     };
     if nexus_user::watch(set, tile.channel, channel_key(slot)).is_err()
         || nexus_user::watch(set, tile.process, process_key(slot)).is_err()
@@ -1853,6 +1888,7 @@ fn open_window(
             What::Client => "compositor: started a window because someone pressed the desktop",
             What::Browser => "compositor: started a browser, and lent it the network",
             What::Terminal => "compositor: started a terminal, and lent it the filesystem",
+            What::Settings => "compositor: started the settings, and lent them the settings",
         }
     ))
     .ok();

@@ -115,6 +115,10 @@ $WallElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-wall"
 $StagedWall = Publish-Program -Elf $WallElf -ProgramDir $ProgramDir -Name 'wall.elf'
 $wallSize = [math]::Round((Get-Item $StagedWall).Length / 1KB, 1)
 
+$SettingsElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-settings"
+$StagedSettings = Publish-Program -Elf $SettingsElf -ProgramDir $ProgramDir -Name 'set.elf'
+$settingsSize = [math]::Round((Get-Item $StagedSettings).Length / 1KB, 1)
+
 $TermElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-term"
 $StagedTerm = Publish-Program -Elf $TermElf -ProgramDir $ProgramDir -Name 'term.elf'
 $termSize = [math]::Round((Get-Item $StagedTerm).Length / 1KB, 1)
@@ -265,6 +269,7 @@ Write-Host "  updater    : $updateSize KiB  -> BIN\UPDT.ELF on the disk"
 Write-Host "  browser    : $browserSize KiB  -> BIN\BROWSE.ELF on the disk"
 Write-Host "  terminal   : $termSize KiB  -> BIN\TERM.ELF on the disk"
 Write-Host "  wallpaper  : $wallSize KiB  -> BIN\WALL.ELF on the disk"
+Write-Host "  settings   : $settingsSize KiB  -> BIN\SET.ELF on the disk"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
 Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1.1.0, signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"

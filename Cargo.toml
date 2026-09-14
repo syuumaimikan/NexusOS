@@ -25,6 +25,7 @@ members = [
     "kernel/nexus-kernel",
     "user/nexus-user",
     "user/nexus-ui",
+    "user/nexus-window",
     "user/nexus-init",
     "user/nexus-hello",
     "user/nexus-compositor",
@@ -36,6 +37,7 @@ members = [
     "user/nexus-browser",
     "user/nexus-term",
     "user/nexus-wall",
+    "user/nexus-settings",
     "user/nexus-setup",
     "user/nexus-idle",
 ]

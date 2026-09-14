@@ -115,7 +115,27 @@ shell.none = 実行中のものはありません
 shell.owner = {name}
 shell.updates.pending = 更新 {number} 件
 shell.updates.installed = 更新 {number} 件を適用しました
+shell.settings = 設定
 shell.leave = ログアウト
+
+settings.title = 設定
+settings.look = 見た目
+settings.style = 背景
+settings.top = 上の色
+settings.bottom = 下の色
+settings.accent = 差し色
+settings.machine = この機械
+settings.language = 言語
+settings.timezone = タイムゾーン
+settings.updates = 更新
+settings.network = ネットワーク
+settings.netmode = 接続
+settings.you = あなた
+settings.name = 名前
+settings.saved = {key} を {value} にしました
+settings.nofile = この画面は設定ディレクトリなしで開かれました
+settings.notacolour = 色ではありません。40d090 のような十六進六桁で入力してください
+settings.keys = 上下で行を選び、左右で変えます。入力して Enter で保存、Escape で取り消します。
 
 setup.title = NexusOS の初期設定
 setup.language = 言語を選んでください

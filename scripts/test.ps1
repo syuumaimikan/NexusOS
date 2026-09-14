@@ -76,7 +76,7 @@ Invoke-Step 'formatting' {
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-look', '-p', 'nexus-ime', '-p', 'nexus-user', '--lib', '--', '-D', 'warnings') 'clippy'
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-look', '-p', 'nexus-ime', '-p', 'nexus-user', '-p', 'nexus-window', '--lib', '--', '-D', 'warnings') 'clippy'
 
         # And the kernel, which needs its own target and core rebuilt for it,
         # and so was left out until it had accumulated a dozen findings nobody
@@ -565,6 +565,14 @@ Invoke-Step 'the terminal' {
 Invoke-Step 'appearance' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-appearance.ps1')) 'appearance tests'
+}
+
+Invoke-Step 'settings' {
+    # The same properties the appearance stage covers, reached from the strip
+    # instead of a prompt -- and one the prompt cannot reach at all: a value the
+    # window has to refuse rather than write.
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-settings.ps1')) 'settings tests'
 }
 
 Invoke-Step 'browsing' {

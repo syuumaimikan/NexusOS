@@ -170,6 +170,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-settings"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-i18n",
+ "nexus-look",
+ "nexus-time",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-setup"
 version = "0.1.0"
 dependencies = [
@@ -250,6 +263,14 @@ version = "0.1.0"
 dependencies = [
  "nexus-config",
  "nexus-look",
+ "nexus-ui",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-window"
+version = "0.1.0"
+dependencies = [
  "nexus-ui",
  "nexus-user",
 ]

@@ -1658,8 +1658,9 @@ Carried alongside the phases rather than scheduled as one:
 ## Where it has got to, and what is not here
 
 The machine boots to a logo, asks who you are, keeps a desktop, fetches a page
-over its own TCP, runs a shell, updates itself and makes a noise. Thirteen test
-stages, run on a real machine under emulation, cover all of it.
+over its own TCP, runs a shell, changes how it looks from a window of its own,
+updates itself and makes a noise. Fifteen test stages, run on a real machine
+under emulation, cover all of it.
 
 What follows is an honest list of what has been asked for and is *not* here,
 with the reason and the size of the job. Nothing on it is pretended at anywhere
@@ -1673,7 +1674,7 @@ in the code.
 | ~~Japanese input~~ | kana done | Romaji to kana is a table and it is here. Kanji conversion needs a dictionary and a candidate window, and is not. |
 | Damage rectangles on a client's frame | small | A program saying *which* part of its surface changed. An animated wallpaper is a full-screen composite per frame without it, which is why it is capped at four a second. |
 | A package manager window | small | The mechanism exists — `nexus-pkg`, the installer, the updater. What is missing is a window that shows it. |
-| A settings window | small | Everything it would set is already a key in `system/settings.txt`, and the terminal's `set` already writes them. |
+| ~~A settings window~~ | done | A window with one row per key that something actually reads, given the settings directory and nothing else. See [settings.md](settings.md). |
 | A text editor | medium | The terminal's line editing, a file, and a scrollback that can be written into. |
 | Standard output for programs | medium | The thing that would let `ls` stop being built into the terminal. A channel a child inherits, and a pipe. |
 | A real audio card | medium | AC'97 or Intel HD Audio: a DMA engine, a ring of buffers and a mixer. The speaker is one bit and says so. |

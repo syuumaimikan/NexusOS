@@ -115,7 +115,27 @@ shell.none = nothing running
 shell.owner = {name}
 shell.updates.pending = {number} updates ready
 shell.updates.installed = {number} updates installed
+shell.settings = Settings
 shell.leave = Log out
+
+settings.title = Settings
+settings.look = Appearance
+settings.style = Background
+settings.top = Top colour
+settings.bottom = Bottom colour
+settings.accent = Accent colour
+settings.machine = This machine
+settings.language = Language
+settings.timezone = Timezone
+settings.updates = Updates
+settings.network = Network
+settings.netmode = Connection
+settings.you = You
+settings.name = Name
+settings.saved = {key} is now {value}
+settings.nofile = This window was started without the settings directory
+settings.notacolour = That is not a colour; six hex digits, like 40d090
+settings.keys = Up and down choose a line. Left and right change it. Type to edit, Enter to save, Escape to undo.
 
 setup.title = Set up NexusOS
 setup.language = Choose a language
