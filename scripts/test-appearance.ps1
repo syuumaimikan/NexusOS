@@ -70,6 +70,27 @@ function Wait-For {
     return $false
 }
 
+# Whether the wallpaper is drawing a style, however it came to be drawing it.
+#
+# Two lines can say so: the one it prints when it starts, and the one it prints
+# when it notices a change. Waiting only for the second made this test depend on
+# which style the machine was left on by whatever ran before it -- and it failed
+# in both directions, once for each value: setting a style the machine is
+# already on produces no change, and therefore no line.
+function Wait-ForStyle {
+    param([string]$Style, [int]$Seconds)
+    $pattern = 'wall: (the look changed to|[0-9]+x[0-9]+ behind the windows,) ' + $Style
+    for ($waited = 0; $waited -lt $Seconds; $waited++) {
+        Start-Sleep -Seconds 1
+        if ($process.HasExited) { return $false }
+        if (Test-Path $Log) {
+            $sofar = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
+            if ([regex]::IsMatch($sofar, $pattern)) { return $true }
+        }
+    }
+    return $false
+}
+
 $failures = @()
 try {
     Write-Host '==> Waiting for the desktop' -ForegroundColor Cyan
@@ -134,7 +155,7 @@ try {
         # wallpaper to say so makes the second change real whatever came before.
         Send-Text 'set look.style gradient'
         Send-Keys @('ret')
-        if (-not (Wait-For -Text 'wall: the look changed to gradient' -Seconds 60)) {
+        if (-not (Wait-ForStyle -Style 'gradient' -Seconds 60)) {
             $failures += 'the wallpaper never went back to a gradient'
         }
 
@@ -145,7 +166,7 @@ try {
 
         # The wallpaper looks every two seconds and the desktop on its minute
         # tick; both are waited for rather than slept through.
-        if (-not (Wait-For -Text 'wall: the look changed to stars' -Seconds 60)) {
+        if (-not (Wait-ForStyle -Style 'stars' -Seconds 60)) {
             $failures += 'the wallpaper never noticed the setting'
         }
 
@@ -183,10 +204,8 @@ foreach ($expected in @(
         # claim worth checking here: the wallpaper is given the screen minus the
         # strip, and a wallpaper that drew the whole screen would cover it.
         'wall: 1920x1164 behind the windows,',
-        'wall: the look changed to gradient',
         'term: ran look',
         'term: ran set',
-        'wall: the look changed to stars',
         'term: typing now makes ',
         'term: ran echo'
     )) {

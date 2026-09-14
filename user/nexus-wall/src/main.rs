@@ -70,14 +70,18 @@ const SETTINGS_MAX: usize = 16 * 1024;
 /// program that needs them is a text editor redrawing one line.
 const FRAME_MS: u64 = 250;
 
-/// How often the settings are looked at again, in frames of the above.
+/// How often the settings are looked at again, in milliseconds.
 ///
 /// Two seconds. A wallpaper that re-read the file every frame would be a
 /// wallpaper opening a file four times a second for an answer that changes when
 /// somebody types a command.
-const RECHECK: u32 = 8;
+///
+/// Milliseconds and not frames: a still pattern has no frames, and a moving one
+/// turned out not to be counting them reliably either.
+const RECHECK_MS: u64 = 2_000;
 
-/// And how often a still pattern looks, since it has no frames of its own.
+/// How long a still pattern waits before looking, since it has nothing else to
+/// wake it.
 const STILL_RECHECK_MS: u64 = 2_000;
 
 /// What the compositor says.
@@ -152,7 +156,15 @@ extern "C" fn main() -> ! {
     }
 
     let mut frame = 0u32;
-    let mut since_check = 0u32;
+    // When the settings were last read, on the machine's own clock.
+    //
+    // A clock and not a count of timed-out waits, which is what this was and
+    // which was wrong in a way that only showed up on a moving pattern: the
+    // recheck sat inside the `ready == 0` branch, so it happened only when a
+    // wait *expired*. An animated wallpaper is answered by the compositor on
+    // nearly every wait, so the branch almost never ran and a setting changed
+    // while the stars were drifting went unnoticed for over a minute.
+    let mut last_check = nexus_user::uptime();
     let mut stale = true;
     let mut in_flight = false;
 
@@ -182,27 +194,30 @@ extern "C" fn main() -> ! {
             break;
         };
 
-        if ready == 0 {
-            frame = frame.wrapping_add(1);
-            since_check += 1;
-            if look.style.moves() {
+        // Looked at again every so often, so that changing a setting shows up
+        // without anything having to tell this program. Before the wake is
+        // dealt with, and whatever woke it: how long it has been is a question
+        // about the clock, not about why this loop is running.
+        let now = nexus_user::uptime();
+        if now.saturating_sub(last_check) >= RECHECK_MS {
+            last_check = now;
+            let fresh = read_look(settings);
+            if fresh != look {
+                nexus_user::log(&alloc::format!(
+                    "wall: the look changed to {} on {}",
+                    fresh.style.name(),
+                    fresh.top.to_text()
+                ))
+                .ok();
+                look = fresh;
                 stale = true;
             }
-            // Looked at again every so often, so that changing a setting shows
-            // up without anything having to tell this program.
-            if since_check >= RECHECK || !look.style.moves() {
-                since_check = 0;
-                let now = read_look(settings);
-                if now != look {
-                    nexus_user::log(&alloc::format!(
-                        "wall: the look changed to {} on {}",
-                        now.style.name(),
-                        now.top.to_text()
-                    ))
-                    .ok();
-                    look = now;
-                    stale = true;
-                }
+        }
+
+        if ready == 0 {
+            frame = frame.wrapping_add(1);
+            if look.style.moves() {
+                stale = true;
             }
             continue;
         }
