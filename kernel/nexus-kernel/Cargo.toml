@@ -12,9 +12,31 @@ path = "src/main.rs"
 
 [dependencies]
 nexus-abi = { path = "../../shared/nexus-abi" }
+nexus-font = { path = "../../shared/nexus-font" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+nexus-net = { path = "../../shared/nexus-net" }
+nexus-time = { path = "../../shared/nexus-time" }
+nexus-config = { path = "../../shared/nexus-config" }
+nexus-look = { path = "../../shared/nexus-look" }
 nexus-mm = { path = "../nexus-mm" }
 
 [features]
+# The filesystem's destructive exercises: make blocks, fill them, read them
+# back, leak one on purpose and reclaim it, abandon a transaction and replay it.
+#
+# Off by default, and the reason is not only that they took eleven seconds of a
+# sixteen-second boot. They *write to the disk*. A machine that ran a thousand
+# block writes across somebody's filesystem every time it was switched on would
+# be a machine doing maintenance nobody asked for, on data it has no business
+# touching, before the desktop appears.
+#
+# So they run where they belong: in the test suite, which builds the kernel with
+# this on. The ordinary boot still mounts the store, replays the journal, reads
+# the boot log back and lists the root -- everything that checks the filesystem
+# by *using* it -- and says plainly that the deep checks were not run, so no log
+# can be read as claiming they passed.
+deep-selftest = []
+
 # Fault-injection builds, used by scripts/test-faults.ps1 to verify that the
 # exception path actually works. They are features rather than test code
 # because the only way to prove a fault handler is to take a real fault, and
@@ -25,3 +47,22 @@ nexus-mm = { path = "../nexus-mm" }
 inject-page-fault = []
 inject-stack-overflow = []
 inject-divide-error = []
+
+# Breaks TLB shootdown so that it invalidates only the processor that made the
+# change, which is what the kernel did before shootdown existed.
+#
+# This one proves a *test* rather than a handler. A shootdown that silently does
+# not happen looks exactly like one that does, so the self-test that checks for
+# stale translations has to be shown to fail when there is something to catch;
+# otherwise it is a line of output that would print either way.
+inject-no-shootdown = []
+
+# Replaces the user program with one that reads kernel memory. The ordinary
+# program shows the boundary can be crossed; only an access that must fail shows
+# the boundary is there.
+inject-user-violation = []
+
+# Gives the two isolation processes the same data frame, which is what having no
+# address-space separation would look like. The programs check that nobody else
+# writes into their memory; this is how that check is shown to be able to fail.
+inject-shared-user-page = []

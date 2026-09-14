@@ -1,0 +1,15 @@
+[package]
+name = "nexus-window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The client half of the compositor's protocol: a surface, keys, and a frame loop."
+
+[lib]
+name = "nexus_window"
+path = "src/lib.rs"
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }

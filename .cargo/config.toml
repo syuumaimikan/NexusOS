@@ -30,3 +30,14 @@ kernel = [
 ]
 # Build the UEFI bootloader against the prebuilt `x86_64-unknown-uefi` core.
 bootloader = ["build", "-p", "nexus-boot", "--target", "x86_64-unknown-uefi"]
+# User programs. Named `user` and not `init`, because cargo has a built-in
+# command by that name and an alias that shadows one is ignored with a warning.
+# The same custom-target machinery as the kernel, with the small
+# code model, because they live in the low half of the address space.
+user = ["build", "-p", "nexus-init", "-p", "nexus-hello",
+        "-p", "nexus-compositor", "-p", "nexus-client", "-p", "nexus-shell", "-p", "nexus-install", "-p", "nexus-find", "-p", "nexus-setup", "-p", "nexus-updater", "-p", "nexus-browser", "-p", "nexus-term", "-p", "nexus-wall", "-p", "nexus-settings", "-p", "nexus-store", "-p", "nexus-idle", "--target", "targets/x86_64-nexus-user.json",
+        "-Zbuild-std=core,compiler_builtins,alloc",
+        "-Zbuild-std-features=compiler-builtins-mem"]
+
+[target.x86_64-nexus-user]
+rustflags = ["-C", "link-arg=--script=user/nexus-init/link.ld"]

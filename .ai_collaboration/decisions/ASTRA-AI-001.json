@@ -1,0 +1,13 @@
+{
+  "id": "ASTRA-AI-001",
+  "topic": "AI runtime isolation",
+  "decision": "Separate read-only service, no_std shared protocol/core, no model or mutable grants in process, existing request/reply channels",
+  "reason": "Existing one-thread-per-process capability ABI; no TLS, FPU support or inference backend",
+  "alternatives": [
+    "kernel-integrated runtime rejected for failure isolation",
+    "inference in UI rejected for blocking"
+  ],
+  "decided_by": [
+    "gpt6_astra"
+  ]
+}

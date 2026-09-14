@@ -1,0 +1,181 @@
+//! Build script: turns `locales/*.txt` into compiled-in string tables.
+//!
+//! The glyphs those strings need are rasterised by `shared/nexus-font`, which
+//! reads the same files: the face and the strings have to cover the same set.
+//!
+//! There is no filesystem read here: translations are compiled in. The kernel
+//! could load them now -- it has a filesystem -- but a kernel that cannot name
+//! a disk error until it has read the disk is a kernel with a hole in its
+//! first minute, and programs start before any of them has opened a file.
+//! Keeping them in data files anyway is what [§77 of the specification]
+//! asks for and what makes adding a language a matter of adding a file.
+//!
+//! Two invariants are enforced here rather than discovered at runtime:
+//!
+//! * every locale must define exactly the same keys, so a missing translation
+//!   is a build error and never a blank label on screen;
+//! * the keys are emitted sorted, so a lookup is a binary search and no
+//!   allocation.
+//!
+//! [§77 of the specification]: ../../docs/NEXUSOS_ROADMAP.md
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn main() {
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let repo_root = manifest.parent().unwrap().parent().unwrap();
+    let locale_dir = repo_root.join("locales");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+
+    println!("cargo:rerun-if-changed={}", locale_dir.display());
+
+    let locales = read_locales(&locale_dir);
+    let keys = validate_and_collect_keys(&locales);
+
+    fs::write(out_dir.join("locales.rs"), emit_locales(&locales, &keys)).unwrap();
+}
+
+/// One parsed locale file.
+struct LocaleFile {
+    tag: String,
+    entries: BTreeMap<String, String>,
+}
+
+/// Read and parse every `*.txt` in `directory`, sorted by file name.
+fn read_locales(directory: &Path) -> Vec<LocaleFile> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+        .collect();
+    paths.sort();
+
+    assert!(
+        !paths.is_empty(),
+        "no locale files in {}",
+        directory.display()
+    );
+
+    paths
+        .iter()
+        .map(|path| {
+            println!("cargo:rerun-if-changed={}", path.display());
+            let text = fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            LocaleFile {
+                tag: path.file_stem().unwrap().to_string_lossy().into_owned(),
+                entries: parse(&text, path),
+            }
+        })
+        .collect()
+}
+
+/// Parse `key = value` lines, ignoring blanks and `#` comments.
+fn parse(text: &str, path: &Path) -> BTreeMap<String, String> {
+    let mut entries = BTreeMap::new();
+
+    for (number, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once('=') else {
+            panic!(
+                "{}:{}: expected `key = value`, found {trimmed:?}",
+                path.display(),
+                number + 1
+            );
+        };
+
+        let key = key.trim().to_string();
+        let value = value.trim().to_string();
+        if let Some(previous) = entries.insert(key.clone(), value) {
+            panic!(
+                "{}:{}: duplicate key {key:?} (previously {previous:?})",
+                path.display(),
+                number + 1
+            );
+        }
+    }
+
+    entries
+}
+
+/// Check that every locale defines the same keys, and return them sorted.
+///
+/// A missing translation is a build failure on purpose: the alternative is a
+/// label that silently renders empty, or falls back to another language, in a
+/// build that looked fine.
+fn validate_and_collect_keys(locales: &[LocaleFile]) -> Vec<String> {
+    let reference = &locales[0];
+    let keys: Vec<String> = reference.entries.keys().cloned().collect();
+
+    for locale in &locales[1..] {
+        let missing: Vec<&String> = keys
+            .iter()
+            .filter(|key| !locale.entries.contains_key(*key))
+            .collect();
+        let extra: Vec<&String> = locale
+            .entries
+            .keys()
+            .filter(|key| !reference.entries.contains_key(*key))
+            .collect();
+
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "locale {} does not match {}: missing {missing:?}, unexpected {extra:?}",
+            locale.tag,
+            reference.tag
+        );
+    }
+
+    keys
+}
+
+/// Emit the string tables.
+fn emit_locales(locales: &[LocaleFile], keys: &[String]) -> String {
+    let mut out = String::new();
+    out.push_str("// Generated by build.rs from locales/*.txt. Do not edit.\n\n");
+
+    let _ = writeln!(out, "pub const KEY_COUNT: usize = {};", keys.len());
+    let _ = writeln!(
+        out,
+        "\n/// Translation keys, sorted so a lookup is a binary search."
+    );
+    let _ = writeln!(out, "pub const KEYS: [&str; KEY_COUNT] = [");
+    for key in keys {
+        let _ = writeln!(out, "    {key:?},");
+    }
+    out.push_str("];\n");
+
+    for (index, locale) in locales.iter().enumerate() {
+        let _ = writeln!(out, "\nstatic VALUES_{index}: [&str; KEY_COUNT] = [");
+        for key in keys {
+            let _ = writeln!(out, "    {:?},", locale.entries[key]);
+        }
+        out.push_str("];\n");
+    }
+
+    let _ = writeln!(out, "\npub const LOCALE_COUNT: usize = {};", locales.len());
+    let _ = writeln!(out, "pub const LOCALES: [Locale; LOCALE_COUNT] = [");
+    for (index, locale) in locales.iter().enumerate() {
+        let name = locale
+            .entries
+            .get("locale.name")
+            .map(String::as_str)
+            .unwrap_or(&locale.tag);
+        let _ = writeln!(
+            out,
+            "    Locale {{ tag: {:?}, name: {:?}, values: &VALUES_{index} }},",
+            locale.tag, name
+        );
+    }
+    out.push_str("];\n");
+
+    out
+}

@@ -18,12 +18,84 @@ use alloc::string::String;
 
 use nexus_abi::FramebufferInfo;
 
-use crate::framebuffer::{font, Color, Framebuffer};
+use crate::framebuffer::{font, Color, Framebuffer, Gradient};
 use crate::sync::IrqSpinLock;
-use crate::{arch, i18n, kprintln, memory, sched};
+use crate::{arch, fs, i18n, input, kprintln, memory, sched};
 
 /// The framebuffer, once the kernel has adopted it.
 static DISPLAY: IrqSpinLock<Option<Framebuffer>> = IrqSpinLock::new(None);
+
+/// What the firmware said about the framebuffer, kept so that a process can be
+/// handed it.
+///
+/// A compositor is a process holding a handle to the display's memory, not a
+/// thing inside the kernel. This is the kernel's half of that: it knows where
+/// the pixels are, and something above it decides what to put in them.
+static GEOMETRY: IrqSpinLock<Option<FramebufferInfo>> = IrqSpinLock::new(None);
+
+/// Where the framebuffer is and what shape it has, if there is one.
+#[must_use]
+pub fn geometry() -> Option<FramebufferInfo> {
+    *GEOMETRY.lock()
+}
+
+/// The region of the screen the kernel's own chrome never touches.
+///
+/// Returned as `(x, y, width, height)` in pixels. It is not a window and it is
+/// not owned: it is a rectangle the kernel promises to leave alone, until there
+/// is a compositor to ask instead of a promise to keep.
+///
+/// Above the panel band, and that is the whole of why it is where it is. The
+/// panel is redrawn twice a second, and clearing it means clearing *whole
+/// rows* -- a translated line is a different length from the one it replaces,
+/// so anything narrower would leave the tail of the previous language on
+/// screen. A rectangle beside the panel is therefore not beside it at all; it
+/// is inside the rows the panel wipes, which is what happened to the first
+/// version of this and showed up as a fifteen-pixel sliver of somebody's
+/// gradient.
+#[must_use]
+pub fn unclaimed_region() -> Option<(u32, u32, u32, u32)> {
+    let info = geometry()?;
+
+    // The whole of it.
+    //
+    // It used to be a rectangle in a corner, because the kernel was still
+    // drawing the rest and two things painting one screen is two things
+    // fighting. What changed is that the kernel *stops*: the moment the
+    // compositor has the framebuffer, the display thread stops repainting and
+    // the screen belongs to a process.
+    //
+    // That is the whole point of having a compositor. A machine where the
+    // kernel keeps four fifths of the display is a machine whose windows live
+    // in a box in the corner, and no amount of work on the windows fixes it.
+    Some((0, 0, info.width, info.height))
+}
+
+/// Whether a process has taken the display over.
+///
+/// Once this is set the kernel draws nothing. It is not a lock and does not
+/// need to be: it goes from false to true exactly once, from the thread that
+/// hands the framebuffer over, and the only reader is a loop that checks it
+/// twice a second.
+static HANDED_OVER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Give up the screen.
+///
+/// Called when the framebuffer is handed to a process. Everything the kernel
+/// had drawn stays on the display until that process draws over it, which is
+/// the right behaviour: a screen that went black between the last kernel frame
+/// and the first composited one would look like a machine that had crashed at
+/// exactly the moment it started working.
+pub fn hand_over() {
+    HANDED_OVER.store(true, core::sync::atomic::Ordering::Release);
+    kprintln!("[disp] the display now belongs to a process; the kernel has stopped drawing");
+}
+
+/// Whether the kernel still owns the screen.
+#[must_use]
+pub fn is_ours() -> bool {
+    !HANDED_OVER.load(core::sync::atomic::Ordering::Acquire)
+}
 
 /// Background at the top of the gradient.
 const BACKGROUND_TOP: Color = Color(0x000B_1220);
@@ -39,9 +111,6 @@ const TEXT: Color = Color(0x00E6_EDF5);
 const MUTED: Color = Color(0x0084_9AB8);
 /// The bar along the bottom.
 const BAR: Color = Color(0x0008_0E18);
-
-/// How long each language is shown for by the demonstration thread.
-const LOCALE_CYCLE_MS: u64 = 6000;
 
 /// Adopt the framebuffer and paint the initial screen.
 ///
@@ -63,8 +132,9 @@ pub unsafe fn init(info: &FramebufferInfo) -> bool {
     );
     if font::has_generated_face() {
         kprintln!(
-            "[disp] {} glyphs available, including CJK",
-            font::generated_glyph_count()
+            "[disp] {} glyphs available, including CJK, from {}",
+            font::generated_glyph_count(),
+            font::generated_source()
         );
     } else {
         // Worth saying plainly: if this line appears, Japanese labels will be
@@ -74,14 +144,194 @@ pub unsafe fn init(info: &FramebufferInfo) -> bool {
     }
 
     *DISPLAY.lock() = Some(framebuffer);
-    paint_chrome();
+    *GEOMETRY.lock() = Some(*info);
+    // The logo first, and the diagnostics panel when the display thread's first
+    // pass comes round. Between the two is the whole of bring-up -- the memory
+    // map, the processors, the disk, the card -- so the mark is on screen for
+    // as long as the machine is actually starting, which is what a boot logo is
+    // for. It is not a timed splash and there is no timer behind it.
+    paint_logo();
     true
+}
+
+/// The mark this machine shows while it is starting.
+///
+/// Drawn from primitives rather than loaded from a file, because at this point
+/// in the boot there is no filesystem: the disk has not been found, the block
+/// cache does not exist and the heap is the only thing that works. A logo that
+/// needed a file would be a logo that could only appear after the machine was
+/// already up, which is the one moment it is not wanted.
+///
+/// What it draws is a nexus: lines converging on a point from every side, which
+/// is what the name means and what the system is -- a kernel everything else
+/// reaches through one interface.
+fn paint_logo() {
+    let name = i18n::text("os.name");
+    let version = i18n::format("os.subtitle", &[("version", &env!("CARGO_PKG_VERSION"))]);
+
+    with(|fb| {
+        let width = fb.width();
+        let height = fb.height();
+        fb.vertical_gradient(BACKGROUND_TOP, Color(0x0002_0610));
+
+        let centre_x = width / 2;
+        let centre_y = height * 2 / 5;
+        // Sized against the smaller side, so the mark is the same shape on a
+        // wide screen and a tall one.
+        let radius = (width.min(height) / 6).max(40);
+
+        // Twelve spokes, converging. Drawn as points along each line rather
+        // than with a line routine, because there is no line routine here and
+        // twelve of these is less code than one that is general.
+        for spoke in 0..12u32 {
+            // A twelfth of a turn each, as sixteenths of a right angle in a
+            // fixed-point table: there is no floating point in the kernel and
+            // a table of twelve directions is smaller than the arithmetic that
+            // would avoid it.
+            const DIRECTIONS: [(i32, i32); 12] = [
+                (1000, 0),
+                (866, 500),
+                (500, 866),
+                (0, 1000),
+                (-500, 866),
+                (-866, 500),
+                (-1000, 0),
+                (-866, -500),
+                (-500, -866),
+                (0, -1000),
+                (500, -866),
+                (866, -500),
+            ];
+            let (dx, dy) = DIRECTIONS[spoke as usize];
+            // The inner end is short of the middle, so the lines converge on a
+            // node rather than crossing in a smear.
+            let inner = radius / 4;
+            for step in inner..radius {
+                let x = centre_x as i32 + dx * step as i32 / 1000;
+                let y = centre_y as i32 + dy * step as i32 / 1000;
+                if x < 0 || y < 0 {
+                    continue;
+                }
+                // Brighter towards the middle, which is where the eye goes.
+                let fade = 255 - (step - inner) * 200 / radius.max(1);
+                let colour = Color::BLACK.blend(ACCENT, fade as u8);
+                // Two pixels thick, so the mark reads at any size the firmware
+                // happens to have given us.
+                fb.put_pixel(x as u32, y as u32, colour);
+                fb.put_pixel((x + 1) as u32, y as u32, colour);
+            }
+        }
+
+        // The node itself.
+        let node = (radius / 10).max(3);
+        fb.fill_rect(
+            centre_x.saturating_sub(node),
+            centre_y.saturating_sub(node),
+            node * 2,
+            node * 2,
+            TEXT,
+        );
+
+        let scale = (width / 240).clamp(3, 10);
+        let name_y = centre_y + radius + radius / 3;
+        fb.draw_text_centered(name_y, name, TEXT, scale);
+        let version_y = name_y + Framebuffer::line_height(scale) + 10;
+        fb.draw_text_centered(version_y, &version, MUTED, (scale / 2).max(2));
+
+        // A line under it all, which is the only part that will move: the
+        // machine is starting and something on screen should say so.
+        let bar_width = radius * 3;
+        let bar_y = version_y + Framebuffer::line_height(2) + radius / 2;
+        fb.fill_rect(
+            centre_x.saturating_sub(bar_width / 2),
+            bar_y,
+            bar_width,
+            2,
+            PANEL,
+        );
+    });
+}
+
+/// Move the line under the logo along.
+///
+/// `done` and `total` are steps of bring-up, not time. A progress bar driven by
+/// a timer is a decoration; this one is the machine saying what it has got
+/// through, so a machine that is slow because its disk is slow shows a bar that
+/// is slow in the same place every time.
+pub fn progress(done: u32, total: u32) {
+    if !is_ours() {
+        return;
+    }
+    with(|fb| {
+        let width = fb.width();
+        let height = fb.height();
+        let centre_x = width / 2;
+        let centre_y = height * 2 / 5;
+        let radius = (width.min(height) / 6).max(40);
+        let scale = (width / 240).clamp(3, 10);
+        let name_y = centre_y + radius + radius / 3;
+        let version_y = name_y + Framebuffer::line_height(scale) + 10;
+        let bar_width = radius * 3;
+        let bar_y = version_y + Framebuffer::line_height(2) + radius / 2;
+
+        let filled = bar_width * done.min(total) / total.max(1);
+        fb.fill_rect(
+            centre_x.saturating_sub(bar_width / 2),
+            bar_y,
+            filled,
+            2,
+            ACCENT,
+        );
+    });
 }
 
 /// Whether a display is available.
 #[must_use]
 pub fn is_available() -> bool {
     DISPLAY.lock().is_some()
+}
+
+/// Repaint the background across rows `start_y..end_y`, leaving the rectangle
+/// that belongs to a process alone.
+///
+/// Every clear in this module goes through here. A clear that ran from edge to
+/// edge would take back the rectangle the kernel gave away, twice a second and
+/// again on every language change -- which it did, and looked exactly like a
+/// user program that had failed to draw.
+fn clear_rows(fb: &mut Framebuffer, start_y: u32, end_y: u32) {
+    let background = Gradient {
+        top: BACKGROUND_TOP,
+        bottom: BACKGROUND_BOTTOM,
+        surface_height: fb.height(),
+    };
+    let Some((x, y, width, height)) = unclaimed_region() else {
+        fb.vertical_gradient_region(start_y, end_y, background);
+        return;
+    };
+
+    // Rows above and below the reserved rectangle: the whole width.
+    let above = end_y.min(y);
+    if above > start_y {
+        fb.vertical_gradient_region(start_y, above, background);
+    }
+    let below = start_y.max(y + height);
+    if end_y > below {
+        fb.vertical_gradient_region(below, end_y, background);
+    }
+
+    // And the rows beside it: everything but the rectangle itself.
+    let overlap_start = start_y.max(y);
+    let overlap_end = end_y.min(y + height);
+    if overlap_end > overlap_start {
+        fb.vertical_gradient_span(0, x, overlap_start, overlap_end, background);
+        fb.vertical_gradient_span(
+            x + width,
+            fb.width(),
+            overlap_start,
+            overlap_end,
+            background,
+        );
+    }
 }
 
 /// Run `f` with the framebuffer, if there is one.
@@ -109,13 +359,7 @@ fn paint_chrome() {
         // Clear the whole chrome area before redrawing. A translation is a
         // different length from the one it replaces, so anything left over from
         // the previous language would still be on screen underneath.
-        fb.vertical_gradient_region(
-            0,
-            height - bar_height,
-            height,
-            BACKGROUND_TOP,
-            BACKGROUND_BOTTOM,
-        );
+        clear_rows(fb, 0, height - bar_height);
 
         // Sized as a fraction of the surface, so the layout is proportionate at
         // whatever mode the firmware gave us.
@@ -247,7 +491,7 @@ static PAINTED_HEIGHT: IrqSpinLock<u32> = IrqSpinLock::new(0);
 static PAINTED_LOCALE: IrqSpinLock<usize> = IrqSpinLock::new(usize::MAX);
 
 /// Gather the current system state as translated label and value pairs.
-fn status_rows() -> [StatusRow; 7] {
+fn status_rows() -> [StatusRow; 10] {
     let uptime_ms = arch::time::uptime_ms();
     let scheduler = sched::stats();
     let heap = memory::heap::stats();
@@ -295,9 +539,19 @@ fn status_rows() -> [StatusRow; 7] {
                 "value.threads",
                 &[
                     ("total", &scheduler.threads),
+                    ("running", &scheduler.running),
                     ("ready", &scheduler.ready),
                     ("sleeping", &scheduler.sleeping),
                 ],
+            ),
+        },
+        // On screen because it is the visible difference between a system that
+        // brought its processors up and one that is scheduling on all of them.
+        StatusRow {
+            label: String::from(i18n::text("status.processors")),
+            value: i18n::format(
+                "value.processors",
+                &[("online", &arch::smp::processor_count())],
             ),
         },
         StatusRow {
@@ -322,9 +576,36 @@ fn status_rows() -> [StatusRow; 7] {
                 ],
             ),
         },
+        // The filesystem the system keeps its own things in, which is on
+        // screen for the same reason memory is: it is a resource that runs out,
+        // and a number nobody can see is a number nobody notices moving.
+        StatusRow {
+            label: String::from(i18n::text("status.storage")),
+            value: match fs::store::space() {
+                Some((total, free)) => i18n::format(
+                    "value.storage",
+                    &[
+                        ("free", &(free / (1024 * 1024))),
+                        ("total", &(total / (1024 * 1024))),
+                    ],
+                ),
+                None => String::from(i18n::text("value.unavailable")),
+            },
+        },
         StatusRow {
             label: String::from(i18n::text("status.language")),
             value: String::from(i18n::current().name),
+        },
+        StatusRow {
+            label: String::from(i18n::text("status.input")),
+            value: {
+                let typed = input::line();
+                if typed.is_empty() {
+                    String::from(i18n::text("value.input_empty"))
+                } else {
+                    i18n::format("value.input", &[("text", &typed)])
+                }
+            },
         },
     ]
 }
@@ -341,13 +622,7 @@ pub fn refresh_status() {
             *painted = (*painted).max(layout.height);
             *painted
         };
-        fb.vertical_gradient_region(
-            layout.y,
-            layout.y + clear_height,
-            fb.height(),
-            BACKGROUND_TOP,
-            BACKGROUND_BOTTOM,
-        );
+        clear_rows(fb, layout.y, layout.y + clear_height);
 
         fb.fill_rect(layout.x, layout.y, layout.width, layout.height, PANEL);
         fb.fill_rect(layout.x, layout.y, layout.width, 2, ACCENT);
@@ -384,6 +659,14 @@ pub fn refresh_status() {
 /// enough to cost nothing measurable.
 fn display_thread(_argument: usize) {
     loop {
+        // The screen may have been handed to a process. Nothing after this
+        // point may touch the framebuffer, and the thread stops rather than
+        // spinning: there is no other reason for it to exist.
+        if !is_ours() {
+            kprintln!("[disp] display thread retiring; the screen is somebody else's");
+            return;
+        }
+
         let locale = i18n::current_index();
         let changed = {
             let mut painted = PAINTED_LOCALE.lock();
@@ -397,25 +680,6 @@ fn display_thread(_argument: usize) {
 
         refresh_status();
         sched::sleep_ms(500);
-    }
-}
-
-/// Cycles the interface language, to demonstrate that switching works at
-/// runtime.
-///
-/// A real system changes language from settings, and only when asked. There is
-/// no settings UI yet, and a language selectable only at build time has not
-/// really been shown to work — the point of this thread is that every string,
-/// and the layout derived from it, is recomputed live.
-fn locale_demo_thread(_argument: usize) {
-    loop {
-        sched::sleep_ms(LOCALE_CYCLE_MS);
-        let locale = i18n::next_locale();
-        // The tag, not the name. The name is in its own language, and putting
-        // UTF-8 on the serial line turns the log into mojibake for anyone whose
-        // terminal is not set to it -- which is the whole reason logs here stay
-        // ASCII. The tag is also what a developer would grep for.
-        kprintln!("[i18n] interface language is now {}", locale.tag);
     }
 }
 
@@ -433,21 +697,5 @@ pub fn start_thread() {
     ) {
         Ok(id) => kprintln!("[disp] display thread {id} started"),
         Err(error) => kprintln!("[disp] could not start the display thread: {error}"),
-    }
-
-    if i18n::locale_count() > 1 {
-        match sched::spawn(
-            "locale-demo",
-            sched::thread::Priority::Background,
-            locale_demo_thread,
-            0,
-        ) {
-            Ok(id) => kprintln!(
-                "[i18n] thread {id} cycles {} languages every {} ms",
-                i18n::locale_count(),
-                LOCALE_CYCLE_MS
-            ),
-            Err(error) => kprintln!("[i18n] could not start the language demonstration: {error}"),
-        }
     }
 }

@@ -29,9 +29,24 @@ use core::arch::naked_asm;
 
 /// Flags a freshly created thread starts with.
 ///
-/// Bit 1 is reserved and always reads as one; bit 9 is the interrupt flag, set
-/// so that a new thread is immediately preemptible.
-pub const INITIAL_RFLAGS: u64 = 0x0000_0000_0000_0202;
+/// Bit 1 is reserved and always reads as one. The interrupt flag is
+/// deliberately *clear*, and that is not a detail.
+///
+/// [`context_switch`] ends with `popfq`, so whatever is in this word takes
+/// effect the instant a new thread is switched to — before it has reached
+/// `thread_trampoline`, and therefore before it has released the thread it
+/// displaced. With the flag set, a timer interrupt landing in that window
+/// scheduled again, overwrote the pending hand-off, and left the displaced
+/// thread ready but on no run queue: not running, never chosen, and nothing
+/// else about the system looking wrong. It cost a day to find, and the window
+/// is a few instructions wide, which is why it appeared in roughly one boot in
+/// a dozen.
+///
+/// A thread resumed the ordinary way returns inside `schedule`, where
+/// `without_interrupts` restores the flag after the hand-off is complete. A new
+/// thread has no such caller, so `thread_trampoline` enables interrupts itself,
+/// at the same point in the sequence.
+pub const INITIAL_RFLAGS: u64 = 0x0000_0000_0000_0002;
 
 /// Number of `u64` slots [`context_switch`] pushes: `rflags` plus six
 /// callee-saved registers.

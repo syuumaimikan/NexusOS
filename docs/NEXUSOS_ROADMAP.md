@@ -6,6 +6,21 @@ proves the behaviour, and its tests pass — not when the code compiles.
 
 Status: ✅ complete · 🚧 in progress · ⬜ not started
 
+Every phase from 0 to 19 has now been opened, and every one of them that is
+marked in progress has something on the machine that proves it — not a design,
+not a compiling module, but a line in a boot log that could not be there if the
+thing did not work. Where a phase is not started, the entry says why in terms of
+what is missing rather than leaving the box blank.
+
+What the machine does today, in one paragraph: it boots from its own bootloader
+on UEFI, brings up four processors, runs its own filesystem with a journal on a
+disk it drives, composites windows for programs that cannot reach the display,
+puts a desktop on the screen that a person can start a program from, has an
+address it was leased and answers TCP from outside, installs signed packages and
+refuses forged ones, runs a Linux binary through a translation layer above its
+own interface, lets a program search a directory it was lent and nothing else,
+and survives a program that faults.
+
 ---
 
 ## Phase 0 — Repository audit ✅
@@ -49,6 +64,10 @@ The local APIC is deferred to after Phase 4: its registers sit above RAM, so
 mapping them needs a virtual memory manager. The PIT reaches the same place
 through port I/O alone.
 
+Also delivered since: the I/O APIC. Its redirection entries are programmed from
+the MADT, including the interrupt source overrides, so devices other than the
+timer can raise interrupts — which is what made a keyboard possible at all.
+
 ## Phase 3 — Physical memory ✅
 
 - Frame allocator over the handoff memory map (buddy allocator)
@@ -88,12 +107,14 @@ core to shoot down.
 - Process and thread objects, address spaces, TLS
 - Context switching, preemption from the APIC timer
 - Priorities, sleep/wake, per-CPU run queues
+- TLB shootdown across processors
 - SMP bring-up via the MADT, per-CPU data
 - Ring 3 transition, `syscall`/`sysret`
+- A separate address space per process
 
 Delivered: kernel threads with their own guarded stacks, context switching,
 preemption from the timer, strict priority with round-robin inside each level,
-sleep and wake, thread exit and reaping, and a dedicated idle thread.
+sleep and wake, thread exit and reaping, and an idle thread per processor.
 
 **Done when:** a thread that never yields can still be taken off the processor.
 Verified: a sleeping ticker woke on schedule five times while a non-yielding
@@ -103,73 +124,1366 @@ Also delivered since: ACPI table parsing (RSDP, XSDT, MADT) and the local APIC
 timer, calibrated against the PIT and now driving the scheduling tick with the
 8259 and PIT shut down behind it.
 
-Still outstanding: user mode, address-space separation, per-CPU run queues and
-SMP. The processors are enumerated but none are started; "thread" currently
-means a kernel thread, and nothing is isolated yet.
+SMP bring-up is also done: every processor the MADT reports is started, through
+a real-mode trampoline and INIT/SIPI, and each runs on its own local APIC timer.
 
-## Phase 6 — Handles, IPC, system calls ⬜
+And every one of them now schedules. Which thread is running, which to fall back
+to, and whether a preemption is due are per-processor, held in the `GS`-based
+per-CPU area and readable without a lock; the thread table and the run queues
+stay shared behind one lock. A thread completes its departure from a processor
+only once the *next* thread there has run, which is what keeps a second core
+from switching onto a stack whose pointer has not been saved. The boot self-test
+records which processors ran its workers and fails if the answer is only one.
+
+TLB shootdown came with it, because it had to. `invlpg` invalidates on the
+processor that runs it and nowhere else, so unmapping a page while other cores
+hold the translation is a silent read or write to memory that has been handed to
+someone else. Each processor now has a shootdown mailbox that is both
+interrupted and polled: the interrupt reaches a core running normally, and the
+polling — from every spin loop — reaches one spinning for a lock with interrupts
+masked, which is the case that otherwise deadlocks, since reaping a thread
+unmaps its stack while holding the scheduler lock.
+
+Ring 3 is open. A user program runs at user privilege, in pages of its own that
+it cannot write and on a stack it cannot execute, and the only way back into the
+kernel is `syscall`. The entry stub is the interesting part: `syscall` does not
+switch stacks, so the processor arrives in ring 0 still standing on the user's,
+and `swapgs` plus the per-CPU area is how it gets off without destroying a
+register belonging to the caller. Every interrupt entry does the same, because
+user code can zero `GS.base` with one instruction and the next timer tick would
+otherwise read per-CPU state through a null pointer.
+
+Five system calls, each one exercised from ring 3 by the program the kernel
+starts at boot, because a call that has never been made from user mode is a
+function with an unusual name. The boot test fails unless an interrupt was taken
+from ring 3 — system calls alone would not prove user privilege, since `syscall`
+is legal from ring 0 — and an injection build reads kernel memory from ring 3 to
+show the boundary keeps something out rather than merely being crossable.
+
+Address spaces followed. Each process has a page-table root of its own; the
+kernel's upper half is shared by copying the top-level entries, so a kernel
+mapping made later appears in every space at once, and the entries are all
+created up front so that they never change afterwards. The scheduler loads the
+incoming thread's root on every switch, skipping the write when it is already
+right — writing `cr3` discards every non-global translation, so doing it
+needlessly would throw away a working set.
+
+The proof is on both sides of the boundary. The kernel compares the two
+processes' page tables and reports the different frames one address maps to,
+which is a fact rather than an interleaving; the two programs write their own
+identifier to that address and read it back two hundred times, which would
+collide within a few rounds if the page were shared. An injection build gives
+them one page between them, so the second check is known to be able to fail.
+
+Finding that took a scheduler bug with it. A newly created thread started with
+its interrupt flag already set, so it could be preempted in the handful of
+instructions between being switched to and releasing the thread it displaced —
+and the displaced thread was then left ready, on no run queue, never to run
+again. About one boot in a dozen lost a thread that way. New threads now start
+with interrupts masked and enable them once the hand-off is done, the hand-off
+slot asserts that it is not being overwritten, and the monitor checks every five
+seconds that no thread is ready and unqueued.
+
+Still outstanding: per-processor run queues, thread affinity, and a process
+object worth the name — there is no parent, no exit status, and no way to create
+one from inside the system.
+
+## Input 🚧
+
+Not a phase of its own either: the system had to become interactive before the
+language could be *chosen* rather than cycled on a timer.
+
+Delivered: the I/O APIC routing the keyboard's line to a vector, a PS/2 driver
+reading scancode set 1, decoding to keys, and an input thread that acts on them
+— typing edits a line on screen, F1 switches the interface language.
+
+Verified from outside: `scripts/test-input.ps1` types through QEMU's monitor and
+checks the guest reports back the word that was typed and the language change.
+Nothing internal can prove an input path; only driving it from outside can.
+
+The input thread no longer polls: it blocks on a wait queue that the keyboard
+interrupt wakes. At ten seconds of uptime with the same keystrokes, that took
+the system from 1766 context switches to 688.
+
+Outstanding: there is no focus, no delivery to a process, and no mouse. Keys are
+acted on by the kernel itself, which is where a window server will take over.
+
+## Phase 6 — Handles, IPC, system calls 🚧
 
 - Handle table with per-handle rights, the root of the capability model
 - Channels, shared memory, events, semaphores, mutexes
 - The Nexus system-call ABI
 - Zero-copy message passing
 
-## Phase 7 — Storage and NexusFS ⬜
+Delivered: wait queues, a handle table with per-handle rights, message
+channels, and ten system calls.
+
+A handle is an index into a table that belongs to one process, and holding it is
+the authority — there is no way to name a channel a process was not handed, so
+there is no ambient check to forget. The rights beside it say what may be done,
+so the same object can be given to one process to read and another to write.
+Both compatibility layers will be tables above this one rather than a second
+idea of authority inside the kernel.
+
+A channel is two endpoints, each with an inbox; writing to one appends to the
+*other* and wakes whoever waits there. Messages are whole, because a byte stream
+pushes framing into every user of it. An endpoint holds its peer weakly, which
+is what makes "the other end has gone" something the kernel states rather than
+something a caller times out on.
+
+Both halves are exercised from both sides. A kernel self-test starts a thread on
+a channel and waits for the *scheduler* to report it blocked before sending
+anything — a receiver that polled would never appear in that count — then checks
+the bytes that came out. A user program creates a channel from ring 3, writes,
+reads it back, is refused a handle it was never given, and is told the peer has
+closed after closing it.
+
+Two processes talk. The kernel creates a channel and gives one end to each
+before either starts, so neither can name the other and neither needs to — the
+handle is the introduction and the authority at once. The client asks once and
+blocks for the answer; the server answers whatever arrives until the channel
+closes, which is how it learns the client has gone. Nothing polls and nothing
+times out. The boot test checks the order as well as the presence: a request
+that arrived after its answer would be two monologues rather than a round trip.
+
+And a handle can be carried in a message, which is what makes the whole thing a
+capability system rather than a pair of pipes. The client makes a second channel
+and sends one end of it down the first; everything after that happens somewhere
+the kernel never arranged. Handles move rather than copy — they leave the
+sender's table at the moment the message is built, so there is no instant where
+both processes hold one — and a send that fails after taking them puts them
+back, because losing authority to a full queue would be a leak the caller could
+not have avoided. Passing one on needs a right of its own, so a process can be
+given something it may use and may not delegate.
+
+Shared memory is the second kind of handle. A channel copies its message twice,
+once out of the sender and once into the receiver, which is right for a request
+and wrong for a framebuffer; this is the other arrangement. The frames exist
+once, and a process holding the handle maps them wherever suits it — the two
+programs that demonstrate it deliberately choose different addresses, because
+sharing memory does not mean agreeing on where it goes. The handle crosses the
+channel; the contents never do.
+
+It needed one bit in a page-table entry. An address space frees every frame it
+maps when it is dropped, and a shared frame is mapped in more than one, so
+without a way to say "not mine" the second space to go would free a frame the
+first had already returned. Bits 9 to 11 of an entry are ignored by the
+processor and available to the operating system, which is what makes saying it
+possible; the object that owns the frames frees them when its last handle does,
+and the boot test fails if the numbers do not match.
+
+And the first pixels a process put on the screen. `paint` is a program on the
+disk that is handed a rectangle and a handle to the framebuffer -- the same
+shared-memory mechanism two programs use to talk, pointed at memory the firmware
+chose instead of at pages the allocator made. It maps it at an address of its
+own choosing, is told the stride rather than guessing it, checks the rectangle
+against the screen rather than trusting what it was sent, and fills it.
+
+That is the shape a compositor has: a process holding a handle to the display,
+not a thing inside the kernel. This is not one. It has no windows and no
+clients, and the kernel still draws its own chrome -- but it now repaints
+*around* the rectangle it gave away, which it did not before, and the first
+version of this looked exactly like a program that had failed to draw.
+
+Two things came out of measuring it. Mapping a nine-megabyte framebuffer meant
+two and a half thousand rounds of interrupting every processor to shoot down a
+translation for a page that had never been present -- and the architecture does
+not permit a processor to have cached one, because there was nothing to cache.
+New mappings now invalidate locally and say nothing to anyone else; changing or
+removing a present mapping still broadcasts. And the painter's completion
+message had nobody reading it, which the boot test caught by counting messages
+sent against messages received.
+
+Outstanding: events and semaphores. A process waits on a channel or on nothing.
+
+## Continuous integration ✅
+
+Not a phase, and it should have come earlier. Two jobs: one that needs only a
+toolchain -- formatting, lints, the host unit tests, and that all four targets
+build -- and one that needs QEMU and boots the thing.
+
+The second is the one that matters. Every claim in this project is verified by
+running rather than by compiling, and those runs are the ones that cannot be
+reproduced from a build log. A hosted runner has no emulation acceleration, so
+boots take seconds instead of milliseconds; the timeouts allow for it, and the
+one measurement that would otherwise be sensitive to a slow machine -- the APIC
+calibration -- measures against the PIT rather than assuming a frequency, so a
+slower host gives a smaller number and not a wrong one. A failing run keeps the
+serial logs, because a red cross is not a diagnosis.
+
+## Phase 7 — Storage and NexusFS ✅
 
 - virtio-blk, then NVMe and AHCI
 - Block cache, VFS layer
 - NexusFS: copy-on-write, journaling, checksums, snapshots, compression
 
-## Phase 8 — Drivers and user space ⬜
+Delivered: PCI enumeration and a virtio block driver.
+
+Everything the machine has that is not on the processor is behind PCI, so
+finding devices came first: every function of every device, through the legacy
+port window, which reaches all of what enumeration and a virtio driver need.
+
+The disk is driven the way a modern device is driven -- descriptors placed in
+memory for the hardware to come and fetch, rather than bytes pushed through a
+port. A virtqueue is three shared arrays: descriptors, an available ring the
+driver appends to, and a used ring the device appends to. A block request is
+three descriptors chained -- a header, the data, and one byte for the device to
+report on.
+
+The image every sector of which begins with its own number, written as text, is
+the point of the test: the failure a block driver has to be caught making is
+fetching a *different* sector than it was asked for, and a disk of zeroes cannot
+tell that apart from working. The boot test reads the first sector, one in the
+middle and the last, checks that a sector past the end is refused, writes a
+position-dependent pattern to a scratch sector, reads it back, and restores what
+was there.
+
+And the image is a real one, built here rather than by a formatter: a protective
+master boot record, a GPT with its backup at the far end, and a FAT32 written
+sector by sector -- boot sector, FSInfo, two file allocation tables, directories
+as cluster chains of 32-byte entries. A test boots a machine with nothing but
+that image attached, so the firmware has to find the partition table, recognise
+the EFI system partition, read the filesystem and load the bootloader out of it;
+NexusOS had never done any of that before, because QEMU had always been
+pretending a directory was a filesystem on its behalf.
+
+The data disk and the bootable image are separate files on purpose. A machine
+given two bootable disks leaves the firmware to choose between them, and it
+chose the one whose kernel was older -- which made every fault-injection build
+boot a binary that was not the one under test, and every result mean nothing.
+
+And the kernel reads both for itself. The GPT is checked rather than trusted --
+the header's own checksum and the one over the entry array are both verified,
+because a partition table is the one structure where believing a corrupt value
+means writing to the wrong part of a disk. FAT32 follows: the boot parameter
+block, cluster chains through the allocation table, directories as runs of
+32-byte entries, and files by path.
+
+The test reads three files and refuses a fourth. One in the root; one a
+directory down, so that walking a path is exercised rather than merely compiled;
+one longer than a cluster with position-dependent contents, so that clusters
+stitched together in the wrong order fail rather than being the right length;
+and a name that does not exist, which has to come back as an error rather than
+as whatever was next in the directory.
+
+And a program now comes off it. `init` is built as its own binary for its own
+target -- the same custom-target machinery as the kernel, with the small code
+model, because a user program lives in the low half of the address space -- and
+the kernel reads it off the filesystem, loads its segments into an address space
+that did not exist a moment earlier, and enters it in ring 3. Everything that
+ran at user privilege before this was assembled into the kernel and copied into
+a page. This is the difference between a system that can run user code and one
+that can run *programs*.
+
+The ELF loader is the same one the bootloader uses, moved into the shared crate
+now that there are two callers. The one thing that differed between them is how
+physical memory is reached -- identity map for the bootloader, direct map for the
+kernel -- so that became a parameter rather than an assumption either of them
+made about the other.
+
+Every page of a loaded image is mapped, gaps between segments included, with the
+permissions of whichever segment covers it and the least of everything for the
+gaps. That is not tidiness: the image is one contiguous block from the buddy
+allocator, and the pages are handed back individually when the address space is
+dropped. A page that was allocated and never mapped would never be freed, and
+the block it came from would stay split for the life of the system.
+
+And a program can ask for another. There is no system call that creates a
+process: there is a channel, and holding one end of it is the authority to ask.
+`init` is given that end when the kernel starts it, sends the path of a program
+down it, and gets back a message carrying a *handle* — a channel to whatever was
+started. The two then talk, and neither can name the other or find any way to.
+A program that was never given the spawner handle cannot ask, and there is no
+name it could use instead, which is the argument for handles over a global
+namespace made concrete rather than argued.
+
+Finding that took a deadlock with it, and a quiet one. Reaping a finished thread
+held the scheduler's lock while dropping it, and dropping a thread can drop the
+last reference to its process, which drops its handle table, which drops the
+channel endpoints in it — and an endpoint's destructor wakes whoever was blocked
+on the other end, which takes that same lock. The machine ran every test
+correctly and then simply stopped. Threads are now taken out of the table under
+the lock and dropped outside it.
+
+And now the system has a filesystem of its own. The disk carries a second
+partition, empty when the build writes it, with a type GUID that means NexusFS
+lives there. The first boot finds no superblock and formats it; every boot after
+that mounts what the first one made. That order is deliberate. A filesystem the
+build script laid out would prove the build script works; the thing worth
+proving is that the kernel can make a filesystem it can then read.
+
+The format is the plain one, chosen so that every part of it can be explained.
+Four-kilobyte blocks. A superblock saying where each region is, checksummed over
+every field that says where something is, so a half-written one says so instead
+of sending a reader to the wrong block. A bitmap of free blocks, with the
+metadata region and the bits past the end of the volume marked taken before the
+bitmap first reaches the disk. A table of 128-byte inodes. Directories are
+ordinary files whose contents happen to be a list of names.
+
+An inode carries eleven direct block numbers and one indirect, which puts the
+largest file at just over two megabytes. That is a small number and an honest
+one: a second level of indirection is four lines and would make it a gigabyte,
+and adding it before anything needs it would be adding a path nothing has ever
+walked. Files are read and written entire, for the same reason -- there is no
+buffer cache underneath, so a byte-at-a-time interface would be a byte-at-a-time
+disk.
+
+Two things are checked that a single boot cannot check. The first is leakage:
+the self-test records the free-block and free-inode counts, makes a directory, a
+small file, a file past the direct blocks with position-dependent contents,
+shrinks it, refuses a duplicate name, refuses a name with a separator, refuses
+removing a directory with something in it, refuses a file larger than the format
+can describe, deletes everything, and requires both counts to be exactly what
+they were. A write path that allocated a block and forgot it passes every other
+test ever written and fails that one.
+
+The second is persistence, which needs two boots and therefore its own test.
+The kernel keeps `/system/boots` and `/system/boot.log` and writes to both on
+every start. `scripts/test-persistence.ps1` makes a fresh disk, boots twice
+without rebuilding, and requires the first boot to *make* a filesystem and
+report boot 1 with one line in the log, and the second to *mount* one and report
+boot 2 with two. Reading a file back in the same boot proves the code agrees
+with itself; only the second boot proves anything reached the platter.
+
+Writing that test brought the two-bootable-disks trap back for a second visit --
+the new script built the data disk with the bootloader in it, the firmware
+preferred it, and all six injection tests began booting a kernel that was not
+the one under test. It is now a check rather than a thing to remember: attaching
+the data disk scans it for `BOOTX64.EFI` and refuses to start a machine that
+would have a choice.
+
+And programs reach it -- through handles, and only through handles. There is no
+system call that takes a path. A process opens one name inside a directory it
+already holds, so what it can reach is exactly the subtree under what it was
+given, and a `/` in a name is refused rather than walked because a directory
+handle that could be escaped with `../..` would not be an authority over
+anything. A handle opened through another carries no more rights than its
+parent, which is what makes handing a program a read-only directory mean
+something.
+
+`init` starts holding two things: the channel to the spawn service, and the root
+directory. It lists the root, makes its own directory, reads what the previous
+boot left there, writes a file, reads it back through the same handle, and
+checks the refusals -- a buffer too small, a name with a separator, a name that
+is not there, and removing a file that is still open. The persistence test now
+requires it to *make* that file on the first boot and *find* it on the second,
+which is the claim one level up from the kernel's own: not that the filesystem
+persists, but that a program can put something in it and get it back across the
+system-call boundary.
+
+Two things fall out of doing it this way. A buffer too small is an error and
+never a truncation, because half a file that reports its own length is
+indistinguishable from a whole one. And removing a name is refused while any
+handle still names it: a handle carries an inode number, an inode number is not
+a reference, and freeing the inode would leave the handle pointing at a number
+the filesystem is free to give to the next file.
+
+And a program can now be waited for. Until this, a process could start another
+and talk to it and had no way to learn that it had finished or whether it had
+worked; the channel closing said the other end was gone, which is not the same
+claim. `Exit` takes a status, the spawn service replies with two handles rather
+than one -- a channel to talk to it and the process to wait for it -- and
+`ProcessWait` blocks until it ends and returns the number.
+
+The handle names a *completion* and not the process, and that is the whole
+design decision. A handle to the process would keep its address space alive for
+as long as anybody remembered it, so a parent that never closed one would be a
+memory leak shaped like politeness. A completion is an identifier, a name and an
+outcome; it outlives the process by design and costs nothing to keep.
+
+Waiting has two paths and only one of them is easy. `init` waits for the program
+it asked for, and by then that program has almost always exited already -- so
+what a boot exercises is a wait on something already finished, which returns
+without ever blocking. The other path is the one with the lost wake-up in it,
+and it gets its own self-test: a thread waits *first*, is checked to have left
+the run queues rather than spun, and only then is the completion finished. If
+the ending were published without waking the queue, or the waiter joined after
+the ending was published, that thread would wait forever and so would every
+program that ever waits for a child.
+
+Two flags rather than one, for the same reason. One claims the ending, so that
+exactly one caller ever stores a status; the other publishes it, so a waiter
+that sees the flag cannot read a status that has not been written yet.
+
+Six assembly programs had to be edited for this, and the edit is the point:
+`Exit` now reads `rdi`, and they had been written when it took no arguments, so
+they exited with whatever happened to be in that register. One of them reported
+a pointer as its status. The suite now requires every process in a boot to exit
+with zero, because a garbage status looks exactly like a working system until a
+parent believes it means failure.
+
+And a program can wait for whichever of several things happens first, which is
+the thing that had to exist before anything could be a *server*. Every blocking
+call until now named one object: a thread read this channel or waited for that
+process, and while it did it could do nothing else. Something holding channels
+to four clients could not serve the second while blocked on the first, and a
+thread per client is the arrangement that stops scaling first and hides
+deadlocks in the meantime.
+
+A wait set is an object held by a handle, like everything else. A process puts
+handles into one under keys of its own choosing, waits, and is told which keys
+are ready. The keys are the caller's and not the kernel's, because the caller is
+the one who has to recognise them: a handle number would make the answer a thing
+to look up, and it already has a name for that client.
+
+Level-triggered, on purpose. Waiting re-tests every member rather than
+remembering which one signalled. An edge -- "a message arrived" -- is a fact
+about a moment, and a set that stored edges would have to be right about every
+one of them forever; an edge delivered while nobody was waiting is a client that
+never gets served again. A level -- "there is a message waiting" -- is a fact
+about now, costs a lock per member to re-read, and cannot be lost. So a signal
+from a channel or a process is only a hint that something may have changed: it
+need not be accurate, need not arrive once, and a spurious one costs a re-poll.
+
+A channel is ready when it holds a message *or* its peer has gone, because both
+are things the holder must act on, and a set that reported only the first would
+hang on a client that died.
+
+Building it turned up a lost wake-up in the wait queues underneath, present
+since they were written. `wait_until` tested its condition outside the queue's
+lock -- it has to, because the condition lives behind an inbox or a status word
+and taking those locks in that order is a deadlock rather than a race -- so a
+waker landing between the test and the block found an empty queue, woke nobody,
+and left the thread asleep with its condition already true. The queue now
+carries a wake counter: a waiter reads it before testing and blocks only if it
+has not moved, and the comparison happens under the same lock as joining the
+queue. There is no third case, which is the point. A wake that a set depends on
+is much easier to lose than one a single blocking receive depends on, because
+there is always another message coming on a channel and there is not always
+another client.
+
+### Checking the filesystem
+
+The journal finishes an operation that was interrupted, and says nothing about
+damage that predates it: a block the bitmap calls taken that no file points at,
+a block two files claim, a name pointing at an inode that is not there. No
+amount of journalling finds those, because from the journal's point of view
+every one of those operations completed.
+
+So there is a check now, and it runs at every mount before anything has started
+writing. It walks the inode table, builds its own picture of what is reachable,
+and corrects the bitmap to match. The asymmetry is the design: a block the
+bitmap calls taken that nothing reaches is leaked and safe to reclaim, and a
+block something reaches that the bitmap calls free is dangerous, so the bit is
+set. In both cases the *bitmap* is corrected, because it is the derived thing --
+the files are what the filesystem is for and are never edited to make the
+bookkeeping agree. A block two files claim, a dangling name and an unreadable
+inode are reported and left alone, because each can only be fixed by choosing
+which file to damage.
+
+The test damages the filesystem the only way that damage can be made: it takes a
+block from the allocator and does nothing with it. It then requires the check to
+have been quiet before, to find exactly one leaked block, to be quiet again
+after, and to hand the same block out again -- a repair that had to be run twice
+would not be a repair.
+
+It had to be made thirty-two times faster before it was usable, by reading the
+inode table a block at a time rather than a block per inode. The first version
+ran eight full walks a boot and pushed the tests past their window, which is a
+good reminder that a check nobody can afford to run is a check that gets turned
+off.
+
+And the slowdown flushed out a race that had been waiting since the compositor
+got its own spawn service. `start_spawn_service` handed the endpoint to its
+thread through a single global, and starting the second service could overwrite
+it before the first thread had read it -- so both threads served the same
+channel and the other had nobody answering on it. Whoever was waiting for a
+reply waited forever, and which of the two it was depended on scheduling, which
+is why it only appeared once something else got slower. Each service has its own
+slot now, given to its thread when it is started.
+
+### Arguments
+
+A spawn request may carry a path, a zero byte, and whatever the asker wants the
+new program to be told. The kernel sends those bytes down the new program's
+channel before handing the other end back.
+
+Arguments *are* the first message, and that is the resolution rather than a
+shortcut around one. This system already has a way for a program to be told
+things; a second would be a second thing to bound, check, copy across an address
+space and explain. What arguments need that a message does not is *timing* --
+they have to be there before the program's first read and before the asker can
+send anything of its own, so a program can rely on them being the first thing it
+hears and not merely an early one. Sending them before the channel is handed
+over is exactly that guarantee and nothing more.
+
+### Part of a file
+
+A file could only be read and written whole, which was deliberate for a reason
+that stopped being true when the block cache landed: without one, changing four
+bytes in the middle of a block meant four kilobytes off the platter and four
+kilobytes back, every call.
+
+So there is `read_at` and `write_at`, in the filesystem and as two system calls.
+Read-modify-write at the ends, whole blocks in between, and the read skipped
+where a change covers a whole block. Writing past the end grows the file and the
+gap reads as zeroes -- a promise rather than an accident, since a block is zeroed
+when it is allocated. There is no cursor and no seek: a file has no position,
+only the offsets its holder chooses, which is the arrangement two programs
+sharing a file can both be right about.
+
+The boot log is the first user. It used to be read entire and written entire to
+add one line -- sixteen kilobytes each way for forty bytes, all on the boot path.
+It appends now, and still rewrites when it has to be trimmed, because taking
+bytes off the front of a file means moving every byte after them.
+
+### What is left, and why some of it is left on purpose
+
+Four things on this phase's list are still not done, and they divide into two
+kinds. Writing them down apart matters, because a list that mixes "not yet" with
+"deliberately not" turns into a list nobody trusts.
+
+**Not yet.** Timestamps are the tick a thing was made at, because there is no
+real-time clock driver: they are comparable within a boot and meaningless across
+one. That is a driver away, and the driver is worth writing.
+
+**Deliberately not**, and each for a reason that would have to change first:
+
+*Permissions.* This system already has an answer to "what may this program
+touch", and it is the handle. A program reaches a file by naming a component
+inside a directory it was given; one that was handed nothing can open nothing,
+and there is no name it could use instead. Adding owners and mode bits would put
+a second, weaker mechanism beside that one -- weaker because a mode bit is a
+property of the file that everyone shares, and a handle is a property of the
+holder. Two mechanisms that answer the same question is how a system ends up
+with a rule that is enforced in one of them and not the other.
+
+*More than one disk request in flight.* The journal's guarantee is an argument
+about the order writes reach the device, and what makes that argument true today
+is that the driver issues one request and waits for it. Raising the queue depth
+without a barrier the device honours would not make the filesystem slower to
+notice -- it would make it silently wrong, and only on a machine that lost
+power. The order to do these in is: negotiate a flush, then use it in the
+journal, then raise the depth. Doing the third first is the tempting one and the
+one that breaks everything.
+
+*Writing FAT32, and long names.* The boot partition is not ours to design. A
+FAT32 writer has to keep two allocation tables and a free-cluster count
+consistent through a power failure, for a filesystem this project reads once at
+boot and never writes -- and a writer that is nearly safe is worse than none,
+because the failure is somebody else's disk. Long names are the same trade
+smaller: every name this reads fits the short form, and a partial implementation
+would look like it worked.
+
+### A journal
+
+An operation touches several blocks and has to be all or none of them. Making a
+file writes an inode, a directory, a bitmap and a superblock, and a power
+failure between any two of them left the filesystem saying something that was
+not true. This was the outstanding item on this phase from the day NexusFS
+landed.
+
+Metadata is written twice now. The blocks an operation changes go to a reserved
+run near the front of the partition; then a descriptor naming them all goes down
+with a checksum over itself; then the blocks are written where they belong; then
+the descriptor is erased. Writing the descriptor *is* the commit — before it the
+operation did not happen, after it the operation will happen even if the machine
+stops.
+
+That leaves three crashes and one recovery. Before the descriptor, its checksum
+fails and nothing is replayed, so the operation never happened. After it and
+part-way home, the next mount finishes the job. After the blocks are home but
+before the descriptor is erased, the next mount writes the same blocks again,
+which changes nothing — replaying is idempotent by construction, which is why
+recovery needs no notion of how far it got last time.
+
+File contents are not journalled: a two-megabyte file would need a
+two-megabyte journal to protect a write nobody promised was atomic. Contents go
+down first and the metadata pointing at them second, so a failure leaves the old
+file rather than a new one pointing at blocks that were never written.
+
+The layout changed to make room, so the format is version 2 and version 1 is
+refused rather than misread — a version-one superblock has its checksum where
+this one has a block number, and a reader that ignored the version would find
+the inode table where the journal is.
+
+**The test crashes it on purpose.** Recovery cannot be proved by reading it, and
+the state it recovers from cannot be produced by a machine that is working. So
+the filesystem has exactly one way to stop half way — write the transaction and
+return without carrying it out — and nothing but the test uses it. The test then
+mounts and requires the new contents to be there, mounts again and requires
+nothing left to replay, and abandons a transaction without committing it and
+requires that one to have left no trace. Both halves matter: a recovery that
+replayed everything it found would be as wrong as one that replayed nothing,
+because it would finish operations that never happened.
+
+What it rests on is worth naming. The block driver issues one request at a time
+and waits for each, so writes reach the *device* in the order above. Whether the
+host or the drive then reorders them onto the platter is beyond this without
+negotiating a flush, and that is a gap rather than a guarantee.
+
+### A block cache
+
+Every read NexusFS made went to the platter. Reading a 128-byte inode cost a
+four-kilobyte block; reading the next inode in the same block cost it again;
+walking a directory read the same bitmap and the same inode table over and over.
+A megabyte of cache -- two hundred and fifty-six blocks, second-chance
+replacement -- now serves 99% of those reads from memory, and the boot's sector
+reads fell from 2652 to 892.
+
+**Write-through, not write-back**, and that is a decision rather than a
+simplification. Everything this filesystem claims about surviving a power
+failure is an argument about the *order* writes reach the disk: an inode is
+written before the directory entry that names it, so a failure in between leaks
+an inode rather than leaving a name pointing at nothing; an inode is written
+before its old blocks are freed, so no inode ever points at a block the bitmap
+calls free. A write-back cache reorders writes by construction, and would turn
+every one of those arguments into a comment that used to be true -- silently,
+and only visibly on a machine that lost power. When there is a journal the cache
+can hold writes back, because then the journal is what orders them.
+
+The disk self-test writes a raw sector straight to the driver, which is the one
+thing on this machine that goes behind the cache's back. It throws the cache
+away afterwards rather than reasoning about it: it costs a few re-reads once per
+boot, and reasoning about it is how a cache ends up serving a block that was
+overwritten underneath it.
+
+### The disk takes its interrupt
+
+A request is submitted and the thread that made it *blocks*; the device's
+interrupt wakes it. Before this it spun -- holding a processor for the whole of
+a request, which on real hardware is the whole of a seek.
+
+The driver proves the interrupt before relying on it. The first request of the
+system's life is made the old way, spinning, and only if the handler is seen to
+have run does the driver switch to blocking. A driver that trusted a routing
+call returning `Ok` would hang on the first firmware that had wired the pin
+elsewhere, and it would look like a disk that stopped answering rather than like
+an interrupt that never came. Which mode it settled into is printed, and the
+suite requires it to be the blocking one -- the fallback is there to be correct,
+not to be used.
+
+Two things had to be got right and one of them was got wrong first. The routing
+had to happen after PCI enumeration rather than beside the keyboard's, because
+a pin routed for a device that does not exist yet routes nothing. And the
+*filesystem's own lock* was an `IrqSpinLock`, held across every read.
+
+That second one is the interesting failure. While the disk spun, holding an
+interrupt-safe spinlock across a read was merely wasteful. The moment a read
+could sleep it became a whole-machine hang: a thread asleep with interrupts off
+on its processor, every other processor spinning on a lock whose owner is
+waiting for the very interrupt that would wake it. It did not fail every time --
+it needed a second thread to touch the filesystem in the window -- which is
+exactly the kind of bug that gets committed. It failed twice in a row in the
+suite, differently each time, which is what said it was a hang and not a flaky
+assertion.
+
+So there is a third kind of lock now. [`SleepLock`] is held by blocking rather
+than by spinning, which makes it the only kind that may be held across anything
+slow. The volume is behind one. The status panel reads it with `try_lock` and
+takes "no answer just now" for an answer, because a panel that waited for the
+disk would stop redrawing the clock every time something touched a file.
+
+## Phase 8 — Drivers and user space 🚧
+
+- PCI/PCIe enumeration, MSI/MSI-X, IOMMU
+- User-space driver model over IPC
+
+Delivered: a compositor, which is where the display now lives.
+
+Everything drawn before it was drawn by whoever could reach the framebuffer.
+The kernel drew the banner and the status panel because it *has* the
+framebuffer; `paint` drew a rectangle because it was handed the framebuffer.
+Both are the same arrangement — draw by having the display — and it does not
+survive a second program wanting to draw.
+
+So `paint` is gone and a compositor has taken its place. One process holds the
+display. Everyone else holds a *surface*: memory of its own, of a size it was
+told, that it draws into and never sees the destination of. A client cannot
+scribble over another client's window because it cannot reach one; cannot read
+what another is showing for the same reason; and cannot be broken by the
+compositor moving things around, because it was never told where it was. Two
+clients run, each drawing a gradient of its own into its own surface, and the
+compositor lays them out side by side in the rectangle the kernel keeps for it.
+
+It waits on every client channel and every client process at once, in one wait
+set, and does one of two things with what it hears: a client says it has drawn,
+so its surface is copied to the display and it is told it may draw again; or a
+client has ended, so its tile is cleared and it is forgotten. Both arrive
+through the same wait, which is why the wait set had to exist first. A
+compositor blocked reading one client stops compositing for everyone the moment
+that client stops talking, and one that cannot hear a client *end* holds a dead
+client's tile on screen forever, which is a lie about what is running.
+
+Three primitives were missing and are now there. **Handle duplication**: handles
+move when they cross a channel, so a compositor that sent a client its surface
+would have *given it away* — the object would die with the client and take the
+frames out from under the compositor's own mapping. Rights can only be dropped
+in a duplicate, never gained, or a capability system is undone in one call. The
+surface a client gets carries read, write and transfer but not close, so it can
+draw and it cannot pull the buffer out from under the thing compositing it.
+**Sleep**: a client that redrew flat out would spend a processor animating a
+rectangle, and there was no way for a program to pace itself. And the reply per
+frame, which is not a primitive but is the same kind of thing: the compositor
+answers each "damaged" so the client knows the buffer is free, because without
+it the two race for the surface and tearing is what that looks like.
+
+The kernel still owns the rest of the screen. That is the honest halfway house:
+the banner and the status panel are the kernel's, the rectangle is the
+compositor's, and the boundary is a number both agree on. Moving the whole
+screen behind the compositor means moving the panel into a program, which is
+worth doing and is not what this establishes — which is that the path from a
+client's pixel to the display runs through a process rather than through the
+kernel.
+
+And keys reach a client. The kernel goes on decoding scancodes and showing what
+was typed, because the panel is still the kernel's and F1 still switches the
+interface language; what changed is that a copy of every key crosses a channel,
+and the compositor decides which program it is for. Routing is policy, and
+knowing which window someone is looking at is exactly the kind of policy that
+does not belong in a kernel: the kernel knows a key was pressed and has no idea
+what a window is.
+
+Tab is the key the compositor keeps. It moves the focus, and the focused client
+is drawn with a ring around its tile — by the compositor, over the client's own
+pixels, after its surface has been copied out. That is what a decoration is:
+something the client did not draw, cannot draw, and cannot remove. A client that
+could paint its own focus ring could claim a focus it does not have.
+
+The input test types `n e x tab u s f1` and requires exactly three keys to reach
+the first client and exactly two the second. Both halves matter: a client that
+heard all five heard someone else's keys, which is the difference between
+routing and broadcasting, and it is how what is typed into one window ends up in
+another.
+
+### Stopping a program
+
+Whoever holds a process handle can now end it. Not by reaching into it -- a
+thread cannot be torn off a processor it is running on, and one stopped
+half-way through a system call would leave the kernel holding whatever it was
+holding. A kill sets a flag and wakes everything the process had asleep; the
+threads notice and leave, because a thread is the only thing that knows what it
+is holding.
+
+So it is cooperative in mechanism and not in effect. Every place a thread can
+wait consults the flag, and so does the system-call boundary on the way in and
+on the way out. A blocked program stops at once; a program making calls stops at
+its next one. A loop that touches nothing -- no calls, no waiting, just arithmetic -- never
+reaches that boundary, so it is stopped somewhere else: on the way back to ring
+3 from the timer, which arrives whether a program asks for anything or not. Only
+when the interrupt came from ring 3, because kernel code has no process to have
+been asked, and stopping a thread part-way through what the kernel was doing on
+its behalf is the thing this whole arrangement exists to avoid. It is safe there
+for the same reason preemption is: the handler runs on the interrupted thread's
+own kernel stack.
+
+`idle` therefore waits in two ways. Told nothing it blocks, and stopping it
+means reaching a thread that is off every run queue. Told `spin` it loops on a
+number and asks the kernel for nothing at all -- and a kernel that only checked
+at the system-call boundary would run that loop until the machine was turned
+off.
+
+Read and write are different rights on a process handle: watching something end
+is not the same as being able to end it, so a program handed a read-only one can
+wait and nothing more. A stopped process ends with a status above anything
+`exit` can be given -- `exit` takes a 32-bit number -- so a waiter tells "it
+decided to fail" from "it was stopped" without a second call.
+
+Two things had to be found by running it. Waking a killed thread was not enough:
+`wait_until` re-tested its condition, found it still false, and went back to
+sleep forever, so the check had to go inside the wait queue rather than in each
+caller. And the first version leaked an address space per kill, because it held
+an `Arc<Process>` across a call to `exit` -- which never returns, so nothing
+after it runs, destructors included. The accounting said fourteen address spaces
+created and thirteen freed, which is exactly the kind of thing that invariant is
+kept for.
+
+`idle` exists to be stopped. Every other program here ends because it has
+finished, which says nothing about whether one can be *made* to end: a program
+that was going to exit anyway would exit at about the right moment whether or
+not the kill worked. That one blocks on a channel nobody will ever send to, and
+`init` starts it, lets it reach its wait, stops it, and requires the ending to
+be a stop rather than an exit.
+
+### A pointer
+
+The mouse shares its controller with the keyboard and almost nothing else. The
+same two ports carry both, and one bit in the status register says whose byte is
+waiting -- so the two drivers are readers of one wire, and getting that wrong
+means one of them decoding the other's bytes *and* the other finding its own
+missing.
+
+It went wrong immediately, and instructively. Bringing the mouse up means asking
+the controller questions and reading its answers out of the one output buffer,
+and the keyboard's interrupt was already unmasked by then: its handler took the
+configuration byte, and the mouse reported that the controller would not say how
+it was configured. Two fixes, and both were needed. The device is brought up
+before any pin on that controller is unmasked, and each handler now checks the
+bit and leaves the other's bytes alone.
+
+Movement is relative and always will be: a mouse reports that it *moved*, never
+where it is, because it cannot know. Turning that into a position needs a screen
+to be a position on and a set of windows to be over, and the kernel has neither.
+So the kernel decodes packets and sends them on, and the compositor keeps the
+pointer -- clamped to the rectangle it owns, so it cannot be drawn over the
+panel that is not its to touch, and with the vertical axis flipped where the two
+conventions meet rather than in the driver, which has no screen to be upside
+down with respect to.
+
+Drawing it costs one thing worth naming. There is no second buffer to composite
+from, so the pixels under the cursor have nowhere to be kept but in the
+compositor: it saves them before drawing and puts them back before moving. It
+also lifts the cursor before painting a tile and draws it again after, because
+compositing writes over whatever was there -- and what was there includes the
+pointer. A compositor that forgot leaves a trail of them.
+
+A press inside a tile focuses it, and a *press* rather than a button being
+down: one that acted on "down" would refocus a window forty times a second while
+somebody held it. That is the second piece of policy this program owns. The
+kernel knows a button went down and has no idea what it went down on.
+
+The input test drives it through QEMU's monitor with `mouse_move`, which is
+relative -- the same shape of input the hardware produces, not a position
+injected past the driver. It requires packets rather than bytes, because three
+bytes that never became a packet is a driver reading the stream without
+understanding it; it requires *no* resynchronisations, because a stream that had
+to resynchronise is one where a byte went to the wrong driver; and it clicks on
+the tile the keyboard did *not* leave focused, so the click has something to
+change.
+
+### Windows that move
+
+A window can be picked up by its title bar and carried, and one that is clicked
+comes to the front. Both are the compositor's alone: the client is never told
+where it is, so it cannot notice being moved, and the bar is a decoration --
+drawn over the client's own pixels after its surface has been copied out, so a
+client can neither draw one nor remove the one it has. A window with no bar
+would be a window that cannot be picked up without picking up whatever is
+inside it.
+
+Once windows can move they can overlap, and once they overlap there has to be
+an order. It is kept back to front, a click raises what was clicked, and a press
+searches front to back -- a compositor that searched the other way would give
+focus to the window *under* the one clicked, which looks exactly like the click
+going through it.
+
+Painting became a full recomposite of the rectangle the compositor owns: clear
+it, then every window in order, then the pointer. That is more work than
+repainting what changed, and it is what makes overlap simply work. A compositor
+that repainted only the damaged window would leave a hole in whatever was above
+it, and getting that right needs damage arithmetic this does not have and does
+not yet need -- the rectangle is ninety thousand pixels.
+
+The drag remembers where within the window it was grabbed. Without that offset a
+window would jump so its corner met the pointer the instant it was picked up,
+which is not what picking something up looks like. And it says so when the
+window first *moves* rather than when it is taken hold of: a press that goes
+nowhere is not a window being carried.
+
+Driving this from the test found a flip worth writing down. QEMU's monitor takes
+screen coordinates, its PS/2 emulation negates Y on the way to the guest, and
+the compositor negates it again on the way to a position. All three are correct
+and they are in three different places, which is why the first drag went
+confidently in the wrong direction.
+
+### Windows that resize
+
+A window has a grip in its bottom-right corner, and dragging it changes the
+size. A surface is tightly packed, so its size *is* its shape -- there is no
+changing one without replacing the other. So the compositor makes a new memory
+object, copies across what still fits, hands the client a handle to it, and
+unmaps and drops the old one.
+
+That needed the one primitive nothing had asked for yet: **unmapping**. Without
+it an address, once used, is used forever, and a program handed a replacement
+for something it already maps would have to put the new one somewhere else and
+leak the old address -- which is how a window resized often enough runs out of
+address space rather than out of memory. The handle says *what* to unmap,
+because the frames belong to the object and not to the space, and the pages are
+checked against it before any of them is removed: an address that happens to be
+mapped to something else is not this object.
+
+The client is told a size and given a handle and nothing else. Not why, not
+where the window is, not that anybody can see it -- a client that had to be told
+why its window changed size would be a client that knew it had a window.
+
+The copy across is not necessary and it is what keeps a resize from flashing:
+without it the window is blank until the client's next frame, which at two
+frames a second is half a second of black. It is also the harder direction that
+the test drives, shrinking rather than growing, because padding a larger surface
+leaves zeroes and cropping has to get the row stride right on both sides at
+once.
+
+The grip is checked before the title bar, because on a window small enough for
+the two to overlap the grip has to win: a window can always be moved by the rest
+of its bar, and a window too small to resize can never be made bigger.
+
+### Putting a window away
+
+The right button on a title bar minimises a window, and a strip along the bottom
+of the compositor's rectangle holds a tab for each one. Clicking a tab brings its
+window back, raised and focused.
+
+The tab is the whole reason this is a feature rather than a trap. A window that
+can be put away and not brought back has been destroyed with extra steps, and
+its client would go on drawing frames into a surface nobody would ever see
+again. So the strip is *reserved*: windows are laid out and clamped above it and
+cannot be moved or resized over the one place that undoes the thing. A tab sits
+at its window's index rather than being packed beside the other minimised ones,
+so it does not move when another window is put away -- a tab that shuffled
+sideways under the pointer would be a tab somebody clicked and missed.
+
+A minimised client is still told its frames are shown. It has not been stopped
+and it does not know: a client that could tell whether it was visible would be a
+client that could behave differently when nobody was looking.
+
+Outstanding here: no window that is not a rectangle, and no damage tracking --
+the compositor repaints its whole rectangle on every change, which is what makes
+overlap simply work and is the thing that stops scaling first. Both belong to
+Phase 9, which the compositor has already begun.
+
+
 
 - PCI/PCIe enumeration, MSI/MSI-X, IOMMU
 - User-space driver model over IPC
 - `init`, service manager, libc, runtime, shell
 
-## Phase 9 — Graphics and the compositor ⬜
-
-Partially anticipated: the kernel already has a bitmap font, text rendering and
-a live status screen redrawn by its own thread. That is a boot display, not a
-compositor — no surfaces, no damage tracking, no windows — and it exists to be
-replaced by the real one.
+## Phase 9 — Graphics and the compositor 🚧
 
 - Nexus Graphics abstraction over the framebuffer, later a GPU
 - Nexus Compositor: surfaces, damage tracking, frame scheduling, multi-monitor
-- Input: keyboard, mouse, touchpad
+- Input routing: focus, event delivery to processes, mouse and touchpad
 
-## Phase 10 — NexusUI ⬜
+Delivered ahead of schedule, because Phase 8 could not be finished without it:
+the compositor is described under that phase and is real. Surfaces, windows that
+move and stack and resize and minimise, a pointer, focus, and keys routed to one
+client and not the others.
+
+What this phase still means, now that the shape exists:
+
+**Damage tracking — done.** The compositor used to repaint its whole rectangle
+on every change. Now every event says what it changed and the repaint is clipped
+to it:
+
+```
+[user] compositor: 55 repaints covered 2321280 pixels of a possible 5068800
+```
+
+What makes this correct rather than merely fast is that *everything* still
+happens on every repaint — the background, every window back to front, every
+decoration, the strip — and every one of them is clipped. A compositor that
+repainted only the window that changed would leave a hole in whatever was above
+it, and getting that right needs the arithmetic this deliberately does not have.
+Drawing the whole scene into a small rectangle costs the rectangle, not the
+scene.
+
+The damage is a single bounding box rather than a list of disjoint rectangles,
+which is worth naming as the approximation it is: two windows redrawing at
+opposite corners damage everything between them. What it buys is the common
+case, which is one window redrawing while nothing else moves — a client at two
+frames a second used to cost the whole display twice a second and now costs its
+own window.
+
+Two things are always in the damage regardless. The pointer's rectangle, because
+the pixels underneath it have to be freshly painted before it is drawn again or
+the saved pixels are saved from a framebuffer that already has a pointer in it.
+And anything that changes stacking or focus, because a focus ring is on two
+windows at once and raising a window changes what covers what.
+
+**Frame scheduling — half of it.** The compositor no longer composites once per
+event. A wait returns *every* member that is ready, which on a busy machine is
+several — two clients that both drew, a key, and the desktop's own frame can all
+arrive together — so the damage is gathered across everything one wake-up
+brought and the display is touched once at the end of it:
+
+```
+[user] compositor: 45 composites for 50 things that changed
+```
+
+That is the half of frame scheduling that does not need the hardware: refusing
+to composite faster than there is reason to. The other half needs a vertical
+blank to schedule against, which needs a display driver, which is the same
+missing piece as multi-monitor.
+
+Making this change exposed a real bug in the desktop, which is the useful part.
+Its strip was redrawn only when a new window list arrived *after* the
+compositor had acknowledged its previous frame — so when the list arrived first,
+which it usually did, the desktop sat holding a strip it had drawn before it
+knew any windows existed. The tabs appeared or not depending on which message
+won a race, and changing the timing is what made it lose.
+
+**Multi-monitor.** One framebuffer, from the firmware. A second output means
+asking the hardware rather than being handed one, which means a real display
+driver, which is what "Nexus Graphics over a GPU" is.
+
+**The rest of the screen.** The kernel still owns the banner and the status
+panel; the compositor owns a rectangle. Moving the whole screen behind the
+compositor means moving the panel into a program, which needs a font in user
+space -- and that is Phase 10's business, not a hole in this one.
+
+## Phase 10 — NexusUI 🚧
 
 Declarative, reactive, GPU-accelerated widgets: layout, text, theming,
 animation, accessibility, DPI scaling, localisation.
 
-## Phase 11 — Nexus Desktop ⬜
+Started, from the bottom. A toolkit is drawing, layout and text, and none of
+those could exist in user space until three things did.
+
+**A heap.** `nexus_user::heap` asks the kernel for a memory object and maps it,
+and gives the region to `nexus_mm::Heap` -- the kernel's own allocator, so the
+thirty-four host tests that already exercise coalescing and alignment and
+exhaustion cover the user side too. There is no `brk` and no anonymous `mmap`:
+a heap is a memory object like any other and the only thing that makes it a
+heap is what the allocator does with it. A program could have two.
+
+**A face both sides can draw with.** The rasteriser moved out of the kernel's
+build script into `shared/nexus-font`, which the kernel and every program now
+depend on. Two faces would be a system where the same string is two widths
+depending on who drew it. The face still covers exactly the characters the
+translations use, plus whatever `shared/nexus-font/charset.txt` adds -- which
+is how a program declares characters no translation happens to contain.
+
+**Something to draw with.** `user/nexus-ui`: `Canvas` over packed or strided
+memory, `Colour`, `Rect`, a `Column` that hands out rows, `wrap` that breaks
+text to a width, `measure` that says how wide a string is. `nexus-client` now
+draws a panel, a title bar, wrapped bilingual body text and a bar that grows
+with the keys it has been routed -- and reports its own layout in a line built
+at run time, which is the heap and the shared face both proving themselves:
+
+```
+[user] client: laid out 5 lines, widest 144 px, in 156 px of surface
+```
+
+Wrapping was where the first real bug was. Slicing by byte index put a cut in
+the middle of a multi-byte character, which ASCII never notices and Japanese
+hits on the first line.
+
+What the phase still means: widgets rather than drawing calls, a retained tree
+rather than repainting from nothing, state that invalidates only what changed,
+theming, animation, accessibility, and DPI scaling -- and "GPU-accelerated"
+waits on a display driver, which is Phase 9's remaining half.
+
+## Phase 11 — Nexus Desktop 🚧
 
 Dock, launcher, workspaces, snap layouts, Mission Control, notifications,
 settings, files, terminal, search.
 
-## Phase 12 — Networking ⬜
+The dock and the launcher are real, and they are a *program*: `nexus-shell`,
+which the compositor starts last and hands the strip along the bottom of the
+screen.
+
+**Why it is not part of the compositor.** The compositor owns the framebuffer.
+Everything it decides is therefore something no other program can check or
+replace, and a bug in it is pixels anywhere on screen. A dock is policy — what
+the strip looks like, what a click in it means, which programs are worth
+starting — and policy in the one program that owns the display is the same
+mistake as policy in the kernel, one layer up. So the desktop is a client: one
+surface, one channel, no handle to a window, no way to reach the display, and
+no idea where its own strip is on it.
+
+**What it is given that other clients are not** is a list. The compositor sends
+the state of every window slot whenever it changes — gone, shown, put away,
+focused — and the desktop sends back three commands: show a slot, hide a slot,
+or start a program. Every one names a slot the compositor already has and is
+checked there; the desktop cannot name a window that does not exist and cannot
+ask for anything else.
+
+**A click now crosses three processes.** The kernel's mouse driver decodes a
+packet and sends it; the compositor turns relative movement into a position,
+finds it is inside the reserved strip, and passes on *where inside the strip*
+it landed — not where on the screen, which would be telling a client where its
+own surface is; the desktop decides that point was a tab and asks for the
+window. The compositor checks the slot and does it.
+
+**Starting a program** is the same path with one more step. Until this phase
+every process on the machine was started at boot or by another program deciding
+to. Pressing the button on the strip is a person starting one: the desktop asks,
+the compositor finds an empty slot, makes a surface, asks the spawn service, and
+watches the new client's channel and process — all while the machine goes on
+compositing.
+
+**The strip is in the interface language.** The translations moved out of the
+kernel into `shared/nexus-i18n`, next to the font, so the kernel's panel and the
+desktop's dock read the same table. Which language that is comes from the kernel
+— F1 is acted on there — as a message on the key channel, forwarded by the
+compositor to the one program that draws words. A desktop counting F1 presses of
+its own would agree with the panel exactly until it missed one.
+
+What the phase still means: workspaces, snap layouts, Mission Control,
+notifications, a settings program, a file manager, a terminal and search. Each
+of them is now an ordinary program rather than a change to the compositor, which
+is the point of having done this part first.
+
+## Phase 12 — Networking 🚧
 
 Ethernet, ARP, IPv4/IPv6, ICMP, UDP, TCP, DHCP, DNS, sockets, firewall.
 
-## Phase 13 — Packages ⬜
+The machine is on a network. It has a card, an address it was *given*, and the
+gateway answers it.
+
+```
+[net ] virtio card at 00:03.0: 52:54:00:12:34:56, queues of 256 and 256
+[net ] card shares IRQ 11 with the disk; both are asked on vector 50
+[net ] address 10.0.2.15/24 from 10.0.2.2, gateway 10.0.2.2, DNS 10.0.2.3, lease 86400 s
+[net ] ping 10.0.2.2: reply in 0 ms
+```
+
+**The card** is legacy virtio-net over a PCI I/O port window — the same
+transport as the disk, for the same reason. Two queues rather than one, and
+receiving is backwards from a disk: nobody asks for a frame, so the driver
+hands the card thirty-two empty buffers at bring-up and gives each one straight
+back after reading it. A card with none posted drops everything.
+
+**DHCP is the proof.** An address that was *leased* cannot be invented locally:
+it took a broadcast, a server that parsed it, an offer, a request that tells
+every other server on the segment their offer was declined, and an
+acknowledgement. Four frames each way through every layer of the stack. The
+ping is the other half — DHCP proves broadcast and UDP, and a ping proves ARP
+(the gateway's hardware address had to be asked for) and unicast in both
+directions.
+
+**The wire format is a crate**, `shared/nexus-net`, because it is pure logic:
+seventeen host tests build packets, parse them back, and check the Internet
+checksum against the worked example in RFC 1071 — on a machine with no card in
+it. The kernel's `net` module is what is left once the formats are gone: an
+interface, an ARP table, a DHCP conversation, and a thread.
+
+**Two bugs worth recording.** The card shares IRQ 11 with the disk, and routing
+its pin *moved* the line to a new vector rather than adding the card to it —
+disk completions started arriving at a handler that knows nothing about disks,
+and the machine hung halfway through booting. Shared PCI lines mean every
+device on the line is asked, and each answers from its own status register.
+
+The second was silent. Legacy virtio-net puts a ten-byte header in front of
+every frame, not twelve; the twelfth and eleventh bytes exist only when
+`VIRTIO_NET_F_MRG_RXBUF` has been negotiated. With the wrong size the card
+takes the frame, the device sends it, nothing reports an error, and the frame
+on the wire is shifted by two bytes so no reply ever comes. What it looked like
+was a DHCP server that would not answer.
+
+**TCP works, and something outside the machine can prove it.** QEMU forwards a
+port on the host into the guest, so `scripts/test-network.ps1` opens an ordinary
+socket with an ordinary .NET `TcpClient` — a client that has never heard of
+NexusOS — and gets an answer:
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 258
+
+NexusOS
+=======
+
+you asked   : GET /nexus HTTP/1.1
+address     : 10.0.2.15/24
+uptime      : 3.673 s
+processes   : 16 started, 12 ended
+frames      : 12 in, 11 out
+```
+
+A three-way handshake, an acknowledgement for the request, a response, a
+four-way close, and retransmission when an acknowledgement does not come back.
+Every number in that page is read at the moment the request arrives, which is
+what makes it an answer rather than a fixed string: it could not have been
+written in advance, and it differs between two requests.
+
+The bug worth recording is the one that made it look like the peer had gone
+silent. This end claimed the response's *sequence space* only after the
+response was acknowledged — but an acknowledgement is accepted only if it falls
+at or before what this end has sent, so the connection rejected the very
+acknowledgement it was waiting for, resent four times, and gave up on a peer
+that had answered instantly every time. The client saw the whole page; the
+server thought nobody was there.
+
+What TCP here deliberately is not: no active open (this end never starts a
+connection), no send queue, no congestion control, no out-of-order reassembly —
+a segment ahead of a gap is dropped so the peer sends it again in order, which
+is correct and, on a link that does not reorder, free.
+
+Still to do: DNS, IPv6, a routing table, fragmentation, a firewall, more than
+one connection at a time, and sockets as capability handles so that a *program*
+can use any of it. None of them is stubbed out — a stub that returns success is
+worse than a function that does not exist.
+
+## Phase 13 — Packages 🚧
 
 The `.nexus` format, repositories, dependency resolution, signatures, rollback.
 
-## Phase 14 — Security ⬜
+A package is built on the host, shipped in the image, placed on the store, and
+installed by a program with no privileges — and every step is checked.
+
+```
+[pkg ] PKG/DEMO.NEX placed on the store from the image, 587 bytes
+[user] install: demo 1.0.0, 2 files, verified before anything was written
+[user] install: wrote 2 files for demo 1.0.0
+[user] init: read a file that arrived inside a package
+```
+
+**The format.** One file: a header, a table of what is in it and where, and the
+contents laid end to end. Read in place — nothing is decompressed and nothing is
+allocated to parse it. Every entry carries its own SHA-256 as well as the
+package carrying one over the whole of itself, because the two answer different
+questions: the outer digest is what a signature will sign and catches
+reordering, dropping or duplicating entries; the per-entry digests say *which*
+file is wrong and can be checked one at a time as each is installed.
+
+**SHA-256 is written out**, not depended on, and checked against the vectors in
+FIPS 180-4 — the empty string, "abc", a message that lands exactly on a block
+boundary, and a million characters fed in a thousand pieces. That last one found
+the bug: `update` reset its buffered count unconditionally at the end, so every
+call threw away the part-built block. A hash fed in one piece was right and a
+hash fed in two was not, and the padding loop never terminated.
+
+**The installer is an ordinary program.** It cannot reach the filesystem at all
+until `init` *hands* it a directory handle, and what it can do is bounded by the
+rights on that handle — read, write and transfer, but not close, so it cannot
+take the filesystem away from whoever started it. A package manager that had to
+run as the system in order to install a file would be a package manager that can
+install a file anywhere.
+
+**Rollback.** Every file about to be overwritten is copied beside itself first
+and every file created is remembered; if anything fails, the copies go back and
+the new files go. What that buys is that an install either happened or did not.
+It is not atomic against losing power — that needs the journal to cover a whole
+sequence — but it is atomic against the install failing, which is what actually
+happens.
+
+**Each file is verified twice**: once as part of the package, before a byte is
+written, and again after it has been written and read back off the disk. The
+second check is not about the package. It is about the disk.
+
+A packaging bug worth recording, because it was in the *build* and not in the
+system: PowerShell's `Set-Content -Encoding utf8` writes a byte-order mark, so
+the file that went into the package began with three bytes nobody expected. The
+package carried them faithfully, the installer wrote them faithfully, and the
+program reading it back saw a string that did not start where it should. The
+package was right; the thing that made it was not.
+
+Signatures are done — see Phase 14. Still to do: repositories, fetching over
+the network, dependency resolution, and uninstall.
+
+## Phase 14 — Security 🚧
 
 Capabilities, sandboxing, the permission model, secure storage, code signing,
 application identity, audit logging.
 
-## Phase 15 — Compatibility ⬜
+**Capabilities are not a phase, they are the system.** Every authority on this
+machine is a handle: a program cannot open a file it was not given a directory
+for, cannot start a program without a channel to a spawn service, cannot reach
+the display without a surface. The installer added in Phase 13 is the clearest
+case — it has no privilege at all until `init` hands it a directory, and the
+rights on that handle are read, write and transfer but *not* close, so it cannot
+take the filesystem away from whoever started it.
+
+**Code signing is real.** Ed25519, written out in `shared/nexus-crypto` and
+checked against the test vectors in RFC 8032 — the same keys, the same
+messages, the same signatures, byte for byte. Signing as well as verifying,
+because a system that could only verify would need its packages signed by
+something else and there is nothing else.
+
+```
+[user] install: demo 1.0.0, 2 files, signed by the key this machine trusts
+[user] install: FAILED: PKG/BAD.NEX: the package's signature is not from a trusted key
+[user] init: a package altered after signing was refused
+```
+
+That second pair is the half that matters. The build makes a second package
+which is the first one with a byte changed *after* it was signed — what a
+package looks like when somebody with no key alters it in transit — and the
+machine refuses it, on the machine, every boot. A system that only ever sees
+correct packages is a system whose checking has never been exercised.
+
+The trusted key is compiled into the installer by a build script that reads
+`keys/development.pub`, not read from the filesystem at runtime: a trusted key
+that lived on disk could be replaced by anything that can write to the disk,
+which is precisely what a package installer is for. The private half is
+committed and is worth nothing — `keys/README.md` says so in both languages, and
+switching to a real key changes exactly one file.
+
+Three details of the implementation are worth naming, because each is a way to
+get it subtly wrong:
+
+* the scalar `S` in a signature is checked to be below the group order, because
+  otherwise `S + L` is a *second, different* signature on the same message that
+  also verifies — fine for authenticity, wrong anywhere something is identified
+  by the bytes of its signature;
+* points are compared projectively (`X₁·Z₂ = X₂·Z₁`), because comparing
+  coordinates would call two spellings of one point different;
+* scalar multiplication performs the addition on every bit and discards the
+  result when the bit is clear, so how long it takes does not depend on the
+  scalar — which, when signing, is the private key.
+
+Still to do: sandboxing beyond what capabilities already give, a permission
+model a person interacts with, secure storage, application identity as something
+more than a signing key, and an audit log that records which capability was
+granted to whom.
+
+## Phase 15 — Compatibility 🚧
 
 Linux: ELF loader, POSIX layer, libc, syscall translation.
 Windows: PE loader, Win32 layer, DirectX translation.
+
+**A Linux program runs.**
+
+```
+[user] process p19 "spawned" loaded from BIN/HELLO.LX: 202 bytes, entry 0x400078
+[linux] spawned wrote: a program built for Linux, running on NexusOS
+[linux] process p19 "spawned" exited with status 0 through the Linux boundary
+[user] init: a Linux program ran and exited through the translation
+```
+
+What ran is a static Linux x86-64 executable — `ET_EXEC`, `EM_X86_64`,
+`ELFOSABI_SYSV`, one `PT_LOAD`, no interpreter — whose machine code makes its
+requests with the `syscall` instruction and Linux's own call numbers: 1 for
+`write`, 231 for `exit_group`. Nothing in it was shaped to suit NexusOS, and
+nothing could have been: `tools/nexus-linux-example` writes out every byte with
+the field it belongs to named beside it, so that the claim can be checked by
+reading rather than taken on trust. It is generated rather than committed for
+the same reason, and because building one otherwise needs a Linux toolchain this
+repository's machine does not have.
+
+**The translation is above the interface, which is the whole rule.** Every Linux
+call becomes something the Nexus interface already offers to any program:
+`write` on standard output becomes the same logging operation `nexus_user::log`
+reaches, `exit_group` becomes the same exit, `getpid` reads the same process
+identifier. There is no operation a translated program can perform that a Nexus
+program could not, and nothing below `compat::linux` knows Linux exists. The
+moment a Linux call needs something Nexus does not have, the answer is to add it
+to Nexus — for everybody — and then translate.
+
+**A program is not sniffed, it is declared.** A static Linux binary and a
+NexusOS one are both `ET_EXEC`, `EM_X86_64`, `ELFOSABI_SYSV` images with no
+interpreter; nothing in the file says which world it was built for. So the asker
+says: a spawn request beginning `linux:` means the program speaks Linux's
+interface. Guessing would be worse than asking, because the two ways of being
+wrong are "a Nexus program's first call is read as Linux's number one" and "a
+Linux program's write is read as a channel send", and both corrupt memory rather
+than fail.
+
+**The stack is the part that is easy to forget.** At the entry point of a
+program built for Linux, `rsp` points at `argc`, then the argument pointers, a
+null, the environment, another null, and an auxiliary vector ending in
+`AT_NULL`. That is not something a C library sets up — it is what the kernel is
+required to have put there, and a program that reads it finds whatever was in
+the page if nobody did.
+
+An unimplemented call answers `-ENOSYS` and says so in the log, which is what
+Linux itself does and what a real program is required to handle. It is not a
+stub: nothing pretends to have succeeded.
+
+Still to do: `brk` and `mmap` so a program can have a heap, file descriptors
+that reach the real filesystem, `clone` and futexes, enough of the auxiliary
+vector for a dynamic loader, and then a libc — at which point ordinary Linux
+software becomes the test. Windows is untouched.
 
 ## Phase 16 — Gaming ⬜
 
 Vulkan, GPU drivers, controllers, HDR, VRR, shader cache, frame pacing.
 
-## Phase 17 — AI ⬜
+Nothing here is started, and it is worth saying why rather than leaving the box
+unticked. Every item on this list stands on a GPU driver: Vulkan is an interface
+to one, a shader cache caches what one compiles, HDR and VRR are things one
+negotiates with a display. The framebuffer this system draws into came from the
+firmware and is a rectangle of memory with no device behind it that can be asked
+for anything.
+
+The one item that does not need a GPU is frame pacing, and the half of it that
+does not need a vertical blank is done — see Phase 9, where it belongs.
+
+Controllers need USB, which is its own phase-sized piece of work and is not on
+this list anywhere. That is an omission in the plan rather than in the system.
+
+## Phase 17 — AI 🚧
 
 Nexus Intelligence (local and remote models, embeddings, semantic index),
 Nexus Agent under capability control, Nexus Workflow automation.
@@ -177,14 +1491,137 @@ Nexus Agent under capability control, Nexus Workflow automation.
 Non-negotiable: the agent gets explicit, revocable, auditable capabilities.
 Never ambient root.
 
-## Phase 18 — Virtualisation ⬜
+**The non-negotiable comes first**, because it is the part that has to be true
+before anything else here is safe to build:
+
+```
+[user] find: given one directory with read transfer
+[user] find: tried to write where it was reading, and was refused
+[user] find: indexed 2 files it was able to read
+[user] find: "verified twice before anything was written" is closest to hello.txt
+[user] init: something read a directory it was lent and answered
+```
+
+`nexus-find` is the smallest thing that is honestly an agent: it is given a job
+and a place to do it in, it decides for itself which files to read, and it comes
+back with an answer nobody told it. What it may do is exactly what its handle
+says — read and transfer, not write — so the answer to "what can this thing do
+to my files" is a fact about the handle and not a promise about the program.
+
+And it is asked to prove it. The first thing it does is try to create a file in
+the directory it was lent, and report being refused. A program that merely does
+not write is not a program that cannot; the difference is the whole point of a
+capability, and the only way to see it is to push against it.
+
+**The index is real and it is not a model.** `shared/nexus-index` hashes every
+three-character sequence of a document into one of two hundred and fifty-six
+buckets and compares documents by the cosine of the angle between their count
+vectors. That is the hashing trick over character n-grams — an old, real
+technique — and it finds a file again by what is in it. Nothing has been
+trained, there is no learned weight anywhere in it, and saying so plainly
+matters: "embedding" is a word that invites the reader to assume a neural
+network.
+
+Two decisions in it are worth naming. Characters rather than words, because
+`画面には触れていません` has no spaces in it and a word tokeniser would treat
+the whole sentence as one token and match nothing. And no floating-point
+arithmetic at all: a cosine is a ratio of a dot product to a product of square
+roots, but two cosines can be *compared* by cross-multiplying and squaring,
+which leaves exact integer arithmetic that ranks the same way on every machine
+and needs no floating-point unit — which matters in a system whose kernel does
+not enable one.
+
+A bug worth recording, because it was not in any of this: the finder page
+faulted on its first run. A program that reads a directory into a buffer and
+builds a vector per file overflows a four-kilobyte stack, and what that looks
+like is a write to an address just below the stack with nothing to say what
+asked for it. Programs now get four pages, with nothing mapped below them so an
+overflow is still a fault.
+
+Still to do: a model of any kind, local or remote; a persistent index rather
+than one built per query; and Nexus Workflow. Remote models need the network
+stack to grow a client and a way for a program to be *given* the authority to
+talk to one — which is the same capability question again, and the reason it was
+answered first.
+
+## Phase 18 — Virtualisation 🚧
 
 VT-x/AMD-V, virtio devices, containers.
 
-## Phase 19 — Production hardening ⬜
+**Containers, in the only sense a capability system has one.** A container here
+is not a namespace, a cgroup or a mount table — it is a process whose authority
+is a strict subset of its parent's, and the property that has to hold is that
+authority can be *narrowed and never widened*.
+
+That is one comparison in one function, `HandleTable::duplicate`, which refuses
+to hand out a handle carrying rights the original does not have. A system where
+that comparison were the wrong way round would look exactly like this one until
+somebody tried it — so something does:
+
+```
+[user] find: given one directory with read transfer
+[user] find: asked for more authority than it holds, and was refused
+[user] find: tried to write where it was reading, and was refused
+```
+
+Both halves matter. The second says the handle's rights are enforced; the first
+says they cannot be escaped by asking. Together they are what makes "give this
+program only what it needs" a fact rather than a hope, and they are checked on
+the machine on every boot.
+
+**virtio devices** are driven, not provided: this system is a virtio *guest* —
+block and network both — and providing them to a guest of its own is the other
+side of the same protocol and has not been started.
+
+**VT-x is not started, and cannot be tested here.** The processor extension
+needs to be exposed to the guest, which needs nested virtualisation, which needs
+a hypervisor underneath that offers it. The development machine runs QEMU under
+dynamic translation, where `VMX` is not available at all. Writing it blind
+against no way to run it would be exactly the kind of code this project refuses
+to write.
+
+## Phase 19 — Production hardening 🚧
 
 Installer, recovery environment, A/B updates with rollback, crash reporting,
 diagnostics, performance work, security audit.
+
+**A program that faults no longer takes the machine with it.** Every exception
+used to end the same way, which meant any program on the machine could stop it
+by dereferencing a null pointer. Now the two cases are told apart, because they
+are not the same: a program that faults has made a mistake about its own memory,
+and a kernel that faults has made one about everyone's.
+
+```
+[user] about to read kernel memory from ring 3
+ EXCEPTION 14: page fault
+  address    : 0xffffffff80000000
+    origin   : user mode
+[fault] process p5 "violation" ended by a page fault; the machine continues
+[crash] wrote crash/5.txt: violation ended by a page fault
+```
+
+The injection test that provokes it now *requires* that the machine did not
+halt, which is the check that would catch this being undone.
+
+**Crash reporting.** The fault outlives the program. What makes that possible is
+where the work happens: writing a file needs the block device, the journal and a
+sleeping lock, and the thread that just faulted may have been holding any of
+them — a handler that reached for a lock its own thread already owned would turn
+a program's bug into a machine that stops. So the handler does the one thing
+that cannot block, writing into a fixed array under an interrupt-safe lock, and
+the monitor thread — an ordinary thread holding nothing — takes what is there
+and writes it out. The next boot reads the directory and says how many it found.
+
+That is the difference between a crash report and a crash: the report has to
+work when the system is in the worst state it has been in all boot.
+
+**Performance work** is done where it was measured, not where it was guessed:
+damage tracking and per-wake-up composition under Phase 9, the block cache under
+Phase 8. Both are reported in numbers the boot log carries.
+
+Still to do: an installer, a recovery environment, A/B updates with rollback —
+which now has signed packages and a rollback-capable installer to build on — and
+a security audit by somebody who did not write it.
 
 ---
 
@@ -199,8 +1636,9 @@ text rendering with half- and full-width advances, build-time glyph
 rasterisation for CJK, and runtime language switching. See
 [i18n.md](i18n.md).
 
-Outstanding: input methods (blocked on a keyboard driver), text shaping,
-vertical writing, and further languages.
+Outstanding: input methods — the keyboard now exists and F1 switches language,
+but composing Japanese needs a conversion engine and a candidate window — plus
+text shaping, vertical writing, and further languages.
 
 ## Cross-cutting work
 
@@ -214,3 +1652,57 @@ Carried alongside the phases rather than scheduled as one:
   throughput, allocator throughput — measured from the phase that introduces
   each, so regressions are visible immediately.
 - **Documentation.** A design document per subsystem, written with the code.
+
+---
+
+## Where it has got to, and what is not here
+
+The machine boots to a logo, asks who you are, keeps a desktop, fetches a page
+over its own TCP, runs a shell, changes how it looks from a window of its own,
+installs signed software and refuses tampered software from another, updates
+itself and makes a noise. Sixteen test stages, run on a real machine under
+emulation, cover all of it.
+
+What follows is an honest list of what has been asked for and is *not* here,
+with the reason and the size of the job. Nothing on it is pretended at anywhere
+in the code.
+
+### Feasible next, in order of value
+
+| What | Size | What it needs |
+| --- | --- | --- |
+| ~~Wallpaper and theming~~ | done | A wallpaper program given the bottom surface; the compositor composites it first and never reads a setting. |
+| ~~Japanese input~~ | kana done | Romaji to kana is a table and it is here. Kanji conversion needs a dictionary and a candidate window, and is not. |
+| Damage rectangles on a client's frame | small | A program saying *which* part of its surface changed. An animated wallpaper is a full-screen composite per frame without it, which is why it is capped at four a second. |
+| ~~A package manager window~~ | done | A list of what is in `PKG/`, what each one's signature is worth, and how it compares with what is installed — with Enter bound to the same `install` the updater calls. See [packages.md](packages.md). |
+| ~~A settings window~~ | done | A window with one row per key that something actually reads, given the settings directory and nothing else. See [settings.md](settings.md). |
+| A text editor | medium | The terminal's line editing, a file, and a scrollback that can be written into. |
+| Standard output for programs | medium | The thing that would let `ls` stop being built into the terminal. A channel a child inherits, and a pipe. |
+| A real audio card | medium | AC'97 or Intel HD Audio: a DMA engine, a ring of buffers and a mixer. The speaker is one bit and says so. |
+| Loadable drivers | large | The kernel has no module loader, no driver ABI and no way to revoke one. Doing it badly is worse than not doing it. |
+
+### Not feasible as asked, and why
+
+* **Video wallpaper.** A video is a codec — H.264 or VP9 — which is tens of
+  thousands of lines and years of patent history. An *animated* wallpaper drawn
+  procedurally is a weekend; a video one is not this machine's next step.
+* **Running Windows software.** A PE loader is a fortnight. The Win32 subsystem
+  behind it — the window manager, GDI, the registry, COM — is what Wine has been
+  writing since 1993. The Linux translation layer here is real and small because
+  Linux's boundary is a few hundred system calls; Windows' is not a boundary of
+  that kind.
+* **A compiler on the machine.** Writing software *for* NexusOS works today,
+  from another machine. Writing it *on* NexusOS needs an editor, an assembler
+  and a linker that run here. The editor is close; the rest is a language
+  implementation.
+* **USB storage.** xHCI, then USB enumeration, then mass storage, then SCSI.
+  Four layers, each of which is a driver on its own. The disk this machine uses
+  is virtio, which is one.
+
+### What "everyday use" means here
+
+It means the parts that are here work when you use them rather than when a test
+runs: the desktop keeps its windows, the machine remembers who you are, the
+browser fetches a page you typed, the shell writes a file you can read back on
+the next boot. Each of those was a bug at some point in this repository's
+history, and each is now a test.

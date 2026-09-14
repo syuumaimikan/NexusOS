@@ -13,6 +13,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod boot;
+pub mod elf;
 pub mod layout;
 
 pub use boot::*;

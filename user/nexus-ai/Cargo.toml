@@ -1,0 +1,21 @@
+[package]
+name = "nexus-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nexus-ai"
+path = "src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "nexus-ai-probe"
+path = "src/probe.rs"
+test = false
+bench = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ai-core = { path = "../../shared/nexus-ai" }

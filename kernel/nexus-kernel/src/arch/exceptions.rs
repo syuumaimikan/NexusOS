@@ -56,6 +56,58 @@ fn report_footer() -> ! {
     halt_forever()
 }
 
+/// What a process's status says when a fault ended it.
+///
+/// A number no program would exit with on purpose, so a parent reading a status
+/// can tell "it decided to stop" from "it was stopped for it".
+pub const FAULT_STATUS: u64 = 0x8000_000E;
+
+/// End the fault: kill the process if it was one, halt the machine if it was
+/// the kernel.
+///
+/// A program that faults has made a mistake about its own memory. A kernel that
+/// faults has made a mistake about everyone's, and cannot be trusted to carry
+/// on -- so the two cases are not the same and must not end the same way. This
+/// used to halt either way, which meant any program on the machine could stop
+/// it by dereferencing a null pointer.
+///
+/// The report is already printed by the time this runs. What it adds is a line
+/// saying which of the two happened, because a boot log that ends in a fault
+/// report and then continues is otherwise a puzzle.
+fn end_of_fault(frame: &InterruptStackFrame, what: &str) -> ! {
+    kprintln!("=======================================================");
+
+    if frame.code_segment & 3 != 3 {
+        // The kernel's own. Nothing here is recoverable: the invariants this
+        // code depends on are the ones that just proved false.
+        kprintln!("the system has been halted");
+        halt_forever();
+    }
+
+    let Some(process) = crate::sched::current_process() else {
+        // Ring 3 with no process is not a thing that should be able to happen,
+        // and a machine that continued from it would be continuing on a
+        // guess.
+        kprintln!("a fault arrived from ring 3 with no process behind it");
+        kprintln!("the system has been halted");
+        halt_forever();
+    };
+
+    kprintln!(
+        "[fault] process {} \"{}\" ended by {what}; the machine continues",
+        process.id,
+        process.name.as_str()
+    );
+    crate::crash::record(process.id.0, process.name.as_str(), what);
+    process.completion.finish(FAULT_STATUS);
+
+    // Interrupts were masked on the way into the exception. The scheduler needs
+    // them to hand this processor to somebody else, and there is nothing left
+    // of this thread to protect.
+    super::interrupts::enable();
+    crate::sched::exit()
+}
+
 /// Decode a selector error code, as pushed by the segment-related faults.
 ///
 /// Bit 0 is the external flag, bits 1..3 select which table, and bits 3..16 are
@@ -78,6 +130,7 @@ fn report_selector_error(code: u64) {
 macro_rules! simple_handler {
     ($name:ident, $vector:expr, $description:expr) => {
         extern "x86-interrupt" fn $name(frame: InterruptStackFrame) {
+            let _gs = super::idt::KernelGs::enter(&frame);
             report_header($vector, $description, &frame);
             report_footer()
         }
@@ -88,6 +141,7 @@ macro_rules! simple_handler {
 macro_rules! selector_error_handler {
     ($name:ident, $vector:expr, $description:expr) => {
         extern "x86-interrupt" fn $name(frame: InterruptStackFrame, error_code: u64) {
+            let _gs = super::idt::KernelGs::enter(&frame);
             report_header($vector, $description, &frame);
             report_selector_error(error_code);
             report_footer()
@@ -123,6 +177,7 @@ selector_error_handler!(control_protection, 21, "control-protection exception");
 /// self-test. Returning from it means execution continues at the instruction
 /// after the trap.
 extern "x86-interrupt" fn breakpoint_trap(frame: InterruptStackFrame) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     kprintln!(
         "[intr] breakpoint at {:#018x} ({} mode); resuming",
         frame.instruction_pointer,
@@ -136,13 +191,14 @@ extern "x86-interrupt" fn breakpoint_trap(frame: InterruptStackFrame) {
 /// most often raised with a zero error code, where the selector decode would be
 /// misleading noise.
 extern "x86-interrupt" fn general_protection_fault(frame: InterruptStackFrame, error_code: u64) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(13, "general protection fault", &frame);
     if error_code == 0 {
         kprintln!("  error code : 0 (no segment selector involved)");
     } else {
         report_selector_error(error_code);
     }
-    report_footer()
+    end_of_fault(&frame, "a general protection fault")
 }
 
 /// Page fault.
@@ -151,6 +207,7 @@ extern "x86-interrupt" fn general_protection_fault(frame: InterruptStackFrame, e
 /// it was for. Together they identify almost every paging bug outright, so both
 /// are decoded in full.
 extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, error_code: u64) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     let address = read_cr2();
 
     report_header(14, "page fault", &frame);
@@ -201,7 +258,7 @@ extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, error_code: u64
         kprintln!("    note     : this is the boot stack guard page (stack overflow)");
     }
 
-    report_footer()
+    end_of_fault(&frame, "a page fault")
 }
 
 /// Double fault.
@@ -211,6 +268,7 @@ extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, error_code: u64
 /// failed is that the current stack is unusable. It cannot return: the
 /// architecture does not define what the interrupted state means.
 extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, error_code: u64) -> ! {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(8, "double fault", &frame);
     kprintln!("  error code : {error_code:#x} (always zero)");
     kprintln!("  note       : running on the double-fault IST stack");
@@ -222,6 +280,7 @@ extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, error_code: u
 /// Machine check. Runs on its own stack; hardware has reported a fault it
 /// cannot correct.
 extern "x86-interrupt" fn machine_check(frame: InterruptStackFrame) -> ! {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(18, "machine check", &frame);
     kprintln!("  note       : the processor reported an uncorrectable error");
     report_footer()
@@ -229,18 +288,21 @@ extern "x86-interrupt" fn machine_check(frame: InterruptStackFrame) -> ! {
 
 /// Alignment check, which pushes an (always zero) error code.
 extern "x86-interrupt" fn alignment_check(frame: InterruptStackFrame, _error_code: u64) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(17, "alignment check", &frame);
     report_footer()
 }
 
 /// Hypervisor injection exception.
 extern "x86-interrupt" fn hypervisor_injection(frame: InterruptStackFrame) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(28, "hypervisor injection exception", &frame);
     report_footer()
 }
 
 /// VMM communication exception.
 extern "x86-interrupt" fn vmm_communication(frame: InterruptStackFrame, error_code: u64) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(29, "VMM communication exception", &frame);
     kprintln!("  error code : {error_code:#x}");
     report_footer()
@@ -248,6 +310,7 @@ extern "x86-interrupt" fn vmm_communication(frame: InterruptStackFrame, error_co
 
 /// Security exception.
 extern "x86-interrupt" fn security_exception(frame: InterruptStackFrame, error_code: u64) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(30, "security exception", &frame);
     kprintln!("  error code : {error_code:#x}");
     report_footer()
@@ -258,6 +321,7 @@ extern "x86-interrupt" fn security_exception(frame: InterruptStackFrame, error_c
 /// Registering this everywhere means an unexpected interrupt produces a message
 /// naming the vector, instead of a triple fault that names nothing.
 extern "x86-interrupt" fn unhandled(frame: InterruptStackFrame) {
+    let _gs = super::idt::KernelGs::enter(&frame);
     report_header(255, "unhandled interrupt", &frame);
     kprintln!("  note       : no handler is registered for this vector");
     report_footer()

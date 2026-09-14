@@ -1,0 +1,11 @@
+[package]
+name = "nexus-ime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Typing Japanese on a keyboard that has none: romaji to kana, as you type."
+
+[lib]
+name = "nexus_ime"
+path = "src/lib.rs"

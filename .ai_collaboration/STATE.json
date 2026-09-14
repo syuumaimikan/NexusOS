@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-09-14T13:24:51.678783+00:00",
+  "agents": {
+    "gpt6_astra": {
+      "status": "reviewing",
+      "current_task": "ASTRA-AI-001",
+      "active_paths": []
+    },
+    "claude_code": {
+      "status": "working",
+      "current_task": "CLAUDE-WINDOWS-003",
+      "active_paths": [
+        "user/nexus-window/",
+        "user/nexus-settings/",
+        "user/nexus-store/",
+        "user/nexus-shell/",
+        "shared/nexus-json/",
+        "scripts/",
+        "locales/"
+      ],
+      "last_activity": "2026-09-14T13:22:04.371222+00:00",
+      "note": "Self-reported. Not touching shared/nexus-ai, user/nexus-ai, docs/AI or scripts/test-ai.ps1 while ASTRA-AI-001 holds them."
+    }
+  },
+  "tasks": [
+    {
+      "id": "ASTRA-AI-001",
+      "status": "completed",
+      "priority": "high",
+      "owner": "gpt6_astra",
+      "summary": "Verified read-only AI runtime and guest IPC service",
+      "dependencies": [],
+      "verification": "13 host tests; native build; host/native clippy -D warnings; final isolated QEMU IPC/security/teardown passed. docs/AI/TESTING.md",
+      "scope": "Read-only runtime slice only, not full Nexus AI MVP"
+    },
+    {
+      "id": "CLAUDE-20260914-001",
+      "status": "completed",
+      "priority": "high",
+      "owner": "gpt6_astra",
+      "summary": "Runtime boundary design response",
+      "dependencies": [],
+      "verification": "Source-based design/review response delivered; source fixes belong to Claude and are not verified by this task."
+    },
+    {
+      "id": "CLAUDE-20260914-002",
+      "status": "completed",
+      "priority": "normal",
+      "owner": "gpt6_astra",
+      "summary": "Window API review",
+      "dependencies": [],
+      "verification": "Source-based design/review response delivered; source fixes belong to Claude and are not verified by this task."
+    },
+    {
+      "id": "CLAUDE-WINDOWS-003",
+      "status": "completed",
+      "priority": "high",
+      "owner": "claude_code",
+      "summary": "Fix the four defects Astra's window review found",
+      "dependencies": [
+        "CLAUDE-20260914-002"
+      ],
+      "verification": "cargo clippy on all three crates; scripts/test-settings.ps1 and scripts/test-store.ps1 passed in QEMU after the change."
+    },
+    {
+      "id": "CLAUDE-TERMINAL-004",
+      "status": "completed",
+      "priority": "normal",
+      "owner": "claude_code",
+      "summary": "Terminal test failed about half the time; it slept instead of waiting",
+      "dependencies": [],
+      "verification": "scripts/test-terminal.ps1 passed three times in a row after the change; failed three times in a row before it."
+    },
+    {
+      "id": "ASTRA-20260914T130524Z-SYSTEM-INFO",
+      "status": "in_progress",
+      "priority": "medium",
+      "owner": "claude_code",
+      "summary": "Read-only system information service for the AI runtime",
+      "dependencies": []
+    }
+  ],
+  "conflicts": [
+    {
+      "type": "shared_index",
+      "status": "resolved",
+      "detail": "AI in-progress files were staged by another process; no index reset or broad commit performed.",
+      "resolution": "claude_code staged the whole tree by accident, then reset. Astra files were not committed. Cargo.toml is shared: Claude committed only the nexus-json member line, leaving the nexus-ai member lines in the working tree for Astra to commit with the code they name.",
+      "resolved_by": "claude_code",
+      "resolved_at": "2026-09-14T13:22:04.371222+00:00"
+    }
+  ],
+  "build": {
+    "ai_user_target": "passed"
+  },
+  "tests": {
+    "ai_core": "13 passed; 0 failed",
+    "ai_clippy": "host + native target passed with -D warnings"
+  },
+  "qemu": {
+    "ai_smoke": "passed",
+    "evidence": "build/ai-249dc3631db7438bb9e16b0aa348743f/serial.log",
+    "final_hardening": "passed"
+  },
+  "pending_requests": [
+    "ASTRA-20260914T130524Z-SYSTEM-INFO"
+  ],
+  "locks": [],
+  "decisions": [
+    "decisions/ASTRA-AI-001.json"
+  ],
+  "integration": {
+    "status": "partial",
+    "note": "Read-only guest service verified. Model/backend, assistant UI and normal boot registration remain pending."
+  },
+  "recent_changes": [
+    "gpt6_astra: ASTRA-AI-001 verified, documented and ready for isolated commit; lock released",
+    "claude_code: window/settings/store fixes from Astra's review; nexus-json added; terminal test flake fixed",
+    "AI core, service and isolated QEMU test; see task ASTRA-AI-001",
+    "Observed concurrent Claude edits to window/settings/store/locales; not touched by Astra"
+  ],
+  "blocked_tasks": []
+}

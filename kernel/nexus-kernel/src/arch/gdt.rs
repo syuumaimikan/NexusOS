@@ -1,13 +1,26 @@
-//! The Global Descriptor Table and Task State Segment.
+//! Per-processor descriptor tables.
 //!
 //! Long mode barely uses segmentation, but three things still require a GDT the
 //! kernel owns rather than the one the firmware left behind:
 //!
-//! * a Task State Segment, which is how the CPU finds a kernel stack when it
-//!   takes an interrupt from user mode, and how it finds a *known-good* stack
-//!   when the current one is unusable (the Interrupt Stack Table);
+//! * a Task State Segment, which is how the processor finds a kernel stack when
+//!   it takes an interrupt from user mode, and how it finds a *known-good*
+//!   stack when the current one is unusable (the Interrupt Stack Table);
 //! * ring 3 descriptors, needed before any user code can run;
 //! * a descriptor layout `syscall`/`sysret` can use.
+//!
+//! ## Why every processor gets its own
+//!
+//! A TSS descriptor is marked busy by the `ltr` that loads it, and loading a
+//! descriptor that is already busy raises a general protection fault. A second
+//! processor therefore cannot simply load the first one's table — it faults,
+//! and because this runs before that processor has an IDT, the fault escalates
+//! to a triple fault and takes the machine down. That is not hypothetical: it
+//! is exactly what the first attempt at starting a second processor did.
+//!
+//! The Interrupt Stack Table stacks have to be per-processor regardless. Two
+//! cores taking a double fault at once would otherwise unwind onto the same
+//! stack and overwrite each other's evidence.
 //!
 //! ## Descriptor order
 //!
@@ -21,7 +34,7 @@
 
 use core::mem::size_of;
 
-use crate::sync::SpinLock;
+use super::percpu::MAX_PROCESSORS;
 
 /// Selector of the kernel code segment.
 pub const KERNEL_CODE_SELECTOR: u16 = 0x08;
@@ -50,19 +63,33 @@ pub const IST_NMI: u16 = 2;
 pub const IST_MACHINE_CHECK: u16 = 3;
 
 /// Size of each Interrupt Stack Table stack.
-const IST_STACK_SIZE: usize = 16 * 1024;
-
-/// Backing storage for the IST stacks.
 ///
-/// These live in `.bss` rather than being allocated, because they must exist
-/// before the physical allocator does — the whole point is that they are
-/// reachable when everything else has gone wrong.
-#[repr(align(16))]
-struct IstStack([u8; IST_STACK_SIZE]);
+/// These exist to report a fault, not to run on: a handler that reaches one
+/// prints and halts. 8 KiB is ample for that, and keeps the total across every
+/// possible processor to a few hundred kilobytes.
+const IST_STACK_SIZE: usize = 8 * 1024;
 
-static mut DOUBLE_FAULT_STACK: IstStack = IstStack([0; IST_STACK_SIZE]);
-static mut NMI_STACK: IstStack = IstStack([0; IST_STACK_SIZE]);
-static mut MACHINE_CHECK_STACK: IstStack = IstStack([0; IST_STACK_SIZE]);
+/// One processor's Interrupt Stack Table stacks.
+///
+/// In `.bss` rather than allocated, because they must exist before the physical
+/// allocator does — the whole point is that they are reachable when everything
+/// else has gone wrong.
+#[repr(C, align(16))]
+struct IstStacks {
+    double_fault: [u8; IST_STACK_SIZE],
+    non_maskable: [u8; IST_STACK_SIZE],
+    machine_check: [u8; IST_STACK_SIZE],
+}
+
+impl IstStacks {
+    const fn new() -> Self {
+        Self {
+            double_fault: [0; IST_STACK_SIZE],
+            non_maskable: [0; IST_STACK_SIZE],
+            machine_check: [0; IST_STACK_SIZE],
+        }
+    }
+}
 
 /// The x86-64 Task State Segment.
 ///
@@ -103,10 +130,16 @@ impl TaskStateSegment {
 ///
 /// Nine slots: null, kernel code, kernel data, user code 32, user data, user
 /// code 64, and two consumed by the 16-byte TSS descriptor, plus one spare so
-/// the table is 16-byte aligned in whole entries.
+/// the table is a whole number of 16-byte units.
 #[repr(C, align(16))]
 struct GlobalDescriptorTable {
     entries: [u64; 9],
+}
+
+impl GlobalDescriptorTable {
+    const fn new() -> Self {
+        Self { entries: [0; 9] }
+    }
 }
 
 /// Operand of `lgdt` and `lidt`.
@@ -133,12 +166,11 @@ const USER_DATA_DESCRIPTOR: u64 = 0x00CF_F200_0000_FFFF;
 /// Present, DPL 3, code, readable, `L` set.
 const USER_CODE64_DESCRIPTOR: u64 = 0x00AF_FA00_0000_FFFF;
 
-static mut GDT: GlobalDescriptorTable = GlobalDescriptorTable { entries: [0; 9] };
-static mut TSS: TaskStateSegment = TaskStateSegment::new();
-
-/// Guards one-time initialisation, so a second call is a no-op rather than a
-/// corrupted descriptor table.
-static INITIALISED: SpinLock<bool> = SpinLock::new(false);
+static mut GDTS: [GlobalDescriptorTable; MAX_PROCESSORS] =
+    [const { GlobalDescriptorTable::new() }; MAX_PROCESSORS];
+static mut TSSES: [TaskStateSegment; MAX_PROCESSORS] =
+    [const { TaskStateSegment::new() }; MAX_PROCESSORS];
+static mut IST_STACKS: [IstStacks; MAX_PROCESSORS] = [const { IstStacks::new() }; MAX_PROCESSORS];
 
 /// Build the two halves of a 16-byte TSS descriptor.
 fn tss_descriptor(base: u64, limit: u32) -> (u64, u64) {
@@ -151,38 +183,40 @@ fn tss_descriptor(base: u64, limit: u32) -> (u64, u64) {
     (low, base >> 32)
 }
 
-/// Install the GDT and TSS on the current processor.
-///
-/// Loads the descriptor table, reloads every segment register, and loads the
-/// task register.
+/// Top (highest address) of an IST stack, 16-byte aligned as the ABI requires.
+fn stack_top(stack: *const u8) -> u64 {
+    // Stacks grow down, so the processor is given the end of the array.
+    (stack as u64 + IST_STACK_SIZE as u64) & !0xF
+}
+
+/// Build and load this processor's descriptor tables.
 ///
 /// # Safety
 ///
-/// Replaces the descriptor tables the processor is currently using. Must run
-/// with interrupts disabled, before any interrupt handler could observe the
-/// half-updated state.
-pub unsafe fn init() {
-    let mut initialised = INITIALISED.lock();
-    if *initialised {
-        return;
-    }
+/// Call once per processor, on that processor, with interrupts disabled.
+/// `cpu_index` must be unique and below [`MAX_PROCESSORS`].
+pub unsafe fn init(cpu_index: usize) {
+    debug_assert!(cpu_index < MAX_PROCESSORS);
 
-    // SAFETY: this runs once, single-threaded, before interrupts are enabled,
-    // so nothing else can observe or race these statics. Addresses are taken
-    // with `addr_of_mut!` to avoid ever forming a reference to a `static mut`.
+    // SAFETY: each processor touches only its own entry, and the caller
+    // guarantees the index is unique, so there is no aliasing between cores.
+    // Addresses are taken with `addr_of_mut!` so no reference to a `static mut`
+    // is ever formed.
     unsafe {
-        let tss = core::ptr::addr_of_mut!(TSS);
+        let stacks = core::ptr::addr_of_mut!(IST_STACKS[cpu_index]);
+        let tss = core::ptr::addr_of_mut!(TSSES[cpu_index]);
+
         (*tss).interrupt_stack_table[(IST_DOUBLE_FAULT - 1) as usize] =
-            stack_top(core::ptr::addr_of_mut!(DOUBLE_FAULT_STACK));
+            stack_top(core::ptr::addr_of!((*stacks).double_fault) as *const u8);
         (*tss).interrupt_stack_table[(IST_NMI - 1) as usize] =
-            stack_top(core::ptr::addr_of_mut!(NMI_STACK));
+            stack_top(core::ptr::addr_of!((*stacks).non_maskable) as *const u8);
         (*tss).interrupt_stack_table[(IST_MACHINE_CHECK - 1) as usize] =
-            stack_top(core::ptr::addr_of_mut!(MACHINE_CHECK_STACK));
+            stack_top(core::ptr::addr_of!((*stacks).machine_check) as *const u8);
 
         let (tss_low, tss_high) =
             tss_descriptor(tss as u64, size_of::<TaskStateSegment>() as u32 - 1);
 
-        let gdt = core::ptr::addr_of_mut!(GDT);
+        let gdt = core::ptr::addr_of_mut!(GDTS[cpu_index]);
         (*gdt).entries[0] = 0;
         (*gdt).entries[1] = KERNEL_CODE_DESCRIPTOR;
         (*gdt).entries[2] = KERNEL_DATA_DESCRIPTOR;
@@ -207,20 +241,14 @@ pub unsafe fn init() {
         load_code_segment(KERNEL_CODE_SELECTOR);
         load_data_segments(KERNEL_DATA_SELECTOR);
 
+        // This is the instruction that marks the descriptor busy, and the
+        // reason each processor needs its own table.
         core::arch::asm!(
             "ltr {selector:x}",
             selector = in(reg) TSS_SELECTOR,
             options(nostack, preserves_flags),
         );
     }
-
-    *initialised = true;
-}
-
-/// Top (highest address) of an IST stack, 16-byte aligned as the ABI requires.
-fn stack_top(stack: *mut IstStack) -> u64 {
-    // Stacks grow down, so the CPU is given the end of the array.
-    (stack as u64 + IST_STACK_SIZE as u64) & !0xF
 }
 
 /// Reload `cs`, which cannot be assigned to directly.
@@ -257,7 +285,7 @@ unsafe fn load_code_segment(selector: u16) {
 /// loaded GDT.
 unsafe fn load_data_segments(selector: u16) {
     // SAFETY: upheld by the caller. `fs` and `gs` are deliberately left alone:
-    // their bases are set through MSRs and will carry per-CPU data.
+    // their bases are set through MSRs and carry per-processor data.
     unsafe {
         core::arch::asm!(
             "mov ds, {selector:x}",
@@ -269,58 +297,42 @@ unsafe fn load_data_segments(selector: u16) {
     }
 }
 
-/// Record the kernel stack the CPU should switch to on entry from user mode.
+/// Record the kernel stack this processor switches to on entry from user mode.
 ///
 /// Called by the scheduler on every context switch once user mode exists: the
-/// value must always be the top of the *current* thread's kernel stack.
+/// value must always be the top of the *current* thread's kernel stack, on
+/// *this* processor.
 ///
 /// # Safety
 ///
-/// `stack_top` must be the top of a valid, mapped kernel stack.
-pub unsafe fn set_kernel_stack(stack_top: u64) {
-    // SAFETY: writing one field of this CPU's TSS; the CPU reads it only on a
-    // privilege transition, which cannot be in progress here.
+/// `stack_top` must be the top of a valid, mapped kernel stack, and
+/// `cpu_index` must be this processor's own.
+#[allow(dead_code)]
+pub unsafe fn set_kernel_stack(cpu_index: usize, stack_top: u64) {
+    debug_assert!(cpu_index < MAX_PROCESSORS);
+    // SAFETY: writing one field of this processor's own TSS; the processor
+    // reads it only on a privilege transition, which cannot be in progress
+    // here.
     unsafe {
-        (*core::ptr::addr_of_mut!(TSS)).privilege_stack_table[0] = stack_top;
+        (*core::ptr::addr_of_mut!(TSSES[cpu_index])).privilege_stack_table[0] = stack_top;
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// The kernel binary has no host test harness, so what can be checked without
+// running is checked at compile time.
 
-    #[test]
-    fn tss_matches_the_architectural_layout() {
-        assert_eq!(size_of::<TaskStateSegment>(), 104);
-    }
+/// The architectural size of a 64-bit TSS.
+const _: () = assert!(size_of::<TaskStateSegment>() == 104);
 
-    /// `sysret` computes both selectors from one base; `syscall` from another.
-    /// These relationships are what the descriptor ordering exists to satisfy.
-    #[test]
-    fn descriptor_order_satisfies_syscall_and_sysret() {
-        // syscall: CS = base, SS = base + 8.
-        assert_eq!(KERNEL_DATA_SELECTOR, KERNEL_CODE_SELECTOR + 8);
-        // sysret: CS = base + 16, SS = base + 8, both at DPL 3.
-        let sysret_base = USER_CODE32_SELECTOR & !3;
-        assert_eq!(USER_CODE64_SELECTOR & !3, sysret_base + 16);
-        assert_eq!(USER_DATA_SELECTOR & !3, sysret_base + 8);
-        assert_eq!(USER_CODE64_SELECTOR & 3, 3);
-        assert_eq!(USER_DATA_SELECTOR & 3, 3);
-    }
-
-    #[test]
-    fn tss_descriptor_encodes_base_and_limit() {
-        let base = 0x0000_1234_5678_9ABCu64;
-        let (low, high) = tss_descriptor(base, 103);
-
-        assert_eq!(low & 0xFFFF, 103, "limit bits 0..16");
-        assert_eq!((low >> 16) & 0xFF_FFFF, base & 0xFF_FFFF, "base bits 0..24");
-        assert_eq!(
-            (low >> 40) & 0xFF,
-            0x89,
-            "available 64-bit TSS, present, DPL 0"
-        );
-        assert_eq!((low >> 56) & 0xFF, (base >> 24) & 0xFF, "base bits 24..32");
-        assert_eq!(high, base >> 32, "base bits 32..64");
-    }
-}
+/// `syscall` takes `CS` from one base and `SS` from base + 8; `sysret` takes
+/// `CS` from another base + 16 and `SS` from that base + 8. The descriptor
+/// order exists to satisfy both, and a mistake is invisible until the first
+/// return to user mode.
+const _: () = {
+    assert!(KERNEL_DATA_SELECTOR == KERNEL_CODE_SELECTOR + 8);
+    let sysret_base = USER_CODE32_SELECTOR & !3;
+    assert!(USER_CODE64_SELECTOR & !3 == sysret_base + 16);
+    assert!(USER_DATA_SELECTOR & !3 == sysret_base + 8);
+    assert!(USER_CODE64_SELECTOR & 3 == 3);
+    assert!(USER_DATA_SELECTOR & 3 == 3);
+};

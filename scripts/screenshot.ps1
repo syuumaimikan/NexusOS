@@ -25,6 +25,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'qemu.ps1')
+
+. (Join-Path $PSScriptRoot 'capture.ps1')
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
 $EspDir = Join-Path $BuildDir 'esp'
@@ -57,19 +61,9 @@ foreach ($stale in @($SerialLog, $PpmPath, $Output)) {
 # Pick a free monitor port so concurrent runs do not collide.
 $MonitorPort = Get-Random -Minimum 24000 -Maximum 24999
 
-$QemuArgs = @(
-    '-machine', 'q35',
-    '-cpu', 'qemu64,+pdpe1gb',
-    '-smp', '4',
-    '-m', '1G',
-    '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$FirmwareCodeLocal",
-    '-drive', "if=pflash,format=raw,unit=1,file=$FirmwareVars",
-    '-drive', "format=raw,file=fat:rw:$EspDir",
-    '-serial', "file:$SerialLog",
-    '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait",
-    '-display', 'none',
-    '-no-reboot'
-)
+$QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
+    -FirmwareCode $FirmwareCodeLocal -FirmwareVars $FirmwareVars -SerialLog $SerialLog `
+    -MonitorPort $MonitorPort -Headless
 
 Write-Host "==> Booting NexusOS (monitor on port $MonitorPort)" -ForegroundColor Cyan
 $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
@@ -88,12 +82,17 @@ try {
         $writer.AutoFlush = $true
         # The monitor greets us first; give it a moment, then issue the dump.
         Start-Sleep -Milliseconds 500
-        $writer.WriteLine("screendump $PpmPath")
-        Start-Sleep -Seconds 3
+        Invoke-Screendump -Writer $writer -Path $PpmPath
         $writer.WriteLine('quit')
-        Start-Sleep -Milliseconds 500
     } finally {
         $client.Close()
+    }
+
+    # Let QEMU shut down on its own after `quit`, so it closes the serial file
+    # and the screendump properly. The kill in the finally block is the
+    # fallback for a guest that will not go away, not the normal path.
+    if (-not $process.WaitForExit(15000)) {
+        Write-Warning 'QEMU did not exit after quit; killing it'
     }
 } finally {
     if (-not $process.HasExited) {
@@ -104,58 +103,11 @@ try {
 
 if (-not (Test-Path $PpmPath)) { throw 'QEMU produced no screendump.' }
 
-# Convert the binary PPM (P6) QEMU writes into a PNG that ordinary tools read.
-Add-Type -AssemblyName System.Drawing
-$bytes = [System.IO.File]::ReadAllBytes($PpmPath)
-
-# Parse the P6 header: magic, width, height, maxval, each whitespace separated,
-# with '#' comments permitted between tokens.
-$pos = 0
-$tokens = New-Object System.Collections.Generic.List[string]
-while ($tokens.Count -lt 4 -and $pos -lt $bytes.Length) {
-    # Skip whitespace.
-    while ($pos -lt $bytes.Length -and [char]$bytes[$pos] -match '\s') { $pos++ }
-    if ($pos -lt $bytes.Length -and [char]$bytes[$pos] -eq '#') {
-        while ($pos -lt $bytes.Length -and $bytes[$pos] -ne 10) { $pos++ }
-        continue
-    }
-    $start = $pos
-    while ($pos -lt $bytes.Length -and -not ([char]$bytes[$pos] -match '\s')) { $pos++ }
-    $tokens.Add([System.Text.Encoding]::ASCII.GetString($bytes, $start, $pos - $start))
-}
-$pos++  # single whitespace byte after maxval
-
-if ($tokens[0] -ne 'P6') { throw "Unexpected screendump format: $($tokens[0])" }
-$width = [int]$tokens[1]
-$height = [int]$tokens[2]
-
-$bitmap = New-Object System.Drawing.Bitmap($width, $height, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
-$rect = New-Object System.Drawing.Rectangle(0, 0, $width, $height)
-$data = $bitmap.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::WriteOnly, $bitmap.PixelFormat)
-try {
-    # PPM is packed RGB rows; GDI+ wants BGR rows padded to a 4-byte stride.
-    $row = New-Object byte[] $data.Stride
-    for ($y = 0; $y -lt $height; $y++) {
-        $src = $pos + $y * $width * 3
-        for ($x = 0; $x -lt $width; $x++) {
-            $i = $src + $x * 3
-            $o = $x * 3
-            $row[$o]     = $bytes[$i + 2]  # blue
-            $row[$o + 1] = $bytes[$i + 1]  # green
-            $row[$o + 2] = $bytes[$i]      # red
-        }
-        [System.Runtime.InteropServices.Marshal]::Copy($row, 0, [IntPtr]($data.Scan0.ToInt64() + $y * $data.Stride), $data.Stride)
-    }
-} finally {
-    $bitmap.UnlockBits($data)
-}
-
-$bitmap.Save($Output, [System.Drawing.Imaging.ImageFormat]::Png)
-$bitmap.Dispose()
+$size = Convert-PpmToPng -PpmPath $PpmPath -PngPath $Output
 Remove-Item $PpmPath -Force
 
 Write-Host ''
-Write-Host "Screenshot: $Output ($width x $height)" -ForegroundColor Green
+Write-Host "Screenshot: $Output ($($size.Width) x $($size.Height))" -ForegroundColor Green
 if (Test-Path $SerialLog) {
     Write-Host "Serial log: $SerialLog"
 }

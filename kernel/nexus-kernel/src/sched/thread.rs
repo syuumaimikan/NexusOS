@@ -6,6 +6,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 
 use nexus_abi::layout;
 
@@ -62,6 +63,29 @@ pub enum ThreadState {
     Running,
     /// Waiting until the tick counter reaches this value.
     Sleeping { until_tick: u64 },
+    /// Waiting on a [`WaitQueue`](super::wait::WaitQueue) for something to
+    /// happen.
+    ///
+    /// Different from [`Sleeping`](Self::Sleeping) in what ends it: a sleeper
+    /// is woken by the clock, and the clock always comes. A blocked thread is
+    /// woken by another thread or an interrupt, and if nobody wakes it, it
+    /// waits forever -- which is the correct behaviour for a thread waiting on
+    /// a channel nobody will ever write to.
+    ///
+    /// Unless it asked for a deadline, which is the two states at once: woken
+    /// by whoever signals, *or* by the clock, whichever comes first. A program
+    /// with a clock on screen is the case that needs it -- it is waiting for a
+    /// keystroke that may never come and it still has to redraw every second,
+    /// and without this the only way to do both is to poll.
+    Blocked { until_tick: Option<u64> },
+    /// Done running, but still standing on its own stack.
+    ///
+    /// The gap between the two matters: a thread that has decided to exit is
+    /// still executing until the stack switch completes, so anything that
+    /// freed its stack on seeing it finished would pull the ground out from
+    /// under it. The processor it left marks it [`Finished`](Self::Finished)
+    /// once it has switched away.
+    Exiting,
     /// Finished. Its stack is reclaimed and it will never run again.
     Finished,
 }
@@ -135,12 +159,13 @@ impl Drop for KernelStack {
         // mapped would let the next owner of those frames be written through
         // this stack's stale mapping.
         let pages = layout::KERNEL_STACK_SIZE / 4096;
-        for page in 0..pages {
-            // SAFETY: this stack is being destroyed, so nothing is running on
-            // it — a thread never drops its own stack while using it.
-            unsafe {
-                let _ = paging::unmap_page(self.bottom + page * 4096);
-            }
+        // As a range, so the other processors are interrupted once rather than
+        // once per page.
+        //
+        // SAFETY: this stack is being destroyed, so nothing is running on it —
+        // a thread never drops its own stack while using it.
+        unsafe {
+            let _ = paging::unmap_range(self.bottom, pages);
         }
         // SAFETY: the block came from `allocate_block` at this order and the
         // mappings that referred to it are gone.
@@ -150,6 +175,15 @@ impl Drop for KernelStack {
 
 /// The function a thread runs.
 pub type ThreadEntry = fn(usize);
+
+/// Where a user thread begins executing in ring 3.
+#[derive(Debug, Clone, Copy)]
+pub struct UserStart {
+    /// First instruction, in the user half of the address space.
+    pub entry: u64,
+    /// Initial user stack pointer, one past the top of its stack.
+    pub stack_top: u64,
+}
 
 /// A kernel thread.
 pub struct Thread {
@@ -164,12 +198,47 @@ pub struct Thread {
     pub stack: Option<KernelStack>,
     /// Entry point and argument, read once by the trampoline.
     pub entry: Option<(ThreadEntry, usize)>,
+    /// Where this thread starts in ring 3, if it is a user thread.
+    ///
+    /// Held on the thread rather than passed as the entry argument because
+    /// there are two values and a `ThreadEntry` takes one; inventing a table to
+    /// index into would be the same thing with more moving parts.
+    pub user_start: Option<UserStart>,
+    /// The process this thread belongs to, if it is not a kernel thread.
+    ///
+    /// Shared rather than owned: threads of one process run in one process, and
+    /// it outlives whichever of them is reaped first. The last reference going
+    /// away is what frees the address space, and by then no processor can still
+    /// have it in `cr3` -- a thread has to be switched away from before it can
+    /// be reaped, and every switch sets `cr3`.
+    pub process: Option<Arc<crate::process::Process>>,
     /// Remaining ticks in the current time slice.
     pub slice_remaining: u32,
     /// Total ticks this thread has been scheduled for.
     pub ticks_run: u64,
     /// How many times it has been switched to.
     pub switches: u64,
+    /// Whether this thread is a processor's idle thread.
+    ///
+    /// Idle threads are reached through per-processor state rather than a run
+    /// queue, so they are the one kind of thread that is `Ready` and correctly
+    /// on no queue. Recorded rather than inferred: the boot processor's idle
+    /// thread owns a stack and the others do not, so every guess about what an
+    /// idle thread looks like has been wrong.
+    pub is_idle: bool,
+    /// Set while this thread has left the scheduler's hands but is still
+    /// executing on its own stack.
+    ///
+    /// A thread announces where it is going -- ready, asleep, or done -- before
+    /// the stack switch that takes it there, and it keeps running for the few
+    /// instructions in between. Anything acting on that announcement in the gap
+    /// would be acting on a thread that is still on a processor: waking it
+    /// would let a second processor switch to a stack pointer that has not been
+    /// saved yet, and reclaiming it would free the stack it is standing on.
+    ///
+    /// The processor it leaves clears this from the incoming thread, once the
+    /// outgoing one has provably stopped executing.
+    pub switching_out: bool,
 }
 
 /// Ticks a thread runs before the scheduler considers preempting it.
@@ -180,22 +249,28 @@ pub struct Thread {
 pub const TIME_SLICE_TICKS: u32 = 10;
 
 impl Thread {
-    /// Create the thread representing the context the kernel booted on.
+    /// Adopt the context already executing as a thread.
     ///
-    /// It owns no stack: it is already running on the bootloader's, and that
+    /// It owns no stack: it is already running on one the kernel did not
+    /// allocate -- the bootloader's, for the boot processor, or the one the
+    /// boot processor handed an application processor to start on -- and that
     /// stack must outlive everything.
-    pub fn boot_thread(id: ThreadId, name: &str) -> Box<Self> {
+    pub fn boot_thread(id: ThreadId, name: &str, priority: Priority) -> Box<Self> {
         Box::new(Self {
             id,
             name: String::from(name),
             state: ThreadState::Running,
-            priority: Priority::Normal,
+            priority,
             stack_pointer: 0,
             stack: None,
             entry: None,
+            user_start: None,
+            process: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
             switches: 0,
+            is_idle: false,
+            switching_out: false,
         })
     }
 
@@ -221,9 +296,13 @@ impl Thread {
             stack_pointer,
             stack: Some(stack),
             entry: Some((entry, argument)),
+            user_start: None,
+            process: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
             switches: 0,
+            is_idle: false,
+            switching_out: false,
         }))
     }
 
@@ -246,7 +325,7 @@ impl Thread {
         // off the top of the stack.
         let terminator = top - 8;
         let return_slot = top - 16;
-        debug_assert!(return_slot % 16 == 0);
+        debug_assert!(return_slot.is_multiple_of(16));
 
         // SAFETY: the whole range lies inside the stack just mapped, and no
         // thread is running on it yet.
@@ -271,9 +350,39 @@ impl Thread {
         }
     }
 
+    /// Physical root of the page tables this thread runs on.
+    #[must_use]
+    pub fn page_table_root(&self) -> Option<u64> {
+        self.process
+            .as_ref()
+            .map(|process| process.page_table_root())
+    }
+
+    /// Top of this thread's kernel stack, if it owns one.
+    ///
+    /// What the processor switches to when an interrupt arrives while this
+    /// thread is in ring 3, and what a system call from it lands on.
+    #[must_use]
+    pub fn kernel_stack_top(&self) -> Option<u64> {
+        self.stack.as_ref().map(KernelStack::top)
+    }
+
     /// Whether this thread is waiting for a deadline that has now passed.
     #[must_use]
     pub fn is_wakeable(&self, now: u64) -> bool {
-        matches!(self.state, ThreadState::Sleeping { until_tick } if now >= until_tick)
+        if self.switching_out {
+            return false;
+        }
+        match self.state {
+            ThreadState::Sleeping { until_tick } => now >= until_tick,
+            // A timed wait. The clock is one of the two things that can end it,
+            // and this is the clock arriving first; whoever it was waiting for
+            // may still signal afterwards and find it already awake, which is
+            // the same harmless race two wakers have always had.
+            ThreadState::Blocked {
+                until_tick: Some(until_tick),
+            } => now >= until_tick,
+            _ => false,
+        }
     }
 }

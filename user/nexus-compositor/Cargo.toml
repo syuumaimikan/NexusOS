@@ -1,0 +1,15 @@
+[package]
+name = "nexus-compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The process that owns the display and composites what its clients draw."
+
+[[bin]]
+name = "nexus-compositor"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }

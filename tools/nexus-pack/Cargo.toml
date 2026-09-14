@@ -1,0 +1,15 @@
+[package]
+name = "nexus-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Builds a .nexus package out of files on the build machine."
+
+[[bin]]
+name = "nexus-pack"
+path = "src/main.rs"
+
+[dependencies]
+nexus-pkg = { path = "../../shared/nexus-pkg" }
+nexus-crypto = { path = "../../shared/nexus-crypto" }

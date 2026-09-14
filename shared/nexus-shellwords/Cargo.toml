@@ -1,0 +1,11 @@
+[package]
+name = "nexus-shellwords"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Splitting a typed command line into the words it means."
+
+[lib]
+name = "nexus_shellwords"
+path = "src/lib.rs"

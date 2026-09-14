@@ -1,0 +1,13 @@
+[package]
+name = "nexus-user"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The NexusOS user-space runtime: the system-call interface, and nothing else."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nexus-mm = { path = "../../kernel/nexus-mm" }

@@ -1,0 +1,20 @@
+[package]
+name = "nexus-setup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The screen a machine shows the first time it is turned on."
+
+[[bin]]
+name = "nexus-setup"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+nexus-time = { path = "../../shared/nexus-time" }
+nexus-config = { path = "../../shared/nexus-config" }
+nexus-crypto = { path = "../../shared/nexus-crypto" }

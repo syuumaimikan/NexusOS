@@ -1,0 +1,20 @@
+[package]
+name = "nexus-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The desktop: the strip along the bottom, and what starting a program looks like."
+
+[[bin]]
+name = "nexus-shell"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+nexus-time = { path = "../../shared/nexus-time" }
+nexus-config = { path = "../../shared/nexus-config" }
+nexus-look = { path = "../../shared/nexus-look" }

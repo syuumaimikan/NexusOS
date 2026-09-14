@@ -7,6 +7,18 @@ name = "nexus-abi"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-ai"
+version = "0.1.0"
+dependencies = [
+ "nexus-ai-core",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-ai-core"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-boot"
 version = "0.1.0"
 dependencies = [
@@ -14,16 +26,282 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-browser"
+version = "0.1.0"
+dependencies = [
+ "nexus-dns",
+ "nexus-html",
+ "nexus-http",
+ "nexus-i18n",
+ "nexus-netclient",
+ "nexus-ui",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-client"
+version = "0.1.0"
+dependencies = [
+ "nexus-ui",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-compositor"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-config"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-crypto"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-dns"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-find"
+version = "0.1.0"
+dependencies = [
+ "nexus-index",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-font"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-hello"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-html"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-http"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-i18n"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-idle"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-ime"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-index"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-init"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-install"
+version = "0.1.0"
+dependencies = [
+ "nexus-pkg",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-json"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-kernel"
 version = "0.1.0"
 dependencies = [
  "nexus-abi",
+ "nexus-config",
+ "nexus-font",
+ "nexus-i18n",
+ "nexus-look",
  "nexus-mm",
+ "nexus-net",
+ "nexus-time",
 ]
+
+[[package]]
+name = "nexus-linux-example"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-look"
+version = "0.1.0"
 
 [[package]]
 name = "nexus-mm"
 version = "0.1.0"
 dependencies = [
  "nexus-abi",
+]
+
+[[package]]
+name = "nexus-net"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-netclient"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-pack"
+version = "0.1.0"
+dependencies = [
+ "nexus-crypto",
+ "nexus-pkg",
+]
+
+[[package]]
+name = "nexus-pkg"
+version = "0.1.0"
+dependencies = [
+ "nexus-crypto",
+]
+
+[[package]]
+name = "nexus-settings"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-i18n",
+ "nexus-look",
+ "nexus-time",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
+name = "nexus-setup"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-crypto",
+ "nexus-i18n",
+ "nexus-time",
+ "nexus-ui",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-shell"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-i18n",
+ "nexus-look",
+ "nexus-time",
+ "nexus-ui",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-shellwords"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-store"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-i18n",
+ "nexus-install",
+ "nexus-look",
+ "nexus-pkg",
+ "nexus-ui",
+ "nexus-update",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
+name = "nexus-term"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-i18n",
+ "nexus-ime",
+ "nexus-look",
+ "nexus-shellwords",
+ "nexus-time",
+ "nexus-ui",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-time"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-ui"
+version = "0.1.0"
+dependencies = [
+ "nexus-font",
+]
+
+[[package]]
+name = "nexus-update"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-updater"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-install",
+ "nexus-pkg",
+ "nexus-update",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-user"
+version = "0.1.0"
+dependencies = [
+ "nexus-mm",
+]
+
+[[package]]
+name = "nexus-wall"
+version = "0.1.0"
+dependencies = [
+ "nexus-config",
+ "nexus-look",
+ "nexus-ui",
+ "nexus-user",
+]
+
+[[package]]
+name = "nexus-window"
+version = "0.1.0"
+dependencies = [
+ "nexus-ui",
+ "nexus-user",
 ]

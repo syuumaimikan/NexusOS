@@ -24,7 +24,7 @@
     Where to write the glyph table.
 
 .PARAMETER FontName
-    Font to use. By default the first of a preference list that is installed.
+    Font to use. By default the best-scoring of a preference list.
 #>
 [CmdletBinding()]
 param(
@@ -48,14 +48,24 @@ $HalfWidth = 8
 $Scratch = 48
 
 # MS Gothic first: it carries hand-tuned embedded bitmaps at small sizes, which
-# is exactly what a 16-pixel cell wants. The rest are fallbacks for machines
-# without it.
-$Preferred = @('MS Gothic', 'MS UI Gothic', 'Yu Gothic UI', 'Meiryo', 'Segoe UI', 'Consolas')
+# is exactly what a 16-pixel cell wants, and it is monospaced, so its half-width
+# forms actually fit eight columns. The other fixed-pitch CJK faces follow, then
+# the proportional ones as a last resort.
+$Preferred = @(
+    'MS Gothic', 'MS Mincho', 'NSimSun', 'SimSun', 'Consolas', 'Courier New',
+    'MS UI Gothic', 'Yu Gothic UI', 'Meiryo', 'Segoe UI'
+)
 
 # Widest characters of each class, used to choose an em size. If these fit, the
 # rest do.
 $HalfProbes = @('M', 'W', '@', 'N', 'O')
 $FullProbes = @([char]0x4E2D, [char]0x7A3C, [char]0x8A9E, [char]0x30E1)
+# Cap height is measured from this one: it is flat-topped and flat-bottomed, so
+# its ink height is the cap height and not an overshoot.
+$CapProbe = 'M'
+
+# Em sizes to try, largest first. The largest that fits wins.
+$EmSizes = 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8
 
 $white = [System.Drawing.Color]::White
 $black = [System.Drawing.Color]::Black
@@ -63,20 +73,47 @@ $black = [System.Drawing.Color]::Black
 # glyph right by an inconsistent amount.
 $Flags = [System.Windows.Forms.TextFormatFlags]::NoPadding
 
-function Resolve-Font {
+$bitmap = New-Object System.Drawing.Bitmap($Scratch, $Scratch)
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+
+function New-ProbeFont {
+    param([string]$Family, [int]$Em)
+    return New-Object System.Drawing.Font(
+        $Family, $Em, [System.Drawing.FontStyle]::Regular,
+        [System.Drawing.GraphicsUnit]::Pixel)
+}
+
+# The family GDI+ substitutes when it is asked for one that is not installed.
+# Asking for a deliberately impossible name is the only reliable way to learn
+# it, and knowing it is what makes substitution detectable below.
+$absent = New-ProbeFont -Family 'NexusOS Deliberately Absent Family' -Em 16
+$SubstituteFamily = $absent.Name
+$absent.Dispose()
+
+# Is this family actually installed, and what does the system call it?
+#
+# Not `InstalledFontCollection`: it reports *localised* family names, so on a
+# Japanese system MS Gothic enumerates as "ＭＳ ゴシック" and a `-contains
+# 'MS Gothic'` test fails. That is exactly what happened here — the build ran
+# under a ja-JP UI culture and an interactive shell under en-US, so the same
+# script picked MS Gothic in one and fell through to proportional MS UI Gothic
+# at 11px in the other, and the only symptom was a kernel with tiny glyphs.
+#
+# Constructing the font instead asks GDI+ to do the lookup it will do anyway.
+# It accepts the invariant English name and reports back the localised one; when
+# the family is missing it silently substitutes, which comparing against
+# $SubstituteFamily catches.
+function Resolve-FamilyName {
     param([string]$Requested)
 
-    $installed = New-Object System.Drawing.Text.InstalledFontCollection
-    $available = $installed.Families | ForEach-Object { $_.Name }
+    $font = New-ProbeFont -Family $Requested -Em 16
+    $name = $font.Name
+    $font.Dispose()
 
-    if ($Requested) {
-        if ($available -contains $Requested) { return $Requested }
-        throw "font '$Requested' is not installed"
+    if ($name -eq $script:SubstituteFamily -and $Requested -ne $script:SubstituteFamily) {
+        return $null
     }
-    foreach ($candidate in $Preferred) {
-        if ($available -contains $candidate) { return $candidate }
-    }
-    throw 'none of the preferred fonts are installed'
+    return $name
 }
 
 # Draw one character and return its rows as a bit-per-pixel array.
@@ -86,18 +123,18 @@ function Resolve-Font {
 # red and blue while leaving green nearly dark; sampling green alone dropped the
 # right-hand stem of every N and O and rendered the title as "NexusCS".
 function Get-GlyphRows {
-    param($Graphics, $Bitmap, $Font, [char]$Character)
+    param($Font, [char]$Character)
 
-    $Graphics.Clear($black)
+    $graphics.Clear($black)
     [System.Windows.Forms.TextRenderer]::DrawText(
-        $Graphics, [string]$Character, $Font,
+        $graphics, [string]$Character, $Font,
         (New-Object System.Drawing.Point(0, 0)), $white, $black, $Flags)
 
     $rows = New-Object 'int[]' $Scratch
     for ($y = 0; $y -lt $Scratch; $y++) {
         $row = 0
         for ($x = 0; $x -lt 32; $x++) {
-            $pixel = $Bitmap.GetPixel($x, $y)
+            $pixel = $bitmap.GetPixel($x, $y)
             $ink = [Math]::Max($pixel.R, [Math]::Max($pixel.G, $pixel.B))
             if ($ink -ge 90) { $row = $row -bor (1 -shl (31 - $x)) }
         }
@@ -122,11 +159,24 @@ function Get-InkRight {
     return $right
 }
 
-$resolved = Resolve-Font -Requested $FontName
+# Number of rows between the topmost and bottommost inked pixel, or 0 if blank.
+function Get-InkHeight {
+    param($Rows)
+    $top = -1
+    $bottom = -1
+    for ($y = 0; $y -lt $Scratch; $y++) {
+        if ($Rows[$y] -ne 0) {
+            if ($top -lt 0) { $top = $y }
+            $bottom = $y
+        }
+    }
+    if ($top -lt 0) { return 0 }
+    return $bottom - $top + 1
+}
 
-$bitmap = New-Object System.Drawing.Bitmap($Scratch, $Scratch)
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-
+# Largest em size of $Family whose ink fits the cell, and the cap height it
+# gives. Returns $null when no size fits.
+#
 # An em size is not an advance width, and the relationship between them is a
 # property of the font, not something to assume. Asking MS Gothic for a
 # 16-pixel em produced glyphs nine pixels wide, one past the eight-pixel cell,
@@ -134,41 +184,95 @@ $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
 # of each class at each candidate size and take the largest size whose ink
 # actually fits. Measuring the drawing rather than asking the font metrics is
 # the only thing that answers the question being asked.
-$chosen = 0
-foreach ($candidate in 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8) {
-    $probeFont = New-Object System.Drawing.Font($resolved, $candidate, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
+function Measure-Fit {
+    param([string]$Family)
 
-    $halfInk = 0
-    foreach ($probe in $HalfProbes) {
-        $right = Get-InkRight (Get-GlyphRows -Graphics $graphics -Bitmap $bitmap -Font $probeFont -Character $probe)
-        if ($right -ge $halfInk) { $halfInk = $right + 1 }
-    }
-    $fullInk = 0
-    foreach ($probe in $FullProbes) {
-        $right = Get-InkRight (Get-GlyphRows -Graphics $graphics -Bitmap $bitmap -Font $probeFont -Character $probe)
-        if ($right -ge $fullInk) { $fullInk = $right + 1 }
-    }
-    $probeFont.Dispose()
+    foreach ($em in $EmSizes) {
+        $probeFont = New-ProbeFont -Family $Family -Em $em
 
-    Write-Verbose "em ${candidate}px: half-width ink $halfInk, full-width ink $fullInk"
-    if ($halfInk -le $HalfWidth -and $fullInk -le $FullWidth -and $fullInk -gt 0) {
-        $chosen = $candidate
-        break
+        $halfInk = 0
+        foreach ($probe in $HalfProbes) {
+            $right = Get-InkRight (Get-GlyphRows -Font $probeFont -Character $probe)
+            if ($right -ge $halfInk) { $halfInk = $right + 1 }
+        }
+        $fullInk = 0
+        foreach ($probe in $FullProbes) {
+            $right = Get-InkRight (Get-GlyphRows -Font $probeFont -Character $probe)
+            if ($right -ge $fullInk) { $fullInk = $right + 1 }
+        }
+        $capHeight = Get-InkHeight (Get-GlyphRows -Font $probeFont -Character $CapProbe)
+
+        $probeFont.Dispose()
+
+        Write-Verbose "  ${Family} at ${em}px: half ink $halfInk, full ink $fullInk, cap $capHeight"
+        if ($halfInk -le $HalfWidth -and $fullInk -le $FullWidth -and $capHeight -gt 0) {
+            return [pscustomobject]@{ Em = $em; CapHeight = $capHeight }
+        }
+    }
+    return $null
+}
+
+# Pick on measured quality, not on position in the list.
+#
+# Preference order only breaks ties. A proportional face squeezed down until its
+# widest half-width form fits eight columns ends up drawing seven-pixel capitals
+# in a sixteen-pixel cell — legible in isolation, unreadable as a UI. Scoring by
+# cap height picks the face that uses the cell, and makes the fallback path
+# degrade gracefully instead of arbitrarily.
+$candidates = if ($FontName) { @($FontName) } else { $Preferred }
+
+$best = $null
+foreach ($candidate in $candidates) {
+    $family = Resolve-FamilyName -Requested $candidate
+    if (-not $family) {
+        Write-Verbose "${candidate}: not installed"
+        continue
+    }
+
+    $fit = Measure-Fit -Family $candidate
+    if (-not $fit) {
+        Write-Verbose "${candidate}: no em size fits a ${FullWidth}x${CellHeight} cell"
+        continue
+    }
+
+    Write-Verbose "${candidate} (${family}): $($fit.Em)px, cap height $($fit.CapHeight)"
+    if (($null -eq $best) -or ($fit.CapHeight -gt $best.CapHeight)) {
+        $best = [pscustomobject]@{
+            Requested = $candidate
+            Family    = $family
+            Em        = $fit.Em
+            CapHeight = $fit.CapHeight
+        }
     }
 }
 
-if ($chosen -eq 0) {
-    throw "no em size of '$resolved' fits a ${FullWidth}x${CellHeight} cell"
+if ($null -eq $best) {
+    if ($FontName) { throw "font '$FontName' is not installed, or no em size of it fits a ${FullWidth}x${CellHeight} cell" }
+    throw 'none of the preferred fonts are installed'
 }
-Write-Verbose "rasterising with $resolved at ${chosen}px"
 
-$font = New-Object System.Drawing.Font($resolved, $chosen, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
+$resolved = $best.Requested
+$description = "$($best.Family) at $($best.Em)px"
+if ($best.Family -ne $best.Requested) {
+    $description = "$($best.Family) [$($best.Requested)] at $($best.Em)px"
+}
+Write-Host "rasterising with $description, cap height $($best.CapHeight)"
+
+$font = New-ProbeFont -Family $resolved -Em $best.Em
 
 $text = [System.IO.File]::ReadAllText($CharsetFile, [System.Text.Encoding]::UTF8)
-$characters = @()
+
+# A case-SENSITIVE set. PowerShell's -contains and -notcontains compare
+# strings case-insensitively, so deduplicating with them silently discarded
+# every lowercase letter whose uppercase had already been seen: 'a' looked like
+# a duplicate of 'A'. The missing glyphs then fell back to the built-in 8x8
+# face, which sits on a different baseline, and the only symptom was a title
+# whose lowercase letters were a few pixels too low.
+$seen = New-Object 'System.Collections.Generic.HashSet[char]'
+$characters = New-Object 'System.Collections.Generic.List[char]'
 foreach ($character in $text.ToCharArray()) {
     if ([int]$character -lt 0x20) { continue }
-    if ($characters -notcontains $character) { $characters += $character }
+    if ($seen.Add($character)) { $characters.Add($character) }
 }
 
 # First pass: rasterise, and find the vertical extent of the ink.
@@ -177,7 +281,7 @@ $inkTop = $Scratch
 $inkBottom = -1
 
 foreach ($character in $characters) {
-    $rows = Get-GlyphRows -Graphics $graphics -Bitmap $bitmap -Font $font -Character $character
+    $rows = Get-GlyphRows -Font $font -Character $character
     for ($y = 0; $y -lt $Scratch; $y++) {
         if ($rows[$y] -ne 0) {
             if ($y -lt $inkTop) { $inkTop = $y }
@@ -202,7 +306,7 @@ if ($inkHeight -gt $CellHeight) {
 
 $lines = New-Object System.Collections.Generic.List[string]
 $lines.Add('# NexusOS glyph table')
-$lines.Add("# font: $resolved at ${chosen}px, cell ${FullWidth}x${CellHeight}")
+$lines.Add("# font: $description, cell ${FullWidth}x${CellHeight}")
 $lines.Add('# format: codepoint advance row0..row15 (hex, MSB leftmost)')
 
 foreach ($character in $characters) {
@@ -233,4 +337,4 @@ $bitmap.Dispose()
 $font.Dispose()
 
 [System.IO.File]::WriteAllLines($OutputFile, $lines, (New-Object System.Text.UTF8Encoding($false)))
-Write-Verbose "wrote $($characters.Count) glyphs to $OutputFile"
+Write-Host "wrote $($characters.Count) glyphs to $OutputFile"

@@ -1,0 +1,10 @@
+{
+  "id": "ASTRA-AI-001",
+  "status": "completed",
+  "priority": "high",
+  "owner": "gpt6_astra",
+  "summary": "Verified read-only AI runtime and guest IPC service",
+  "dependencies": [],
+  "verification": "13 host tests; native build; host/native clippy -D warnings; final isolated QEMU IPC/security/teardown passed. docs/AI/TESTING.md",
+  "scope": "Read-only runtime slice only, not full Nexus AI MVP"
+}

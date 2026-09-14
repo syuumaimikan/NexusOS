@@ -29,11 +29,21 @@ pub const NO_CACHE: u64 = 1 << 4;
 pub const HUGE: u64 = 1 << 7;
 /// The translation survives a `cr3` reload.
 pub const GLOBAL: u64 = 1 << 8;
+
+/// Software bit: the frame behind this page belongs to something else.
+///
+/// Bits 9 to 11 of an entry are ignored by the processor and available to the
+/// operating system, which is what makes this possible at all. An address space
+/// frees every frame it maps when it is dropped, and a shared frame is mapped in
+/// more than one -- so without a way to say "not mine" the second space to go
+/// away would free a frame the first had already returned. The object that owns
+/// the frames frees them when its last handle does.
+pub const SHARED: u64 = 1 << 9;
 /// Instruction fetches through this mapping fault.
 pub const NO_EXECUTE: u64 = 1 << 63;
 
 /// Bits of an entry holding the physical frame address.
-const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+pub(super) const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// Why a mapping operation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +78,22 @@ impl core::fmt::Display for MapError {
 /// # Safety
 ///
 /// `table` must be a live page table reachable through the direct map.
+pub(super) unsafe fn read_table_entry(table: u64, index: usize) -> u64 {
+    // SAFETY: upheld by the caller.
+    unsafe { read_entry(table, index) }
+}
+
+/// Write one entry of the page table at physical address `table`.
+///
+/// # Safety
+///
+/// See [`read_table_entry`], and the value must be a well-formed entry for the
+/// level `table` sits at.
+pub(super) unsafe fn write_table_entry(table: u64, index: usize, value: u64) {
+    // SAFETY: upheld by the caller.
+    unsafe { write_entry(table, index, value) };
+}
+
 unsafe fn read_entry(table: u64, index: usize) -> u64 {
     let pointer = layout::phys_to_virt(table) as *const u64;
     // SAFETY: upheld by the caller; `index` is masked to 0..512 by callers.
@@ -86,10 +112,12 @@ unsafe fn write_entry(table: u64, index: usize, value: u64) {
     unsafe { pointer.add(index).write_volatile(value) }
 }
 
-/// Invalidate the TLB entry for one page.
+/// Invalidate the TLB entry for one page **on this processor only**.
 ///
-/// Single-processor only: once other cores are running, a mapping change also
-/// needs a shootdown, which arrives with SMP.
+/// Almost never what a caller wants directly. A mapping change has to reach
+/// every processor, which is [`crate::arch::tlb::shoot_down`]'s job; this is
+/// the piece it is built from, and is correct on its own only where no other
+/// processor can hold the translation.
 #[inline]
 pub fn flush(virt: u64) {
     // SAFETY: `invlpg` only discards a cached translation; it can never make
@@ -131,10 +159,28 @@ const fn index_for(virt: u64, level: usize) -> usize {
 
 /// Walk to the page table containing `virt`, creating tables as needed.
 ///
+/// `user` marks every table on the path reachable from ring 3, and must be set
+/// exactly when the leaf being installed is a user mapping. The processor takes
+/// the effective permission as the AND across all four levels, so a user leaf
+/// under a kernel-only table is simply unreachable — which faults on the first
+/// instruction of the first user program and looks nothing like the missing bit
+/// that it is.
+///
+/// Kernel mappings leave it clear, so a kernel table can never be reached from
+/// ring 3 even if a leaf below it is later marked user by mistake. Nothing is
+/// lost by being permissive at the intermediate levels of the *user* half:
+/// every leaf there is a user leaf, and a leaf without the bit is still
+/// unreachable whatever the tables above it say.
+///
 /// # Safety
 ///
 /// `root` must be a live root page table reachable through the direct map.
-unsafe fn walk_to_page_table(root: u64, virt: u64, create: bool) -> Result<u64, MapError> {
+unsafe fn walk_to_page_table(
+    root: u64,
+    virt: u64,
+    create: bool,
+    user: bool,
+) -> Result<u64, MapError> {
     let mut table = root;
 
     for level in 0..3 {
@@ -145,6 +191,13 @@ unsafe fn walk_to_page_table(root: u64, virt: u64, create: bool) -> Result<u64, 
         if entry & PRESENT != 0 {
             if entry & HUGE != 0 {
                 return Err(MapError::CoveredByLargePage);
+            }
+            // A table created for an earlier kernel mapping and now on the path
+            // to a user one has to gain the bit; the first user page under a
+            // given table is where that happens.
+            if user && entry & USER == 0 {
+                // SAFETY: `table` is a live table and `index` is in range.
+                unsafe { write_entry(table, index, entry | USER) };
             }
             table = entry & ADDRESS_MASK;
             continue;
@@ -159,12 +212,8 @@ unsafe fn walk_to_page_table(root: u64, virt: u64, create: bool) -> Result<u64, 
         // map. A page table must start zeroed or its entries are garbage.
         unsafe {
             core::ptr::write_bytes(layout::phys_to_virt(frame) as *mut u8, 0, 4096);
-            // Intermediate entries are permissive in write and restrictive in
-            // user access: the effective permission is the AND across levels,
-            // so the leaf decides what is writable, but leaving USER clear here
-            // means a kernel table can never be reached from ring 3 even if a
-            // leaf below it is later marked USER by mistake.
-            write_entry(table, index, frame | PRESENT | WRITABLE);
+            let extra = if user { USER } else { 0 };
+            write_entry(table, index, frame | PRESENT | WRITABLE | extra);
         }
         table = frame;
     }
@@ -180,9 +229,34 @@ unsafe fn walk_to_page_table(root: u64, virt: u64, create: bool) -> Result<u64, 
 /// caller is entitled to define. Creating a second mapping for a frame that is
 /// already mapped elsewhere aliases it, which is the caller's responsibility.
 pub unsafe fn map_page(virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
-    let root = active_root();
-    // SAFETY: `root` is the live root table; the direct map covers it.
-    let table = unsafe { walk_to_page_table(root, virt, true)? };
+    // SAFETY: upheld by the caller.
+    unsafe { map_page_in(active_root(), virt, phys, flags) }
+}
+
+/// Map `virt` in the address space rooted at `root`.
+///
+/// No shootdown, and that is the interesting part. This turns an entry from
+/// absent to present, and the architecture does not permit a processor to have
+/// cached a translation for a page that was not there: there was nothing to
+/// cache. So no other processor can be holding anything about this address, and
+/// telling them all would be pure cost -- which it measurably was, when mapping
+/// a nine-megabyte framebuffer meant two and a half thousand rounds of
+/// interrupting every processor and waiting.
+///
+/// The local invalidation stays. It costs one instruction and covers the
+/// difference between the architecture's guarantee and an implementation's
+/// behaviour, which is a trade worth making on the processor doing the mapping
+/// and not on the other three.
+///
+/// Changing a present entry is a different matter entirely, and
+/// [`remap_page`] and [`unmap_page`] do broadcast.
+///
+/// # Safety
+///
+/// See [`map_page`], and `root` must be a live root page table.
+pub unsafe fn map_page_in(root: u64, virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
+    // SAFETY: `root` is a live root table; the direct map covers it.
+    let table = unsafe { walk_to_page_table(root, virt, true, flags & USER != 0)? };
     let index = index_for(virt, 3);
 
     // SAFETY: `table` is a live page table.
@@ -193,9 +267,9 @@ pub unsafe fn map_page(virt: u64, phys: u64, flags: u64) -> Result<(), MapError>
         write_entry(table, index, (phys & ADDRESS_MASK) | flags | PRESENT);
     }
 
-    // A previously absent translation can still be cached as such on some
-    // processors, so the flush is not optional.
-    flush(virt);
+    if root == active_root() {
+        flush(virt);
+    }
     Ok(())
 }
 
@@ -237,9 +311,22 @@ pub unsafe fn map_range(virt: u64, phys: u64, size: u64, flags: u64) -> Result<(
 /// Nothing may access `virt` afterwards. Unmapping memory that is still in use
 /// turns every later access into a page fault.
 pub unsafe fn unmap_page(virt: u64) -> Result<u64, MapError> {
-    let root = active_root();
-    // SAFETY: `root` is the live root table.
-    let table = unsafe { walk_to_page_table(root, virt, false)? };
+    // SAFETY: upheld by the caller.
+    unsafe { unmap_page_in(active_root(), virt) }
+}
+
+/// Unmap `virt` from the address space rooted at `root`.
+///
+/// Returns the frame that was there, which the caller disposes of -- this does
+/// not free it, because the page may have been a view of memory something else
+/// owns.
+///
+/// # Safety
+///
+/// See [`unmap_page`], and `root` must be a live root page table.
+pub unsafe fn unmap_page_in(root: u64, virt: u64) -> Result<u64, MapError> {
+    // SAFETY: `root` is a live root table.
+    let table = unsafe { walk_to_page_table(root, virt, false, false)? };
     let index = index_for(virt, 3);
 
     // SAFETY: `table` is a live page table.
@@ -249,9 +336,84 @@ pub unsafe fn unmap_page(virt: u64) -> Result<u64, MapError> {
     }
     // SAFETY: as above.
     unsafe { write_entry(table, index, 0) };
-    flush(virt);
+
+    // Every processor, not just this one. The frame is about to go back to the
+    // allocator and be handed to something else, and a core still holding the
+    // translation would read or write it with no fault to say so.
+    //
+    // SAFETY: the entry is already cleared, so nothing can re-cache it.
+    unsafe { crate::arch::tlb::shoot_down(virt, 1) };
 
     Ok(entry & ADDRESS_MASK)
+}
+
+/// Point an already-mapped page at a different frame.
+///
+/// Distinct from unmapping and mapping again, and not merely as a convenience:
+/// between the two the address is absent, and anything touching it in that
+/// window takes a page fault. Rewriting the entry in place leaves no window.
+///
+/// # Safety
+///
+/// See [`map_page`]. The previous frame becomes the caller's to dispose of.
+pub unsafe fn remap_page(virt: u64, phys: u64, flags: u64) -> Result<u64, MapError> {
+    let root = active_root();
+    // SAFETY: `root` is the live root table; the direct map covers it.
+    let table = unsafe { walk_to_page_table(root, virt, false, flags & USER != 0)? };
+    let index = index_for(virt, 3);
+
+    // SAFETY: `table` is a live page table.
+    let previous = unsafe { read_entry(table, index) };
+    if previous & PRESENT == 0 {
+        return Err(MapError::NotMapped);
+    }
+    // SAFETY: as above.
+    unsafe { write_entry(table, index, (phys & ADDRESS_MASK) | flags | PRESENT) };
+
+    // The old translation is now wrong everywhere, not merely here.
+    //
+    // SAFETY: the entry already holds the new mapping, so a processor that
+    // re-walks during the shootdown caches the new translation, not the old.
+    unsafe { crate::arch::tlb::shoot_down(virt, 1) };
+
+    Ok(previous & ADDRESS_MASK)
+}
+
+/// Unmap `pages` consecutive pages, with a single shootdown for the range.
+///
+/// Unmapping a sixteen-page stack one page at a time means sixteen rounds of
+/// interrupting every other processor and waiting for it. The mapping changes
+/// are independent, so they can all be made first and announced once.
+///
+/// # Safety
+///
+/// See [`unmap_page`]. Returns the number of pages that were mapped and are
+/// now not; an already-absent page is skipped rather than being an error.
+pub unsafe fn unmap_range(virt: u64, pages: u64) -> u64 {
+    let mut removed = 0;
+
+    for page in 0..pages {
+        let address = virt + page * 4096;
+        let root = active_root();
+        // SAFETY: `root` is the live root table.
+        let Ok(table) = (unsafe { walk_to_page_table(root, address, false, false) }) else {
+            continue;
+        };
+        let index = index_for(address, 3);
+
+        // SAFETY: `table` is a live page table.
+        unsafe {
+            if read_entry(table, index) & PRESENT == 0 {
+                continue;
+            }
+            write_entry(table, index, 0);
+        }
+        removed += 1;
+    }
+
+    // SAFETY: every entry in the range is cleared, so nothing can re-cache one.
+    unsafe { crate::arch::tlb::shoot_down(virt, pages) };
+    removed
 }
 
 /// Look up the physical address `virt` translates to, if any.
@@ -260,9 +422,15 @@ pub unsafe fn unmap_page(virt: u64) -> Result<u64, MapError> {
 /// the direct map rather than failing on it.
 #[must_use]
 pub fn translate(virt: u64) -> Option<u64> {
-    let mut table = active_root();
+    translate_in(active_root(), virt)
+}
 
-    for level in 0..4 {
+/// Look up `virt` in the address space rooted at `root`.
+#[must_use]
+pub fn translate_in(root: u64, virt: u64) -> Option<u64> {
+    let mut table = root;
+
+    for (level, shift) in LEVEL_SHIFTS.iter().enumerate() {
         let index = index_for(virt, level);
         // SAFETY: the walk only follows present, non-huge entries, each of
         // which points at a live table reachable through the direct map.
@@ -276,7 +444,7 @@ pub fn translate(virt: u64) -> Option<u64> {
         }
         if entry & HUGE != 0 {
             // A large page at this level; the offset is everything below it.
-            let page_mask = (1u64 << LEVEL_SHIFTS[level]) - 1;
+            let page_mask = (1u64 << shift) - 1;
             return Some((entry & ADDRESS_MASK & !page_mask) | (virt & page_mask));
         }
         table = entry & ADDRESS_MASK;
@@ -306,8 +474,11 @@ pub unsafe fn tear_down_identity_map() {
     // the caller guarantees nothing depends on it.
     unsafe {
         write_entry(root, 0, 0);
-        // Clearing a top-level entry invalidates an enormous range, so flush
-        // the whole non-global TLB rather than one page at a time.
-        flush_all();
+        // Clearing a top-level entry invalidates an enormous range, so discard
+        // everything rather than walking it a page at a time. Broadcast even
+        // though this runs before the other processors start: it costs nothing
+        // when this is the only one, and it stops the correctness of this call
+        // from depending on where it sits in the bring-up order.
+        crate::arch::tlb::shoot_down_all();
     }
 }

@@ -33,11 +33,20 @@ fn panic(info: &PanicInfo) -> ! {
              =======================================================\n"
         ));
 
-        crate::serial::write_fmt_unlocked(format_args!(
-            "thread:   {}
+        // A processor that has not joined the scheduler has no thread to name,
+        // and saying so is more use than an invented identifier.
+        match crate::sched::current_id() {
+            Some(id) => crate::serial::write_fmt_unlocked(format_args!(
+                "thread:   {id} on processor {}
 ",
-            crate::sched::current_id()
-        ));
+                crate::arch::percpu::cpu_index()
+            )),
+            None => crate::serial::write_fmt_unlocked(format_args!(
+                "thread:   none yet, on processor {}
+",
+                crate::arch::percpu::cpu_index()
+            )),
+        }
 
         if let Some(location) = info.location() {
             crate::serial::write_fmt_unlocked(format_args!(

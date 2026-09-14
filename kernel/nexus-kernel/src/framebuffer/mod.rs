@@ -74,6 +74,23 @@ pub struct Framebuffer {
 // serialised by the lock that owns the `Framebuffer`, not by the type itself.
 unsafe impl Send for Framebuffer {}
 
+/// A vertical colour ramp, and the height it is measured against.
+///
+/// Three values that always travel together, and that are wrong in a way
+/// nothing catches when they come apart: the height is the *surface's*, not the
+/// region being painted, so that a strip repainted on its own gets the colours
+/// a full repaint would have given it. Passed separately, a caller that reached
+/// for the region's height instead produced a seam and no error.
+#[derive(Debug, Clone, Copy)]
+pub struct Gradient {
+    /// Colour at the top of the surface.
+    pub top: Color,
+    /// Colour at the bottom of it.
+    pub bottom: Color,
+    /// Rows the ramp runs over, which is the whole surface.
+    pub surface_height: u32,
+}
+
 impl Framebuffer {
     /// Adopt the framebuffer the bootloader described.
     ///
@@ -252,20 +269,35 @@ impl Framebuffer {
     /// region, so repainting part of the screen produces exactly the colours
     /// that a full repaint would have put there. A region-relative gradient
     /// would leave a visible seam at the boundary.
-    pub fn vertical_gradient_region(
+    pub fn vertical_gradient_region(&mut self, start_y: u32, end_y: u32, gradient: Gradient) {
+        self.vertical_gradient_span(0, self.width, start_y, end_y, gradient);
+    }
+
+    /// The same, across part of the width rather than all of it.
+    ///
+    /// What makes it possible to repaint the background *around* something. The
+    /// kernel gives a rectangle of the screen to a process, and a clear that
+    /// went from edge to edge would take it back twice a second.
+    pub fn vertical_gradient_span(
         &mut self,
+        start_x: u32,
+        end_x: u32,
         start_y: u32,
         end_y: u32,
-        surface_height: u32,
-        top: Color,
-        bottom: Color,
+        gradient: Gradient,
     ) {
-        let height = surface_height.max(1);
+        if end_x <= start_x {
+            return;
+        }
+        let height = gradient.surface_height.max(1);
         let end_y = end_y.min(self.height);
+        let end_x = end_x.min(self.width);
         for row in start_y..end_y {
+            // The shade depends on the row's place on the *surface*, not in the
+            // span, so a strip repainted on its own matches what is beside it.
             let amount = (row as u64 * 255 / height as u64).min(255) as u8;
-            let color = top.blend(bottom, amount);
-            self.fill_rect(0, row, self.width, 1, color);
+            let color = gradient.top.blend(gradient.bottom, amount);
+            self.fill_rect(start_x, row, end_x - start_x, 1, color);
         }
     }
 

@@ -154,44 +154,99 @@ pub struct InterruptStackFrame {
     pub stack_segment: u64,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Restores the kernel's `GS` base for as long as a handler entered from ring 3
+/// is running, and puts the user's back on the way out.
+///
+/// Every entry into the kernel from user mode has to do this, and doing it in
+/// the handler rather than in an assembly stub works because nothing between
+/// the processor pushing this frame and the guard being constructed touches
+/// `GS`: the `x86-interrupt` prologue only saves registers, and reading the
+/// frame is stack-relative.
+///
+/// The alternative — trusting `GS` across a trip through ring 3 — is not
+/// available. User code can zero `GS.base` with a single `mov gs, ax`, and the
+/// next timer interrupt would then read this processor's state through a null
+/// pointer.
+pub struct KernelGs(bool);
 
-    #[test]
-    fn entry_is_sixteen_bytes_and_the_table_is_four_kibibytes() {
-        assert_eq!(size_of::<Entry>(), 16);
-        assert_eq!(size_of::<InterruptDescriptorTable>(), 16 * 256);
+/// Interrupts and exceptions taken while a processor was in ring 3.
+///
+/// The one piece of evidence that user code really ran at user privilege, and
+/// that it was preemptible while it did. A user program can be observed making
+/// system calls without either being true -- `syscall` is legal from ring 0 --
+/// so this counts the entries that could only have come from ring 3, which is
+/// the ones where the saved code selector says so.
+static FROM_USER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// How many interrupts and exceptions have arrived from ring 3.
+#[must_use]
+pub fn entries_from_user() -> u64 {
+    FROM_USER.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+impl KernelGs {
+    /// Swap in the kernel's `GS` if `frame` was pushed by user code.
+    #[inline]
+    #[must_use]
+    pub fn enter(frame: &InterruptStackFrame) -> Self {
+        // The low two bits of the saved code selector are the privilege the
+        // interrupted code was running at.
+        let from_user = frame.code_segment & 3 == 3;
+        if from_user {
+            FROM_USER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            // SAFETY: entered from ring 3, so the kernel's base is the
+            // inactive one; `Drop` performs the matching swap.
+            unsafe { super::percpu::swap_gs() };
+        }
+        Self(from_user)
+    }
+}
+
+impl Drop for KernelGs {
+    fn drop(&mut self) {
+        if self.0 {
+            // SAFETY: pairs with the swap in `enter`.
+            unsafe { super::percpu::swap_gs() };
+        }
+    }
+}
+
+/// Check the descriptor layout against the architecture.
+///
+/// None of this touches the processor: it is what a descriptor has to look like
+/// in memory before one is ever loaded, and getting it wrong produces a machine
+/// that triple-faults on the first interrupt with nothing to say about why.
+/// Run at boot rather than under `cargo test`; see [`crate::selftest`].
+pub fn layout_self_test() -> Result<(), &'static str> {
+    if size_of::<Entry>() != 16 || size_of::<InterruptDescriptorTable>() != 16 * 256 {
+        return Err("a descriptor or the table is not the size the architecture defines");
     }
 
-    #[test]
-    fn set_handler_splits_the_address_across_three_fields() {
-        let mut entry = Entry::missing();
-        let handler = 0xFFFF_FFFF_8012_3456u64;
-        entry.set_handler(handler, 0);
-
-        assert_eq!(entry.offset_low, 0x3456);
-        assert_eq!(entry.offset_mid, 0x8012);
-        assert_eq!(entry.offset_high, 0xFFFF_FFFF);
-        assert_eq!(entry.selector, KERNEL_CODE_SELECTOR);
-        assert_eq!(entry.flags, INTERRUPT_GATE);
-        assert_eq!(entry.ist, 0);
+    // A handler address is stored in three separate fields, which is the one
+    // part of the encoding a reader is likely to get wrong.
+    let mut entry = Entry::missing();
+    entry.set_handler(0xFFFF_FFFF_8012_3456, 0);
+    if entry.offset_low != 0x3456 || entry.offset_mid != 0x8012 || entry.offset_high != 0xFFFF_FFFF
+    {
+        return Err("a handler address was not split across the three offset fields");
+    }
+    if entry.selector != KERNEL_CODE_SELECTOR || entry.flags != INTERRUPT_GATE || entry.ist != 0 {
+        return Err("a gate was not built as a kernel interrupt gate");
     }
 
-    #[test]
-    fn only_the_low_three_bits_of_an_ist_index_are_stored() {
-        let mut entry = Entry::missing();
-        entry.set_handler(0x1000, 1);
-        assert_eq!(entry.ist, 1);
-
-        // Slot numbers above 7 do not exist; the field must not spill into the
-        // reserved bits beside it.
-        entry.set_handler(0x1000, 0xFF);
-        assert_eq!(entry.ist, 7);
+    // Stack slots above seven do not exist, and the field must not spill into
+    // the reserved bits beside it.
+    entry.set_handler(0x1000, 1);
+    if entry.ist != 1 {
+        return Err("an interrupt-stack slot was not stored");
+    }
+    entry.set_handler(0x1000, 0xFF);
+    if entry.ist != 7 {
+        return Err("an out-of-range stack slot spilled into the reserved bits");
     }
 
-    #[test]
-    fn irq_vectors_start_above_the_architectural_exceptions() {
-        assert!(IRQ_BASE >= 32, "vectors 0..32 belong to the architecture");
+    if IRQ_BASE < 32 {
+        return Err("device vectors overlap the architectural exceptions");
     }
+    Ok(())
 }

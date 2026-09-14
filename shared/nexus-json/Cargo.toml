@@ -1,0 +1,11 @@
+[package]
+name = "nexus-json"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "JSON, read and written, with objects that keep the order they were given."
+
+[lib]
+name = "nexus_json"
+path = "src/lib.rs"

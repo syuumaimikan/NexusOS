@@ -1,0 +1,21 @@
+[package]
+name = "nexus-settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A window for the file that decides what this machine is."
+
+[[bin]]
+name = "nexus-settings"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-window = { path = "../nexus-window" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+nexus-config = { path = "../../shared/nexus-config" }
+nexus-look = { path = "../../shared/nexus-look" }
+nexus-time = { path = "../../shared/nexus-time" }

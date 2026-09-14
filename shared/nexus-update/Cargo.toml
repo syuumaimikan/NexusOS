@@ -1,0 +1,11 @@
+[package]
+name = "nexus-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Deciding what on a machine is out of date, and what to do about it."
+
+[lib]
+name = "nexus_update"
+path = "src/lib.rs"

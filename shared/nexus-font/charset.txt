@@ -1,0 +1,17 @@
+# Characters the face must cover beyond what the translations use.
+#
+# The face is generated from `locales/*.txt`, because the set of characters the
+# interface can put on screen is exactly the set its translations use. A program
+# that draws its own text is outside that: its strings are not translations and
+# are not in those files, and a character with no glyph draws as a hollow box.
+#
+# So this is where a program says what it needs. One character per line or many
+# to a line; blank lines and lines beginning with `#` are ignored, and so is
+# every space, so a line can be written as the sentence it comes from.
+#
+# It is data rather than code on purpose. Adding a character to the face should
+# not be editing a build script, and the alternative -- covering the whole of
+# Japanese -- is forty thousand glyphs to make one sentence render.
+
+# nexus-client, which draws a panel saying what it is.
+画面には触れていません。

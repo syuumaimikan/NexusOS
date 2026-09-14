@@ -1,19 +1,16 @@
-//! Build script: turns `locales/*.txt` into compiled-in string tables, and
-//! rasterises the glyphs those strings need.
+//! Build script: rasterises the glyphs the interface needs.
 //!
-//! The kernel has no filesystem yet, so translations cannot be loaded at
-//! runtime; they are compiled in. Keeping them in data files anyway is what
-//! [§77 of the specification] asks for and what makes adding a language a
-//! matter of adding a file rather than editing the kernel.
+//! The face is generated rather than committed. Hand-authoring a CJK face is
+//! not realistic, and putting a downloaded font's data in the repository would
+//! be redistributing it, which its licence generally does not allow. So the
+//! glyphs are rendered here, once, from a font already on the build machine.
 //!
-//! Two invariants are enforced here rather than discovered at runtime:
+//! It reads `locales/*.txt` for the same reason the kernel does: the set of
+//! characters the interface can put on screen is exactly the set its
+//! translations use, so the face contains what is needed and nothing more.
 //!
-//! * every locale must define exactly the same keys, so a missing translation
-//!   is a build error and never a blank label on screen;
-//! * the keys are emitted sorted, so the kernel can look one up with a binary
-//!   search and no allocation.
-//!
-//! [§77 of the specification]: ../../docs/NEXUSOS_ROADMAP.md
+//! When no usable font is found the crate ships its built-in ASCII face alone,
+//! and text outside that set draws as a placeholder rather than as nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -21,7 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Width and height of a full-width glyph cell, in pixels.
+/// Height of a glyph cell, in pixels.
 const CELL: usize = 16;
 
 fn main() {
@@ -33,20 +30,54 @@ fn main() {
     println!("cargo:rerun-if-changed={}", locale_dir.display());
 
     let locales = read_locales(&locale_dir);
-    let keys = validate_and_collect_keys(&locales);
+    let extra = manifest.join("charset.txt");
+    println!("cargo:rerun-if-changed={}", extra.display());
 
-    fs::write(out_dir.join("locales.rs"), emit_locales(&locales, &keys)).unwrap();
+    let mut charset = required_characters(&locales);
+    charset.extend(extra_characters(&extra));
+    let (description, glyphs) = rasterise(&repo_root, &out_dir, &charset);
+    fs::write(
+        out_dir.join("wide_font.rs"),
+        emit_font(&description, &glyphs),
+    )
+    .unwrap();
+}
 
-    // Every character any translation can put on screen, so the font contains
-    // exactly what is needed and nothing more.
-    let charset = required_characters(&locales);
-    let glyphs = rasterise(&repo_root, &out_dir, &charset);
-    fs::write(out_dir.join("wide_font.rs"), emit_font(&glyphs)).unwrap();
+/// Every character that appears in any translation, plus printable ASCII.
+///
+/// Printable ASCII is included unconditionally because the kernel formats
+/// numbers and untranslated identifiers with it regardless of locale.
+fn required_characters(locales: &[LocaleFile]) -> BTreeSet<char> {
+    let mut characters: BTreeSet<char> = (0x20u8..=0x7E).map(char::from).collect();
+    for locale in locales {
+        for value in locale.entries.values() {
+            characters.extend(value.chars());
+        }
+    }
+    // Placeholder braces are consumed by the formatter, never drawn.
+    characters.remove(&'{');
+    characters.remove(&'}');
+    characters
+}
+
+/// Characters a program asked for, from `charset.txt`.
+///
+/// Programs draw text that is not a translation and is therefore in none of the
+/// locale files, so there has to be somewhere to say "the face needs this too".
+/// A missing file is not an error: it means nothing has asked yet.
+fn extra_characters(path: &Path) -> BTreeSet<char> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return BTreeSet::new();
+    };
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .flat_map(str::chars)
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
 
 /// One parsed locale file.
 struct LocaleFile {
-    tag: String,
     entries: BTreeMap<String, String>,
 }
 
@@ -73,7 +104,6 @@ fn read_locales(directory: &Path) -> Vec<LocaleFile> {
             let text = fs::read_to_string(path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
             LocaleFile {
-                tag: path.file_stem().unwrap().to_string_lossy().into_owned(),
                 entries: parse(&text, path),
             }
         })
@@ -112,97 +142,6 @@ fn parse(text: &str, path: &Path) -> BTreeMap<String, String> {
     entries
 }
 
-/// Check that every locale defines the same keys, and return them sorted.
-///
-/// A missing translation is a build failure on purpose: the alternative is a
-/// label that silently renders empty, or falls back to another language, in a
-/// build that looked fine.
-fn validate_and_collect_keys(locales: &[LocaleFile]) -> Vec<String> {
-    let reference = &locales[0];
-    let keys: Vec<String> = reference.entries.keys().cloned().collect();
-
-    for locale in &locales[1..] {
-        let missing: Vec<&String> = keys
-            .iter()
-            .filter(|key| !locale.entries.contains_key(*key))
-            .collect();
-        let extra: Vec<&String> = locale
-            .entries
-            .keys()
-            .filter(|key| !reference.entries.contains_key(*key))
-            .collect();
-
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "locale {} does not match {}: missing {missing:?}, unexpected {extra:?}",
-            locale.tag,
-            reference.tag
-        );
-    }
-
-    keys
-}
-
-/// Emit the string tables.
-fn emit_locales(locales: &[LocaleFile], keys: &[String]) -> String {
-    let mut out = String::new();
-    out.push_str("// Generated by build.rs from locales/*.txt. Do not edit.\n\n");
-
-    let _ = writeln!(out, "pub const KEY_COUNT: usize = {};", keys.len());
-    let _ = writeln!(
-        out,
-        "\n/// Translation keys, sorted so a lookup is a binary search."
-    );
-    let _ = writeln!(out, "pub const KEYS: [&str; KEY_COUNT] = [");
-    for key in keys {
-        let _ = writeln!(out, "    {key:?},");
-    }
-    out.push_str("];\n");
-
-    for (index, locale) in locales.iter().enumerate() {
-        let _ = writeln!(out, "\nstatic VALUES_{index}: [&str; KEY_COUNT] = [");
-        for key in keys {
-            let _ = writeln!(out, "    {:?},", locale.entries[key]);
-        }
-        out.push_str("];\n");
-    }
-
-    let _ = writeln!(out, "\npub const LOCALE_COUNT: usize = {};", locales.len());
-    let _ = writeln!(out, "pub const LOCALES: [Locale; LOCALE_COUNT] = [");
-    for (index, locale) in locales.iter().enumerate() {
-        let name = locale
-            .entries
-            .get("locale.name")
-            .map(String::as_str)
-            .unwrap_or(&locale.tag);
-        let _ = writeln!(
-            out,
-            "    Locale {{ tag: {:?}, name: {:?}, values: &VALUES_{index} }},",
-            locale.tag, name
-        );
-    }
-    out.push_str("];\n");
-
-    out
-}
-
-/// Every character that appears in any translation, plus printable ASCII.
-///
-/// Printable ASCII is included unconditionally because the kernel formats
-/// numbers and untranslated identifiers with it regardless of locale.
-fn required_characters(locales: &[LocaleFile]) -> BTreeSet<char> {
-    let mut characters: BTreeSet<char> = (0x20u8..=0x7E).map(char::from).collect();
-    for locale in locales {
-        for value in locale.entries.values() {
-            characters.extend(value.chars());
-        }
-    }
-    // Placeholder braces are consumed by the formatter, never drawn.
-    characters.remove(&'{');
-    characters.remove(&'}');
-    characters
-}
-
 /// One rasterised glyph.
 struct Glyph {
     codepoint: u32,
@@ -225,13 +164,24 @@ struct Glyph {
 /// If this cannot run, the build still succeeds: the table comes out empty, the
 /// kernel falls back to its built-in ASCII font, and text outside that set
 /// renders as a placeholder box.
-fn rasterise(repo_root: &Path, out_dir: &Path, characters: &BTreeSet<char>) -> Vec<Glyph> {
+///
+/// Returns which font was actually used alongside the glyphs, so the kernel can
+/// report it at boot. Font resolution has already gone wrong twice in ways that
+/// were invisible until someone looked closely at a screenshot; a line in the
+/// serial log costs nothing and makes the next substitution obvious.
+fn rasterise(
+    repo_root: &Path,
+    out_dir: &Path,
+    characters: &BTreeSet<char>,
+) -> (String, Vec<Glyph>) {
+    let none = || (String::from("built-in 8x8 only"), Vec::new());
+
     let script = repo_root.join("scripts").join("generate-font.ps1");
     println!("cargo:rerun-if-changed={}", script.display());
 
     if !script.exists() {
         println!("cargo:warning=font generator missing; using the built-in ASCII font only");
-        return Vec::new();
+        return none();
     }
 
     let charset_path = out_dir.join("charset.txt");
@@ -262,15 +212,28 @@ fn rasterise(repo_root: &Path, out_dir: &Path, characters: &BTreeSet<char>) -> V
                     .trim()
                     .replace('\n', " ")
             );
-            return Vec::new();
+            return none();
         }
         Err(error) => {
             println!("cargo:warning=could not run the font generator ({error}); using the built-in ASCII font only");
-            return Vec::new();
+            return none();
         }
     }
 
-    parse_glyphs(&fs::read_to_string(&glyph_path).unwrap_or_default())
+    let table = fs::read_to_string(&glyph_path).unwrap_or_default();
+    let glyphs = parse_glyphs(&table);
+    if glyphs.is_empty() {
+        return none();
+    }
+    (font_description(&table), glyphs)
+}
+
+/// The generator's `# font: ...` header, or a placeholder if it is absent.
+fn font_description(table: &str) -> String {
+    table
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# font:"))
+        .map_or_else(|| String::from("unknown"), |rest| rest.trim().to_string())
 }
 
 /// Parse the generator's output: `codepoint width row0 row1 ... row15`, hex.
@@ -320,14 +283,18 @@ fn parse_glyphs(text: &str) -> Vec<Glyph> {
 }
 
 /// Emit the glyph table.
-fn emit_font(glyphs: &[Glyph]) -> String {
+fn emit_font(description: &str, glyphs: &[Glyph]) -> String {
     let mut out = String::new();
     out.push_str("// Generated by build.rs. Do not edit.\n");
     out.push_str("//\n");
     out.push_str("// Rasterised from a font installed on the build machine and never\n");
     out.push_str("// committed; see the `rasterise` function in build.rs for why.\n\n");
 
-    let _ = writeln!(out, "pub const GLYPH_COUNT: usize = {};", glyphs.len());
+    let _ = writeln!(
+        out,
+        "/// Which font this table came from, reported at boot.\npub const SOURCE: &str = {description:?};"
+    );
+    let _ = writeln!(out, "\npub const GLYPH_COUNT: usize = {};", glyphs.len());
     let _ = writeln!(
         out,
         "\n/// Codepoints present in [`GLYPHS`], ascending, for binary search."

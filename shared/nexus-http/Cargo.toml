@@ -1,0 +1,11 @@
+[package]
+name = "nexus-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "HTTP/1.1 as a client speaks it: a request to write and a response to read."
+
+[lib]
+name = "nexus_http"
+path = "src/lib.rs"
