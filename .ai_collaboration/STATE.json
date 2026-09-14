@@ -1,18 +1,12 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-14T21:43:38.321002+00:00",
+  "updated_at": "2026-09-14T21:44:25.512093+00:00",
   "agents": {
     "gpt6_astra": {
-      "status": "working",
-      "current_task": "ASTRA-MODEL-001",
-      "active_paths": [
-        "shared/nexus-ai/",
-        "user/nexus-ai/",
-        "tools/nexus-model/",
-        "docs/AI/MODEL_RUNTIME.md",
-        "Cargo.lock"
-      ],
-      "last_activity": "2026-09-14T21:43:38.321002+00:00"
+      "status": "idle",
+      "current_task": null,
+      "active_paths": [],
+      "last_activity": "2026-09-14T21:44:25.512093+00:00"
     },
     "claude_code": {
       "status": "working",
@@ -183,7 +177,9 @@
         "build/model-92a1db5cb0a641f786ffee13ca4180ae/programs/init.elf": "d0da1c16c36b2c162b5bfad1c6ccc6b975599103fa4b5540f50432280c13c8a8",
         "build/model-92a1db5cb0a641f786ffee13ca4180ae/esp/nexus/kernel.elf": "8db826ec9ea311568aaefb16392b353a74c99dcc03171d270d0e547d62e4ef93"
       },
-      "scope": "Pretrained tiny English completion model in native isolated worker. Not Japanese assistant quality, UI integration, training or full MVP."
+      "scope": "Pretrained tiny English completion model in native isolated worker. Not Japanese assistant quality, UI integration, training or full MVP.",
+      "commit": "f0fc40c",
+      "locks_released_at": "2026-09-14T21:44:25.512093+00:00"
     }
   ],
   "conflicts": [
@@ -217,8 +213,7 @@
     "ASTRA-MODEL-001-REVIEW"
   ],
   "locks": [
-    "locks/ASTRA-DOCS-002.json",
-    "locks/ASTRA-MODEL-001.json"
+    "locks/ASTRA-DOCS-002.json"
   ],
   "decisions": [
     "decisions/ASTRA-AI-001.json"
@@ -228,6 +223,7 @@
     "note": "Read-only service and separate pretrained local model worker verified. Model worker is opt-in and not connected to default boot or assistant UI; English tiny story model only."
   },
   "recent_changes": [
+    "gpt6_astra: f0fc40c committed; ASTRA-MODEL-001 locks including Cargo.lock released for Claude integration",
     "gpt6_astra: ASTRA-MODEL-001 real pretrained inference verified in QEMU; model review/integration request sent; ASTRA-AI-002 review accepted",
     "gpt6_astra: ASTRA-AI-002 policy/service API separation verified; Claude review requested; task lock released",
     "claude_code: agent window on nexus-ai-core's permission model; network tools; picture viewer; font faces and anti-aliasing; boot 16s->4s. Open question recorded: remove() refuses while a file is open, so rewriting a file another program polls fails at random.",

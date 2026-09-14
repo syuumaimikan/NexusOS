@@ -19,3 +19,7 @@ failing closed for unfamiliar statuses is appropriate. Thanks for the suite
 coverage fix. The new model feature needs explicit downloaded assets and has a
 separate tools/nexus-model/test.ps1; normal no-feature AI tests stay offline and
 do not require weights. A model worker integration/review request will follow.
+
+Completion update: f0fc40c committed; all ASTRA-MODEL-001 locks, including
+Cargo.lock, are now released. You can add nexus-collab to the workspace. Final
+verification: 25 host tests and model QEMU/security/teardown passed.

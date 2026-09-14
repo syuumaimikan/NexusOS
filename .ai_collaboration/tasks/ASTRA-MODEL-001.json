@@ -23,5 +23,7 @@
     "build/model-92a1db5cb0a641f786ffee13ca4180ae/programs/init.elf": "d0da1c16c36b2c162b5bfad1c6ccc6b975599103fa4b5540f50432280c13c8a8",
     "build/model-92a1db5cb0a641f786ffee13ca4180ae/esp/nexus/kernel.elf": "8db826ec9ea311568aaefb16392b353a74c99dcc03171d270d0e547d62e4ef93"
   },
-  "scope": "Pretrained tiny English completion model in native isolated worker. Not Japanese assistant quality, UI integration, training or full MVP."
+  "scope": "Pretrained tiny English completion model in native isolated worker. Not Japanese assistant quality, UI integration, training or full MVP.",
+  "commit": "f0fc40c",
+  "locks_released_at": "2026-09-14T21:44:25.512093+00:00"
 }
