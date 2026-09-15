@@ -1747,9 +1747,12 @@ in the code.
   `xhci_rings.rs`, `usb.rs`, `usb_storage.rs`. The kernel reads and writes an
   external drive's blocks, checked against an image whose every sector says its
   own number -- so a driver returning the first sector for every request fails
-  rather than passes. What is left is smaller than any of the four: a block
-  device handle, so a *program* can reach it. No interrupts, no hubs, no
-  hot-plug. See [usb.md](usb.md).
+  rather than passes. A program reaches it too: `usb` in the shell lists drives,
+  lists a directory and reads a file, over a channel the compositor lends the
+  terminal. Writing *files* is refused by name -- the FAT32 reader cannot
+  allocate clusters, and a write that corrupted somebody's stick would be worse
+  than one that did not happen. No interrupts, no hubs, no hot-plug. See
+  [usb.md](usb.md).
 
 ### What "everyday use" means here
 
