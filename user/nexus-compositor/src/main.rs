@@ -316,6 +316,8 @@ mod desk {
     pub const PACKAGES: &[u8] = b"pkgs";
     /// Show the pictures on this machine.
     pub const PICTURES: &[u8] = b"pics";
+    /// Open a window a file can be written in.
+    pub const EDITOR: &[u8] = b"edit";
     /// Start the agent.
     pub const ASSIST: &[u8] = b"asst";
     /// End the session.
@@ -465,6 +467,8 @@ const LAUNCHER: &[u8] = b"BIN/LAUNCH.ELF";
 const STORE: &[u8] = b"BIN/STORE.ELF";
 /// And the one that shows pictures.
 const VIEWER: &[u8] = b"BIN/VIEW.ELF";
+/// The editor.
+const EDITOR: &[u8] = b"BIN/EDIT.ELF";
 /// And the agent, which is given less than any of them.
 const ASSISTANT: &[u8] = b"BIN/ASSIST.ELF";
 /// The program that draws the strip along the bottom and says what a click in
@@ -492,6 +496,17 @@ const GAP: u32 = 8;
 /// from it. Taking space would mean the client's surface and its window were
 /// different sizes, which is a second rectangle to keep in step for the sake of
 /// fourteen pixels a client was going to fill with its own border anyway.
+/// How tall the bar along the top of a window is.
+///
+/// A client's surface is copied whole and then this is painted over the top of
+/// it, so the first fourteen rows a program draws are lost. `nexus_ui::TITLE_BAR`
+/// is the same number, for programs that want their first line to be visible.
+///
+/// Two constants rather than one, and worth saying why: sharing it would mean
+/// this program depending on `nexus-ui`, which depends on a font -- and the
+/// reason this bar has no text on it is that the compositor deliberately has no
+/// font. Fourteen pixels of decoration is not worth that dependency. If they
+/// ever disagree the cost is cosmetic, which is the trade being made.
 const TITLE: u32 = 14;
 /// How large the corner is that resizes a window.
 ///
@@ -1227,6 +1242,29 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
 /// is only which program is started and what the third number in its first
 /// message means -- a tint for a client, a count of window slots for the
 /// desktop.
+/// Where documents live on the store.
+const DOCUMENTS: &str = "DOCS";
+
+/// Open -- making it if it is not there -- the folder an editor may write in.
+///
+/// Made on demand rather than seeded by the kernel, because it is the one
+/// directory on this machine that exists for the person using it rather than
+/// for the system. A machine nobody has opened an editor on does not need one.
+fn open_documents() -> Result<nexus_user::Handle, nexus_user::Error> {
+    let directory = match nexus_user::open(FILESYSTEM, DOCUMENTS) {
+        Ok(directory) => directory,
+        Err(_) => nexus_user::create(FILESYSTEM, DOCUMENTS, nexus_user::Kind::Directory)?,
+    };
+    // Read, write and transfer. Not close: an editor cannot take the folder
+    // away from the program that lent it.
+    let lent = nexus_user::duplicate(
+        directory,
+        nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+    );
+    nexus_user::close(directory).ok();
+    lent
+}
+
 /// Open the root certificate store, read only, to lend to a browser.
 ///
 /// `None` when there is not one, which is an ordinary state on a machine whose
@@ -1951,6 +1989,13 @@ enum What {
     Packages,
     /// The picture window, which is given the filesystem to read from.
     Pictures,
+    /// The editor, which is given one directory to read *and write*.
+    ///
+    /// The only window on this machine lent a directory it may change. Not the
+    /// filesystem: a program that can write is a program that can destroy, and
+    /// the difference between "it can edit your documents" and "it can edit
+    /// anything" is one `open` here.
+    Editor,
     /// The agent, which is given the filesystem to read and the machine
     /// snapshot, and nothing that can change anything.
     Assistant,
@@ -2015,6 +2060,7 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::SETTINGS => Launched::Window(What::Settings),
         tag if tag == desk::PACKAGES => Launched::Window(What::Packages),
         tag if tag == desk::PICTURES => Launched::Window(What::Pictures),
+        tag if tag == desk::EDITOR => Launched::Window(What::Editor),
         tag if tag == desk::ASSIST => Launched::Window(What::Assistant),
         tag if tag == desk::QUIT => Launched::Leave,
         tag if tag == desk::HALT => Launched::Halt,
@@ -2182,6 +2228,10 @@ fn read_shell(
 
     if message == desk::PACKAGES {
         return open_window(screen, set, tiles, focus, order, What::Packages);
+    }
+
+    if message == desk::EDITOR {
+        return open_window(screen, set, tiles, focus, order, What::Editor);
     }
 
     if message == desk::PICTURES {
@@ -2445,6 +2495,27 @@ fn open_window(
                 &[files, record],
             )?
         }
+        What::Editor => {
+            // One directory, opened here, read and write. The viewer above is
+            // lent the filesystem read-only because a picture viewer that could
+            // write could delete a photograph; an editor has to write, so what
+            // it is lent is narrowed the other way -- to a single directory
+            // rather than to a single right.
+            let Ok(documents) = open_documents() else {
+                failed("compositor: FAILED: could not make a folder for the editor");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                EDITOR,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[documents],
+            )?
+        }
         What::Pictures => {
             // The filesystem, and read-only: a picture viewer that could write
             // is a picture viewer that can delete a photograph. Transfer as
@@ -2563,6 +2634,7 @@ fn open_window(
             What::Settings => "compositor: started the settings, and lent them the settings",
             What::Packages => "compositor: started the packages, and lent them the disk",
             What::Pictures => "compositor: started a picture window, and lent it the disk to read",
+            What::Editor => "compositor: started an editor, and lent it the documents folder",
             What::Assistant => {
                 "compositor: started the agent, and lent it the disk to read and nothing to write"
             }

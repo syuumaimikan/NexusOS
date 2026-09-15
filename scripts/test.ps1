@@ -109,15 +109,14 @@ $HostLibraries = @(
 
 # Programs that run on the development machine rather than on Nexus: the package
 # signer, and the example guest binary.
-$HostTools = @('nexus-pack', 'nexus-collab', 'nexus-linux-example')
+$HostTools = @('nexus-pack', 'nexus-collab', 'nexus-roots', 'nexus-linux-example')
 
 # Programs that run on Nexus, built for the user target.
 $Programs = @(
     'nexus-ai', 'nexus-assist', 'nexus-browser', 'nexus-client', 'nexus-compositor',
-    'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install', 'nexus-launch',
-    'nexus-settings',
-    'nexus-setup', 'nexus-shell', 'nexus-store', 'nexus-term', 'nexus-ui', 'nexus-updater',
-    'nexus-view', 'nexus-wall'
+    'nexus-edit', 'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install',
+    'nexus-launch', 'nexus-settings', 'nexus-setup', 'nexus-shell', 'nexus-store',
+    'nexus-term', 'nexus-ui', 'nexus-updater', 'nexus-view', 'nexus-wall'
 )
 
 # The two that stand alone, each with its own target.

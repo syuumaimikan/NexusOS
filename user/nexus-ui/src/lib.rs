@@ -506,6 +506,22 @@ pub fn measure_scaled(text: &str, scale: u32) -> u32 {
 /// How tall one line is.
 pub const LINE_HEIGHT: u32 = font::CELL_HEIGHT;
 
+/// The strip along the top of a window that the compositor draws over.
+///
+/// A window's surface is the whole of its rectangle, and the compositor copies
+/// all of it -- then paints the title bar on top, because a bar a client could
+/// draw is a bar a client could leave out. So the top of every client's surface
+/// is written twice and the client's version loses.
+///
+/// A program that wants its first line to be visible starts below this.
+///
+/// The compositor has its own copy, named `TITLE`, and the two must agree.
+/// They are not shared because the compositor would then depend on this crate,
+/// which depends on a font -- and the compositor draws no text on purpose. The
+/// cost of them drifting apart is fourteen pixels of overlap, which is the
+/// trade being made knowingly rather than by accident.
+pub const TITLE_BAR: u32 = 14;
+
 /// A stack of things laid out one under another.
 ///
 /// The whole of the layout this has. It is not a constraint solver and does not

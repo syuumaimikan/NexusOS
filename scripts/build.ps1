@@ -137,6 +137,10 @@ $AiElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-ai"
 $StagedAi = Publish-Program -Elf $AiElf -ProgramDir $ProgramDir -Name 'ai.elf'
 $aiSize = [math]::Round((Get-Item $StagedAi).Length / 1KB, 1)
 
+$GeminiElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-gemini"
+$StagedGemini = Publish-Program -Elf $GeminiElf -ProgramDir $ProgramDir -Name 'gemini.elf'
+$geminiSize = [math]::Round((Get-Item $StagedGemini).Length / 1KB, 1)
+
 $ViewElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-view"
 $StagedView = Publish-Program -Elf $ViewElf -ProgramDir $ProgramDir -Name 'view.elf'
 $viewSize = [math]::Round((Get-Item $StagedView).Length / 1KB, 1)
@@ -144,6 +148,10 @@ $viewSize = [math]::Round((Get-Item $StagedView).Length / 1KB, 1)
 $LaunchElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-launch"
 $StagedLaunch = Publish-Program -Elf $LaunchElf -ProgramDir $ProgramDir -Name 'launch.elf'
 $launchSize = [math]::Round((Get-Item $StagedLaunch).Length / 1KB, 1)
+
+$EditElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-edit"
+$StagedEdit = Publish-Program -Elf $EditElf -ProgramDir $ProgramDir -Name 'edit.elf'
+$editSize = [math]::Round((Get-Item $StagedEdit).Length / 1KB, 1)
 
 $StoreElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-store"
 $StagedStore = Publish-Program -Elf $StoreElf -ProgramDir $ProgramDir -Name 'store.elf'
@@ -340,8 +348,10 @@ Write-Host "  settings   : $settingsSize KiB  -> BIN\SET.ELF on the disk"
 Write-Host "  packages   : $storeSize KiB  -> BIN\STORE.ELF on the disk"
 Write-Host "  viewer     : $viewSize KiB  -> BIN\VIEW.ELF on the disk"
 Write-Host "  launcher   : $launchSize KiB  -> BIN\LAUNCH.ELF on the disk"
+Write-Host "  editor     : $editSize KiB  -> BIN\EDIT.ELF on the disk"
 Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
 Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
+Write-Host "  gemini agt : $geminiSize KiB  -> BIN\GEMINI.ELF on the disk"
 Write-Host "  picture    : $pictureSize KiB  -> PICTURES\NEXUS.PNG on the disk"
 Write-Host "  recording  : $videoSize KiB  -> PICTURES\NEXUS.AVI on the disk"
 Write-Host "  root store : $rootsSize KiB  -> SYSTEM\ROOTS.NXR on the disk"
