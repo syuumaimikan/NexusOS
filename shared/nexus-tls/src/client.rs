@@ -488,6 +488,9 @@ fn signature_matches(
         (s::ECDSA_P256_SHA256, PublicKey::P256 { point }) => {
             crate::p256::verify(point, signature, message, false).is_ok()
         }
+        (s::ECDSA_P384_SHA384, PublicKey::P384 { point }) => {
+            crate::p384::verify(point, signature, message, crate::Hash::Sha384).is_ok()
+        }
         (s::RSA_PSS_RSAE_SHA256, PublicKey::Rsa { modulus, exponent }) => {
             crate::rsa::verify_pss(modulus, exponent, signature, message).is_ok()
         }

@@ -35,20 +35,24 @@ accepted into `build/programs/roots.nxr`. Run it to see the current numbers:
 cargo run -p nexus-roots -- roots/mozilla-ca-bundle.pem --list
 ```
 
-At the time of writing that is **76 kept, 45 dropped**, and the reasons are
-worth reading, because they are a to-do list rather than a shrug:
+At the time of writing that is **117 kept, 4 dropped**, and the four are worth
+reading, because they are a decision rather than a shrug:
 
 | dropped | why | what would fix it |
 | --- | --- | --- |
-| 37 | a P-384 key (`1.3.132.0.34`) | a second curve in `shared/nexus-tls/src` |
-| 4 | self-signed with RSA/SHA-512 | an OID and a hash this machine already has |
 | 3 | self-signed with RSA/SHA-1 | nothing. SHA-1 is broken and stays refused |
-| 1 | self-signed with ECDSA/SHA-512 | the curve above, and the hash above |
+| 1 | a P-521 key (`1.3.132.0.35`) | a third curve, for one authority |
 
-Seventy-six authorities is a usable store -- it covers the authorities behind
-most of the public web -- but it is not the whole list, and a site whose chain
-ends at one of the other forty-five will not load. That is a real limitation and
-it is written down here rather than discovered.
+It was 76 until `shared/nexus-tls/src/p384.rs` existed. Thirty-seven of those
+forty-five were dropped for one missing curve, four for a missing hash prefix,
+and one for both -- none of them because anything was insecure, all of them
+because the arithmetic was two limbs too short.
+
+The three SHA-1 roots are the interesting ones. SHA-1 collisions have been
+practical since 2017, and an authority that signs with it is one whose
+signature can be forged. Supporting it to raise the number to 120 would make
+this machine's trust *worse*, so it is not supported and the number stays at
+117.
 
 ## Rebuilding it
 

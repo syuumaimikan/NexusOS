@@ -28,6 +28,8 @@ use alloc::vec::Vec;
 
 use nexus_crypto::sha256;
 
+use crate::Hash;
+
 /// The most limbs a modulus may have: 8192 bits.
 ///
 /// Larger is refused by the certificate parser as well. Verifying costs the
@@ -285,6 +287,15 @@ const SHA384_PREFIX: &[u8] = &[
     0x00, 0x04, 0x30,
 ];
 
+/// And for SHA-512.
+///
+/// Four of Mozilla's root authorities self-sign with this and were unreadable
+/// without it -- not for any interesting reason, just a missing constant.
+const SHA512_PREFIX: &[u8] = &[
+    0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05,
+    0x00, 0x04, 0x40,
+];
+
 /// Verify a PKCS#1 v1.5 signature over the SHA-256 of `message`.
 ///
 /// # How this avoids Bleichenbacher's forgery
@@ -303,17 +314,23 @@ pub fn verify_pkcs1(
     exponent: &[u8],
     signature: &[u8],
     message: &[u8],
-    sha384: bool,
+    hash: Hash,
 ) -> Result<(), Trouble> {
     if signature.len() != modulus.len() {
         return Err(Trouble::WrongLength);
     }
-    let (prefix, digest): (&[u8], Vec<u8>) = if sha384 {
-        // SHA-384 truncates SHA-512; this crate carries SHA-512, so it is the
-        // one place the other hash is needed.
-        (SHA384_PREFIX, sha384_of(message))
-    } else {
-        (SHA256_PREFIX, sha256::digest(message).to_vec())
+    // The prefix and the hash travel together on purpose. A signature verified
+    // against one hash's bytes under another hash's DigestInfo would be a
+    // signature verified against nothing in particular.
+    let (prefix, digest): (&[u8], Vec<u8>) = match hash {
+        Hash::Sha256 => (SHA256_PREFIX, sha256::digest(message).to_vec()),
+        // SHA-384 truncates SHA-512's state, not its output; `nexus_crypto`
+        // has both and `sha512::it_is_not_sha512_truncated` says why.
+        Hash::Sha384 => (SHA384_PREFIX, sha384_of(message)),
+        Hash::Sha512 => (
+            SHA512_PREFIX,
+            nexus_crypto::sha512::digest(message).to_vec(),
+        ),
     };
 
     let recovered = power_mod(signature, exponent, modulus)?;
@@ -564,14 +581,14 @@ mod tests {
         let message = include_bytes!("../fixtures/signed.txt");
         let signature = include_bytes!("../fixtures/signed.pkcs1");
 
-        verify_pkcs1(&modulus, &exponent, signature, message, false)
+        verify_pkcs1(&modulus, &exponent, signature, message, Hash::Sha256)
             .expect("a real signature should verify");
 
         // And the same signature over anything else must not.
         let mut changed = message.to_vec();
         changed[0] ^= 1;
         assert_eq!(
-            verify_pkcs1(&modulus, &exponent, signature, &changed, false).unwrap_err(),
+            verify_pkcs1(&modulus, &exponent, signature, &changed, Hash::Sha256).unwrap_err(),
             Trouble::Mismatch
         );
     }
@@ -591,7 +608,7 @@ mod tests {
                 let mut broken = signature.to_vec();
                 broken[at] ^= 1 << bit;
                 assert!(
-                    verify_pkcs1(&modulus, &exponent, &broken, message, false).is_err(),
+                    verify_pkcs1(&modulus, &exponent, &broken, message, Hash::Sha256).is_err(),
                     "bit {bit} of byte {at} was flipped and the signature still verified"
                 );
             }
@@ -607,15 +624,15 @@ mod tests {
         let message = include_bytes!("../fixtures/signed.txt");
         let signature = include_bytes!("../fixtures/signed384.pkcs1");
 
-        verify_pkcs1(&modulus, &exponent, signature, message, true)
+        verify_pkcs1(&modulus, &exponent, signature, message, Hash::Sha384)
             .expect("a real SHA-384 signature should verify");
 
         // And it must not verify as SHA-256, nor the SHA-256 one as SHA-384:
         // the hash is named in the padding, so confusing them is a verifier
         // accepting a signature over a different digest.
-        assert!(verify_pkcs1(&modulus, &exponent, signature, message, false).is_err());
+        assert!(verify_pkcs1(&modulus, &exponent, signature, message, Hash::Sha256).is_err());
         let sha256_signature = include_bytes!("../fixtures/signed.pkcs1");
-        assert!(verify_pkcs1(&modulus, &exponent, sha256_signature, message, true).is_err());
+        assert!(verify_pkcs1(&modulus, &exponent, sha256_signature, message, Hash::Sha384).is_err());
     }
 
     #[test]
@@ -643,14 +660,14 @@ mod tests {
         let pss = include_bytes!("../fixtures/signed.pss");
 
         assert!(verify_pss(&modulus, &exponent, pkcs1, message).is_err());
-        assert!(verify_pkcs1(&modulus, &exponent, pss, message, false).is_err());
+        assert!(verify_pkcs1(&modulus, &exponent, pss, message, Hash::Sha256).is_err());
     }
 
     #[test]
     fn a_signature_of_the_wrong_length_is_refused_before_any_arithmetic() {
         let (modulus, exponent) = test_key();
         assert_eq!(
-            verify_pkcs1(&modulus, &exponent, &[0u8; 128], b"x", false).unwrap_err(),
+            verify_pkcs1(&modulus, &exponent, &[0u8; 128], b"x", Hash::Sha256).unwrap_err(),
             Trouble::WrongLength
         );
     }

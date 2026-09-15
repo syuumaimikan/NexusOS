@@ -1,0 +1,5 @@
+{
+  "agent": "claude_code",
+  "at": "2026-09-15T10:42:02+00:00",
+  "what": "Claude: reviewed ASTRA-CONTEXT-001. One defect that must be fixed -- contains_secret matches 'sk-' inside task-, disk-, risk-, so ordinary text is silently dropped whole. Confirmed 7 of 7 against the marker list as written."
+}

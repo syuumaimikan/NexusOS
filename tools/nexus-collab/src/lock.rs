@@ -216,11 +216,10 @@ pub fn release(store: &Store, agent: &str, task: &str) -> Answer<Lock> {
              This program will not release another agent's lock. If it is in your way, \
              say so in a request: .ai_collaboration/{to}/",
             holder = lock.agent,
-            to = if agent == "claude_code" {
-                "claude_to_astra"
-            } else {
-                "astra_to_claude"
-            },
+            // Named from the two agents actually involved, rather than assumed
+            // to be the other one of two. With three developers, "not yours"
+            // no longer says whose.
+            to = crate::mailbox::between(agent, &lock.agent),
         ));
     }
 

@@ -59,6 +59,7 @@
 
 mod clock;
 mod lock;
+mod mailbox;
 mod state;
 mod store;
 
@@ -920,24 +921,78 @@ fn check_paths(store: &Store, asked: &Asked) -> Answer<bool> {
 fn requests(store: &Store, asked: &Asked) -> Answer<bool> {
     match asked.word(1).unwrap_or("list") {
         "list" => {
+            // Every mailbox on the disk, not a list written here. See
+            // `mailbox.rs`: a third developer joined and the two names that
+            // used to be in this loop stopped being the whole truth.
+            //
+            // `--mine` narrows it to what this agent should be reading, which
+            // is the question somebody actually has.
+            let looked = if asked.flag("mine").is_some() {
+                mailbox::addressed_to(store, &asked.agent()?)?
+            } else {
+                mailbox::all(store)?
+            };
+
             let mut found = Value::array();
-            for directory in ["claude_to_astra", "astra_to_claude"] {
-                for name in store.list(directory)? {
+            let mut shown = 0usize;
+            for box_ in &looked {
+                for name in store.list(&box_.directory)? {
                     if !name.starts_with("REQUEST") {
                         continue;
                     }
+                    shown += 1;
                     if asked.json {
                         let mut one = Value::object();
-                        one.set("from", Value::string(directory));
+                        one.set("from", Value::string(box_.from.as_str()));
+                        one.set("to", Value::string(box_.to.as_str()));
+                        one.set("directory", Value::string(box_.directory.as_str()));
                         one.set("file", Value::string(name.as_str()));
                         found.push(one);
                     } else {
-                        println!("{directory}/{name}");
+                        println!("{}/{name}", box_.directory);
                     }
                 }
             }
             if asked.json {
                 println!("{}", found.to_pretty());
+            } else if shown == 0 {
+                // Said out loud, because "nothing printed" used to mean both
+                // "no requests" and "this tool did not look in your mailbox".
+                println!(
+                    "no requests in {} mailbox{}",
+                    looked.len(),
+                    if looked.len() == 1 { "" } else { "es" }
+                );
+            }
+            Ok(true)
+        }
+        "mailboxes" => {
+            // Who is asking, if they said. Not required -- somebody looking at
+            // the whole arrangement should not have to claim an identity to see
+            // it -- but it turns the listing into an answer about *them*.
+            let me = asked.flag("agent").map(str::to_string).unwrap_or_else(|| {
+                std::env::var("NEXUS_AGENT").unwrap_or_default()
+            });
+            for box_ in mailbox::all(store)? {
+                let count = store
+                    .list(&box_.directory)?
+                    .iter()
+                    .filter(|name| name.starts_with("REQUEST"))
+                    .count();
+                let mine = if box_.read_by(&me) {
+                    "  <- yours to read"
+                } else if box_.written_by(&me) {
+                    "  <- yours to write"
+                } else {
+                    ""
+                };
+                println!(
+                    "  {:<24} {} -> {}, {count} request{}{mine}",
+                    box_.directory,
+                    box_.from,
+                    box_.to,
+                    if count == 1 { "" } else { "s" }
+                );
             }
             Ok(true)
         }
@@ -945,7 +1000,8 @@ fn requests(store: &Store, asked: &Asked) -> Answer<bool> {
             let Some(which) = asked.word(2) else {
                 return Err(trouble!("which request?"));
             };
-            for directory in ["claude_to_astra", "astra_to_claude"] {
+            for box_ in mailbox::all(store)? {
+                let directory = &box_.directory;
                 for name in store.list(directory)? {
                     if name.contains(which) {
                         let path = store.at(&format!("{directory}/{name}"));
@@ -959,7 +1015,9 @@ fn requests(store: &Store, asked: &Asked) -> Answer<bool> {
             }
             Err(trouble!("nothing here is called {which}"))
         }
-        other => Err(trouble!("`request {other}`? It is list or show.")),
+        other => Err(trouble!(
+            "`request {other}`? It is list, show or mailboxes."
+        )),
     }
 }
 
@@ -978,7 +1036,25 @@ fn event(store: &Store, asked: &Asked) -> Answer<bool> {
     value.set("agent", Value::string(me.as_str()));
     value.set("at", Value::string(moment.stamp()));
     value.set("what", Value::string(what.as_str()));
-    let name = format!("events/{}-{}.json", moment.filename_stamp(), me);
+    // A free name, not just a timestamped one. The stamp has one-second
+    // resolution and two events a second apart is not unusual when an agent is
+    // recording several things it has just finished -- the first write of this
+    // pair was silently replaced by the second, which is the worst way for a
+    // log to fail. `back_up_state` in `store.rs` had this right already.
+    let stamp = moment.filename_stamp();
+    let name = (0..100)
+        .map(|counter| {
+            if counter == 0 {
+                format!("events/{stamp}-{me}.json")
+            } else {
+                format!("events/{stamp}-{me}-{counter:02}.json")
+            }
+        })
+        .find(|candidate| !store.at(candidate).exists())
+        // A hundred events inside one second is not something this does, and
+        // if it ever happened, losing the hundred-and-first is better than
+        // refusing to record anything.
+        .unwrap_or_else(|| format!("events/{stamp}-{me}-99.json"));
     store.write_json(&name, &value)?;
 
     let mut state = state::read(store)?;

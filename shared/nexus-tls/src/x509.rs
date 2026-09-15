@@ -46,6 +46,10 @@ pub mod oid {
     pub const ECDSA_SHA256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02];
     /// ecdsa-with-SHA384, 1.2.840.10045.4.3.3.
     pub const ECDSA_SHA384: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03];
+    /// ecdsa-with-SHA512, 1.2.840.10045.4.3.4.
+    pub const ECDSA_SHA512: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x04];
+    /// sha512WithRSAEncryption, 1.2.840.113549.1.1.13.
+    pub const RSA_SHA512: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0D];
 
     /// rsaEncryption, 1.2.840.113549.1.1.1 -- the key type.
     pub const RSA_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
@@ -53,6 +57,12 @@ pub mod oid {
     pub const EC_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
     /// prime256v1 (P-256), 1.2.840.10045.3.1.7.
     pub const P256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
+    /// secp384r1 (P-384), 1.3.132.0.34.
+    ///
+    /// Thirty-seven of Mozilla's hundred and twenty-one root authorities use
+    /// this curve, and every one of them was unusable on this machine until
+    /// `p384.rs` existed.
+    pub const P384: &[u8] = &[0x2B, 0x81, 0x04, 0x00, 0x22];
 
     /// id-ce-subjectAltName, 2.5.29.17.
     pub const SUBJECT_ALT_NAME: &[u8] = &[0x55, 0x1D, 0x11];
@@ -119,6 +129,8 @@ pub enum PublicKey {
     /// A P-256 key, as the uncompressed point the certificate carries: a `0x04`
     /// byte then x and y, thirty-two bytes each.
     P256 { point: Vec<u8> },
+    /// A P-384 key, the same shape with forty-eight bytes each.
+    P384 { point: Vec<u8> },
 }
 
 /// How a signature was made.
@@ -126,9 +138,19 @@ pub enum PublicKey {
 pub enum Algorithm {
     RsaPkcs1Sha256,
     RsaPkcs1Sha384,
+    RsaPkcs1Sha512,
     RsaPss,
-    EcdsaP256Sha256,
-    EcdsaP256Sha384,
+    /// ECDSA with the named hash.
+    ///
+    /// The curve is deliberately not part of this. `ecdsa-with-SHA256` says
+    /// which hash and nothing else; which curve comes from the *key* the
+    /// signature is checked against. These used to be spelled
+    /// `EcdsaP256Sha256`, which read as though the OID named the curve, and
+    /// that reading would have quietly made every P-384 certificate
+    /// unverifiable.
+    EcdsaSha256,
+    EcdsaSha384,
+    EcdsaSha512,
 }
 
 /// Everything a decision about a certificate rests on.
@@ -271,8 +293,10 @@ fn read_algorithm(reader: &mut Reader<'_>) -> Result<Algorithm, Trouble> {
         oid::RSA_SHA256 => Algorithm::RsaPkcs1Sha256,
         oid::RSA_SHA384 => Algorithm::RsaPkcs1Sha384,
         oid::RSA_PSS => Algorithm::RsaPss,
-        oid::ECDSA_SHA256 => Algorithm::EcdsaP256Sha256,
-        oid::ECDSA_SHA384 => Algorithm::EcdsaP256Sha384,
+        oid::RSA_SHA512 => Algorithm::RsaPkcs1Sha512,
+        oid::ECDSA_SHA256 => Algorithm::EcdsaSha256,
+        oid::ECDSA_SHA384 => Algorithm::EcdsaSha384,
+        oid::ECDSA_SHA512 => Algorithm::EcdsaSha512,
         other => {
             return Err(Trouble::Unsupported(alloc::format!(
                 "signatures of type {}",
@@ -309,24 +333,36 @@ fn read_key(body: &[u8]) -> Result<PublicKey, Trouble> {
             Ok(PublicKey::Rsa { modulus, exponent })
         }
         oid::EC_KEY => {
-            // The curve is a parameter of the algorithm, and the only one this
-            // handles is P-256.
+            // The curve is a parameter of the algorithm. Two are handled here;
+            // anything else is named rather than guessed at, because guessing
+            // the curve would mean doing arithmetic in the wrong field and
+            // getting an answer.
             let curve = algorithm.expect(tag::OID)?.body;
-            if curve != oid::P256 {
-                return Err(Trouble::Unsupported(alloc::format!(
-                    "the elliptic curve {}",
-                    der::oid_text(curve)
-                )));
-            }
             // Uncompressed only. The compressed form needs a square root in the
             // field to recover y, and every certificate authority issues the
             // uncompressed form.
-            if bits.len() != 65 || bits[0] != 0x04 {
-                return Err(Trouble::Malformed("a P-256 point that is not uncompressed"));
+            match curve {
+                oid::P256 => {
+                    if bits.len() != 65 || bits[0] != 0x04 {
+                        return Err(Trouble::Malformed("a P-256 point that is not uncompressed"));
+                    }
+                    Ok(PublicKey::P256 {
+                        point: bits.to_vec(),
+                    })
+                }
+                oid::P384 => {
+                    if bits.len() != 97 || bits[0] != 0x04 {
+                        return Err(Trouble::Malformed("a P-384 point that is not uncompressed"));
+                    }
+                    Ok(PublicKey::P384 {
+                        point: bits.to_vec(),
+                    })
+                }
+                other => Err(Trouble::Unsupported(alloc::format!(
+                    "the elliptic curve {}",
+                    der::oid_text(other)
+                ))),
             }
-            Ok(PublicKey::P256 {
-                point: bits.to_vec(),
-            })
         }
         other => Err(Trouble::Unsupported(alloc::format!(
             "public keys of type {}",
@@ -568,7 +604,7 @@ mod tests {
         let der_bytes = include_bytes!("../fixtures/ecdsa-leaf.der");
         let certificate = parse(der_bytes).expect("a real certificate should parse");
 
-        assert_eq!(certificate.algorithm, Algorithm::EcdsaP256Sha256);
+        assert_eq!(certificate.algorithm, Algorithm::EcdsaSha256);
         match &certificate.key {
             PublicKey::P256 { point } => {
                 assert_eq!(point.len(), 65);
@@ -811,18 +847,51 @@ mod tests {
     #[test]
     fn a_curve_this_does_not_know_is_named_rather_than_guessed() {
         let mut algorithm = write(tag::OID, oid::EC_KEY);
-        // secp384r1, 1.3.132.0.34.
-        algorithm.extend_from_slice(&write(tag::OID, &[0x2B, 0x81, 0x04, 0x00, 0x22]));
+        // secp521r1, 1.3.132.0.35. This test used to use secp384r1, and it
+        // began failing the day P-384 was implemented -- which is the right
+        // way round for a test whose subject is "what this machine cannot do
+        // yet". P-521 is the next one, and there is no demand for it: no root
+        // in Mozilla's list uses it.
+        algorithm.extend_from_slice(&write(tag::OID, &[0x2B, 0x81, 0x04, 0x00, 0x23]));
         let mut spki = write(tag::SEQUENCE, &algorithm);
         let mut body = vec![0u8, 0x04];
-        body.extend_from_slice(&[0x33; 96]);
+        body.extend_from_slice(&[0x33; 132]);
         spki.extend_from_slice(&write(tag::BIT_STRING, &body));
 
         match read_key(&spki) {
             Err(Trouble::Unsupported(what)) => {
-                assert!(what.contains("1.3.132.0.34"), "{what}");
+                assert!(what.contains("1.3.132.0.35"), "{what}");
             }
             other => panic!("expected an Unsupported naming the curve, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_p384_key_is_read() {
+        // The fixture is a real self-signed P-384 authority, made by OpenSSL.
+        let der_bytes = include_bytes!("../fixtures/p384-ca.der");
+        let certificate = parse(der_bytes).expect("a real P-384 certificate should parse");
+        assert_eq!(certificate.algorithm, Algorithm::EcdsaSha384);
+        assert!(certificate.is_authority);
+        match certificate.key {
+            PublicKey::P384 { point } => {
+                assert_eq!(point.len(), 97, "an uncompressed P-384 point");
+                assert_eq!(point[0], 0x04);
+            }
+            other => panic!("expected a P-384 key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_p384_point_of_the_wrong_length_is_refused() {
+        // A P-256-sized point under a P-384 curve identifier. Caught on length
+        // before any arithmetic sees it.
+        let mut algorithm = write(tag::OID, oid::EC_KEY);
+        algorithm.extend_from_slice(&write(tag::OID, oid::P384));
+        let mut spki = write(tag::SEQUENCE, &algorithm);
+        let mut body = vec![0u8, 0x04];
+        body.extend_from_slice(&[0x33; 64]);
+        spki.extend_from_slice(&write(tag::BIT_STRING, &body));
+        assert!(matches!(read_key(&spki), Err(Trouble::Malformed(_))));
     }
 }

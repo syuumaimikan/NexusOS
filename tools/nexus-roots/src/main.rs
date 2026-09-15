@@ -251,13 +251,16 @@ fn judge(der: &[u8], now: i64) -> Verdict {
     let key = match &certificate.key {
         PublicKey::Rsa { modulus, .. } => format!("RSA-{}", modulus.len() * 8),
         PublicKey::P256 { .. } => String::from("P-256"),
+        PublicKey::P384 { .. } => String::from("P-384"),
     };
     let signed = match certificate.algorithm {
         Algorithm::RsaPkcs1Sha256 => "RSA/SHA-256",
         Algorithm::RsaPkcs1Sha384 => "RSA/SHA-384",
+        Algorithm::RsaPkcs1Sha512 => "RSA/SHA-512",
         Algorithm::RsaPss => "RSA-PSS",
-        Algorithm::EcdsaP256Sha256 => "ECDSA/SHA-256",
-        Algorithm::EcdsaP256Sha384 => "ECDSA/SHA-384",
+        Algorithm::EcdsaSha256 => "ECDSA/SHA-256",
+        Algorithm::EcdsaSha384 => "ECDSA/SHA-384",
+        Algorithm::EcdsaSha512 => "ECDSA/SHA-512",
     };
 
     let mut about = format!("{key}, self-signed with {signed}");

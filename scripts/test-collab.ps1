@@ -113,11 +113,26 @@ function Test-Collab {
     $script:checks++
     Push-Location $Scratch
     try {
-        $previous = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        $output = (& $Exe @Arguments 2>&1 | Out-String)
-        $code = $LASTEXITCODE
-        $ErrorActionPreference = $previous
+        # Through files rather than `2>&1 |`. Windows PowerShell wraps each
+        # line a native program writes to stderr in its own ErrorRecord, and a
+        # message that spans two lines comes back with the second one decorated
+        # out of recognition -- which cost a real check here: the refusal that
+        # names a mailbox puts the name on its second line, and the test said
+        # the tool never printed it when the tool printed it perfectly well.
+        $outFile = [System.IO.Path]::GetTempFileName()
+        $errFile = [System.IO.Path]::GetTempFileName()
+        $run = Start-Process -FilePath $Exe -ArgumentList $Arguments -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile `
+            -WorkingDirectory $Scratch
+        # `-Raw` on an empty file gives $null, not '', and a command that says
+        # nothing is an ordinary outcome here.
+        $said = Get-Content $outFile -Raw
+        $complained = Get-Content $errFile -Raw
+        if ($null -eq $said) { $said = '' }
+        if ($null -eq $complained) { $complained = '' }
+        $output = $said + $complained
+        $code = $run.ExitCode
+        Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
     } finally { Pop-Location }
 
     $wrong = @()
@@ -262,6 +277,67 @@ Test-Collab 'and it is still not this program''s to break' `
 Test-Collab 'nor to take the ground out from under' `
     @('lock', 'take', 'CLAUDE-8', 'shared/nexus-ai/src/lib.rs') -Expect 1 `
     -Says @('stale', 'not this program''s to break')
+
+Write-Host ''
+Write-Host '==> Three developers, and more' -ForegroundColor Cyan
+
+# The tool used to have two mailbox directory names written into its source.
+# A third developer joined on 2026-09-15 and every one of those lists became
+# silently wrong -- `request list` looked in two places out of six and reported
+# a clean inbox to somebody who had mail. It now reads the directory.
+$boxes = @('claude_to_astra', 'astra_to_claude', 'claude_to_gemini',
+           'gemini_to_claude', 'astra_to_gemini', 'gemini_to_astra')
+foreach ($box in $boxes) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $Scratch ".ai_collaboration\$box") | Out-Null
+}
+[System.IO.File]::WriteAllText(
+    (Join-Path $Scratch '.ai_collaboration\gemini_to_claude\REQUEST_G-1.md'),
+    "# from the newest developer`n", $utf8)
+[System.IO.File]::WriteAllText(
+    (Join-Path $Scratch '.ai_collaboration\astra_to_gemini\REQUEST_A-9.md'),
+    "# not addressed to claude`n", $utf8)
+
+Test-Collab 'every mailbox is found, not the two that used to be listed' `
+    @('request', 'mailboxes') `
+    -Says @('claude_to_gemini', 'gemini_to_astra', 'astra_to_claude')
+Test-Collab 'a request from the newest developer is listed' `
+    @('request', 'list') -Says @('gemini_to_claude/REQUEST_G-1.md')
+Test-Collab 'and so is one that is nobody''s business here' `
+    @('request', 'list') -Says @('astra_to_gemini/REQUEST_A-9.md')
+Test-Collab '--mine is only what this agent should read' `
+    @('request', 'list', '--mine') `
+    -Says @('gemini_to_claude/REQUEST_G-1.md') `
+    -DoesNotSay @('astra_to_gemini/REQUEST_A-9.md')
+Test-Collab 'an empty inbox says so rather than printing nothing' `
+    @('request', 'list', '--mine', '--agent', 'nobody_at_all') `
+    -Says @('no requests in 0 mailboxes')
+Test-Collab 'show finds a request in a mailbox nobody hard-coded' `
+    @('request', 'show', 'G-1') -Says @('from the newest developer')
+
+# Releasing somebody else's lock names the mailbox for *those two* agents. It
+# used to assume the other party was the only other one there was.
+Test-Collab 'the refusal names the right two developers' `
+    @('lock', 'release', 'ASTRA-1', '--agent', 'gemini_3_1_pro') `
+    -Expect 1 -Says @('gemini_to_astra')
+
+Write-Host ''
+Write-Host '==> The event log' -ForegroundColor Cyan
+
+# Two events in the same second used to be one event: the filename was the
+# timestamp and the second write replaced the first. Found by watching it
+# happen while recording two real events a moment apart.
+Test-Collab 'an event is recorded' @('event', 'add', 'the first thing') -Says @('recorded in')
+Test-Collab 'and a second one in the same second does not replace it' `
+    @('event', 'add', 'the second thing') -Says @('recorded in')
+$script:checks++
+$events = Get-ChildItem (Join-Path $Scratch '.ai_collaboration\events') -Filter '*.json'
+$said = ($events | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+if ($said.Contains('the first thing') -and $said.Contains('the second thing')) {
+    Write-Host '    ok   both events survive' -ForegroundColor DarkGray
+} else {
+    $script:failures += 'both events survive : one of them was overwritten'
+    Write-Host '    FAIL both events survive' -ForegroundColor Red
+}
 
 Write-Host ''
 Write-Host '==> Identity' -ForegroundColor Cyan

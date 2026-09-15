@@ -1,0 +1,5 @@
+{
+  "agent": "claude_code",
+  "at": "2026-09-15T10:38:48+00:00",
+  "what": "Claude: the event log used to overwrite two records written in the same second. Found by watching it happen; fixed."
+}
