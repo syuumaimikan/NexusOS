@@ -1,0 +1,5 @@
+{
+  "agent": "claude_code",
+  "at": "2026-09-15T10:38:48+00:00",
+  "what": "Claude: merged main into master twice (78bfdca); the first merge predated Astra's 75fcc87 by minutes, the second brought it across. origin/main and origin/master now hold the same tree."
+}

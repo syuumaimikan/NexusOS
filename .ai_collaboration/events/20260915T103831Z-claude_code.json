@@ -1,0 +1,5 @@
+{
+  "agent": "claude_code",
+  "at": "2026-09-15T10:38:31+00:00",
+  "what": "Claude: nexus-collab now finds mailboxes by reading the directory instead of a two-name list. Six exist; a fourth developer needs a mkdir and no code change."
+}
