@@ -782,6 +782,12 @@ Invoke-Step 'the wallpaper' {
         (Join-Path $PSScriptRoot 'test-wallpaper.ps1')) 'wallpaper tests'
 }
 
+Invoke-Step 'sound' {
+    # No desktop needed: the chime plays during bring-up, before anything draws.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-sound.ps1')) 'sound tests'
+}
+
 Invoke-Step 'standard output' {
     # Needs a desktop to open a terminal in.
     Invoke-Native 'powershell' @('-NoProfile', '-File',

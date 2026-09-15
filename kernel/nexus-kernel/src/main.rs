@@ -232,6 +232,14 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         Err(error) => kprintln!("[net ] no network card: {error}"),
     }
 
+    // The sound card, on the same terms. A machine with none keeps the speaker,
+    // which is one bit and says so; a machine with one gets sixteen-bit stereo
+    // through a codec, and `sound.rs` prefers it without either caller knowing.
+    // SAFETY: called once, after enumeration, with the frame allocator running.
+    if !unsafe { drivers::ac97::init(&devices) } {
+        kprintln!("[snd ] no AC'97 card on this machine; the speaker is what there is");
+    }
+
     // The USB host controller, on the same terms again. A machine with nothing
     // plugged in is the ordinary case and is reported rather than treated as a
     // failure -- and so is a machine whose USB controller is an older kind this
@@ -553,9 +561,10 @@ fn monitor_thread(_argument: usize) {
             }
             let (notes, hushed) = sound::statistics();
             let (tones, speaker) = drivers::speaker::statistics();
-            if notes > 0 || hushed > 0 || tones > 0 {
+            let (card_tones, card_samples) = drivers::ac97::statistics();
+            if notes > 0 || hushed > 0 || tones > 0 || card_tones > 0 {
                 kprintln!(
-                    "[mon ] sound {notes} notes played, {hushed} refused,              {tones} tones on the speaker{}",
+                    "[mon ] sound {notes} notes played, {hushed} refused,              {tones} tones on the speaker{}, {card_tones} through the card ({card_samples} samples)",
                     if speaker { "" } else { " (never used)" }
                 );
                 let (asked, denied) = machine::statistics();

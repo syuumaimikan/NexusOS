@@ -254,6 +254,24 @@ function Get-NexusQemuArgs {
         '-device', 'virtio-net-pci,netdev=nexusnet,disable-modern=on'
     )
 
+    # A sound card, and nothing to play it through.
+    #
+    # `-audiodev none` is deliberate and is the whole reason this can be tested
+    # at all: the card is real to the guest -- it enumerates on the PCI bus, its
+    # codec answers, and its DMA engine reads the guest's memory -- and the
+    # samples go nowhere on the host. A test machine that opened the developer's
+    # speakers every time it booted would be a test nobody runs twice.
+    #
+    # AC'97 rather than Intel HD Audio because it is the simpler of the two by a
+    # long way: a descriptor list and a codec on a serial link, against HDA's
+    # command ring, response ring, widget graph and stream descriptors. The
+    # roadmap said "AC'97 or Intel HD Audio" and this is the one that is a
+    # driver rather than a project.
+    $arguments += @(
+        '-audiodev', 'none,id=nexusquiet',
+        '-device', 'AC97,audiodev=nexusquiet'
+    )
+
     # An xHCI controller, and a USB drive plugged into it.
     #
     # xHCI rather than the older UHCI or EHCI because it is what a machine built

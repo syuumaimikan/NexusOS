@@ -24,7 +24,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::sync::IrqSpinLock;
-use crate::{drivers::speaker, ipc, kprintln, sched};
+use crate::{
+    drivers::{ac97, speaker},
+    ipc, kprintln, sched,
+};
 
 /// How many tones may be waiting to be played.
 ///
@@ -106,16 +109,40 @@ pub fn start_thread() {
     }
 }
 
+/// Make one noise, on whichever of the two things this machine has.
+///
+/// The card if there is one, and the speaker otherwise. Neither the caller nor
+/// the queue above knows which happened, which is the point: a program asks for
+/// a tone, and what the machine has decides how it is made.
+///
+/// A card that is present but did not play falls back rather than staying
+/// silent. `ac97::tone` returns false when the engine never moved, and a
+/// machine that made no sound at all because its new driver was wrong would be
+/// a worse machine than the one before it.
+fn make_noise(hertz: u32, milliseconds: u64) {
+    if ac97::is_present() && ac97::tone(hertz, milliseconds) {
+        return;
+    }
+    speaker::tone(hertz, milliseconds);
+}
+
 /// Play what has been asked for, and answer whoever asked.
 fn sound_thread(_argument: usize) {
     // The machine saying it is up. First, and before anything can ask for
     // anything, so that the chime is the chime rather than whatever a program
     // queued during bring-up.
     for (hertz, milliseconds) in [(523u32, 90u64), (659, 90), (784, 150)] {
-        speaker::tone(hertz, milliseconds);
+        make_noise(hertz, milliseconds);
         sched::sleep_ms(25);
     }
-    kprintln!("[snd ] played the start-up chime");
+    kprintln!(
+        "[snd ] played the start-up chime{}",
+        if ac97::is_present() {
+            " through the sound card"
+        } else {
+            " on the speaker"
+        }
+    );
 
     loop {
         serve();
@@ -123,7 +150,7 @@ fn sound_thread(_argument: usize) {
         let next = QUEUE.lock().pop_front();
         match next {
             Some(note) => {
-                speaker::tone(note.hertz, note.milliseconds);
+                make_noise(note.hertz, note.milliseconds);
                 PLAYED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 // A gap between notes, so a sequence is a sequence rather than
                 // one long slur at whichever frequency came last.
