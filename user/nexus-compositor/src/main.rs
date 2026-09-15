@@ -164,6 +164,12 @@ const SOUND: Handle = Handle(8);
 /// it -- so a program can be given the disk and the speaker and not this.
 const MACHINE: Handle = Handle(9);
 
+/// The channel a removable drive is reached through.
+///
+/// Held on the same terms as the rest and read by nothing here: what this
+/// program does with it is lend it to the window that looks at files.
+const REMOVABLE: Handle = Handle(11);
+
 /// The channel that stops the machine.
 ///
 /// Held to pass a request on, and never used on this program's own initiative.
@@ -2424,12 +2430,16 @@ fn open_window(
             // which is what a shell is for -- and it is still a decision made
             // here, by the program that holds those handles, rather than
             // something the terminal could have helped itself to.
-            let (Ok(files), Ok(spawner), Ok(sound), Ok(machine), Ok(network)) = (
+            let (Ok(files), Ok(spawner), Ok(sound), Ok(machine), Ok(network), Ok(removable)) = (
                 nexus_user::duplicate(FILESYSTEM, lending),
                 nexus_user::duplicate(SPAWNER, lending),
                 nexus_user::duplicate(SOUND, lending),
                 nexus_user::duplicate(MACHINE, lending),
                 nexus_user::duplicate(NETWORK, lending),
+                // And removable drives, because a shell is where somebody looks
+                // at what is on a stick. Last in the list so that adding it does
+                // not move the numbers of the handles before it.
+                nexus_user::duplicate(REMOVABLE, lending),
             ) else {
                 failed("compositor: FAILED: could not lend a terminal what it needs");
                 return Some(Asked::Nothing);
@@ -2442,7 +2452,7 @@ fn open_window(
                 width,
                 height,
                 0,
-                &[files, spawner, sound, machine, network],
+                &[files, spawner, sound, machine, network, removable],
             )?
         }
         What::Settings => {

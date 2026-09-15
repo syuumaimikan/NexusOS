@@ -34,6 +34,7 @@ mod memory;
 mod net;
 mod panic;
 mod power;
+mod removable;
 
 mod process;
 mod random;
@@ -341,6 +342,7 @@ fn start_system_threads() {
     sound::start_thread();
     machine::start_thread();
     power::start_thread();
+    removable::start_thread();
 
     display::progress(5, BOOT_STEPS);
 
@@ -584,6 +586,12 @@ fn monitor_thread(_argument: usize) {
                     "[mon ] network service {served} requests answered, {turned_down} refused"
                 );
             }
+        }
+        let (served, turned_away) = removable::statistics();
+        if served > 0 || turned_away > 0 {
+            kprintln!(
+                "[mon ] removable {served} requests answered, {turned_away} refused"
+            );
         }
         let (translated, refused, mapped) = compat::linux::statistics();
         if translated > 0 || refused > 0 {

@@ -105,6 +105,37 @@ The directory listing is not the whole claim either -- a listing proves the
 *directory's* cluster chain was followed and says nothing about a file's, which
 is a different chain. So it reads a file as well.
 
+## Reaching it from a program
+
+```
+/> usb
+Drive 0: 1 MiB, no filesystem this reads
+Drive 1: 64 MiB, with a filesystem on it
+/> usb 1
+  HELLO.TXT  35
+  TESTS/
+  CHAIN.BIN  5000
+/> usb 1 hello.txt
+NexusOS reads its own filesystem.
+```
+
+A **channel**, not a directory, and that is a decision rather than a shortcut.
+
+Every other file here is reached by opening a name in a directory handle. A
+removable drive could have been made to look the same, and is not, for two
+reasons. The node layer under those handles is one filesystem -- an inode on the
+store, with nowhere to put "which disk" -- so making room would mean changing
+the type every open file in the system is named by. And a removable drive *is
+not like* a fixed one: it can be absent, and it can be pulled out between two
+calls. A handle that stayed valid across that would be lying.
+
+So every request names the drive again, and the volume is mounted fresh for
+each one. That costs a few sector reads per request, which is the right trade
+for something a person uses a few times a minute.
+
+The compositor holds the channel and lends it to the terminal, the same way it
+lends the network. It reads nothing through it itself.
+
 ## What is not here
 
 **No interrupts.** Every wait is a poll with a deadline. This runs at start-up
@@ -124,10 +155,10 @@ eight blocks. A larger transfer needs either a bigger buffer or a scatter list.
 afterwards is not noticed; the port status change events that would say so are
 read off the event ring and discarded.
 
-**Not yet reachable from a program.** The kernel reads and writes the drive's
-blocks and mounts a filesystem off it; nothing *above* the kernel can, because
-there is no handle to hand a program. That is the next piece and it is smaller
-than any of the four layers below it.
+**Writing *files*.** The blocks can be written -- that is checked above -- and
+the FAT32 reader cannot yet allocate clusters, so `usb` refuses a write by name
+rather than half-doing one. A write that corrupted somebody's stick would be
+much worse than one that did not happen.
 
 **Older controllers are named, not driven.** EHCI and UHCI are a different data
 structure, not a simpler version of this one, so a machine with one is told it

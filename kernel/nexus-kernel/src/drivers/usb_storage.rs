@@ -699,3 +699,17 @@ pub fn mount_and_list(index: usize) {
         }
     }
 }
+
+/// The shape of every USB disk: how many blocks, and how big each is.
+///
+/// A snapshot rather than a handle. Anything above this driver asks by index,
+/// and the index is stable because there is no hot-plug -- which is the same
+/// reason this can be a plain list.
+#[must_use]
+pub fn shapes() -> alloc::vec::Vec<(u64, u32)> {
+    usb::DISKS
+        .lock()
+        .iter()
+        .map(|(_, disk)| (disk.blocks, disk.block_size))
+        .collect()
+}
