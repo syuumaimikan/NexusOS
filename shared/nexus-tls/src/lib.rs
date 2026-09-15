@@ -32,6 +32,7 @@
 
 extern crate alloc;
 
+pub mod chain;
 pub mod der;
 pub mod handshake;
 pub mod p256;
