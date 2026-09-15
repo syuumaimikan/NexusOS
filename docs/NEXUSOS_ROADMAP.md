@@ -1461,10 +1461,32 @@ An unimplemented call answers `-ENOSYS` and says so in the log, which is what
 Linux itself does and what a real program is required to handle. It is not a
 stub: nothing pretends to have succeeded.
 
-Still to do: `brk` and `mmap` so a program can have a heap, file descriptors
-that reach the real filesystem, `clone` and futexes, enough of the auxiliary
-vector for a dynamic loader, and then a libc — at which point ordinary Linux
-software becomes the test. Windows is untouched.
+**Files, and a vector a real program survives.** Two of the things on that list
+are done. `mmap` gives a program a heap, and descriptors now reach the real
+filesystem: `openat`, `read`, `write`, `lseek`, `fstat`, `getdents64` and a
+dozen more walk the machine's own store, rooted at `linux/` in it.
+
+A Linux descriptor *is* a Nexus handle — the node goes into the process's
+ordinary handle table and the handle number is the descriptor, so the rights
+check is the same one every Nexus program gets. Which forces one thing into the
+open: handle numbers start at one, and one is standard output, so a Linux
+process starts its handles at three. Without that the first `open` returns the
+descriptor every `printf` writes to, and nothing looks wrong.
+
+The auxiliary vector is no longer empty, and that was not a nicety. `AT_RANDOM`
+is where a stack guard comes from, so a binary built with `-fstack-protector` —
+every distribution's default — follows that pointer before it reaches `main` and
+dies if it is null. `AT_PHDR` is how a libc finds its own `PT_TLS`.
+
+The evidence is a third generated program that writes a file, reads it back and
+checks the bytes, and whose every step exits with its own number when it is
+wrong — and then the file being found in the host's copy of the disk, which a
+layer that kept none of the bytes would fail.
+
+Still to do: `clone` and futexes, `PT_INTERP` and a dynamic loader, sockets,
+and then a libc — at which point ordinary Linux software becomes the test.
+`docs/linux-software.md` has the whole list, including what Steam would need
+and why none of it is close. Windows is untouched.
 
 ## Phase 16 — Gaming ⬜
 
@@ -1753,6 +1775,18 @@ in the code.
   allocate clusters, and a write that corrupted somebody's stick would be worse
   than one that did not happen. No interrupts, no hubs, no hot-plug. See
   [usb.md](usb.md).
+* **~~Writing files to a USB drive.~~** Done, and so is the file manager that
+  was the reason to want it: one window over the store and every removable
+  drive, and `F2` copies a file between them. The FAT32 writer under it
+  allocates and frees clusters, updates every copy of the table rather than one,
+  and orders each operation so that stopping part-way loses space and never
+  data. Checked from outside the guest: after the copy, the file's directory
+  entry is in the host's image.
+* **~~Files, for a program built for Linux.~~** Done. Sixteen more calls
+  translated, a root at `linux/` in the store, and an auxiliary vector with the
+  entries a C library reads before `main`. See
+  [linux-software.md](linux-software.md), which also says what Steam would need
+  and why none of it is close.
 
 ### What "everyday use" means here
 
