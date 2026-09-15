@@ -32,11 +32,25 @@
 
 extern crate alloc;
 
+/// Which hash a signature was made over.
+///
+/// One definition for the whole crate. RSA and both curves all need to be told
+/// which hash an algorithm identifier named, and three enums that meant the
+/// same thing would be three places for them to disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hash {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
 pub mod chain;
 pub mod client;
 pub mod der;
+pub mod ec;
 pub mod handshake;
 pub mod p256;
+pub mod p384;
 pub mod record;
 pub mod roots;
 pub mod rsa;

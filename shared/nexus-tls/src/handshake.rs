@@ -46,12 +46,21 @@ pub const X25519: u16 = 0x001d;
 pub mod scheme {
     /// ECDSA over P-256 with SHA-256.
     pub const ECDSA_P256_SHA256: u16 = 0x0403;
+    /// ECDSA over P-384 with SHA-384.
+    ///
+    /// Offered because a server may hold a P-384 key, and because thirty-seven
+    /// of the world's root authorities do -- a chain that ends at one of them
+    /// needs this to be verifiable even when the leaf is P-256.
+    pub const ECDSA_P384_SHA384: u16 = 0x0503;
     /// RSASSA-PSS with SHA-256, which TLS 1.3 requires for RSA keys.
     pub const RSA_PSS_RSAE_SHA256: u16 = 0x0804;
     /// RSASSA-PKCS1-v1_5 with SHA-256. Not allowed in `CertificateVerify` by
     /// RFC 8446 §4.2.3, but it is what most certificates are *signed with*, so
     /// it has to be offered for the chain to verify.
     pub const RSA_PKCS1_SHA256: u16 = 0x0401;
+    /// And the same with SHA-384 and SHA-512, for the same reason.
+    pub const RSA_PKCS1_SHA384: u16 = 0x0501;
+    pub const RSA_PKCS1_SHA512: u16 = 0x0601;
 }
 
 /// What kind of handshake message this is.
@@ -262,8 +271,15 @@ pub fn client_hello(random: &[u8; 32], public: &[u8; 32], host: &str) -> Option<
     // it cannot.
     let mut schemes = Writer::new();
     schemes.u16(scheme::ECDSA_P256_SHA256);
+    schemes.u16(scheme::ECDSA_P384_SHA384);
     schemes.u16(scheme::RSA_PSS_RSAE_SHA256);
     schemes.u16(scheme::RSA_PKCS1_SHA256);
+    // RSA/SHA-384 and RSA/SHA-512 are offered for the same reason PKCS#1
+    // SHA-256 is: they cannot appear in CertificateVerify, but certificates in
+    // the chain are signed with them and a server chooses what to send partly
+    // from this list.
+    schemes.u16(scheme::RSA_PKCS1_SHA384);
+    schemes.u16(scheme::RSA_PKCS1_SHA512);
     let mut body_of = Writer::new();
     if !body_of.vector16(schemes.as_bytes()) {
         return None;

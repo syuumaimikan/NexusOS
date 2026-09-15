@@ -318,7 +318,7 @@ pub fn signature_verifies(certificate: &Certificate, issuer: &Certificate) -> Re
                 exponent,
                 &certificate.signature,
                 &certificate.tbs,
-                false,
+                crate::Hash::Sha256,
             )
             .map_err(|_| bad())
         }
@@ -328,7 +328,7 @@ pub fn signature_verifies(certificate: &Certificate, issuer: &Certificate) -> Re
                 exponent,
                 &certificate.signature,
                 &certificate.tbs,
-                true,
+                crate::Hash::Sha384,
             )
             .map_err(|_| bad())
         }
@@ -336,12 +336,36 @@ pub fn signature_verifies(certificate: &Certificate, issuer: &Certificate) -> Re
             crate::rsa::verify_pss(modulus, exponent, &certificate.signature, &certificate.tbs)
                 .map_err(|_| bad())
         }
-        (Algorithm::EcdsaP256Sha256, PublicKey::P256 { point }) => {
+        (Algorithm::RsaPkcs1Sha512, PublicKey::Rsa { modulus, exponent }) => {
+            crate::rsa::verify_pkcs1(
+                modulus,
+                exponent,
+                &certificate.signature,
+                &certificate.tbs,
+                crate::Hash::Sha512,
+            )
+            .map_err(|_| bad())
+        }
+        // ECDSA. The algorithm says which hash and the key says which curve,
+        // which is why these are two independent matches rather than five
+        // named pairs.
+        (Algorithm::EcdsaSha256, PublicKey::P256 { point }) => {
             crate::p256::verify(point, &certificate.signature, &certificate.tbs, false)
                 .map_err(|_| bad())
         }
-        (Algorithm::EcdsaP256Sha384, PublicKey::P256 { point }) => {
+        (Algorithm::EcdsaSha384, PublicKey::P256 { point }) => {
             crate::p256::verify(point, &certificate.signature, &certificate.tbs, true)
+                .map_err(|_| bad())
+        }
+        (algorithm, PublicKey::P384 { point }) => {
+            let hash = match algorithm {
+                Algorithm::EcdsaSha256 => crate::p384::Hash::Sha256,
+                Algorithm::EcdsaSha384 => crate::p384::Hash::Sha384,
+                Algorithm::EcdsaSha512 => crate::p384::Hash::Sha512,
+                // An RSA signature cannot be checked with a P-384 key.
+                _ => return Err(bad()),
+            };
+            crate::p384::verify(point, &certificate.signature, &certificate.tbs, hash)
                 .map_err(|_| bad())
         }
         // A signature algorithm that does not match the key type. Not a

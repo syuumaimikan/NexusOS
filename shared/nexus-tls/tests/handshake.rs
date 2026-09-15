@@ -212,6 +212,51 @@ fn a_whole_handshake_against_openssl_with_an_ecdsa_certificate() {
 }
 
 #[test]
+fn a_whole_handshake_against_openssl_with_a_p384_certificate() {
+    // The one that proves `p384.rs` works where it has to. The server holds a
+    // P-384 key, so its CertificateVerify is signed with
+    // ecdsa_secp384r1_sha384 and the chain is verified against a P-384 root --
+    // two independent uses of the new curve, in a handshake with something
+    // that has never heard of this project.
+    if !have_openssl() {
+        eprintln!("openssl is not on this machine; skipping the handshake test");
+        return;
+    }
+    let Some(server) = start("p384-ca.pem", "p384.key", 14437) else {
+        eprintln!("openssl s_server would not start; skipping");
+        return;
+    };
+
+    let page = fetch("p384.test", server.port, "p384-ca.der")
+        .expect("a P-384 handshake should finish and the page should arrive");
+    assert!(
+        page.contains("HTTP/1.0 200") || page.contains("s_server"),
+        "the page did not look like s_server's"
+    );
+}
+
+#[test]
+fn a_p384_certificate_from_an_untrusted_root_is_refused() {
+    // The negative half. Without it, the test above only proves the handshake
+    // completed, not that anything was checked.
+    if !have_openssl() {
+        eprintln!("openssl is not on this machine; skipping the handshake test");
+        return;
+    }
+    let Some(server) = start("p384-ca.pem", "p384.key", 14438) else {
+        eprintln!("openssl s_server would not start; skipping");
+        return;
+    };
+
+    let why = fetch_with_roots("p384.test", server.port, Roots::empty())
+        .expect_err("an untrusted P-384 certificate must not verify");
+    assert!(
+        why.contains("trust"),
+        "the reason should say the chain is untrusted: {why}"
+    );
+}
+
+#[test]
 fn a_certificate_this_machine_does_not_trust_is_refused() {
     // The test that says the verification is doing anything. The same server,
     // the same handshake, and an empty root store -- and it must fail.
