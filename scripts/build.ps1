@@ -314,6 +314,16 @@ $bytes = [System.IO.File]::ReadAllBytes($Package)
 $bytes[$bytes.Length - 1] = $bytes[$bytes.Length - 1] -bxor 0x01
 [System.IO.File]::WriteAllBytes($Tampered, $bytes)
 
+# The image behind the USB stick. Made every build rather than kept, because it
+# is a fixture and not a record: the kernel writes to its last sector to prove
+# it can, and a fixture that accumulated previous runs' writes would be one
+# whose content nobody could predict.
+$UsbImage = Join-Path $BuildDir 'nexus-usb.img'
+& powershell -NoProfile -ExecutionPolicy Bypass `
+    -File (Join-Path $PSScriptRoot 'make-usb.ps1') -OutputFile $UsbImage | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'could not write the USB image' }
+$usbSize = [math]::Round((Get-Item $UsbImage).Length / 1KB, 1)
+
 # The disk the kernel drives. Data only, with nothing to boot from: a machine
 # given two bootable disks leaves the firmware to choose between them, and it
 # chose the one whose kernel was older. Made once and left alone, because the
@@ -364,6 +374,7 @@ Write-Host "  gemini agt : $geminiSize KiB  -> BIN\GEMINI.ELF on the disk"
 Write-Host "  picture    : $pictureSize KiB  -> PICTURES\NEXUS.PNG on the disk"
 Write-Host "  recording  : $videoSize KiB  -> PICTURES\NEXUS.AVI on the disk"
 Write-Host "  root store : $rootsSize KiB  -> SYSTEM\ROOTS.NXR on the disk"
+Write-Host "  usb stick  : $usbSize KiB, every sector numbered  -> plugged into qemu-xhci"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
 Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1.1.0, signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"

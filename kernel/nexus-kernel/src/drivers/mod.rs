@@ -10,4 +10,7 @@ pub mod rtc;
 pub mod speaker;
 pub mod virtio_blk;
 pub mod virtio_net;
+pub mod usb;
+pub mod usb_storage;
 pub mod xhci;
+pub mod xhci_rings;

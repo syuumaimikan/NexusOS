@@ -239,6 +239,9 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         Ok(()) => {
             // SAFETY: the controller was just started, so its window is mapped.
             unsafe { drivers::xhci::survey_ports() };
+            // And ask whatever is there what it is.
+            // SAFETY: the controller is running and the ports have been reset.
+            unsafe { drivers::usb::enumerate() };
         }
         Err(drivers::xhci::Trouble::NotPresent) => {
             kprintln!("[usb ] no xHCI controller on this machine");

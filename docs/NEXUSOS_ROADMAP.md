@@ -1743,9 +1743,13 @@ in the code.
   from another machine. Writing it *on* NexusOS needs an editor, an assembler
   and a linker that run here. The editor is close; the rest is a language
   implementation.
-* **USB storage.** xHCI, then USB enumeration, then mass storage, then SCSI.
-  Four layers, each of which is a driver on its own. The disk this machine uses
-  is virtio, which is one.
+* **~~USB storage.~~** Done, and it really was four layers: `xhci.rs`,
+  `xhci_rings.rs`, `usb.rs`, `usb_storage.rs`. The kernel reads and writes an
+  external drive's blocks, checked against an image whose every sector says its
+  own number -- so a driver returning the first sector for every request fails
+  rather than passes. What is left is smaller than any of the four: a block
+  device handle, so a *program* can reach it. No interrupts, no hubs, no
+  hot-plug. See [usb.md](usb.md).
 
 ### What "everyday use" means here
 
