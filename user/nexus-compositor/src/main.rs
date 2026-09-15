@@ -282,6 +282,16 @@ mod key {
 /// state each is in, and it says what should happen to them. It cannot do any
 /// of it itself -- it has no handle to a window, no way to reach the display,
 /// and no idea where its own strip is.
+/// What a client says to this program.
+mod wire {
+    /// This client has drawn. Optionally followed by four little-endian `u32`s
+    /// -- x, y, width, height in the client's own surface -- saying which part
+    /// of it changed. Without them it means the whole surface, which is what
+    /// every client meant before the rectangle existed and what any client may
+    /// still mean.
+    pub const DAMAGED: &[u8] = b"damaged";
+}
+
 mod desk {
     /// Here is every window and what state it is in.
     pub const WINDOWS: &[u8] = b"win";
@@ -625,6 +635,55 @@ fn strip(screen: &Screen) -> Region {
 /// Where a window is.
 fn region_of(tile: &Tile) -> Region {
     Region::of(tile.x, tile.y, tile.width, tile.height)
+}
+
+/// What part of its own surface a client says it changed.
+///
+/// A `damaged` message may carry four little-endian `u32`s -- x, y, width,
+/// height, in the client's own coordinates. One that carries nothing means the
+/// whole surface, which is what every client used to mean and still may.
+///
+/// # Why the clamping is not optional
+///
+/// The numbers come from another process. A rectangle reaching past the
+/// surface would have this program compositing from memory the client does not
+/// own, so it is intersected with the tile and anything left over is dropped.
+/// A client cannot enlarge its own window by claiming a bigger rectangle, and
+/// it cannot reach another window's pixels by claiming a negative one -- the
+/// values are unsigned and the intersection is with its own tile.
+///
+/// A client that lies *small* only cheats itself: the compositor will not
+/// repaint what it did not declare, so the parts it drew and did not mention
+/// are the parts that will look stale. That asymmetry is the right way round.
+fn damaged_region(tile: &Tile, message: &[u8]) -> Region {
+    if message.len() < wire::DAMAGED.len() + 16 {
+        return region_of(tile);
+    }
+    let at = wire::DAMAGED.len();
+    let x = read_u32(message, at);
+    let y = read_u32(message, at + 4);
+    let width = read_u32(message, at + 8);
+    let height = read_u32(message, at + 12);
+
+    // Saturating, so that a width near `u32::MAX` becomes the tile's edge
+    // rather than wrapping round to a tiny rectangle.
+    let left = tile.x.saturating_add(x.min(tile.width));
+    let top = tile.y.saturating_add(y.min(tile.height));
+    let right = left
+        .saturating_add(width)
+        .min(tile.x.saturating_add(tile.width));
+    let bottom = top
+        .saturating_add(height)
+        .min(tile.y.saturating_add(tile.height));
+    if right <= left || bottom <= top {
+        return Region::nothing();
+    }
+    Region {
+        left,
+        top,
+        right,
+        bottom,
+    }
 }
 
 /// Repaints performed, and how many pixels they were asked to cover.
@@ -1168,7 +1227,6 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
 /// is only which program is started and what the third number in its first
 /// message means -- a tint for a client, a count of window slots for the
 /// desktop.
-#[allow(clippy::too_many_arguments)]
 /// Open the root certificate store, read only, to lend to a browser.
 ///
 /// `None` when there is not one, which is an ordinary state on a machine whose
@@ -1207,6 +1265,7 @@ fn start_service(program: &[u8]) -> Option<nexus_user::Handle> {
     Some(handles[0])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_program(
     program: &[u8],
     index: usize,
@@ -1622,15 +1681,22 @@ fn serve(
                     .as_ref()
                     .map(|tile| nexus_user::receive(tile.channel, &mut message, &mut none))
                 {
-                    Some(Ok(_)) => {
+                    Some(Ok(received)) => {
+                        let mut drawn = region_of_wallpaper(screen);
                         if let Some(tile) = wallpaper.as_mut() {
                             tile.frames += 1;
+                            // What it says it changed, which for a recording
+                            // is the picture's own rectangle rather than the
+                            // whole display. That is the difference between a
+                            // moving wallpaper costing a full-screen composite
+                            // every frame and costing its own area.
+                            drawn = damaged_region(tile, &message[..received.bytes]);
                             if nexus_user::send(tile.channel, b"shown", &[]).is_err() {
                                 nexus_user::unwatch(set, KEY_WALL).ok();
                             }
                         }
                         painted += 1;
-                        pending = pending.union(region_of_wallpaper(screen));
+                        pending = pending.union(drawn);
                     }
                     _ => {
                         nexus_user::unwatch(set, KEY_WALL).ok();
@@ -1693,7 +1759,7 @@ fn serve(
                             pending = pending.union(region_of(tile));
                         }
                     }
-                    Ok(_) => {
+                    Ok(received) => {
                         tile.frames += 1;
                         composited += 1;
                         // Answered, so the client knows the buffer is free
@@ -1704,10 +1770,13 @@ fn serve(
                             // which is ordinary and not a failure.
                             stop_listening(set, tile, index);
                         }
-                        // That window and no other. This is what damage
-                        // tracking exists for: a client redrawing twice a
-                        // second used to cost the whole display every time.
-                        let drawn = region_of(tile);
+                        // That window and no other, and -- when the client
+                        // said so -- only the part of it that changed. This is
+                        // what damage tracking exists for: a client redrawing
+                        // twice a second used to cost the whole display every
+                        // time, and one that redraws a caret used to cost it
+                        // the whole window.
+                        let drawn = damaged_region(tile, &message[..received.bytes]);
                         pending = pending.union(drawn);
                     }
                     Err(_) => stop_listening(set, tile, index),
@@ -2412,17 +2481,35 @@ fn open_window(
             let reading = nexus_user::rights::READ | nexus_user::rights::TRANSFER;
             let talking =
                 nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
-            let (Ok(files), Ok(machine)) = (
+            let (Ok(files), Ok(machine), Ok(network)) = (
                 nexus_user::duplicate(FILESYSTEM, reading),
                 nexus_user::duplicate(MACHINE, talking),
+                nexus_user::duplicate(NETWORK, talking),
             ) else {
                 failed("compositor: FAILED: could not lend the agent what it may have");
                 return Some(Asked::Nothing);
             };
+            let roots = open_roots();
+            let mut lent = alloc::vec::Vec::new();
+            lent.push(files);
+            lent.push(machine);
+            lent.push(network);
+            if let Some(r) = roots {
+                lent.push(r);
+            } else {
+                lent.push(nexus_user::Handle(0));
+            }
             let Some(ai_channel) = start_service(b"BIN/AI.ELF") else {
                 failed("compositor: FAILED: could not start the AI service");
                 return Some(Asked::Nothing);
             };
+            lent.push(ai_channel);
+            let Some(gemini_channel) = start_service(b"BIN/GEMINI.ELF") else {
+                failed("compositor: FAILED: could not start the Gemini agent");
+                return Some(Asked::Nothing);
+            };
+            lent.push(gemini_channel);
+            let lent_slice = lent.leak();
             start_program(
                 ASSISTANT,
                 slot,
@@ -2431,7 +2518,7 @@ fn open_window(
                 width,
                 height,
                 0,
-                &[files, machine, ai_channel],
+                lent_slice,
             )?
         }
         What::Launcher => {

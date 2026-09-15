@@ -73,11 +73,22 @@ const MOST_PIXELS: usize = 12 * 1024 * 1024 / 4;
 
 /// How often a recording's frames are shown, at most.
 ///
-/// Four a second. Not a choice about what looks good: there are no per-client
-/// damage rectangles in this system, so a full-screen wallpaper frame costs a
-/// composite of the whole display, and the roadmap has said so since before
-/// there was anything to play. A recording asking for thirty is shown at four
-/// and the log says what it managed.
+/// It used to be four a second, and the reason was that there were no
+/// per-client damage rectangles: a wallpaper frame cost a composite of the
+/// whole display whatever had changed. There are now, and a recording declares
+/// the rectangle its picture covers -- so a frame costs that picture's area
+/// and the cap can go.
+///
+/// What is left is the file's own interval, floored here. Thirty a second is
+/// what a recording of any kind asks for and is as fast as this is willing to
+/// wake up for a decoration.
+const VIDEO_FLOOR_MS: u64 = 33;
+
+/// And a ceiling, for a file whose header asks for something absurd or says
+/// nothing usable at all.
+const VIDEO_CEILING_MS: u64 = 1_000;
+
+/// What to use when the recording does not say.
 const VIDEO_MS: u64 = 250;
 
 /// What the settings file is called.
@@ -95,10 +106,10 @@ const SETTINGS_MAX: usize = 16 * 1024;
 /// that a moving background is a small fraction of a processor rather than a
 /// steady load.
 ///
-/// The way past this is damage rectangles on a client's frame, so a program can
-/// say *which* part of its surface changed. Nothing has them yet, and inventing
-/// them for a decoration would be inventing them in the wrong place: the first
-/// program that needs them is a text editor redrawing one line.
+/// Damage rectangles exist now and do not help here: a drifting pattern changes
+/// every part of the surface, so its damage really is the whole of it. What
+/// would help is a pattern that knew which points it moved -- a different piece
+/// of work, and one worth doing only if somebody wants a faster background.
 const FRAME_MS: u64 = 250;
 
 /// How often the settings are looked at again, in milliseconds.
@@ -119,7 +130,35 @@ const STILL_RECHECK_MS: u64 = 2_000;
 mod wire {
     pub const SHOWN: &[u8] = b"shown";
     pub const RESIZED: &[u8] = b"size";
+    /// Followed, when there is one, by four little-endian `u32`s saying which
+    /// part of the surface changed. See `damage_message`.
     pub const DAMAGED: &[u8] = b"damaged";
+}
+
+/// The `damaged` message, with the rectangle on it when there is one.
+///
+/// The same shape `nexus_window` sends; this program does not use that crate
+/// because it is handed the bottom surface directly rather than being given a
+/// window.
+fn damage_message(rectangle: Option<(u32, u32, u32, u32)>) -> [u8; 23] {
+    let mut out = [0u8; 23];
+    out[..7].copy_from_slice(wire::DAMAGED);
+    if let Some((x, y, width, height)) = rectangle {
+        out[7..11].copy_from_slice(&x.to_le_bytes());
+        out[11..15].copy_from_slice(&y.to_le_bytes());
+        out[15..19].copy_from_slice(&width.to_le_bytes());
+        out[19..23].copy_from_slice(&height.to_le_bytes());
+    }
+    out
+}
+
+/// How much of it to send: the word alone when there is no rectangle.
+const fn damage_length(rectangle: Option<(u32, u32, u32, u32)>) -> usize {
+    if rectangle.is_some() {
+        23
+    } else {
+        7
+    }
 }
 
 #[unsafe(naked)]
@@ -204,6 +243,12 @@ extern "C" fn main() -> ! {
     let mut last_check = nexus_user::uptime();
     let mut stale = true;
     let mut in_flight = false;
+    // Whether the *whole* surface changed, rather than just the recording's
+    // rectangle. True for the first frame, for a moving pattern, for a resize
+    // and for a settings change -- and false for the ordinary case this exists
+    // for, which is one video frame replacing the last while the pattern
+    // behind it stays exactly as it was.
+    let mut whole = true;
 
     // Whatever the settings name, opened once. Reopened only when the name or
     // the fit changes -- decoding a wallpaper on every settings re-read would
@@ -221,11 +266,18 @@ extern "C" fn main() -> ! {
     // thing it draws is meant to be there all of it.
     for _ in 0..16_000_000u64 {
         if stale && !in_flight {
-            draw(&look, behind.as_ref(), width, height, frame);
-            if nexus_user::send(COMPOSITOR, wire::DAMAGED, &[]).is_err() {
+            let covered = draw(&look, behind.as_ref(), width, height, frame);
+            // The picture's rectangle when that is all that changed, and the
+            // whole surface otherwise. This is the difference between a
+            // recording costing its own area and costing the display.
+            let damage = if whole { None } else { covered };
+            let message = damage_message(damage);
+            let length = damage_length(damage);
+            if nexus_user::send(COMPOSITOR, &message[..length], &[]).is_err() {
                 break;
             }
             stale = false;
+            whole = false;
             in_flight = true;
         }
 
@@ -235,8 +287,11 @@ extern "C" fn main() -> ! {
         // A recording wakes on its own clock; a moving pattern on the frame
         // clock; a still one waits to be woken and costs nothing. What decides
         // is what is actually being drawn.
-        let wait = if matches!(behind, Some(Behind::Moving { .. })) {
-            VIDEO_MS
+        let wait = if let Some(Behind::Moving { interval_us, .. }) = behind.as_ref() {
+            // What the file asks for, held between a floor and a ceiling. A
+            // recording claiming a microsecond a frame is a recording this
+            // will play at thirty.
+            (u64::from(*interval_us) / 1000).clamp(VIDEO_FLOOR_MS, VIDEO_CEILING_MS)
         } else if look.style.moves() {
             FRAME_MS
         } else {
@@ -280,6 +335,9 @@ extern "C" fn main() -> ! {
                     next_due = nexus_user::uptime();
                 }
                 stale = true;
+                // A different picture, a different fit or a different pattern:
+                // all of the surface is new.
+                whole = true;
             }
         }
 
@@ -287,6 +345,9 @@ extern "C" fn main() -> ! {
             frame = frame.wrapping_add(1);
             if look.style.moves() {
                 stale = true;
+                // The pattern itself moved, so the rectangle the picture
+                // covers is not the whole of what changed.
+                whole = true;
             }
             // A recording, if it is time. The deadline moves by one interval
             // rather than to "now", so that a decode taking most of an interval
@@ -298,10 +359,16 @@ extern "C" fn main() -> ! {
                 if next_frame(behind.as_mut().expect("just matched")) {
                     stale = true;
                 }
+                let interval = match behind.as_ref() {
+                    Some(Behind::Moving { interval_us, .. }) => {
+                        (u64::from(*interval_us) / 1000).clamp(VIDEO_FLOOR_MS, VIDEO_CEILING_MS)
+                    }
+                    _ => VIDEO_MS,
+                };
                 next_due = if now.saturating_sub(next_due) > 1000 {
-                    now + VIDEO_MS
+                    now + interval
                 } else {
-                    next_due + VIDEO_MS
+                    next_due + interval
                 };
                 said_rate = say_rate(behind.as_ref(), said_rate);
             }
@@ -335,6 +402,9 @@ extern "C" fn main() -> ! {
                 break;
             }
             stale = true;
+            // A new surface of a different size. Nothing on it is what was
+            // there, and the compositor has a different rectangle to fill.
+            whole = true;
         }
     }
 
@@ -629,14 +699,21 @@ fn say_rate(behind: Option<&Behind>, already: bool) -> bool {
     } else {
         (1_000_000_000u64 / u64::from(*interval_us)) as u32
     };
+    // What it is actually shown at: the recording's own interval, clamped.
+    // This used to say a flat four a second, which was true when a wallpaper
+    // frame cost a composite of the whole display. It no longer does -- a
+    // recording declares the rectangle its picture covers -- and a log line
+    // still reporting four would be reporting a cap that has been removed.
+    let interval = (u64::from(*interval_us) / 1000).clamp(VIDEO_FLOOR_MS, VIDEO_CEILING_MS);
+    let shown = 1000 / interval.max(1);
     nexus_user::log(&alloc::format!(
         "wall: decoding at {}.{} frames a second; the recording asks for {}.{}, \
-         and a full-screen wallpaper is shown at {}.0",
+         and it is shown at {}",
         milli / 1000,
         (milli % 1000) / 100,
         asked / 1000,
         (asked % 1000) / 100,
-        1000 / VIDEO_MS
+        shown
     ))
     .ok();
     true
@@ -648,15 +725,20 @@ fn say_rate(behind: Option<&Behind>, already: bool) -> bool {
 /// working out which source pixel it came from. Done this way round rather than
 /// by walking the source, because walking the source leaves gaps when scaling
 /// up and writes the same destination pixel repeatedly when scaling down.
+/// Draw the picture, and say what part of the screen it covered.
+///
+/// The rectangle is what lets a recording cost its own area instead of the
+/// whole display: between one frame and the next, the pattern behind it is
+/// redrawn identically and only this changed.
 fn draw_picture(
     canvas: &mut nexus_ui::Canvas,
     picture: &nexus_image::Picture,
     fit: nexus_look::Fit,
     width: u32,
     height: u32,
-) {
+) -> Option<(u32, u32, u32, u32)> {
     if picture.width == 0 || picture.height == 0 || width == 0 || height == 0 {
-        return;
+        return None;
     }
 
     const ONE: u64 = 65536;
@@ -677,6 +759,13 @@ fn draw_picture(
     let left = (width as i64 - across as i64) / 2;
     let top = (height as i64 - down as i64) / 2;
 
+    // What of that lands on the screen. `Fill` puts the long side off both
+    // edges, so the covered rectangle is not the picture's size.
+    let covered_left = left.max(0).min(i64::from(width)) as u32;
+    let covered_top = top.max(0).min(i64::from(height)) as u32;
+    let covered_right = (left + i64::from(across)).max(0).min(i64::from(width)) as u32;
+    let covered_bottom = (top + i64::from(down)).max(0).min(i64::from(height)) as u32;
+
     for row in 0..down {
         let y = top + i64::from(row);
         if y < 0 || y >= i64::from(height) {
@@ -695,10 +784,29 @@ fn draw_picture(
             }
         }
     }
+
+    if covered_right <= covered_left || covered_bottom <= covered_top {
+        return None;
+    }
+    Some((
+        covered_left,
+        covered_top,
+        covered_right - covered_left,
+        covered_bottom - covered_top,
+    ))
 }
 
-/// Draw the whole background.
-fn draw(look: &Look, behind: Option<&Behind>, width: u32, height: u32, frame: u32) {
+/// Draw the whole background, and say what part of it the picture covers.
+///
+/// The rectangle is only *usable* as damage when nothing else changed -- see
+/// the frame loop, which decides that.
+fn draw(
+    look: &Look,
+    behind: Option<&Behind>,
+    width: u32,
+    height: u32,
+    frame: u32,
+) -> Option<(u32, u32, u32, u32)> {
     // SAFETY: the surface is mapped here, writable, and at least
     // `width * height * 4` bytes -- checked when it was taken and again after
     // every replacement.
@@ -729,7 +837,9 @@ fn draw(look: &Look, behind: Option<&Behind>, width: u32, height: u32, frame: u3
     // pattern around it -- which is better than a black border and is why the
     // pattern is drawn even when it will mostly be covered.
     if let Some(picture) = behind.and_then(Behind::picture) {
-        draw_picture(&mut canvas, picture, look.fit, width, height);
+        draw_picture(&mut canvas, picture, look.fit, width, height)
+    } else {
+        None
     }
 }
 

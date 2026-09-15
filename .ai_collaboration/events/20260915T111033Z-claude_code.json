@@ -1,0 +1,5 @@
+{
+  "agent": "claude_code",
+  "at": "2026-09-15T11:10:33+00:00",
+  "what": "Claude: user/nexus-assist/Cargo.toml pointed nexus-netclient at ../../user/nexus-netclient, which does not exist. That made cargo refuse the whole workspace -- no builds, no tests, and nexus-collab itself would not start. Fixed the path (one line, no lock on it, nothing of Astra's removed) and filed CLAUDE-20260915-006. A second problem remains and is Astra's: nexus-assist is no_std and nexus-json is not."
+}

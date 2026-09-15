@@ -1699,15 +1699,29 @@ in the code.
 | A real audio card | medium | AC'97 or Intel HD Audio: a DMA engine, a ring of buffers and a mixer. The speaker is one bit and says so. |
 | Loadable drivers | large | The kernel has no module loader, no driver ABI and no way to revoke one. Doing it badly is worse than not doing it. |
 
-* **A vertical seam at the screen's midpoint.** A one-pixel line at
-  `x = screen.width / 2`, running the full height, visible in every screenshot
-  including through windows that should cover it. It is *not* the window
-  ordering: `raise` rotates the raised slot to the end of `order` and the
-  composite loop draws that last, and the launcher's own border and highlight
-  are drawn over the windows behind it correctly. It is not a stride mismatch
-  either -- that would smear diagonally rather than leave one column. Cosmetic,
-  reproducible, and not yet understood; recorded here rather than left for
-  somebody to rediscover.
+* **~~A vertical seam at the screen's midpoint.~~** Investigated and **not
+  reproducible**; the original diagnosis was wrong. Every one of the thirteen
+  screendumps in `build/` was measured for a column that differs from both its
+  neighbours down most of the screen. Five such columns exist across all of
+  them, at x = 14, 970 and 1905 on a 1920-wide screen -- **none at 960**, which
+  is where this entry said to look.
+
+  Each one is a window border: the colour is the compositor's accent, and it
+  runs from the top of the desktop to y = 1149, one pixel above the taskbar,
+  which is exactly a maximised window's extent. The left and right borders are
+  different colours (`6280D5` and `AB6DB6`), which is the focused and unfocused
+  pair rather than an artifact. The claim that it showed *through* windows could
+  not be reproduced in any capture.
+
+  The reason it looked like a stray line is that this is a dark theme: at
+  x = 14 the desktop behind and the window interior are both `09101F`, so the
+  border reads as a line floating on uniform background rather than as an edge
+  between two things.
+
+  Left here rather than deleted, because "somebody saw a line" is worth keeping
+  next to "here is what the pixels actually say". If it is seen again, the
+  measurement is `build/` plus the column scan in this repository's history --
+  and the first question is which x, because 960 is not it.
 
 ### Not feasible as asked, and why
 

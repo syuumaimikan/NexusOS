@@ -1,0 +1,5 @@
+{
+  "agent": "claude_code",
+  "at": "2026-09-15T10:47:43+00:00",
+  "what": "Claude: P-384 landed; the root store is 117 of Mozilla's 121 authorities, up from 76. The disk image was not restaged -- QEMU is running against build/esp and I left it alone."
+}
