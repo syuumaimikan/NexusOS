@@ -164,6 +164,58 @@ impl Device {
     /// # Safety
     ///
     /// The caller must be about to drive this device.
+    /// Walk the capability list, handing each one to `look`.
+    ///
+    /// A capability is a small structure somewhere in the device's own
+    /// configuration space, linked into a chain: a byte at 0x34 says where the
+    /// first one is, and each one's second byte says where the next is, with
+    /// nought ending it. `look` is given the offset and the identifier, and
+    /// returns `Some` to stop.
+    ///
+    /// This exists because modern virtio devices put *everything* here -- which
+    /// bar their registers are in, and at what offset -- rather than at a fixed
+    /// place in configuration space the way the legacy transport did. There is
+    /// no other way to find a virtio 1.0 device's registers at all.
+    ///
+    /// # Safety
+    ///
+    /// The device must be one enumeration found, so its configuration space is
+    /// readable, and nothing else may be writing it.
+    pub unsafe fn capabilities<T>(&self, mut look: impl FnMut(u8, u8) -> Option<T>) -> Option<T> {
+        /// Bit 4 of the status half of the command register: "this device has a
+        /// capability list". A device without one has whatever was left in the
+        /// byte at 0x34, and following it walks into somebody else's registers.
+        const HAS_CAPABILITIES: u32 = 1 << 20;
+        // SAFETY: upheld by the caller.
+        if unsafe { read_config(self.address, 0x04) } & HAS_CAPABILITIES == 0 {
+            return None;
+        }
+
+        // SAFETY: as above.
+        let mut at = (unsafe { read_config(self.address, 0x34) } & 0xFC) as u8;
+        // Bounded, because the list is a chain of pointers the *device* writes
+        // and a device with a loop in it would otherwise stop the machine. The
+        // space is 256 bytes and a capability is at least four, so there cannot
+        // honestly be more than this many.
+        for _ in 0..64 {
+            if at < 0x40 {
+                break;
+            }
+            // SAFETY: as above.
+            let header = unsafe { read_config(self.address, at) };
+            let identifier = (header & 0xFF) as u8;
+            if let Some(found) = look(at, identifier) {
+                return Some(found);
+            }
+            let next = ((header >> 8) & 0xFC) as u8;
+            if next == 0 || next == at {
+                break;
+            }
+            at = next;
+        }
+        None
+    }
+
     pub unsafe fn enable(&self) {
         const IO_SPACE: u32 = 1 << 0;
         const MEMORY_SPACE: u32 = 1 << 1;

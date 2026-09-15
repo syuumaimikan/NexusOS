@@ -1488,22 +1488,46 @@ and then a libc — at which point ordinary Linux software becomes the test.
 `docs/linux-software.md` has the whole list, including what Steam would need
 and why none of it is close. Windows is untouched.
 
-## Phase 16 — Gaming ⬜
+## Phase 16 — Gaming 🚧
 
 Vulkan, GPU drivers, controllers, HDR, VRR, shader cache, frame pacing.
 
-Nothing here is started, and it is worth saying why rather than leaving the box
-unticked. Every item on this list stands on a GPU driver: Vulkan is an interface
-to one, a shader cache caches what one compiles, HDR and VRR are things one
-negotiates with a display. The framebuffer this system draws into came from the
-firmware and is a rectangle of memory with no device behind it that can be asked
-for anything.
+**A GPU driver is done**, and the entry that used to be here was wrong about
+why it could not be. It said every item on this list stands on a GPU driver and
+that the framebuffer came from the firmware with no device behind it — both
+true — and concluded that a GPU driver was out of reach, which was not. Two
+different things were being called by one name.
+
+A **display driver** is finding the device, negotiating with it, allocating a
+framebuffer, telling the device that framebuffer is a scanout, and handing it
+the rectangles that changed. That is an ordinary driver of about the size of the
+USB stack, and `kernel/nexus-kernel/src/drivers/virtio_gpu.rs` is one. Most of
+it is not graphics: virtio-gpu has no legacy form, so it is the first device
+here to need virtio's **modern transport**, and that meant teaching `pci.rs` to
+walk a capability list, which it could not do.
+
+**3D** is the other thing: a command stream in the device's own instruction set,
+a shader compiler, a memory manager, and an implementation of OpenGL or Vulkan
+above it — a per-vendor ISA and a firmware blob on real hardware, or `virgl`
+and a full GL implementation on virtio. That is still millions of lines and is
+still out of reach, and saying so is still honest. It is a different sentence.
+
+So the box is in progress rather than empty. What the driver does today:
+`GET_DISPLAY_INFO`, a 2D resource, memory attached to it, a scanout set, and
+`TRANSFER_TO_HOST_2D` plus `RESOURCE_FLUSH` for a rectangle. Checked from
+outside the guest: the kernel draws three bands of known colour and the host is
+asked for a picture of *that* display, which is 1280x800 with red at row 133,
+green at 400 and blue at 667. See [gpu.md](gpu.md).
+
+The GPU sits beside the firmware's display rather than instead of it, so the
+desktop still draws into the framebuffer the bootloader was handed. Moving it
+across is the next step and a real one.
 
 The one item that does not need a GPU is frame pacing, and the half of it that
 does not need a vertical blank is done — see Phase 9, where it belongs.
 
-Controllers need USB, which is its own phase-sized piece of work and is not on
-this list anywhere. That is an omission in the plan rather than in the system.
+Controllers need USB, which is done since this entry was written — see the
+USB storage work — though nothing yet enumerates a gamepad's HID descriptors.
 
 ## Phase 17 — AI 🚧
 

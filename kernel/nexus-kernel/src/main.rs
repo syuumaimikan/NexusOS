@@ -232,6 +232,19 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         Err(error) => kprintln!("[net ] no network card: {error}"),
     }
 
+    // The GPU, on the same terms. A machine without one keeps the framebuffer
+    // the firmware handed over, which is what every boot before this used.
+    // SAFETY: called once, after enumeration, with the allocators and the
+    // kernel's page tables running.
+    if unsafe { drivers::virtio_gpu::init(&devices) } {
+        // And prove it displays, rather than merely that it answered. The host
+        // can be asked for a picture of what this device is showing, and three
+        // bands of known colour are not something that appears by accident.
+        drivers::virtio_gpu::self_test();
+    } else {
+        kprintln!("[gpu ] no virtio GPU on this machine; the firmware's framebuffer is what there is");
+    }
+
     // The sound card, on the same terms. A machine with none keeps the speaker,
     // which is one bit and says so; a machine with one gets sixteen-bit stereo
     // through a codec, and `sound.rs` prefers it without either caller knowing.
@@ -600,6 +613,17 @@ fn monitor_thread(_argument: usize) {
         if served > 0 || turned_away > 0 {
             kprintln!(
                 "[mon ] removable {served} requests answered, {turned_away} refused"
+            );
+        }
+        let (gpu_commands, gpu_flushes) = drivers::virtio_gpu::statistics();
+        if gpu_commands > 0 {
+            kprintln!(
+                "[mon ] gpu {gpu_commands} commands answered, {gpu_flushes} rectangles flushed{}",
+                if drivers::virtio_gpu::is_present() {
+                    ""
+                } else {
+                    " (the device has stopped)"
+                }
             );
         }
         let (translated, refused, mapped) = compat::linux::statistics();

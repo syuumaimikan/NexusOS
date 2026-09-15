@@ -90,7 +90,12 @@ foreach ($expected in @(
         '8086:2415',
         # The codec answered. A controller whose link is still in reset reports
         # itself present and every mixer write is silently lost.
-        "AC'97 at 00:04.0: 48000 Hz, 2 channels, 128 KiB of buffer, codec ready",
+        # Not the slot. Adding a device to the machine renumbers everything
+        # after it on the bus, and this test broke the day a GPU was plugged in
+        # in front of the sound card -- which is a fact about the argument list
+        # and not about the driver. What matters is the card and the codec.
+        "AC'97 at ",
+        ': 48000 Hz, 2 channels, 128 KiB of buffer, codec ready',
         # And the engine ran. This is the check: the alternative ending of this
         # sentence is " on the speaker".
         'played the start-up chime through the sound card'

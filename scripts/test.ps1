@@ -790,6 +790,13 @@ Invoke-Step 'kanji conversion' {
         (Join-Path $PSScriptRoot 'test-kanji.ps1')) 'kanji conversion tests'
 }
 
+Invoke-Step 'the GPU' {
+    # No desktop needed: the driver comes up during bring-up and draws into its
+    # own scanout, which is a different display from the one the desktop is on.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-gpu.ps1')) 'GPU tests'
+}
+
 Invoke-Step 'sound' {
     # No desktop needed: the chime plays during bring-up, before anything draws.
     Invoke-Native 'powershell' @('-NoProfile', '-File',

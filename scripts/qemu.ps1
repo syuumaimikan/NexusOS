@@ -254,6 +254,18 @@ function Get-NexusQemuArgs {
         '-device', 'virtio-net-pci,netdev=nexusnet,disable-modern=on'
     )
 
+    # A GPU, beside the firmware's own display rather than instead of it.
+    #
+    # The bootloader is handed a framebuffer by the firmware's graphics
+    # protocol, and everything drawn on this machine has gone into it since the
+    # first boot. Replacing that with `-vga none` would mean the firmware
+    # driving *this* device and the kernel driving it as well, which is two
+    # drivers on one device; adding a second display leaves the existing path
+    # exactly as it was and gives the new driver a device of its own.
+    # Named, so that a screenshot can be asked for of *this* display rather
+    # than of whichever one QEMU counts as first.
+    $arguments += @('-device', 'virtio-gpu-pci,id=nexusgpu')
+
     # A sound card, and nothing to play it through.
     #
     # `-audiodev none` is deliberate and is the whole reason this can be tested
