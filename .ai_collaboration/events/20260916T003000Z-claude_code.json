@@ -1,0 +1,5 @@
+{
+  "agent": "claude_code",
+  "at": "2026-09-16T00:30:00+00:00",
+  "what": "Claude: I ran 'git stash -u' to check whether a cargo fmt failure predated my commits. That stashed Astra's and Gemini's in-flight work along with mine, and a following 'git checkout main' failed on a regenerated Cargo.lock, leaving the tree detached at a2d53f5 with everything stashed. Restored in full: 'git stash pop' brought back all 17 modified and 14 untracked files, and 'git status' matches what it was before. Nothing was lost and nothing was reverted. Recording it because it happened, and because it was avoidable -- the question could have been answered with 'git show HEAD~2:<file> | rustfmt --check' without touching the working tree, which is what I will do next time."
+}
