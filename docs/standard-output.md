@@ -57,9 +57,38 @@ order is not a preference: a channel holds a bounded number of messages, so a
 left-hand program writing more than that stops until somebody reads, and the
 reader would be a program the shell had not started yet.
 
+Any number of stages, not two:
+
+```
+/> ls | grep PKG | head 1
+PKG/
+```
+
+Every stage is resolved to a program before any of them is started, so a line
+with a mistake in its last stage does not run its first; and every stage is
+*started* before any is waited for, because the other order deadlocks.
+
 Built-in commands cannot be piped, and say so. They write into the window
 rather than to a handle, and a pipe that quietly dropped the right-hand side of
 `help | count` would be worse than one that refuses.
+
+## The programs there are now
+
+| `ls` | a directory, one name a line, directories with a slash |
+| `cat` | a file, or its input, so `ls \| cat` works |
+| `head` | the first few lines, and it stops reading rather than reading it all |
+| `grep` | the lines containing some text -- a plain substring, not a pattern |
+| `count` | how many lines, bytes and messages arrived |
+
+`cat`, `head` and `grep` are one crate with three binaries, because what they
+share -- reading lines off a channel and writing lines back -- is most of what
+each of them is. They are still separate processes with separate handles; only
+the source is shared.
+
+`grep` matching a substring rather than a regular expression is worth saying
+out loud. Somebody who types `grep "a.c"` on another system means a pattern, and
+here it means three characters. A program that silently treated one as the other
+would match the wrong lines and look right doing it.
 
 ## What the shell does
 

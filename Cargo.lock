@@ -365,6 +365,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-text"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-time"
 version = "0.1.0"
 

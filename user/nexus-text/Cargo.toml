@@ -1,0 +1,36 @@
+[package]
+name = "nexus-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Three small programs that read text and write text: cat, head and grep."
+
+# One crate, three programs. They share the reading and the writing -- which is
+# most of what each of them is -- and three crates to hold thirty lines apiece
+# would be three manifests, three entry points and three sets of build wiring
+# for no separation that means anything. A program here is still its own
+# process with its own handles; only the source tree is shared.
+
+[[bin]]
+name = "nexus-cat"
+path = "src/cat.rs"
+test = false
+
+[[bin]]
+name = "nexus-head"
+path = "src/head.rs"
+test = false
+
+[[bin]]
+name = "nexus-grep"
+path = "src/grep.rs"
+test = false
+
+[lib]
+name = "nexus_text"
+path = "src/lib.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }

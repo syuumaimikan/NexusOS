@@ -168,6 +168,17 @@ try {
         }
         Start-Sleep -Seconds 4
 
+        # Three stages, which is the check that a pipeline is not two special
+        # cases. `grep` finds the names with a capital in them and `head` takes
+        # the first of those.
+        Write-Host '==> ls | grep PKG | head 1' -ForegroundColor Cyan
+        Send-Text 'ls | grep PKG | head 1'
+        Send-Keys @('ret')
+        if (-not (Wait-For -Text 'from BIN/HEAD.ELF at a process' -Seconds 60)) {
+            $failures += 'the shell never started the third stage of the pipeline'
+        }
+        Start-Sleep -Seconds 4
+
         # And a name that is not a command and not a program, so the fallback
         # is shown to have a floor: the shell has to say it does not know it
         # rather than sitting there waiting for something that never started.
@@ -210,7 +221,10 @@ foreach ($expected in @(
         # count of what the left-hand one sent it. A shell that had run them
         # separately would have counted nothing.
         'from BIN/COUNT.ELF at a process',
-        'BIN/LS.ELF | BIN/COUNT.ELF wrote '
+        'BIN/LS.ELF | BIN/COUNT.ELF wrote ',
+        # And the three-stage one, named in full so a shell that quietly ran
+        # two of them would fail.
+        'BIN/LS.ELF | BIN/GREP.ELF | BIN/HEAD.ELF wrote '
     )) {
     $checks++
     if ($output.Contains($expected)) {

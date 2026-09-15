@@ -267,7 +267,7 @@ extern "C" fn main() -> ! {
 /// dropped the right-hand side of `help | count` would be worse than one that
 /// says it cannot do it.
 const BUILT_IN: &[&str] = &[
-    "help", "?", "clear", "cls", "echo", "pwd", "dir", "cd", "cat", "type", "write", "append",
+    "help", "?", "clear", "cls", "echo", "pwd", "dir", "cd", "type", "write", "append",
     "mkdir", "rm", "del", "run", "date", "beep", "set", "look", "sys", "top", "net", "usb",
     "lookup", "dig", "nslookup", "scan", "uptime", "history",
 ];
@@ -278,28 +278,34 @@ const BUILT_IN: &[&str] = &[
 /// not a pipe. The scan is the same one `nexus_shellwords` does and it is done
 /// again here rather than shared, because this needs the *position* of the bar
 /// in the original text and the splitter returns words.
-fn split_pipe(line: &str) -> Option<(alloc::string::String, alloc::string::String)> {
+fn split_pipe(line: &str) -> Option<Vec<alloc::string::String>> {
+    let mut sides: Vec<alloc::string::String> = Vec::new();
     let mut quote: Option<char> = None;
+    let mut from = 0usize;
+
     for (at, character) in line.char_indices() {
         match quote {
             Some(open) if character == open => quote = None,
             Some(_) => {}
             None if character == '\'' || character == '"' => quote = Some(character),
             None if character == '|' => {
-                let left = line[..at].trim();
-                let right = line[at + 1..].trim();
-                if left.is_empty() || right.is_empty() {
-                    return None;
-                }
-                return Some((
-                    alloc::string::String::from(left),
-                    alloc::string::String::from(right),
-                ));
+                sides.push(alloc::string::String::from(line[from..at].trim()));
+                from = at + 1;
             }
             None => {}
         }
     }
-    None
+    if sides.is_empty() {
+        return None;
+    }
+    sides.push(alloc::string::String::from(line[from..].trim()));
+
+    // A bar with nothing on one side of it is a line somebody is still typing,
+    // not a pipe. Refused as a whole rather than run with a piece missing.
+    if sides.iter().any(alloc::string::String::is_empty) {
+        return None;
+    }
+    Some(sides)
 }
 
 /// A kanji conversion somebody is choosing between.
@@ -754,8 +760,8 @@ impl Terminal {
         // built-in commands write into the window rather than to a handle, and
         // a pipe that silently ignored its right-hand side would be worse than
         // one that says it cannot.
-        if let Some((left, right)) = split_pipe(line) {
-            self.pipe_line(&left, &right);
+        if let Some(sides) = split_pipe(line) {
+            self.pipe_line(&sides);
             return;
         }
 
@@ -782,7 +788,13 @@ impl Terminal {
                 self.run_program("BIN/LS.ELF", &arguments);
             }
             "cd" => self.change(words.argument(0)),
-            "cat" | "type" => self.show(words.argument(0)),
+            // `cat` is a program now too, in `user/nexus-text`. `type` is the
+            // same program under the name somebody coming from the other
+            // tradition would type.
+            "type" => {
+                let arguments = words.arguments().join(" ");
+                self.run_program("BIN/CAT.ELF", &arguments);
+            }
             "write" => self.write_file(words.argument(0), &words.arguments().join(" ")),
             "append" => self.append_file(words.argument(0), &words.arguments().join(" ")),
             "mkdir" => self.make_directory(words.argument(0)),
@@ -847,6 +859,8 @@ impl Terminal {
             "term.help.ls",
             "term.help.cd",
             "term.help.cat",
+            "term.help.head",
+            "term.help.grep",
             "term.help.write",
             "term.help.append",
             "term.help.mkdir",
@@ -959,43 +973,6 @@ impl Terminal {
             self.trouble(nexus_i18n::text("term.gone"));
         }
     }
-
-    /// `cat`
-    fn show(&mut self, name: Option<&str>) {
-        let Some(name) = name else {
-            self.trouble(nexus_i18n::text("term.needname"));
-            return;
-        };
-        let Some(directory) = self.directory() else {
-            self.trouble(nexus_i18n::text("term.nofiles"));
-            return;
-        };
-        let file = match nexus_user::open(directory, name) {
-            Ok(handle) => handle,
-            Err(error) => {
-                let text =
-                    nexus_i18n::format("term.cannotopen", &[("name", &name), ("why", &error)]);
-                self.trouble(&text);
-                return;
-            }
-        };
-        let size = nexus_user::size(file).unwrap_or(0).min(MAX_FILE);
-        let mut bytes = alloc::vec![0u8; size];
-        let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
-        nexus_user::close(file).ok();
-        bytes.truncate(read);
-
-        if bytes.is_empty() {
-            self.note(nexus_i18n::text("term.emptyfile"));
-            return;
-        }
-        // Shown as text, replacing what is not. A file of machine code printed
-        // as a wall of replacement characters is an honest answer to `cat` on
-        // a program, and refusing to show it would be less use.
-        let text = String::from_utf8_lossy(&bytes).replace('\t', "    ");
-        self.plain(&text);
-    }
-
     /// `write`
     fn write_file(&mut self, name: Option<&str>, joined: &str) {
         let Some(name) = name else {
@@ -1348,78 +1325,133 @@ impl Terminal {
     }
 
     /// Run one typed line that has a `|` in it.
-    fn pipe_line(&mut self, left: &str, right: &str) {
-        let Some((left_program, left_arguments)) = self.piped_program(left) else {
-            return;
-        };
-        let Some((right_program, right_arguments)) = self.piped_program(right) else {
-            return;
-        };
-        self.run_pipe(
-            &left_program,
-            &left_arguments,
-            &right_program,
-            &right_arguments,
-        );
+    ///
+    /// Every side is resolved to a program before any of them is started, so a
+    /// line with a mistake in its last stage does not run its first.
+    fn pipe_line(&mut self, sides: &[alloc::string::String]) {
+        let mut stages: Vec<(alloc::string::String, alloc::string::String)> = Vec::new();
+        for side in sides {
+            let Some(stage) = self.piped_program(side) else {
+                return;
+            };
+            stages.push(stage);
+        }
+        self.run_pipe(&stages);
     }
 
-    /// Run `left | right`: the first program's output is the second one's input.
+    /// Run a pipeline: each program's output is the next one's input.
     ///
     /// A pipe here is not a new kind of object. It is one ordinary channel,
-    /// handed to one program as its standard output and to the other as its
+    /// handed to one program as its standard output and to the next as its
     /// standard input, and neither of them knows which end it has. That is the
-    /// whole of it, and it is why this function is short.
+    /// whole of it, and it is why this is short for any number of stages.
     ///
-    /// Both are started before either is waited for. The other order deadlocks:
-    /// a channel holds a bounded number of messages, so a left-hand program
+    /// Every stage is started before any of them is waited for. The other order
+    /// deadlocks: a channel holds a bounded number of messages, so a program
     /// that writes more than that stops until somebody reads -- and the reader
-    /// is a program the shell has not started yet.
-    fn run_pipe(&mut self, left: &str, left_arguments: &str, right: &str, right_arguments: &str) {
-        // The pipe itself. `between` is written by the left program; `and` is
-        // read by the right one.
-        let Ok((between, and)) = nexus_user::channel() else {
+    /// would be a program the shell has not started yet.
+    fn run_pipe(&mut self, stages: &[(alloc::string::String, alloc::string::String)]) {
+        if stages.len() < 2 {
+            return;
+        }
+
+        // The last stage's output is what reaches the window.
+        let Ok((mine, last_output)) = nexus_user::channel() else {
             self.trouble(nexus_i18n::text("term.noprograms"));
             return;
         };
-        // And the right-hand program's own output, which is what reaches the
-        // window.
-        let Ok((mine, theirs)) = nexus_user::channel() else {
-            nexus_user::close(between).ok();
-            nexus_user::close(and).ok();
-            self.trouble(nexus_i18n::text("term.noprograms"));
-            return;
-        };
+        // And the first stage has nothing to read.
         let Some(nothing) = self.nothing_to_read() else {
-            nexus_user::close(between).ok();
-            nexus_user::close(and).ok();
             nexus_user::close(mine).ok();
-            nexus_user::close(theirs).ok();
+            nexus_user::close(last_output).ok();
             return;
         };
 
-        let Some((left_channel, left_process)) =
-            self.spawn_program(left, left_arguments, between, nothing)
-        else {
-            nexus_user::close(and).ok();
+        // One channel between each pair. Made up front, so that a failure to
+        // make one leaves nothing started rather than half a pipeline running.
+        let mut between: Vec<(Handle, Handle)> = Vec::new();
+        let mut short = false;
+        for _ in 1..stages.len() {
+            match nexus_user::channel() {
+                Ok(pair) => between.push(pair),
+                Err(_) => {
+                    short = true;
+                    break;
+                }
+            }
+        }
+        if short {
+            for (writes, reads) in between {
+                nexus_user::close(writes).ok();
+                nexus_user::close(reads).ok();
+            }
             nexus_user::close(mine).ok();
-            nexus_user::close(theirs).ok();
+            nexus_user::close(last_output).ok();
+            nexus_user::close(nothing).ok();
+            self.trouble(nexus_i18n::text("term.noprograms"));
             return;
-        };
-        let Some((right_channel, right_process)) =
-            self.spawn_program(right, right_arguments, theirs, and)
-        else {
+        }
+
+        let mut started: Vec<(alloc::string::String, Handle, Handle)> = Vec::new();
+        let mut stopped = false;
+        for (index, (program, arguments)) in stages.iter().enumerate() {
+            let output = if index + 1 == stages.len() {
+                last_output
+            } else {
+                between[index].0
+            };
+            let input = if index == 0 {
+                nothing
+            } else {
+                between[index - 1].1
+            };
+
+            match self.spawn_program(program, arguments, output, input) {
+                Some((channel, process)) => started.push((program.clone(), channel, process)),
+                None => {
+                    stopped = true;
+                    break;
+                }
+            }
+        }
+
+        if stopped {
+            // Whatever did start is waited for rather than abandoned. A process
+            // nobody waits for is one whose ending nobody hears, and the
+            // handles this shell holds for it would sit there until it exits.
+            //
+            // The ends that were never handed over go too: the pipeline is
+            // broken, and leaving one open would leave the stage before it
+            // waiting for a reader that is never coming.
             nexus_user::close(mine).ok();
-            self.finished(left, left_channel, left_process);
+            for (index, (writes, reads)) in between.into_iter().enumerate() {
+                if index >= started.len() {
+                    nexus_user::close(writes).ok();
+                }
+                if index + 1 >= started.len() {
+                    nexus_user::close(reads).ok();
+                }
+            }
+            for (program, channel, process) in started {
+                self.finished(&program, channel, process);
+            }
             return;
-        };
+        }
 
         let read = self.show_output(mine);
-        nexus_user::log(&format!("term: {left} | {right} wrote {read} bytes")).ok();
-        // The left one first, because it is the one that has already finished:
-        // the right one cannot have closed its output until its input ended,
-        // and its input ending is the left one exiting.
-        self.finished(left, left_channel, left_process);
-        self.finished(right, right_channel, right_process);
+        let names: Vec<&str> = stages.iter().map(|(program, _)| program.as_str()).collect();
+        nexus_user::log(&format!(
+            "term: {} wrote {read} bytes",
+            names.join(" | ")
+        ))
+        .ok();
+
+        // In order, because that is the order they finish in: a stage cannot
+        // close its output until its input has ended, and its input ending is
+        // the stage before it exiting.
+        for (program, channel, process) in started {
+            self.finished(&program, channel, process);
+        }
     }
 
     /// Where the machine's own settings live, from the root this shell holds.

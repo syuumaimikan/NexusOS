@@ -35,7 +35,7 @@ bootloader = ["build", "-p", "nexus-boot", "--target", "x86_64-unknown-uefi"]
 # The same custom-target machinery as the kernel, with the small
 # code model, because they live in the low half of the address space.
 user = ["build", "-p", "nexus-init", "-p", "nexus-hello",
-        "-p", "nexus-compositor", "-p", "nexus-client", "-p", "nexus-shell", "-p", "nexus-install", "-p", "nexus-find", "-p", "nexus-setup", "-p", "nexus-updater", "-p", "nexus-browser", "-p", "nexus-term", "-p", "nexus-wall", "-p", "nexus-settings", "-p", "nexus-store", "-p", "nexus-view", "-p", "nexus-launch", "-p", "nexus-edit", "-p", "nexus-files", "-p", "nexus-ls", "-p", "nexus-count", "-p", "nexus-assist", "-p", "nexus-ai", "-p", "nexus-idle", "--target", "targets/x86_64-nexus-user.json",
+        "-p", "nexus-compositor", "-p", "nexus-client", "-p", "nexus-shell", "-p", "nexus-install", "-p", "nexus-find", "-p", "nexus-setup", "-p", "nexus-updater", "-p", "nexus-browser", "-p", "nexus-term", "-p", "nexus-wall", "-p", "nexus-settings", "-p", "nexus-store", "-p", "nexus-view", "-p", "nexus-launch", "-p", "nexus-edit", "-p", "nexus-files", "-p", "nexus-ls", "-p", "nexus-count", "-p", "nexus-text", "-p", "nexus-assist", "-p", "nexus-ai", "-p", "nexus-idle", "--target", "targets/x86_64-nexus-user.json",
         "-Zbuild-std=core,compiler_builtins,alloc",
         "-Zbuild-std-features=compiler-builtins-mem"]
 

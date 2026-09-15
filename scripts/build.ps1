@@ -173,6 +173,16 @@ $CountElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-count"
 $StagedCount = Publish-Program -Elf $CountElf -ProgramDir $ProgramDir -Name 'count.elf'
 $countSize = [math]::Round((Get-Item $StagedCount).Length / 1KB, 1)
 
+# `cat`, `head` and `grep`: three programs from one crate, because what they
+# share -- reading lines off a channel and writing lines back -- is most of what
+# each of them is.
+$textSizes = @()
+foreach ($tool in @('cat', 'head', 'grep')) {
+    $elf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-$tool"
+    $staged = Publish-Program -Elf $elf -ProgramDir $ProgramDir -Name "$tool.elf"
+    $textSizes += [math]::Round((Get-Item $staged).Length / 1KB, 1)
+}
+
 $StoreElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-store"
 $StagedStore = Publish-Program -Elf $StoreElf -ProgramDir $ProgramDir -Name 'store.elf'
 $storeSize = [math]::Round((Get-Item $StagedStore).Length / 1KB, 1)
@@ -441,6 +451,7 @@ Write-Host "  editor     : $editSize KiB  -> BIN\EDIT.ELF on the disk"
 Write-Host "  files      : $filesSize KiB  -> BIN\FILES.ELF on the disk"
 Write-Host "  ls         : $lsSize KiB  -> BIN\LS.ELF on the disk"
 Write-Host "  count      : $countSize KiB  -> BIN\COUNT.ELF on the disk"
+Write-Host "  cat/head/grep: $($textSizes -join '/') KiB  -> BIN\{CAT,HEAD,GREP}.ELF on the disk"
 Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
 Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
 Write-Host "  gemini agt : $geminiSize KiB  -> BIN\GEMINI.ELF on the disk"
