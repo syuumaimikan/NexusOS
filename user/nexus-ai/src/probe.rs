@@ -31,6 +31,7 @@ fn receive(channel: Handle, bytes: &mut [u8], handles: &mut [Handle]) -> nexus_u
     received
 }
 extern "C" fn main() -> ! {
+    verify_context();
     nexus_user::log("ai-probe: starting actual service process").ok();
     nexus_user::send(Handle(1), b"BIN/AI.ELF", &[]).unwrap_or_else(|_| fail());
     let mut bytes = [0; 256];
@@ -155,6 +156,87 @@ extern "C" fn main() -> ! {
     .ok();
     nexus_user::log("ai-probe: PASS service IPC policy verification disconnect; kernel alive").ok();
     nexus_user::exit()
+}
+fn verify_context() {
+    use nexus_ai_core::context::{
+        ByteBpeBudget, Context, Destination, Entry, Origin, Policy, Sensitivity,
+    };
+    struct Source;
+    impl nexus_ai_core::SystemSource for Source {
+        fn snapshot(&mut self) -> Result<nexus_ai_core::Snapshot, nexus_ai_core::Unavailable> {
+            Ok(nexus_ai_core::Snapshot {
+                uptime_ms: nexus_user::uptime(),
+                thread_id: nexus_user::thread_id(),
+            })
+        }
+    }
+    let mut runtime = nexus_ai_core::Runtime::new(1);
+    let request = Request {
+        session: 1,
+        id: 1,
+        tool: Tool::SystemInfo,
+    };
+    if runtime
+        .execute(request, nexus_user::uptime(), &mut Source)
+        .status
+        != Status::Verified
+    {
+        fail();
+    }
+    let facts = runtime.context().unwrap_or_else(|| fail());
+    let mut buffer = [0; 96];
+    let text = facts.write(&mut buffer).unwrap_or_else(|_| fail());
+    let item = |text| Entry {
+        text,
+        origin: Origin::System,
+        scope: facts.scope(),
+        collected_ms: facts.collected_ms(),
+        priority: 1,
+        relevance: 1,
+        sensitivity: Sensitivity::Public,
+        authorized: true,
+        remote_allowed: false,
+    };
+    let mut japanese = item("日本語の確認🌸");
+    japanese.origin = Origin::User;
+    let entries = [item(text), japanese, item("password=probe-fixture")];
+    let policy = Policy {
+        scope: facts.scope(),
+        now_ms: nexus_user::uptime(),
+        max_age_ms: 500,
+        destination: Destination::Local,
+        allow_private: false,
+        byte_budget: 256,
+        token_budget: 258,
+    };
+    let mut context = Context::select(&entries, &policy, &ByteBpeBudget).unwrap_or_else(|_| fail());
+    if context.selected().count() != 2
+        || context.report().redacted != 1
+        || !context.text().contains("日本語の確認🌸")
+        || !context.text().starts_with(text)
+    {
+        fail();
+    }
+    let remote = Policy {
+        destination: Destination::Remote,
+        ..policy
+    };
+    if !Context::select(&entries, &remote, &ByteBpeBudget)
+        .unwrap_or_else(|_| fail())
+        .text()
+        .is_empty()
+    {
+        fail();
+    }
+    context.clear();
+    runtime.cancel();
+    if !context.text().is_empty() || runtime.context().is_some() {
+        fail();
+    }
+    nexus_user::log(
+        "ai-probe: context PASS verified observations UTF-8 privacy budget cancellation",
+    )
+    .ok();
 }
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {

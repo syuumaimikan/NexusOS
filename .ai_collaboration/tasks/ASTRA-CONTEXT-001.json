@@ -1,0 +1,45 @@
+{
+  "id": "ASTRA-CONTEXT-001",
+  "owner": "gpt6_astra",
+  "status": "completed",
+  "scope": "Bounded transient context selection and verified observation adapter; not complete Nexus AI MVP",
+  "base_commit": "da6e9a9",
+  "files": [
+    "shared/nexus-ai/src/context.rs",
+    "shared/nexus-ai/src/context_tests.rs",
+    "shared/nexus-ai/src/lib.rs",
+    "user/nexus-ai/src/probe.rs",
+    "docs/AI/CONTEXT.md"
+  ],
+  "tests": {
+    "host_model": "38 passed, 0 failed (33 unit, 5 checkpoint integration); includes 13 new context tests",
+    "host_without_model": "27 passed, 0 failed in shared checkout",
+    "clippy": "host model all-targets and native AI target passed with -D warnings, in both shared and isolated checkouts",
+    "japanese_budget_cases": 961,
+    "real_inference": "Selected context tokenized with real tokenizer; pretrained first token matches existing independent oracle ID 432"
+  },
+  "build": "Detached baseline kernel, bootloader and user binaries built successfully with current context changes",
+  "qemu": {
+    "status": "passed",
+    "checkout": "C:/Users/yuang/Projects/NexusOS-context-verification",
+    "run": "build/ai-81d07b9488f548b69d181bd2938e512b",
+    "context_marker": "ai-probe: context PASS verified observations UTF-8 privacy budget cancellation",
+    "service_marker": "ai-probe: PASS service IPC policy verification disconnect; kernel alive",
+    "serial_sha256": "649d4dcf4d5121b426321b294b9146c9cd96739a6ba2dfa0469d2a5cb7a163ec",
+    "ai_elf_sha256": "03b5869c32b9bdc1a45968be7caec766ffe2c0bc4673e4fd7fbc114a7e7ad181",
+    "init_elf_sha256": "fff74d7cd04b143da90c6e4c4c603cf41eea1527a2b6a066e6ae4dd3303983c3",
+    "kernel_elf_sha256": "6d157be140da493ae9316c2deaf154aee77b4ca43598ae3f4b202bb2b4ffbe20"
+  },
+  "integration": {
+    "status": "pending_shared_tree_verification",
+    "owner_role": "Gemini 3.1 Pro: integration and verification (user assigned)",
+    "limitation": "Shared-checkout full harness hit concurrent browser TLS missing dependency/method/call-argument errors. No Claude files changed. Isolated result excludes all concurrent uncommitted model/TLS edits.",
+    "review_request": "ASTRA-CONTEXT-001-REVIEW",
+    "review_status": "pending"
+  },
+  "verification_notes": [
+    "Initial isolated host run reused a baseline artifact after copying older-timestamp files. Not counted as context coverage. Repeated with fresh target-context-host directory: 38 passed.",
+    "A nested verification worktree inherited parent Cargo aliases; moved to the recorded sibling location before successful build.",
+    "Context marker independently checked in serial log, in addition to the harness final marker and live-kernel check."
+  ]
+}
