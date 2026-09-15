@@ -104,7 +104,7 @@ extern "C" fn main() -> ! {
         finish();
     }
 
-    let mut lent = [Handle(0); 2];
+    let mut lent = [Handle(0); 3];
     let (window, carried) = match Window::open(COMPOSITOR, SURFACE_AT, &mut lent) {
         Ok(opened) => opened,
         Err(trouble) => {
@@ -116,7 +116,13 @@ extern "C" fn main() -> ! {
     let mut assistant = Assistant::new(
         (carried >= 1).then_some(lent[0]),
         (carried >= 2).then_some(lent[1]),
+        (carried >= 3).then_some(lent[2]),
     );
+
+    if let Some(ai) = assistant.ai {
+        window.watch(ai, nexus_window::FIRST_KEY).ok();
+    }
+
     nexus_user::log("assist: an agent that can only do what it was lent").ok();
 
     let outcome = window.run(&mut assistant);
@@ -156,6 +162,14 @@ struct Assistant {
     root: Option<Handle>,
     /// The channel that says what the machine is doing.
     machine: Option<Handle>,
+    /// The AI service channel.
+    ai: Option<Handle>,
+    /// The ID of the last request sent to the AI service.
+    last_id: u64,
+    /// The tool we are waiting for a reply about.
+    pending_tool: Option<Tool>,
+    /// The argument for the pending tool (e.g. search string).
+    pending_argument: String,
     /// What has been said, oldest first.
     lines: Vec<Line>,
     /// What is being typed.
@@ -167,7 +181,7 @@ struct Assistant {
 }
 
 impl Assistant {
-    fn new(root: Option<Handle>, machine: Option<Handle>) -> Self {
+    fn new(root: Option<Handle>, machine: Option<Handle>, ai: Option<Handle>) -> Self {
         let look = root
             .and_then(|handle| nexus_user::open(handle, SYSTEM).ok())
             .and_then(|directory| {
@@ -181,6 +195,10 @@ impl Assistant {
         let mut assistant = Self {
             root,
             machine,
+            ai,
+            last_id: 0,
+            pending_tool: None,
+            pending_argument: String::new(),
             lines: Vec::new(),
             typing: String::new(),
             scrolled: 0,
@@ -192,20 +210,45 @@ impl Assistant {
         assistant
     }
 
-    fn say(&mut self, text: &str, kind: Kindness) {
+    fn say(&mut self, text: &str, kindness: Kindness) {
+        if let Some(Line { kind, .. }) = self.lines.last_mut() {
+            if *kind == Kindness::Did && kindness == Kindness::Said {
+                *kind = Kindness::Said;
+            }
+        }
         for piece in text.split('\n') {
             if self.lines.len() >= HISTORY {
                 self.lines.remove(0);
             }
             self.lines.push(Line {
                 text: piece.to_string(),
-                kind,
+                kind: kindness,
             });
         }
         self.scrolled = 0;
     }
 
-    /// Ask whether a tool may be used, and say what the answer was.
+    fn send_ai_request(&mut self, tool: Tool, argument: &str) -> bool {
+        if let Some(ai) = self.ai {
+            self.last_id += 1;
+            let request = nexus_ai_core::Request {
+                session: 1,
+                id: self.last_id,
+                tool,
+            };
+            self.pending_tool = Some(tool);
+            self.pending_argument = argument.to_string();
+            let bytes = nexus_ai_core::wire::encode_request(request);
+            if nexus_user::send(ai, &bytes, &[]).is_ok() {
+                return true;
+            }
+            self.pending_tool = None;
+        }
+        false
+    }
+
+    /// Ask the permission model whether a tool may be used, and if not, say
+    /// why in a way the person looking at the window understands.
     ///
     /// The policy is not this program's: `nexus_ai_core::permitted` decides,
     /// and this window asks and obeys.
@@ -250,37 +293,35 @@ impl Assistant {
             Err(status) => status,
         };
 
-        // `permitted` returns one of three today, and `Status` has ten
-        // variants. The last arm is not padding and is not unreachable in the
-        // sense that matters: it is what happens when Astra adds a reason to
-        // refuse and this window has not been taught to phrase it. Refusing
-        // and naming the raw status is right; the alternative is a match that
-        // has to be edited in lockstep with somebody else's crate, and the
-        // failure mode of forgetting is an agent that does the thing.
+        self.say_may_result(tool, status);
+        false
+    }
+
+    fn say_may_result(&mut self, tool: Tool, status: nexus_ai_core::Status) {
+        let (permission, _) = nexus_ai_core::requirement(tool);
+        let named = format!("{permission:?}");
+        let tool_name = format!("{tool:?}");
         let status_name = format!("{status:?}");
-        // Typed, because binding the list to a name loses the unsizing that
-        // happens for free when it is written out at the call.
         let (key, fields): (&str, [(&str, &dyn core::fmt::Display); 2]) = match status {
-            Status::ConfirmRequired => (
+            nexus_ai_core::Status::ConfirmRequired => (
                 "assist.needsconfirming",
                 [("tool", &tool_name), ("permission", &named)],
             ),
-            Status::Privileged => (
+            nexus_ai_core::Status::Privileged => (
                 "assist.privileged",
                 [("tool", &tool_name), ("permission", &named)],
             ),
-            Status::Blocked => (
+            nexus_ai_core::Status::Blocked => (
                 "assist.blocked",
                 [("tool", &tool_name), ("permission", &named)],
             ),
             _ => (
-                "assist.refusedunknown",
+                "assist.refused",
                 [("tool", &tool_name), ("reason", &status_name)],
             ),
         };
         let why = nexus_i18n::format(key, &fields);
         self.say(&why, Kindness::Refused);
-        false
     }
 
     /// Read the question and do something about it.
@@ -310,20 +351,24 @@ impl Assistant {
             "状態",
             "負荷",
         ]) {
-            self.about_the_machine();
+            if !self.send_ai_request(Tool::SystemInfo, "") {
+                self.about_the_machine_fallback();
+            }
         } else if wants(&["package", "installed", "software", "パッケージ", "導入"]) {
-            self.about_packages();
+            if !self.send_ai_request(Tool::FileRead, "") {
+                self.about_packages();
+            }
         } else if let Some(what) = after_any(
             &lowered,
             asked,
             &["find ", "search ", "look for ", "探して", "検索"],
         ) {
-            self.search(&what);
+            if !self.send_ai_request(Tool::FileRead, &what) {
+                self.search(&what);
+            }
         } else if wants(&[
             "delete", "remove", "write", "install", "run ", "消し", "削除", "書き",
         ]) {
-            // Deliberately reached: somebody asking for one of these should see
-            // the permission model refuse it by name, not a shrug.
             let tool = if wants(&["delete", "remove", "消し", "削除"]) {
                 Tool::FileRemove
             } else if wants(&["run ", "install"]) {
@@ -331,7 +376,9 @@ impl Assistant {
             } else {
                 Tool::FileWrite
             };
-            self.may(tool);
+            if !self.send_ai_request(tool, "") {
+                self.may(tool);
+            }
         } else {
             self.say(nexus_i18n::text("assist.cannot"), Kindness::Said);
             self.say(nexus_i18n::text("assist.hint"), Kindness::Did);
@@ -339,7 +386,7 @@ impl Assistant {
     }
 
     /// How busy the machine is, through the kernel's snapshot service.
-    fn about_the_machine(&mut self) {
+    fn about_the_machine_fallback(&mut self) {
         if !self.may(Tool::SystemInfo) {
             return;
         }
@@ -567,6 +614,58 @@ impl App for Assistant {
             Key::Language => true,
             _ => false,
         }
+    }
+
+    fn woken(&mut self, key: Option<u64>) -> bool {
+        if key == Some(nexus_window::FIRST_KEY) {
+            if let Some(ai) = self.ai {
+                let mut reply = [0u8; 128];
+                let mut handles = [Handle(0); 4];
+                if let Ok(received) = nexus_user::receive(ai, &mut reply, &mut handles) {
+                    for handle in &handles[..received.handles] {
+                        nexus_user::close(*handle).ok();
+                    }
+                    if let Some(response) = nexus_ai_core::wire::decode_response(&reply[..received.bytes]) {
+                        if response.id == self.last_id {
+                            let tool = self.pending_tool.take();
+                            let argument = core::mem::take(&mut self.pending_argument);
+                            if response.status == nexus_ai_core::Status::Verified {
+                                if tool == Some(Tool::SystemInfo) {
+                                    let said = nexus_i18n::format(
+                                        "assist.uptime",
+                                        &[
+                                            ("uptime", &response.snapshot.uptime_ms),
+                                            ("thread", &response.snapshot.thread_id),
+                                        ],
+                                    );
+                                    self.say(&said, Kindness::Said);
+                                }
+                            } else if response.status == nexus_ai_core::Status::Unsupported {
+                                if let Some(t) = tool {
+                                    if t == Tool::SystemInfo {
+                                        self.about_the_machine_fallback();
+                                    } else if t == Tool::FileRead {
+                                        if argument.is_empty() {
+                                            self.about_packages();
+                                        } else {
+                                            self.search(&argument);
+                                        }
+                                    } else {
+                                        self.may(t);
+                                    }
+                                }
+                            } else {
+                                if let Some(t) = tool {
+                                    self.say_may_result(t, response.status);
+                                }
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
