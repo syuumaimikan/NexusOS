@@ -1,0 +1,14 @@
+[package]
+name = "nexus-roots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Builds the root certificate store this machine trusts, using the machine's own X.509 parser."
+
+[[bin]]
+name = "nexus-roots"
+path = "src/main.rs"
+
+[dependencies]
+nexus-tls = { path = "../../shared/nexus-tls" }

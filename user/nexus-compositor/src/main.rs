@@ -140,7 +140,15 @@ const POINTER: Handle = Handle(4);
 const NETWORK: Handle = Handle(6);
 
 /// The filesystem, held to lend to a terminal and read by nothing here.
+///
+/// Except for one file: [`open_roots`] reaches through it for the root
+/// certificate store, so that a browser can be handed that one file rather than
+/// the disk it sits on.
 const FILESYSTEM: Handle = Handle(7);
+
+/// Where the root certificate store lives on the store.
+const SYSTEM: &str = "SYSTEM";
+const ROOTS: &str = "ROOTS.NXR";
 
 /// The speaker, held on the same terms and never used by this program.
 ///
@@ -1161,6 +1169,44 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
 /// message means -- a tint for a client, a count of window slots for the
 /// desktop.
 #[allow(clippy::too_many_arguments)]
+/// Open the root certificate store, read only, to lend to a browser.
+///
+/// `None` when there is not one, which is an ordinary state on a machine whose
+/// disk has just been made and not a failure. The browser is told, and says so
+/// when somebody types an `https://` address, rather than falling back to
+/// `http://` -- which would be the one genuinely bad answer.
+fn open_roots() -> Option<nexus_user::Handle> {
+    let directory = nexus_user::open(FILESYSTEM, SYSTEM).ok()?;
+    let file = nexus_user::open(directory, ROOTS).ok();
+    // The directory handle was the means, not the thing lent. Closed here so
+    // that nothing but the file itself can leave this function.
+    nexus_user::close(directory).ok();
+    let file = file?;
+    // Read and transfer: enough to read it and to be given it, and no write,
+    // so the program it goes to cannot alter what it trusts.
+    let narrowed = nexus_user::duplicate(
+        file,
+        nexus_user::rights::READ | nexus_user::rights::TRANSFER,
+    )
+    .ok();
+    nexus_user::close(file).ok();
+    narrowed
+}
+
+fn start_service(program: &[u8]) -> Option<nexus_user::Handle> {
+    if nexus_user::send(SPAWNER, program, &[]).is_err() {
+        return None;
+    }
+    let mut reply = [0u8; 64];
+    let mut handles = [nexus_user::Handle(0); 2];
+    let received = nexus_user::receive(SPAWNER, &mut reply, &mut handles).ok()?;
+    if received.handles != 2 || !reply[..received.bytes].starts_with(b"started ") {
+        return None;
+    }
+    nexus_user::close(handles[1]).ok();
+    Some(handles[0])
+}
+
 fn start_program(
     program: &[u8],
     index: usize,
@@ -2211,6 +2257,30 @@ fn open_window(
                 failed("compositor: FAILED: could not lend the network to a browser");
                 return Some(Asked::Nothing);
             };
+            // And the root certificate store, which is what makes `https://`
+            // mean anything. The *file*, opened here, and not the directory it
+            // is in and certainly not the disk: a browser is the program on
+            // this machine most likely to be handed something hostile, and the
+            // whole of what it can reach on the store should be the one file it
+            // needs to check a certificate with.
+            //
+            // Read only, so it cannot rewrite the list of authorities its own
+            // security rests on. A browser that could edit its root store is a
+            // browser one bug away from trusting anybody.
+            let roots = open_roots();
+            if roots.is_none() {
+                // Not fatal. The browser starts, `http://` works, and `https://`
+                // says there is no root store rather than pretending.
+                nexus_user::log(
+                    "compositor: no root certificate store; this browser cannot verify https",
+                )
+                .ok();
+            }
+            let mut lent = alloc::vec::Vec::with_capacity(2);
+            lent.push(theirs);
+            if let Some(roots) = roots {
+                lent.push(roots);
+            }
             start_program(
                 BROWSER,
                 slot,
@@ -2219,7 +2289,7 @@ fn open_window(
                 width,
                 height,
                 0,
-                &[theirs],
+                &lent,
             )?
         }
         What::Terminal => {
@@ -2349,6 +2419,10 @@ fn open_window(
                 failed("compositor: FAILED: could not lend the agent what it may have");
                 return Some(Asked::Nothing);
             };
+            let Some(ai_channel) = start_service(b"BIN/AI.ELF") else {
+                failed("compositor: FAILED: could not start the AI service");
+                return Some(Asked::Nothing);
+            };
             start_program(
                 ASSISTANT,
                 slot,
@@ -2357,7 +2431,7 @@ fn open_window(
                 width,
                 height,
                 0,
-                &[files, machine],
+                &[files, machine, ai_channel],
             )?
         }
         What::Launcher => {

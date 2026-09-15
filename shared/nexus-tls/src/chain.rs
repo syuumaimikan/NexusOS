@@ -123,6 +123,7 @@ impl core::fmt::Display for Trouble {
 }
 
 /// The certificates this machine trusts to be at the top of a chain.
+#[derive(Debug)]
 pub struct Roots {
     certificates: Vec<Certificate>,
 }

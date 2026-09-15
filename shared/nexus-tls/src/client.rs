@@ -33,6 +33,7 @@
 //! * continue when the server's `Finished` does not match;
 //! * send anything at all before the server has proved who it is.
 
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -145,7 +146,11 @@ const MOST_HANDSHAKE: usize = 100 * 1024;
 pub struct Client {
     step: Step,
     host: String,
-    roots: Roots,
+    /// Shared rather than owned: a browser loads one root store at start-up
+    /// and every connection it makes wants the same hundred-odd certificates.
+    /// Copying them per fetch would be a hundred kilobytes of memcpy to answer
+    /// a question none of the copies would answer differently.
+    roots: Rc<Roots>,
     now: Option<i64>,
 
     /// This connection's ephemeral private key, until the shared secret is made.
@@ -187,7 +192,7 @@ impl Client {
     /// of randomness and must not invent one.
     pub fn start(
         host: &str,
-        roots: Roots,
+        roots: Rc<Roots>,
         now: Option<i64>,
         random: [u8; 32],
         private: [u8; 32],

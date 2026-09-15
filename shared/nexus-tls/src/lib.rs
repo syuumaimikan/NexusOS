@@ -38,6 +38,7 @@ pub mod der;
 pub mod handshake;
 pub mod p256;
 pub mod record;
+pub mod roots;
 pub mod rsa;
 pub mod schedule;
 pub mod wire;

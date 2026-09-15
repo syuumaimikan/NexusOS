@@ -1275,6 +1275,10 @@ fn filesystem_self_test() {
 /// machine whose picture viewer had nothing to show on a fresh disk would be a
 /// machine where that program could not be used until somebody had already
 /// used it to put a file somewhere.
+///
+/// And the root certificate store, into `SYSTEM`, where the argument is
+/// strongest of all: it is the thing that would have to be fetched securely in
+/// order to be able to fetch anything securely.
 fn seed_packages() {
     let Ok(partitions) = fs::gpt::read() else {
         return;
@@ -1303,6 +1307,12 @@ fn seed_packages() {
             || name.ends_with(".AVI")
         {
             "PICTURES"
+        } else if name.ends_with(".NXR") {
+            // The root certificate store. It travels the same way and for the
+            // same reason as everything else here: a machine that had to fetch
+            // its list of certificate authorities before it could verify a
+            // certificate would have nothing to verify the fetch with.
+            "SYSTEM"
         } else {
             continue;
         };

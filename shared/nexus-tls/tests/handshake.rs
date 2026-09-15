@@ -17,6 +17,7 @@
 //! code. The QEMU stage is where a missing handshake would actually be caught.
 
 use std::io::{Read, Write};
+use std::rc::Rc;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -119,7 +120,7 @@ fn fetch(host: &str, port: u16, certificate: &str) -> Result<String, String> {
     // has nothing to do with the code.
     let now = Some(1_790_000_000i64);
 
-    let mut client = Client::start(host, roots, now, test_random(3), test_random(11))
+    let mut client = Client::start(host, Rc::new(roots), now, test_random(3), test_random(11))
         .map_err(|why| format!("could not start: {why}"))?;
 
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|why| why.to_string())?;
@@ -259,7 +260,7 @@ fn the_wrong_host_name_is_refused_against_a_real_server() {
 /// `fetch`, with the root store given rather than built from a fixture.
 fn fetch_with_roots(host: &str, port: u16, roots: Roots) -> Result<String, String> {
     let now = Some(1_790_000_000i64);
-    let mut client = Client::start(host, roots, now, test_random(5), test_random(13))
+    let mut client = Client::start(host, Rc::new(roots), now, test_random(5), test_random(13))
         .map_err(|why| format!("could not start: {why}"))?;
 
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|why| why.to_string())?;

@@ -243,6 +243,28 @@ $Video = Join-Path $ProgramDir 'nexus.avi'
 if ($LASTEXITCODE -ne 0) { throw "could not draw the recording (exit $LASTEXITCODE)" }
 $videoSize = [math]::Round((Get-Item $Video).Length / 1KB, 1)
 
+# The root certificate store, which is what makes `https://` mean anything.
+#
+# Built here rather than committed as a binary, because the interesting property
+# is that it was filtered by the machine's own X.509 parser: a certificate that
+# went in and did not come out is one this machine could never have used, and
+# the tool says so rather than leaving it to be found later as a site that will
+# not load. Staged beside the programs because the kernel copies `.NXR` out of
+# the image onto the store, the same way it does `.NEX` and `.PNG`.
+Write-Host '==> Building the root certificate store' -ForegroundColor Cyan
+Push-Location $RepoRoot
+try {
+    & cargo build --offline -q -p nexus-roots
+    if ($LASTEXITCODE -ne 0) { throw 'could not build nexus-roots' }
+} finally { Pop-Location }
+
+$RootsExe = Join-Path $RepoRoot 'target\debug\nexus-roots.exe'
+$RootsPem = Join-Path $RepoRoot 'roots\mozilla-ca-bundle.pem'
+$RootsOut = Join-Path $ProgramDir 'roots.nxr'
+& $RootsExe $RootsPem --out $RootsOut
+if ($LASTEXITCODE -ne 0) { throw 'could not build the root certificate store' }
+$rootsSize = [math]::Round((Get-Item $RootsOut).Length / 1KB, 1)
+
 $Package = Join-Path $ProgramDir 'demo.nex'
 $SigningKey = Join-Path $RepoRoot 'keys\development.key'
 & $PackExe $Package $SigningKey 'demo' '1.0.0' "demo/hello.txt=$greeting" "demo/notes.txt=$notes"
@@ -322,6 +344,7 @@ Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
 Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
 Write-Host "  picture    : $pictureSize KiB  -> PICTURES\NEXUS.PNG on the disk"
 Write-Host "  recording  : $videoSize KiB  -> PICTURES\NEXUS.AVI on the disk"
+Write-Host "  root store : $rootsSize KiB  -> SYSTEM\ROOTS.NXR on the disk"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
 Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1.1.0, signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"

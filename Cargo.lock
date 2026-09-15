@@ -58,6 +58,7 @@ dependencies = [
  "nexus-http",
  "nexus-i18n",
  "nexus-netclient",
+ "nexus-tls",
  "nexus-ui",
  "nexus-user",
 ]
@@ -240,6 +241,13 @@ name = "nexus-pkg"
 version = "0.1.0"
 dependencies = [
  "nexus-crypto",
+]
+
+[[package]]
+name = "nexus-roots"
+version = "0.1.0"
+dependencies = [
+ "nexus-tls",
 ]
 
 [[package]]

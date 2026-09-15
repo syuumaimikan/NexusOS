@@ -14,12 +14,26 @@
 //! ceiling and it is stated rather than worked around: what this is for is
 //! reading, and a great deal of the web is readable.
 //!
+//! # HTTPS
+//!
+//! Real TLS 1.3, with the certificate chain actually verified against a root
+//! store this program is handed at start-up. See `shared/nexus-tls`.
+//!
+//! The rule it is built under, and the reason it took as long as it did: **a
+//! client that does not verify certificates is worse than no client at all.**
+//! It produces a padlock and protects against nothing. So there is no way to
+//! reach an `https://` page here without a chain that verified, no option to
+//! continue anyway, and no retry over `http://` when TLS fails -- that last one
+//! being the quiet downgrade that would undo the rest of it.
+//!
+//! When something does go wrong, the reason is shown in words. "That
+//! certificate is for another name" and "nothing here trusts who issued that
+//! certificate" are different problems and somebody should be able to tell
+//! which one they have.
+//!
 //! # What it cannot do, and will not pretend to
 //!
-//! HTTPS. There is no TLS on this machine, so `https://` is refused in words
-//! rather than quietly fetched over `http` -- a browser that downgraded a
-//! secure address would be worse than one that cannot open it, because the
-//! person would not know.
+//! Pictures, styling, scripts.
 //!
 //! # Keys
 //!
@@ -58,6 +72,13 @@ const SURFACE_AT: usize = 0x0000_0000_2000_0000;
 
 /// How much heap: a page, the document it becomes, and the lines it lays out.
 const HEAP: usize = 8 * 1024 * 1024;
+
+/// The largest root store this will read into memory.
+///
+/// A hundred and twenty authorities is around two hundred kilobytes. The bound
+/// is here because the size comes off a file and this program has eight
+/// megabytes of heap for the whole of a page as well.
+const MAX_ROOTS_BYTES: usize = 2 * 1024 * 1024;
 
 /// How long the window waits before looking at the network again.
 ///
@@ -159,6 +180,13 @@ struct Browser {
     /// Where this window has been, so Backspace can go back.
     history: Vec<nexus_http::Url>,
 
+    /// What a secure fetch is verified against.
+    ///
+    /// Loaded once, at start-up, and shared by every fetch this window makes.
+    /// `None` on a machine with no root store, which makes `https://` fail with
+    /// a sentence rather than fall back to `http://`.
+    trust: Option<fetch::Trust>,
+
     /// The fetch in progress, if any.
     fetch: Option<Fetch>,
     /// What to say along the bottom.
@@ -182,16 +210,92 @@ pub extern "C" fn _start() -> ! {
     )
 }
 
+/// Read the root certificate store, and say in the log what came of it.
+///
+/// `None` means `https://` will not work, and every path to it says so: no root
+/// store, a store that will not read, a store with nothing usable in it, or a
+/// machine with no clock. That last one is the surprising member of the list
+/// and belongs there -- a machine that does not know the date cannot tell a
+/// current certificate from one withdrawn years ago, so it must not pretend to
+/// judge one.
+fn load_trust(file: Option<Handle>) -> Option<fetch::Trust> {
+    let Some(file) = file else {
+        nexus_user::log("browse: no root certificate store; https will not be available").ok();
+        return None;
+    };
+
+    let size = nexus_user::size(file).ok()?;
+    if size == 0 || size > MAX_ROOTS_BYTES {
+        nexus_user::log(&format!(
+            "browse: the root store is {size} bytes, which is not a size a root store is"
+        ))
+        .ok();
+        return None;
+    }
+    let mut bytes = alloc::vec![0u8; size];
+    let read = nexus_user::read(file, &mut bytes).ok()?;
+    bytes.truncate(read);
+
+    let loaded = match nexus_tls::roots::read(&bytes) {
+        Ok(loaded) => loaded,
+        Err(why) => {
+            nexus_user::log(&format!("browse: the root store will not read: {why}")).ok();
+            return None;
+        }
+    };
+    if !loaded.skipped.is_empty() {
+        // Every certificate in the store was parsed by this same parser when
+        // the store was built, so this cannot happen without the tool and the
+        // parser having drifted apart -- which is worth a line in the log.
+        nexus_user::log(&format!(
+            "browse: {} of {} roots would not parse, which should not happen",
+            loaded.skipped.len(),
+            loaded.held
+        ))
+        .ok();
+    }
+    if loaded.roots.is_empty() {
+        nexus_user::log("browse: the root store is empty, so nothing can be verified").ok();
+        return None;
+    }
+
+    // The wall clock, not the uptime. A certificate's validity is a pair of
+    // moments and comparing them against how long this boot has lasted would
+    // put every certificate in the future.
+    let now = match nexus_user::now() {
+        Ok(seconds) => Some(seconds as i64),
+        Err(_) => {
+            nexus_user::log(
+                "browse: this machine has no clock, so no certificate can be judged current;                  https will not be available",
+            )
+            .ok();
+            return None;
+        }
+    };
+
+    nexus_user::log(&format!(
+        "browse: {} certificate authorities loaded; https is available",
+        loaded.roots.len()
+    ))
+    .ok();
+    Some(fetch::Trust {
+        roots: alloc::rc::Rc::new(loaded.roots),
+        now,
+    })
+}
+
 extern "C" fn main() -> ! {
     if !nexus_user::heap::init(HEAP) {
         failed("browse: FAILED: could not get a heap");
         finish();
     }
 
-    // Two handles: the surface to draw on, and the network. The second is what
-    // makes this a browser rather than a window with an address bar in it.
+    // Three handles: the surface to draw on, the network, and the root
+    // certificate store. The second is what makes this a browser rather than a
+    // window with an address bar in it, and the third is what makes `https://`
+    // mean something rather than look like it does.
     let mut buffer = [0u8; 32];
-    let mut handles = [Handle(0); 2];
+    let mut handles = [Handle(0); 3];
     let Ok(received) = nexus_user::receive(COMPOSITOR, &mut buffer, &mut handles) else {
         failed("browse: FAILED: nothing arrived to draw on");
         finish();
@@ -206,6 +310,16 @@ extern "C" fn main() -> ! {
     let surface = handles[0];
     let service = if received.handles >= 2 {
         Some(handles[1])
+    } else {
+        None
+    };
+    // The third, if it came, is the root certificate store: the file itself,
+    // read only. Not the directory it is in and not the disk -- this program is
+    // the one on the machine most likely to be handed something hostile, and
+    // what it can reach on the store is exactly the one file it has to read to
+    // check a certificate.
+    let roots_file = if received.handles >= 3 {
+        Some(handles[2])
     } else {
         None
     };
@@ -258,6 +372,7 @@ extern "C" fn main() -> ! {
     ))
     .ok();
     let mut browser = Browser::new(service, width, height);
+    browser.trust = load_trust(roots_file);
     browser.resolver = resolver;
     browser.myself = myself;
     // This machine's own server, which is running on this machine and reached
@@ -293,6 +408,7 @@ impl Browser {
             links: Vec::new(),
             here: None,
             history: Vec::new(),
+            trust: None,
             fetch: None,
             status: nexus_i18n::text("browse.ready").to_string(),
             scroll: 0,
@@ -442,6 +558,7 @@ impl Browser {
                                 self.resolver,
                                 next,
                                 redirects + 1,
+                                self.trust.clone(),
                             ));
                             return true;
                         }
@@ -508,6 +625,17 @@ impl Browser {
                 ("links", &self.links.len()),
             ],
         );
+        // Said only when it is true, and true only because a chain verified --
+        // there is no path to a shown `https://` page that did not. A browser
+        // that showed this for any address beginning with the right five
+        // letters would be teaching people to read a word that means nothing.
+        if url.secure {
+            self.status = format!(
+                "{}  |  {}",
+                nexus_i18n::format("browse.https.safe", &[("host", &url.host)]),
+                self.status
+            );
+        }
         nexus_user::log(&format!(
             "browse: showed {} ({status}), {} blocks, {} links",
             url.to_text(),
@@ -536,7 +664,13 @@ impl Browser {
                 }
                 self.status = nexus_i18n::format("browse.fetching", &[("url", &url.to_text())]);
                 self.typing = url.to_text();
-                self.fetch = Some(Fetch::start(self.service, self.resolver, url, 0));
+                self.fetch = Some(Fetch::start(
+                    self.service,
+                    self.resolver,
+                    url,
+                    0,
+                    self.trust.clone(),
+                ));
                 self.editing = false;
             }
             Err(error) => {
