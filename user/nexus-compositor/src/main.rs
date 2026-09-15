@@ -1254,6 +1254,10 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
 /// desktop.
 /// Where documents live on the store.
 const DOCUMENTS: &str = "DOCS";
+/// And where a browser may put what it fetched. Eight and three, like the rest
+/// of the names on this disk, because a FAT32 volume is one of the places it
+/// can end up.
+const DOWNLOADS: &str = "DOWNLOAD";
 
 /// Open -- making it if it is not there -- the folder an editor may write in.
 ///
@@ -1267,6 +1271,29 @@ fn open_documents() -> Result<nexus_user::Handle, nexus_user::Error> {
     };
     // Read, write and transfer. Not close: an editor cannot take the folder
     // away from the program that lent it.
+    let lent = nexus_user::duplicate(
+        directory,
+        nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+    );
+    nexus_user::close(directory).ok();
+    lent
+}
+
+/// Open the folder a browser may save into, making it if it is not there.
+///
+/// A folder of its own, and not the documents folder the editor is lent and
+/// certainly not the disk. A browser is the program on this machine most likely
+/// to be handed something hostile: what it fetched is somebody else's bytes
+/// under somebody else's name, and the one place it can put them should be a
+/// place where finding an unexpected file is not alarming.
+///
+/// Read, write and transfer. Not close, so a browser cannot take the folder
+/// away from the program that lent it.
+fn open_downloads() -> Result<nexus_user::Handle, nexus_user::Error> {
+    let directory = match nexus_user::open(FILESYSTEM, DOWNLOADS) {
+        Ok(directory) => directory,
+        Err(_) => nexus_user::create(FILESYSTEM, DOWNLOADS, nexus_user::Kind::Directory)?,
+    };
     let lent = nexus_user::duplicate(
         directory,
         nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
@@ -2417,11 +2444,33 @@ fn open_window(
                 )
                 .ok();
             }
-            let mut lent = alloc::vec::Vec::with_capacity(2);
+            // And somewhere to save what it fetched. A folder of its own,
+            // because a browser is the program most likely to be handed
+            // somebody else's bytes under somebody else's name, and the place
+            // it puts them should be one where an unexpected file is not
+            // alarming. Not fatal either: a browser without it says it cannot
+            // save rather than failing to start.
+            let downloads = open_downloads().ok();
+            if downloads.is_none() {
+                nexus_user::log("compositor: no downloads folder; this browser cannot save").ok();
+            }
+
+            // Which of the two optional handles are actually here, said in the
+            // message rather than left to be counted. Counting is what breaks:
+            // a machine with no root store but a downloads folder would hand
+            // the folder over in the slot where the browser expects
+            // certificates, and the browser would try to verify a connection
+            // against a directory.
+            let mut lent = alloc::vec::Vec::with_capacity(3);
             lent.push(theirs);
             if let Some(roots) = roots {
                 lent.push(roots);
             }
+            if let Some(downloads) = downloads {
+                lent.push(downloads);
+            }
+            let carrying = u32::from(roots.is_some()) | (u32::from(downloads.is_some()) << 1);
+
             start_program(
                 BROWSER,
                 slot,
@@ -2429,7 +2478,7 @@ fn open_window(
                 screen.y + GAP + step,
                 width,
                 height,
-                0,
+                carrying,
                 &lent,
             )?
         }

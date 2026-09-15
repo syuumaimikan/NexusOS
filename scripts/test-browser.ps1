@@ -117,6 +117,15 @@ try {
             $failures += 'the browser never showed a page'
         }
 
+        # And save it. The page is in the window now, which means the browser is
+        # holding the bytes that arrived rather than the text it laid out -- F2
+        # writes those bytes into the one folder it was lent.
+        Write-Host '==> Saving the page' -ForegroundColor Cyan
+        $writer.WriteLine('sendkey f2')
+        if (-not (Wait-For -Text 'browse: saved' -Seconds 60)) {
+            $failures += 'the browser never saved the page'
+        }
+
         # The figures below come from the kernel's monitor thread, which reports
         # every five seconds. This used to sleep a fixed six seconds and hope,
         # and it was a coin toss: a page that finished just after a report left
@@ -156,7 +165,11 @@ foreach ($expected in @(
         'compositor: started a browser, and lent it the network',
         'browse: a window that can fetch a page',
         'a program opened a connection to 10.0.2.15:80',
-        'browse: showed http://10.0.2.15/ (200)'
+        'browse: showed http://10.0.2.15/ (200)',
+        # Saved, with a name worked out from the URL and a byte count. The name
+        # matters: the path is `/`, which has no last component, so this is the
+        # front-page case rather than a name taken from the server.
+        'browse: saved index'
     )) {
     if ($output.Contains($expected)) {
         Write-Host "    ok   $expected" -ForegroundColor DarkGray
@@ -195,6 +208,62 @@ if ($output -match 'client (\d+) connections opened, (\d+) bytes out, (\d+) in')
 }
 if ($output.Contains('KERNEL PANIC')) { $failures += 'the kernel panicked' }
 if ($output.Contains('browse: PANIC')) { $failures += 'the browser panicked' }
+
+# And the check that is outside the guest: the bytes are in the host's copy of
+# the disk. A browser that reported a save and wrote nothing passes every check
+# above and fails this one.
+$checks = if (Test-Path variable:checks) { $checks } else { 0 }
+$image = Join-Path $BuildDir 'nexus-disk.img'
+# The name the browser said it used, this run. Not a fixed one: saving the same
+# page twice numbers the second, so a test that looked for `index.html` would
+# find the *previous* run's file and pass while this run had failed.
+$named = [regex]::Match($output, 'browse: saved (\S+?), (\d+) bytes')
+if (-not $named.Success) {
+    $failures += 'the log never said what was saved'
+    $savedAs = 'index.html'
+} else {
+    $savedAs = $named.Groups[1].Value
+    Write-Host "    .... looking for $savedAs in the host's image" -ForegroundColor DarkGray
+}
+$needle = [System.Text.Encoding]::ASCII.GetBytes($savedAs)
+$found = $false
+$stream = [System.IO.File]::OpenRead($image)
+try {
+    # From the start of the NexusFS partition; there is no point reading the
+    # FAT32 in front of it.
+    $stream.Position = 526336L * 512
+    $overlap = $needle.Length - 1
+    $chunk = 8MB
+    $buffer = New-Object byte[] ($chunk + $overlap)
+    $held = 0
+    while (-not $found) {
+        $got = $stream.Read($buffer, $held, $chunk)
+        if ($got -le 0) { break }
+        $usable = $held + $got
+        $last = $usable - $needle.Length
+        $index = 0
+        while ($index -le $last) {
+            $index = [Array]::IndexOf($buffer, $needle[0], $index, $last - $index + 1)
+            if ($index -lt 0) { break }
+            $match = $true
+            for ($offset = 1; $offset -lt $needle.Length; $offset++) {
+                if ($buffer[$index + $offset] -ne $needle[$offset]) { $match = $false; break }
+            }
+            if ($match) { $found = $true; break }
+            $index++
+        }
+        $held = [math]::Min($overlap, $usable)
+        [Array]::Copy($buffer, $usable - $held, $buffer, 0, $held)
+    }
+} finally {
+    $stream.Close()
+}
+if ($found) {
+    Write-Host "    ok   the saved file is in the host's disk image" -ForegroundColor DarkGray
+} else {
+    $failures += "what the browser saved is not in $image"
+    Write-Host "    FAIL the saved file is not in the host's image" -ForegroundColor Red
+}
 
 Write-Host ''
 if ($failures.Count -eq 0) {

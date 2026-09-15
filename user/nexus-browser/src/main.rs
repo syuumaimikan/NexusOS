@@ -109,12 +109,21 @@ mod wire {
 }
 
 /// What a key is, as the kernel sends it.
+/// F2 saves what is on screen.
+///
+/// Not F1, which the kernel takes to change the interface language, and not F3,
+/// which the desktop takes to open the launcher. A window may only bind what
+/// nothing above it has already claimed.
+const SAVE_KEY: u32 = 2;
+
 mod key {
     pub const CHARACTER: u8 = 1;
     pub const BACKSPACE: u8 = 2;
     pub const ENTER: u8 = 3;
     pub const ESCAPE: u8 = 4;
     pub const TAB: u8 = 5;
+    /// A function key, by its number: `FUNCTION` with value 2 is F2.
+    pub const FUNCTION: u8 = 6;
     pub const LANGUAGE: u8 = 7;
     pub const MOVE: u8 = 8;
     pub const SIZE: usize = 5;
@@ -192,6 +201,21 @@ struct Browser {
     /// What to say along the bottom.
     status: String,
 
+    /// The folder this window may save into, if it was lent one.
+    ///
+    /// The only thing on the disk this program may write, and not the documents
+    /// folder: what a browser saves is somebody else's bytes under somebody
+    /// else's name.
+    downloads: Option<Handle>,
+    /// The bytes of the page on screen, kept so they can be saved.
+    ///
+    /// The bytes and not the text. What was fetched may not be text at all, and
+    /// a save that wrote back what the window happened to render would write a
+    /// different file from the one that arrived.
+    fetched: Vec<u8>,
+    /// Where those bytes came from, for naming the file.
+    fetched_from: Option<nexus_http::Url>,
+
     /// The first line of the page that is on screen.
     scroll: usize,
     /// How many lines the last draw laid out, so scrolling can be bounded.
@@ -208,6 +232,83 @@ pub extern "C" fn _start() -> ! {
         "ud2",
         main = sym main,
     )
+}
+
+/// Make a file under `wanted`, or under `wanted` with a number in it.
+///
+/// Returns the name it settled on and the open file. `None` when every name it
+/// tried was taken, which is a hundred of them -- at which point the honest
+/// answer is that this is not working rather than to keep counting.
+fn free_name(
+    directory: Handle,
+    wanted: &str,
+) -> Option<(String, Handle)> {
+    /// How many numbered names to try before giving up.
+    const TRIES: u32 = 100;
+
+    if let Ok(file) = nexus_user::create(directory, wanted, nexus_user::Kind::File) {
+        return Some((String::from(wanted), file));
+    }
+
+    // The number goes before the extension, so `page.html` becomes `page-1.html`
+    // and not `page.html-1`: the extension is what says how to open the thing,
+    // and a browser that moved it would save files nothing will open.
+    let (stem, extension) = match wanted.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, extension),
+        _ => (wanted, ""),
+    };
+    for number in 1..TRIES {
+        let candidate = if extension.is_empty() {
+            format!("{stem}-{number}")
+        } else {
+            format!("{stem}-{number}.{extension}")
+        };
+        if let Ok(file) = nexus_user::create(directory, &candidate, nexus_user::Kind::File) {
+            return Some((candidate, file));
+        }
+    }
+    None
+}
+
+/// A file name for what a URL fetched.
+///
+/// The last component of the path, with anything that is not a letter, a digit,
+/// a dot, a dash or an underscore replaced. Replaced and not dropped, so two
+/// different names cannot collapse into one; and bounded, because a server
+/// chooses what its URLs say and a name of four hundred characters is a name
+/// the filesystem will refuse in a way that is harder to read than this.
+///
+/// A path that ends in a separator, or has nothing in it, is a site's front
+/// page and gets a name of its own rather than an empty one.
+fn file_name(url: &nexus_http::Url) -> String {
+    /// Long enough for anything anybody means, short enough for every
+    /// filesystem this machine writes.
+    const MOST: usize = 64;
+
+    let last = url
+        .path
+        .rsplit('/')
+        .find(|piece| !piece.is_empty())
+        .unwrap_or("");
+    if last.is_empty() {
+        return String::from("index.html");
+    }
+
+    let mut name = String::with_capacity(last.len().min(MOST));
+    for character in last.chars().take(MOST) {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+            name.push(character);
+        } else {
+            name.push('_');
+        }
+    }
+    // A name that is entirely dots is `.` or `..`, which name directories that
+    // already exist. Given a name of its own rather than refused, because the
+    // page is real and somebody asked for it.
+    if name.chars().all(|character| character == '.') {
+        return String::from("index.html");
+    }
+    name
 }
 
 /// Read the root certificate store, and say in the log what came of it.
@@ -295,7 +396,7 @@ extern "C" fn main() -> ! {
     // window with an address bar in it, and the third is what makes `https://`
     // mean something rather than look like it does.
     let mut buffer = [0u8; 32];
-    let mut handles = [Handle(0); 3];
+    let mut handles = [Handle(0); 4];
     let Ok(received) = nexus_user::receive(COMPOSITOR, &mut buffer, &mut handles) else {
         failed("browse: FAILED: nothing arrived to draw on");
         finish();
@@ -313,13 +414,37 @@ extern "C" fn main() -> ! {
     } else {
         None
     };
-    // The third, if it came, is the root certificate store: the file itself,
-    // read only. Not the directory it is in and not the disk -- this program is
-    // the one on the machine most likely to be handed something hostile, and
-    // what it can reach on the store is exactly the one file it has to read to
-    // check a certificate.
-    let roots_file = if received.handles >= 3 {
-        Some(handles[2])
+    // Which of the optional handles came, said in the message rather than
+    // counted. Counting is what breaks: a machine with no root store but a
+    // downloads folder would hand the folder over in the slot where this
+    // expects certificates, and this would try to verify a connection against
+    // a directory.
+    let carrying = read_u32(&buffer, 8);
+    let has_roots = carrying & 1 != 0;
+    let has_downloads = carrying & 2 != 0;
+
+    // The root certificate store: the file itself, read only. Not the directory
+    // it is in and not the disk -- this program is the one on the machine most
+    // likely to be handed something hostile, and what it can reach on the store
+    // is exactly the one file it has to read to check a certificate.
+    // Two, not one. Handle nought is the surface and handle one is the network
+    // service; the optional pair begins after those. Starting at one made this
+    // read the network service as a certificate store and the certificate file
+    // as a folder, and the only sign was `create` being refused -- which is
+    // exactly right, because a file is not a directory.
+    let mut next = 2usize;
+    let roots_file = if has_roots && received.handles > next {
+        let handle = handles[next];
+        next += 1;
+        Some(handle)
+    } else {
+        None
+    };
+    // And a folder to save into, which is the only thing on the disk this
+    // program may write. Not the documents folder and not the disk: what a
+    // browser saves is somebody else's bytes under somebody else's name.
+    let downloads = if has_downloads && received.handles > next {
+        Some(handles[next])
     } else {
         None
     };
@@ -373,6 +498,13 @@ extern "C" fn main() -> ! {
     .ok();
     let mut browser = Browser::new(service, width, height);
     browser.trust = load_trust(roots_file);
+    browser.downloads = downloads;
+    nexus_user::log(&format!(
+        "browse: carrying {carrying:#x}: {} certificates, {} somewhere to save",
+        if roots_file.is_some() { "with" } else { "without" },
+        if downloads.is_some() { "with" } else { "without" }
+    ))
+    .ok();
     browser.resolver = resolver;
     browser.myself = myself;
     // This machine's own server, which is running on this machine and reached
@@ -400,6 +532,9 @@ impl Browser {
             resolver: [0, 0, 0, 0],
             width,
             height,
+            downloads: None,
+            fetched: Vec::new(),
+            fetched_from: None,
             typing: String::from(HOME),
             editing: false,
             myself: None,
@@ -569,6 +704,10 @@ impl Browser {
                     }
                 }
 
+                // Kept before it is shown, because showing it turns it into
+                // laid-out text and the bytes are what a save has to write.
+                self.fetched = response.body.clone();
+                self.fetched_from = Some(url.clone());
                 self.show(&url, response.status, response.is_html(), &response.body);
                 true
             }
@@ -713,6 +852,18 @@ impl Browser {
             return true;
         }
 
+        // Save what was fetched. Before the split between the address bar and
+        // the page, because it is about the window rather than about the
+        // caret -- and because the moment somebody wants it is right after a
+        // page has loaded, which is exactly when the bar still has the
+        // keyboard. Putting it in the page handler was the first attempt, and
+        // it meant the key did nothing at the only moment anybody would press
+        // it.
+        if kind == key::FUNCTION && value == SAVE_KEY {
+            self.save();
+            return true;
+        }
+
         if self.editing {
             return self.key_in_bar(kind, value);
         }
@@ -720,6 +871,84 @@ impl Browser {
     }
 
     /// A key while the address bar has the keyboard.
+    /// Write what was fetched into the downloads folder.
+    ///
+    /// The name comes from the URL's last path component, and everything about
+    /// turning that into a filename is refusing rather than repairing. A server
+    /// chooses what a URL says, so the name is somebody else's text: it may
+    /// have separators in it, it may be `..`, it may be four hundred characters
+    /// of nothing. A browser that cleaned such a name up and saved it anyway
+    /// would be a browser that occasionally wrote where it was not asked to.
+    fn save(&mut self) {
+        // Every ending of this says so on the log, and not only the one that
+        // worked. What the window shows is for the person in front of it; the
+        // log is the only way anything outside the machine can tell that a key
+        // arrived and what came of it, and a save that quietly did nothing is
+        // exactly the failure worth being able to see.
+        let Some(directory) = self.downloads else {
+            nexus_user::log("browse: asked to save with nowhere to save to").ok();
+            self.status = nexus_i18n::text("browse.nosaving").to_string();
+            return;
+        };
+        if self.fetched.is_empty() {
+            nexus_user::log("browse: asked to save with nothing fetched").ok();
+            self.status = nexus_i18n::text("browse.nothingtosave").to_string();
+            return;
+        }
+        let Some(url) = self.fetched_from.clone() else {
+            nexus_user::log("browse: asked to save with no address for what was fetched").ok();
+            self.status = nexus_i18n::text("browse.nothingtosave").to_string();
+            return;
+        };
+
+        let wanted = file_name(&url);
+        // `create` and not `open`, and a number when the name is taken. A save
+        // that silently replaced a file would be a browser overwriting what
+        // somebody downloaded earlier because two servers both said `index`;
+        // one that refused would be a browser that cannot save the same page
+        // twice. Numbering is what every other browser does and is what a
+        // person expects.
+        let Some((name, file)) = free_name(directory, &wanted) else {
+            nexus_user::log(&format!("browse: no free name near {wanted}")).ok();
+            self.status = nexus_i18n::format("browse.notsaved", &[("why", &wanted)]);
+            return;
+        };
+        match Ok::<_, nexus_user::Error>(file) {
+            Ok(file) => {
+                let written = nexus_user::write(file, &self.fetched);
+                nexus_user::close(file).ok();
+                match written {
+                    Ok(count) if count == self.fetched.len() => {
+                        nexus_user::log(&format!("browse: saved {name}, {count} bytes")).ok();
+                        self.status = nexus_i18n::format(
+                            "browse.saved",
+                            &[("name", &name), ("bytes", &count)],
+                        );
+                    }
+                    // A short write is the failure that must not look like
+                    // success: what is on the disk is then neither the whole
+                    // file nor nothing.
+                    Ok(count) => {
+                        self.status = nexus_i18n::format(
+                            "browse.savedpart",
+                            &[("name", &name), ("bytes", &count),
+                              ("total", &self.fetched.len())],
+                        );
+                    }
+                    Err(error) => {
+                        nexus_user::log(&format!("browse: could not write {name}: {error}")).ok();
+                        self.status =
+                            nexus_i18n::format("browse.notsaved", &[("why", &error)]);
+                    }
+                }
+            }
+            Err(error) => {
+                nexus_user::log(&format!("browse: could not make {name}: {error}")).ok();
+                self.status = nexus_i18n::format("browse.notsaved", &[("why", &error)]);
+            }
+        }
+    }
+
     fn key_in_bar(&mut self, kind: u8, value: u32) -> bool {
         match kind {
             key::CHARACTER => {
