@@ -231,6 +231,21 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         Err(error) => kprintln!("[net ] no network card: {error}"),
     }
 
+    // The USB host controller, on the same terms again. A machine with nothing
+    // plugged in is the ordinary case and is reported rather than treated as a
+    // failure -- and so is a machine whose USB controller is an older kind this
+    // does not drive.
+    match drivers::xhci::start(&devices) {
+        Ok(()) => {
+            // SAFETY: the controller was just started, so its window is mapped.
+            unsafe { drivers::xhci::survey_ports() };
+        }
+        Err(drivers::xhci::Trouble::NotPresent) => {
+            kprintln!("[usb ] no xHCI controller on this machine");
+        }
+        Err(error) => kprintln!("[usb ] the USB controller would not start: {error}"),
+    }
+
     // The display comes up only now, after the heap: translated strings are
     // built at runtime by substituting into templates, so drawing anything
     // localised allocates. Bringing the display up earlier cost a boot to an

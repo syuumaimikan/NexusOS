@@ -10,3 +10,4 @@ pub mod rtc;
 pub mod speaker;
 pub mod virtio_blk;
 pub mod virtio_net;
+pub mod xhci;

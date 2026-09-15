@@ -243,6 +243,64 @@ fn find_bitmap_home(regions: &[MemoryRegion], bytes: u64) -> Option<u64> {
     })
 }
 
+/// Make a device's registers reachable through the direct map.
+///
+/// A controller's registers live in the PCI aperture, well above the last byte
+/// of RAM, and the direct map the bootloader built stops at RAM. So the window
+/// has to be added to it -- which is the same thing the bootloader already does
+/// for the framebuffer, for the same reason, and this is that done at run time
+/// for a device found by scanning.
+///
+/// Mapped **uncached**. Device registers are not memory: reading one can have
+/// an effect, writing one certainly does, and a processor that served a read
+/// from a cache line would be answering with what the device said last time.
+/// The same flag is why nothing here needs a barrier to see a register change.
+///
+/// Returns the address to read and write through, which is
+/// [`phys_to_virt`](nexus_abi::layout::phys_to_virt) of the window's base --
+/// so a driver can keep using the same translation as everything else.
+///
+/// # Errors
+///
+/// `None` when a page in the range is already mapped to something else, which
+/// means two drivers have claimed overlapping windows and one of them is wrong.
+///
+/// # Safety
+///
+/// `phys` must be a device window this kernel is entitled to drive, and no
+/// other mapping of it may exist.
+pub unsafe fn map_device_registers(phys: u64, size: u64) -> Option<u64> {
+    use nexus_abi::layout;
+
+    if size == 0 {
+        return None;
+    }
+    let first = layout::page_align_down(phys);
+    let last = layout::page_align_up(phys.checked_add(size)?);
+    let root = crate::memory::address_space::kernel_root();
+    let flags = paging::PRESENT
+        | paging::WRITABLE
+        | paging::NO_CACHE
+        | paging::NO_EXECUTE
+        | paging::GLOBAL;
+
+    let mut at = first;
+    while at < last {
+        // SAFETY: the caller guarantees the window is this kernel's to drive.
+        // A page already mapped is reported rather than replaced: replacing one
+        // would be taking a window from whoever mapped it.
+        match unsafe { paging::map_page_in(root, layout::phys_to_virt(at), at, flags) } {
+            Ok(()) => {}
+            // Already there is the ordinary case for a second window inside the
+            // same page, and for a driver asked to start twice.
+            Err(paging::MapError::AlreadyMapped) => {}
+            Err(_) => return None,
+        }
+        at += layout::PAGE_SIZE;
+    }
+    Some(layout::phys_to_virt(phys))
+}
+
 /// Allocate one physical frame.
 ///
 /// Returns the physical address, or `None` when memory is exhausted.

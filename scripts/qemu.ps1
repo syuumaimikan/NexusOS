@@ -23,6 +23,16 @@ function Get-NexusDiskImage {
     return (Join-Path $BuildDir 'nexus-disk.img')
 }
 
+# The image behind the USB stick.
+#
+# A different file from the disk above on purpose: "the machine can read its
+# own disk" and "the machine can read a USB stick" are different claims, and
+# one image would let the second be mistaken for the first.
+function Get-NexusUsbImage {
+    param([Parameter(Mandatory = $true)][string]$BuildDir)
+    return (Join-Path $BuildDir 'nexus-usb.img')
+}
+
 # Refuse a data disk the firmware could boot from.
 #
 # The rule above is easy to state and easy to break: `make-disk.ps1 -SourceDir`
@@ -160,6 +170,25 @@ function Get-NexusQemuArgs {
         '-netdev', "user,id=nexusnet,hostfwd=tcp:127.0.0.1:${HostHttpPort}-:80",
         '-device', 'virtio-net-pci,netdev=nexusnet,disable-modern=on'
     )
+
+    # An xHCI controller, and a USB drive plugged into it.
+    #
+    # xHCI rather than the older UHCI or EHCI because it is what a machine built
+    # this decade actually has, and because the older ones are a different
+    # driver rather than a simpler version of this one. `qemu-xhci` is the
+    # standards-compliant model; `nec-usb-xhci` is a particular vendor's.
+    #
+    # The drive is a separate image from the one the kernel already drives, so
+    # that "the machine can read its own disk" and "the machine can read a USB
+    # stick" cannot be confused for one another.
+    $stick = Get-NexusUsbImage -BuildDir $BuildDir
+    if (Test-Path $stick) {
+        $arguments += @(
+            '-device', 'qemu-xhci,id=nexusxhci',
+            '-drive', "if=none,id=nexusstick,format=raw,file=$stick",
+            '-device', 'usb-storage,bus=nexusxhci.0,drive=nexusstick'
+        )
+    }
 
     if ($MonitorPort -gt 0) {
         $arguments += @('-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait")
