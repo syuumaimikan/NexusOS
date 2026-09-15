@@ -35,6 +35,7 @@ extern crate alloc;
 pub mod der;
 pub mod handshake;
 pub mod record;
+pub mod rsa;
 pub mod schedule;
 pub mod wire;
 pub mod x509;
