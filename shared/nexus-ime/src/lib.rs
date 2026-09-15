@@ -11,22 +11,26 @@
 //! the deciding has to be right about the cases where one letter changes what
 //! the previous two meant.
 //!
-//! # What this is not
+//! # And kana to kanji
 //!
-//! It does not convert to kanji. That needs a dictionary of readings, a way to
-//! rank candidates and a window to choose from them; the dictionary alone is
-//! larger than this whole system. What is here is the half that is a function
-//! of the letters — and it is the half that has to be right first, because a
-//! kanji converter is fed kana.
+//! The other half, which is not a function of the letters at all: `かんじ` is
+//! `漢字` or `感じ` or `幹事`, and only meaning decides. That needs a dictionary,
+//! and [`dictionary`] is one -- two hundred and twenty-five readings, written
+//! out by hand, against the hundred thousand a real input method ships.
 //!
-//! Saying so matters: a machine that offered "Japanese input" and quietly meant
-//! kana only would be a machine somebody discovers the limits of half way
-//! through a sentence.
+//! The size is stated rather than implied, and the consequence is stated where
+//! somebody meets it: a word that is not in the table converts to itself, in
+//! kana or in katakana, which is a real answer. A machine that offered
+//! "Japanese input" and quietly meant kana only would be one somebody discovers
+//! the limits of half way through a sentence; so would one that pretended to a
+//! dictionary it does not have.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
+
+pub mod dictionary;
 
 use alloc::string::{String, ToString as _};
 
@@ -273,6 +277,19 @@ impl Output {
 pub struct Ime {
     script: Script,
     pending: String,
+    /// Kana settled since the last time a conversion was asked for or given up
+    /// on: the *composition*.
+    ///
+    /// Kept because kanji conversion needs it and nothing else has it. What
+    /// `push` returns as `committed` goes straight into whatever is being
+    /// typed into, and by the time somebody presses space to convert, those
+    /// characters are in a line this crate has never seen. So a copy is kept
+    /// here, and whoever is typed into replaces that many characters when a
+    /// candidate is chosen.
+    ///
+    /// It is only collected while the script is not [`Script::Direct`]: letters
+    /// typed as letters are not a composition and never want converting.
+    composed: String,
 }
 
 impl Ime {
@@ -282,7 +299,26 @@ impl Ime {
         Self {
             script: Script::Direct,
             pending: String::new(),
+            composed: String::new(),
         }
+    }
+
+    /// The kana settled since the last conversion or reset.
+    ///
+    /// What a caller replaces when a candidate is chosen, and what it asks
+    /// [`candidates`] about.
+    #[must_use]
+    pub fn composed(&self) -> &str {
+        &self.composed
+    }
+
+    /// Forget the composition, because it has been converted or left alone.
+    ///
+    /// Called when a line is finished, when a candidate is committed, and when
+    /// anything happens that means the kana before the caret is no longer a
+    /// word somebody is in the middle of.
+    pub fn settle(&mut self) {
+        self.composed.clear();
     }
 
     /// Which script it is converting to.
@@ -314,6 +350,7 @@ impl Ime {
 
     /// Give up whatever is waiting, and say what it was.
     pub fn clear(&mut self) -> String {
+        self.composed.clear();
         core::mem::take(&mut self.pending)
     }
 
@@ -323,11 +360,37 @@ impl Ime {
     /// waiting the caller should take one from the line instead, which is the
     /// behaviour every input method has: backspace un-types the romaji first.
     pub fn backspace(&mut self) -> bool {
-        self.pending.pop().is_some()
+        // A backspace that ate a pending letter has not changed the line, so
+        // the composition is untouched. One that did not is about to delete a
+        // character of the line, which may be the last kana of the composition.
+        if self.pending.pop().is_some() {
+            return true;
+        }
+        self.composed.pop();
+        false
     }
 
     /// Type one character.
     pub fn push(&mut self, character: char) -> Output {
+        let output = self.convert_one(character);
+        // Remembered, so that a conversion can be asked for later. Only kana:
+        // letters typed as letters are not a composition, and neither is the
+        // punctuation that ends one -- a full stop after `かんじ` means the word
+        // is over, and converting across it would convert a sentence.
+        if self.script != Script::Direct {
+            for character in output.committed.chars() {
+                if is_kana(character) {
+                    self.composed.push(character);
+                } else {
+                    self.composed.clear();
+                }
+            }
+        }
+        output
+    }
+
+    /// The letters-to-kana half, which is all this used to be.
+    fn convert_one(&mut self, character: char) -> Output {
         if self.script == Script::Direct {
             return Output {
                 committed: character.to_string(),
@@ -466,6 +529,100 @@ impl Ime {
     }
 }
 
+/// Whether a character is kana, of either kind.
+///
+/// The two blocks are adjacent and contiguous: hiragana from U+3041, katakana
+/// to U+30FF, with the prolonged sound mark and the middle dot inside the
+/// second. A range rather than a list, because the alternative is a list that
+/// is wrong about one character nobody thinks to test.
+#[must_use]
+pub fn is_kana(character: char) -> bool {
+    ('\u{3041}'..='\u{30FF}').contains(&character)
+}
+
+/// What a run of kana might be written as, commonest first.
+///
+/// The last two are always the kana itself and its katakana form, so there is
+/// always something to choose even for a reading the dictionary has never heard
+/// of -- which is the honest answer for a table of two hundred entries, and is
+/// a great deal better than refusing to convert.
+///
+/// # Segmenting
+///
+/// An exact match is used whole. Failing that the reading is cut at the longest
+/// entry that starts it, and the rest converted the same way -- greedy
+/// longest-match, which is the crudest segmentation there is. It gets `にほんご`
+/// right by taking the four-kana word over the three-kana one, and it will get
+/// a sentence wrong, which is what a real input method's connection costs and
+/// language model are for. Neither is here and neither is pretended at.
+#[must_use]
+pub fn candidates(reading: &str) -> alloc::vec::Vec<String> {
+    use alloc::vec::Vec;
+
+    let mut out: Vec<String> = Vec::new();
+    let add = |candidate: String, out: &mut Vec<String>| {
+        if !candidate.is_empty() && !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    };
+
+    if let Some(exact) = dictionary::look_up(reading) {
+        for candidate in exact {
+            add((*candidate).to_string(), &mut out);
+        }
+    }
+
+    // Then the segmented reading, if it is not the same as the whole one.
+    if let Some(segmented) = segment(reading) {
+        add(segmented, &mut out);
+    }
+
+    // And always these two. A reading nobody has heard of still converts to
+    // what was typed, which is what somebody wanted when they typed it.
+    add(reading.to_string(), &mut out);
+    add(to_katakana(reading), &mut out);
+    out
+}
+
+/// Cut a reading into dictionary words, taking the first candidate of each.
+///
+/// `None` when nothing in it is a known word at all, so that the caller does
+/// not offer a "conversion" that is the reading with extra steps.
+fn segment(reading: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = reading;
+    let mut found = false;
+
+    while !rest.is_empty() {
+        match dictionary::longest_prefix(rest) {
+            Some((matched, candidates)) => {
+                out.push_str(candidates[0]);
+                rest = &rest[matched.len()..];
+                found = true;
+            }
+            None => {
+                // Nothing known starts here, so one character goes through as
+                // itself and the search begins again after it. A run of unknown
+                // kana comes out as itself, which is right.
+                let mut characters = rest.chars();
+                match characters.next() {
+                    Some(character) => {
+                        out.push(character);
+                        rest = characters.as_str();
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    if found && out != reading {
+        Some(out)
+    } else {
+        None
+    }
+}
+
 /// Whether a character is one the table could use.
 fn is_romaji(character: char) -> bool {
     character.is_ascii_alphabetic() || matches!(character, '-' | ',' | '.' | '/' | '[' | ']')
@@ -490,6 +647,86 @@ mod tests {
         }
         line.push_str(&ime.finish());
         line
+    }
+
+    /// Type a word, then ask what it could be written as.
+    fn convert(text: &str) -> alloc::vec::Vec<String> {
+        let mut ime = Ime::new();
+        ime.set_script(Script::Hiragana);
+        for character in text.chars() {
+            ime.push(character);
+        }
+        ime.finish();
+        candidates(ime.composed())
+    }
+
+    /// The whole point: letters in, kanji out, with the alternatives after it.
+    #[test]
+    fn it_converts_a_word_it_knows() {
+        let choices = convert("kanji");
+        assert_eq!(choices[0], "漢字");
+        assert!(choices.contains(&"感じ".to_string()));
+        // And the kana is always there to fall back to.
+        assert!(choices.contains(&"かんじ".to_string()));
+        assert!(choices.contains(&"カンジ".to_string()));
+    }
+
+    /// A reading nobody has heard of still converts, to itself. That is the
+    /// honest answer for a dictionary this size, and it is a great deal better
+    /// than refusing.
+    #[test]
+    fn an_unknown_word_converts_to_what_was_typed() {
+        // Nonsense on purpose, and chosen to have no ambiguity in the romaji
+        // table: `supagetti` would have done, except that `ti` is ち here and
+        // the test would then be about the kana table rather than about the
+        // dictionary.
+        let choices = convert("nyoronyoro");
+        assert_eq!(
+            choices,
+            alloc::vec!["にょろにょろ".to_string(), "ニョロニョロ".to_string()]
+        );
+    }
+
+    /// Longest match, so `にほんご` is one word and not `にほん` plus `ご`.
+    #[test]
+    fn it_prefers_the_longer_reading() {
+        assert_eq!(convert("nihongo")[0], "日本語");
+    }
+
+    /// Two known words with no space between them come out as both.
+    #[test]
+    fn it_segments_a_run_of_words() {
+        let choices = convert("watashiha");
+        assert!(
+            choices.iter().any(|choice| choice.starts_with('私')),
+            "expected 私 at the front of one of {choices:?}"
+        );
+    }
+
+    /// The composition is the kana, and only the kana. A full stop ends a word,
+    /// and converting across it would convert a sentence.
+    #[test]
+    fn punctuation_ends_the_composition() {
+        let mut ime = Ime::new();
+        ime.set_script(Script::Hiragana);
+        for character in "yama.umi".chars() {
+            ime.push(character);
+        }
+        ime.finish();
+        assert_eq!(ime.composed(), "うみ");
+    }
+
+    /// And settling forgets it, which is what pressing return does.
+    #[test]
+    fn settling_forgets_the_composition() {
+        let mut ime = Ime::new();
+        ime.set_script(Script::Hiragana);
+        for character in "yama".chars() {
+            ime.push(character);
+        }
+        assert_eq!(ime.composed(), "やま");
+        ime.settle();
+        assert_eq!(ime.composed(), "");
     }
 
     #[test]

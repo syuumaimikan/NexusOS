@@ -152,6 +152,8 @@ struct Terminal {
     scrolled: usize,
     /// Turns romaji into kana, when it is asked to.
     ime: nexus_ime::Ime,
+    /// The kanji conversion being chosen from, if one is open.
+    choosing: Option<Choice>,
     /// The channel that says what the machine is doing, if this shell has one.
     machine: Option<Handle>,
     /// The network, if this shell was lent it.
@@ -240,6 +242,7 @@ extern "C" fn main() -> ! {
         recalled: None,
         scrolled: 0,
         ime: nexus_ime::Ime::new(),
+        choosing: None,
         style: (nexus_ui::font::Face::Crisp, false),
     };
     terminal.style = terminal.read_style();
@@ -297,6 +300,21 @@ fn split_pipe(line: &str) -> Option<(alloc::string::String, alloc::string::Strin
         }
     }
     None
+}
+
+/// A kanji conversion somebody is choosing between.
+///
+/// The kana is kept as well as the candidates, because escaping has to put it
+/// back: a conversion that could not be undone would be one nobody dares start
+/// in the middle of a line.
+struct Choice {
+    /// What was typed, in kana.
+    kana: String,
+    /// What it could be written as, commonest first. The kana itself is in
+    /// here too, at the end, so cycling always reaches it.
+    candidates: Vec<String>,
+    /// Which one is in the line at the moment.
+    at: usize,
 }
 
 impl Terminal {
@@ -458,6 +476,25 @@ impl Terminal {
                 let Some(character) = char::from_u32(value) else {
                     return false;
                 };
+                // Space, with kana behind the caret, is "convert this" -- which
+                // is what space means in every Japanese input method there has
+                // ever been, and is why this is checked before the character
+                // reaches the kana table.
+                if character == ' ' && self.convert() {
+                    return true;
+                }
+                // Anything else typed *while choosing* accepts what is shown
+                // and carries on. The alternative -- swallowing the letter --
+                // loses a keystroke somebody made on purpose.
+                //
+                // Only while choosing. Doing it unconditionally was a bug that
+                // took a boot to find: `settle` forgets the composition, so
+                // every keystroke threw away the kana before it and `kanji`
+                // arrived at the converter as `じ`.
+                if self.choosing.take().is_some() {
+                    self.ime.settle();
+                }
+
                 let output = self.ime.push(character);
                 self.insert(&output.committed);
                 self.recalled = None;
@@ -479,6 +516,9 @@ impl Terminal {
                 true
             }
             key::ENTER => {
+                // Whatever candidate is in the line is the one that was meant.
+                self.choosing = None;
+                self.ime.settle();
                 let left = self.ime.finish();
                 self.insert(&left);
                 let line = core::mem::take(&mut self.typing);
@@ -496,6 +536,16 @@ impl Terminal {
                 true
             }
             key::ESCAPE => {
+                // While choosing a kanji, escape means "not any of those" and
+                // puts the kana back -- not "throw the line away". A conversion
+                // that could not be undone would be one nobody dares start in
+                // the middle of a sentence.
+                if let Some(choice) = self.choosing.take() {
+                    let shown = choice.candidates[choice.at].clone();
+                    self.replace_before_caret(&shown, &choice.kana);
+                    nexus_user::log("term: went back to the kana").ok();
+                    return true;
+                }
                 self.ime.clear();
                 self.typing.clear();
                 self.caret = 0;
@@ -586,6 +636,84 @@ impl Terminal {
         let at = self.byte_of(self.caret);
         self.typing.insert_str(at, text);
         self.caret += text.chars().count();
+    }
+
+    /// Convert the kana behind the caret, or move to the next candidate.
+    ///
+    /// Returns whether the space was used for this rather than typed. A space
+    /// with no kana behind it is a space, which is what somebody separating two
+    /// English words means by it.
+    fn convert(&mut self) -> bool {
+        // Already choosing: the next space is "not that one, the one after".
+        if let Some(choice) = self.choosing.as_mut() {
+            // The two strings are taken out of the borrow before the line is
+            // touched: `replace_before_caret` needs the terminal, and the
+            // candidate list is part of it.
+            let count = choice.candidates.len();
+            let previous = choice.candidates[choice.at].clone();
+            choice.at = (choice.at + 1) % count;
+            let replacement = choice.candidates[choice.at].clone();
+            let which = choice.at + 1;
+            self.replace_before_caret(&previous, &replacement);
+            // Said on the log rather than in the window. What the window shows
+            // is the candidate itself, in the line, which is the whole of what
+            // a person needs; this is the only way anything outside the machine
+            // can tell that the conversion happened.
+            nexus_user::log(&format!(
+                "term: kanji candidate {which} of {count} is {replacement}"
+            ))
+            .ok();
+            return true;
+        }
+
+        // Whatever the letters have settled into, plus anything still pending:
+        // somebody who typed `kanji` and pressed space means all five letters.
+        let left = self.ime.finish();
+        if !left.is_empty() {
+            self.insert(&left);
+        }
+        let kana = self.ime.composed().to_string();
+        if kana.is_empty() {
+            return false;
+        }
+
+        let candidates = nexus_ime::candidates(&kana);
+        // The first candidate goes into the line at once, which is what an
+        // input method does: space shows you an answer rather than a menu.
+        let first = candidates[0].clone();
+        self.replace_before_caret(&kana, &first);
+        nexus_user::log(&format!(
+            "term: converted {kana} to {first}, 1 of {} candidates",
+            candidates.len()
+        ))
+        .ok();
+        self.choosing = Some(Choice {
+            kana,
+            candidates,
+            at: 0,
+        });
+        true
+    }
+
+    /// Swap `was` for `now` immediately before the caret.
+    ///
+    /// By characters and not by bytes, because everything here is Japanese and
+    /// the two numbers stopped agreeing the moment it was.
+    fn replace_before_caret(&mut self, was: &str, now: &str) {
+        let length = was.chars().count();
+        if length > self.caret {
+            return;
+        }
+        let from = self.byte_of(self.caret - length);
+        let to = self.byte_of(self.caret);
+        if self.typing.get(from..to) != Some(was) {
+            // The line is not what this thought it was, so changing it would be
+            // changing something else. Left alone, which is the safe way to be
+            // wrong.
+            return;
+        }
+        self.typing.replace_range(from..to, now);
+        self.caret = self.caret - length + now.chars().count();
     }
 
     /// Where a character position is, in bytes.

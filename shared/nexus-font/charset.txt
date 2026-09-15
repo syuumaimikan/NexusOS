@@ -36,3 +36,26 @@
 ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲンヴヵヶヷヸヹヺ
 ・ーヽヾヿ
 、。「」・ー〜
+
+# The kanji every candidate in the input method's dictionary can produce.
+#
+# Generated from `shared/nexus-ime/src/dictionary.rs` rather than chosen: the
+# set of characters conversion can put on screen is exactly the set of
+# characters its candidates are made of, and keeping the two in step by hand is
+# keeping them out of step.
+#
+# It was visible before it was fixed, in the same way the kana were. Converting
+# `kanji` produced 漢字 and drew it as □字, because the face carried the
+# second character and not the first -- the conversion was right and the font
+# had never been told about it.
+#
+# 358 characters, which is what 225 dictionary entries are written with.
+一三上下世中予事二京人今仕他付代仲件会伝位作使供信修値先光児入全具写冬処出刃切初
+制券前副創力功効動北医千午南卵取口古台史右号各合同名向吸吹味唄問啓四因図国土在地
+型城報場塩声変夏外夜大天女始子字学安完定実家容寄小少居屋山島川工左巧市師帰干年幹
+店建張形待後御心志応思性悪情意感慣成戦戸所手拝指描教数敵文料新方日早明易星映春昨
+時景曜更書最月服朝期木未本朱来東果柄査校桜械森検楽様権橋機歌歓此歯歴死段母比氏気
+水河泉注海液深漢火父物犬猫玉現理琴生産用由男町画界番異発登白的皮目県真知石示社神
+私秋空窓章童端第答算管箸米精紙終結絵線縞置署考耳聞聴肉肩背能脚自舌色花芽英菊葉葦
+蒼蛙行街表製複西要見観角言計記診詠試詩話語説読調貼質赤走足跡身車転辞通速造週進道
+邪部都酸重金銀録鐘開間陽難雨雪電震青非革音頭題風食飲飴飽首駅高髪魚鳥麻黄黒鼻

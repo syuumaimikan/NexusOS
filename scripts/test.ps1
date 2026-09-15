@@ -782,6 +782,14 @@ Invoke-Step 'the wallpaper' {
         (Join-Path $PSScriptRoot 'test-wallpaper.ps1')) 'wallpaper tests'
 }
 
+Invoke-Step 'kanji conversion' {
+    # Needs a desktop to type into.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-kanji.ps1')) 'kanji conversion tests'
+}
+
 Invoke-Step 'sound' {
     # No desktop needed: the chime plays during bring-up, before anything draws.
     Invoke-Native 'powershell' @('-NoProfile', '-File',
