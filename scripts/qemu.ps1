@@ -33,6 +33,12 @@ function Get-NexusUsbImage {
     return (Join-Path $BuildDir 'nexus-usb.img')
 }
 
+# And the one with a filesystem on it.
+function Get-NexusUsbFsImage {
+    param([Parameter(Mandatory = $true)][string]$BuildDir)
+    return (Join-Path $BuildDir 'nexus-usb-fs.img')
+}
+
 # Refuse a data disk the firmware could boot from.
 #
 # The rule above is easy to state and easy to break: `make-disk.ps1 -SourceDir`
@@ -182,11 +188,25 @@ function Get-NexusQemuArgs {
     # that "the machine can read its own disk" and "the machine can read a USB
     # stick" cannot be confused for one another.
     $stick = Get-NexusUsbImage -BuildDir $BuildDir
+    $formatted = Get-NexusUsbFsImage -BuildDir $BuildDir
+    if ((Test-Path $stick) -or (Test-Path $formatted)) {
+        $arguments += @('-device', 'qemu-xhci,id=nexusxhci')
+    }
     if (Test-Path $stick) {
         $arguments += @(
-            '-device', 'qemu-xhci,id=nexusxhci',
             '-drive', "if=none,id=nexusstick,format=raw,file=$stick",
             '-device', 'usb-storage,bus=nexusxhci.0,drive=nexusstick'
+        )
+    }
+    # A second stick, with a filesystem on it. Two rather than one because the
+    # two prove different things: the raw one proves blocks reach the right
+    # place, and this one proves a filesystem can be read off a drive that
+    # arrives over four layers of USB. Having both also means the driver has to
+    # cope with more than one device, which is a thing it could quietly not do.
+    if (Test-Path $formatted) {
+        $arguments += @(
+            '-drive', "if=none,id=nexusformatted,format=raw,file=$formatted",
+            '-device', 'usb-storage,bus=nexusxhci.0,drive=nexusformatted'
         )
     }
 

@@ -28,6 +28,8 @@ use crate::drivers::virtio_blk::{self, SECTOR_SIZE};
 pub enum FatError {
     /// The disk could not be read.
     Disk(virtio_blk::BlockError),
+    /// A USB drive could not be read.
+    Usb,
     /// The boot sector is not a FAT32 one.
     NotFat32,
     /// A field in the boot sector cannot describe a working filesystem.
@@ -46,6 +48,7 @@ impl core::fmt::Display for FatError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Disk(error) => write!(f, "the disk could not be read: {error}"),
+            Self::Usb => f.write_str("the USB drive could not be read"),
             Self::NotFat32 => f.write_str("this partition does not hold a FAT32 filesystem"),
             Self::BadGeometry => f.write_str("the boot sector does not describe a filesystem"),
             Self::BadCluster(cluster) => write!(f, "cluster {cluster} is outside the filesystem"),
@@ -57,7 +60,39 @@ impl core::fmt::Display for FatError {
 }
 
 /// A mounted filesystem.
+/// Where a volume's sectors come from.
+///
+/// The reader below does not care, and that is the point: a FAT32 filesystem is
+/// a FAT32 filesystem whether the sectors arrive over virtio or over four
+/// layers of USB. Before this existed the reader called the virtio driver by
+/// name, which made "mount the stick" a rewrite rather than an argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// The disk this machine boots with.
+    Virtio,
+    /// A USB drive, by its position in the list the USB driver keeps.
+    Usb(usize),
+}
+
+impl Source {
+    /// Read one sector from wherever this is.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the driver underneath said.
+    pub fn read_sector(self, lba: u64, into: &mut [u8]) -> Result<(), FatError> {
+        match self {
+            Self::Virtio => virtio_blk::read_sector(lba, into).map_err(FatError::Disk),
+            Self::Usb(index) => {
+                crate::drivers::usb_storage::read_block(index, lba, into).map_err(|_| FatError::Usb)
+            }
+        }
+    }
+}
+
 pub struct Volume {
+    /// Where its sectors come from.
+    source: Source,
     /// First sector of the partition, which everything below is relative to.
     start_lba: u64,
     sectors_per_cluster: u32,
@@ -101,8 +136,17 @@ const MAX_CHAIN: usize = 1 << 20;
 impl Volume {
     /// Read the boot sector of the partition starting at `start_lba`.
     pub fn mount(start_lba: u64) -> Result<Self, FatError> {
+        Self::mount_on(Source::Virtio, start_lba)
+    }
+
+    /// Mount a volume whose sectors come from somewhere named.
+    ///
+    /// # Errors
+    ///
+    /// As [`mount`](Self::mount).
+    pub fn mount_on(source: Source, start_lba: u64) -> Result<Self, FatError> {
         let mut boot = [0u8; SECTOR_SIZE];
-        virtio_blk::read_sector(start_lba, &mut boot).map_err(FatError::Disk)?;
+        source.read_sector(start_lba, &mut boot)?;
 
         // The last two bytes are the signature every boot sector carries, and
         // the type string is what separates FAT32 from its predecessors --
@@ -152,6 +196,7 @@ impl Volume {
             .into();
 
         Ok(Self {
+            source,
             start_lba,
             sectors_per_cluster,
             fat_lba,
@@ -182,7 +227,7 @@ impl Volume {
         let offset = (byte % SECTOR_SIZE as u64) as usize;
 
         let mut buffer = [0u8; SECTOR_SIZE];
-        virtio_blk::read_sector(sector, &mut buffer).map_err(FatError::Disk)?;
+        self.source.read_sector(sector, &mut buffer)?;
 
         let entry =
             u32::from_le_bytes(buffer[offset..offset + 4].try_into().unwrap()) & 0x0FFF_FFFF;
@@ -218,8 +263,8 @@ impl Volume {
 
         for cluster in self.chain(first)? {
             for index in 0..self.sectors_per_cluster {
-                virtio_blk::read_sector(self.cluster_lba(cluster) + u64::from(index), &mut buffer)
-                    .map_err(FatError::Disk)?;
+                self.source
+                    .read_sector(self.cluster_lba(cluster) + u64::from(index), &mut buffer)?;
                 data.extend_from_slice(&buffer);
                 if data.len() >= limit {
                     data.truncate(limit);

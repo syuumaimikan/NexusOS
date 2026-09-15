@@ -324,6 +324,29 @@ $UsbImage = Join-Path $BuildDir 'nexus-usb.img'
 if ($LASTEXITCODE -ne 0) { throw 'could not write the USB image' }
 $usbSize = [math]::Round((Get-Item $UsbImage).Length / 1KB, 1)
 
+# And a second stick, with a real filesystem on it. Built by the same script
+# that builds this machine's own disk, because it is the same thing: a GPT with
+# a FAT32 partition. What it proves is different -- that a filesystem can be
+# read off a drive whose sectors arrive over four layers of USB -- and having
+# two drives also means the driver has to cope with more than one device.
+$UsbFiles = Join-Path $BuildDir 'usb-files'
+New-Item -ItemType Directory -Force -Path $UsbFiles | Out-Null
+[System.IO.File]::WriteAllText(
+    (Join-Path $UsbFiles 'readme.txt'),
+    "A file on a USB stick, read by NexusOS over xHCI.`n", $utf8)
+[System.IO.File]::WriteAllText(
+    (Join-Path $UsbFiles 'notes.txt'),
+    "Second file, so the directory has to be walked.`n", $utf8)
+
+$UsbFsImage = Join-Path $BuildDir 'nexus-usb-fs.img'
+if (-not (Test-Path $UsbFsImage)) {
+    & powershell -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $PSScriptRoot 'make-disk.ps1') `
+        -Output $UsbFsImage -SourceDir $UsbFiles -SizeMiB 64 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'could not make the formatted USB image' }
+}
+$usbFsSize = [math]::Round((Get-Item $UsbFsImage).Length / 1MB, 0)
+
 # The disk the kernel drives. Data only, with nothing to boot from: a machine
 # given two bootable disks leaves the firmware to choose between them, and it
 # chose the one whose kernel was older. Made once and left alone, because the
@@ -375,6 +398,7 @@ Write-Host "  picture    : $pictureSize KiB  -> PICTURES\NEXUS.PNG on the disk"
 Write-Host "  recording  : $videoSize KiB  -> PICTURES\NEXUS.AVI on the disk"
 Write-Host "  root store : $rootsSize KiB  -> SYSTEM\ROOTS.NXR on the disk"
 Write-Host "  usb stick  : $usbSize KiB, every sector numbered  -> plugged into qemu-xhci"
+Write-Host "  usb stick 2: $usbFsSize MiB, GPT with FAT32 and two files  -> plugged in beside it"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
 Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1.1.0, signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"

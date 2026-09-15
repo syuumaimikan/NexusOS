@@ -468,93 +468,234 @@ pub fn describe(disk: &Disk) {
     );
 }
 
-/// Read a sector, write one, and read it back.
+/// Read a block, write one, and read it back.
 ///
 /// The claim being tested is "an external USB drive can be read and written",
-/// and each half of it needs its own evidence:
+/// and each half needs its own evidence:
 ///
 /// * **Reading** is checked against content the image was built with. Every
-///   sector of it says its own number, so a read that returns the *wrong*
-///   sector fails here rather than looking like a success. A driver that
-///   returned sector zero for every request would pass a test that only read
-///   sector zero.
-/// * **Writing** is checked by reading it back -- and by reading back a
-///   *different* sector afterwards, because a write that went to the wrong
-///   place would otherwise look exactly like a write that went to the right
-///   one.
+///   block of it says its own number, so a read that returns the *wrong* block
+///   fails here rather than looking like a success -- a driver that returned
+///   block zero for everything would pass a test that only read block zero.
+/// * **Writing** is checked by reading it back, *and* by reading a different
+///   block in between. Without that middle step the read-back would pass
+///   against a driver whose write and read both did nothing and left the buffer
+///   alone.
 ///
-/// It writes to the last sector, which is the one nothing else on the image
-/// depends on.
-///
-/// # Safety
-///
-/// The disk must have been opened.
-pub unsafe fn verify(attached: &mut Attached, disk: &mut Disk) {
-    if disk.blocks < 8 || disk.block_size as usize != 512 {
-        kprintln!("[usb ] the disk is an odd shape; not testing it");
+/// It goes through [`read_block`] and [`write_block`] rather than the internal
+/// transfer path, so what is tested is the entry point anything above the
+/// driver will use -- including its bounds checks and its locking.
+pub fn verify(index: usize) {
+    let Some((blocks, block_size)) = shape(index) else {
+        return;
+    };
+    if blocks < 8 || block_size != 512 {
+        kprintln!("[usb ] drive {index} is an odd shape; not testing it");
         return;
     }
 
-    // A sector that is not the first. Zero is what a broken driver returns.
+    // A block that is not the first. Zero is what a broken driver returns.
     const PROBE: u64 = 5;
-    // SAFETY: the disk is open and one block fits the buffer.
-    if let Err(trouble) = unsafe { read(attached, disk, PROBE, 1) } {
+    let mut buffer = [0u8; 512];
+    if let Err(trouble) = read_block(index, PROBE, &mut buffer) {
         kprintln!("[usb ] FAILED: could not read block {PROBE}: {trouble}");
         return;
     }
-    // SAFETY: 512 bytes were just read into the buffer.
-    let text = unsafe {
-        core::slice::from_raw_parts(attached.buffer_at() as *const u8, 32)
-    };
     let expected = b"NEXUS USB SECTOR 000005";
-    if &text[..expected.len()] != expected {
+    if &buffer[..expected.len()] != expected {
         kprintln!(
             "[usb ] FAILED: block {PROBE} says {:?}, not what the image was built with",
-            core::str::from_utf8(&text[..24]).unwrap_or("<not text>")
+            core::str::from_utf8(&buffer[..24]).unwrap_or("<not text>")
         );
         return;
     }
     kprintln!("[usb ] read block {PROBE} and it holds what the image was built with");
 
     // Now write. The last block, so nothing else cares what is in it.
-    let last = disk.blocks - 1;
+    let last = blocks - 1;
     let marker = b"NEXUS WROTE THIS OVER USB";
-    // SAFETY: the buffer is a page and this writes 512 bytes of it.
-    unsafe {
-        let at = attached.buffer_at() as *mut u8;
-        core::ptr::write_bytes(at, b'.', 512);
-        core::ptr::copy_nonoverlapping(marker.as_ptr(), at, marker.len());
-    }
-    // SAFETY: the disk is open and the buffer holds what is to be written.
-    if let Err(trouble) = unsafe { write(attached, disk, last, 1) } {
+    let mut out = [b'.'; 512];
+    out[..marker.len()].copy_from_slice(marker);
+    if let Err(trouble) = write_block(index, last, &out) {
         kprintln!("[usb ] FAILED: could not write block {last}: {trouble}");
         return;
     }
 
-    // Read something else first, so that the buffer cannot simply still hold
-    // what was written. Without this the read-back would pass against a driver
-    // whose write and read both did nothing.
-    // SAFETY: as above.
-    if unsafe { read(attached, disk, PROBE, 1) }.is_err() {
+    // Something else first, so the buffer cannot simply still hold what was
+    // written.
+    if read_block(index, PROBE, &mut buffer).is_err() {
         kprintln!("[usb ] FAILED: could not read back after writing");
         return;
     }
-
-    // SAFETY: as above.
-    if let Err(trouble) = unsafe { read(attached, disk, last, 1) } {
+    if let Err(trouble) = read_block(index, last, &mut buffer) {
         kprintln!("[usb ] FAILED: could not read block {last} back: {trouble}");
         return;
     }
-    // SAFETY: 512 bytes were just read.
-    let back = unsafe {
-        core::slice::from_raw_parts(attached.buffer_at() as *const u8, marker.len())
-    };
-    if back == marker {
+    if &buffer[..marker.len()] == marker {
         kprintln!("[usb ] wrote block {last} and read it back: the drive can be written to");
     } else {
         kprintln!(
             "[usb ] FAILED: block {last} reads {:?} after being written",
-            core::str::from_utf8(back).unwrap_or("<not text>")
+            core::str::from_utf8(&buffer[..marker.len()]).unwrap_or("<not text>")
         );
+    }
+
+    // And the bounds, which are the other half of a public entry point. A block
+    // past the end must be refused rather than wrapped or truncated.
+    if read_block(index, blocks, &mut buffer).is_ok() {
+        kprintln!("[usb ] FAILED: a read past the end of drive {index} was allowed");
+    }
+}
+
+/// How many blocks a disk has, and how big they are.
+fn shape(index: usize) -> Option<(u64, u32)> {
+    let disks = usb::DISKS.lock();
+    let (_, disk) = disks.get(index)?;
+    Some((disk.blocks, disk.block_size))
+}
+
+/// Read one block from a USB disk into `into`.
+///
+/// The way anything above the driver reaches a drive. It takes the disk by its
+/// position in the list rather than by a handle, because that list is the whole
+/// of what exists: there is no hot-plug, so a disk's index is fixed for the
+/// life of the machine.
+///
+/// It locks both the device and the disk for the whole transfer, which means
+/// two threads reading the same stick take turns. That is correct rather than
+/// fast: bulk-only transport has one command outstanding at a time by
+/// construction, and a second command sent before the first one's status came
+/// back would be answered by a status with the wrong tag.
+///
+/// # Errors
+///
+/// No such disk, a block past the end of it, or anything the device refused.
+pub fn read_block(index: usize, block: u64, into: &mut [u8]) -> Result<(), Trouble> {
+    let mut disks = usb::DISKS.lock();
+    let Some((attached_index, disk)) = disks.get_mut(index) else {
+        return Err(Trouble::NoEndpoints);
+    };
+    if block >= disk.blocks || into.len() < disk.block_size as usize {
+        return Err(Trouble::TooMuch);
+    }
+    let attached_index = *attached_index;
+
+    let mut attached = usb::ATTACHED.lock();
+    let Some(attached) = attached.get_mut(attached_index) else {
+        return Err(Trouble::NoEndpoints);
+    };
+
+    // SAFETY: the disk was opened during enumeration, so its endpoints are
+    // configured and its rings are live.
+    unsafe { read(attached, disk, block, 1)? };
+    // SAFETY: a block was just read into the buffer, which is a page, and the
+    // block is no larger than one.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            attached.buffer_at() as *const u8,
+            into.as_mut_ptr(),
+            disk.block_size as usize,
+        );
+    }
+    Ok(())
+}
+
+/// Write one block to a USB disk.
+///
+/// # Errors
+///
+/// As [`read_block`].
+pub fn write_block(index: usize, block: u64, from: &[u8]) -> Result<(), Trouble> {
+    let mut disks = usb::DISKS.lock();
+    let Some((attached_index, disk)) = disks.get_mut(index) else {
+        return Err(Trouble::NoEndpoints);
+    };
+    if block >= disk.blocks || from.len() < disk.block_size as usize {
+        return Err(Trouble::TooMuch);
+    }
+    let attached_index = *attached_index;
+
+    let mut attached = usb::ATTACHED.lock();
+    let Some(attached) = attached.get_mut(attached_index) else {
+        return Err(Trouble::NoEndpoints);
+    };
+
+    // SAFETY: the buffer is a page and a block is no larger than one.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            from.as_ptr(),
+            attached.buffer_at() as *mut u8,
+            disk.block_size as usize,
+        );
+    }
+    // SAFETY: the disk is open and the buffer holds what is to be written.
+    unsafe { write(attached, disk, block, 1) }
+}
+
+
+/// Mount the filesystem on a USB disk, and say what is on it.
+///
+/// This is the layer above the four: a FAT32 volume whose sectors happen to
+/// arrive over USB rather than over virtio. Nothing in `fs/fat32.rs` knows the
+/// difference, which is the point -- before it took a [`Source`], "mount the
+/// stick" would have been a second filesystem reader.
+///
+/// [`Source`]: crate::fs::fat32::Source
+pub fn mount_and_list(index: usize) {
+    use crate::fs::fat32::Source;
+
+    let source = Source::Usb(index);
+    let partitions = match crate::fs::gpt::read_on(source) {
+        Ok(partitions) => partitions,
+        Err(error) => {
+            // Not a failure. A stick with no partition table is an ordinary
+            // stick -- plenty are formatted with a filesystem at sector zero
+            // and nothing else -- and this does not read those yet.
+            kprintln!("[usb ] drive {index} has no partition table this reads: {error}");
+            return;
+        }
+    };
+    let Some(partition) = partitions.iter().find(|partition| partition.is_esp()) else {
+        kprintln!("[usb ] drive {index} has {} partitions, none of them a filesystem this reads", partitions.len());
+        return;
+    };
+
+    let volume = match crate::fs::fat32::Volume::mount_on(source, partition.first_lba) {
+        Ok(volume) => volume,
+        Err(error) => {
+            kprintln!("[usb ] drive {index}'s filesystem will not mount: {error}");
+            return;
+        }
+    };
+
+    let entries = match volume.read_directory_at("") {
+        Ok(entries) => entries,
+        Err(error) => {
+            kprintln!("[usb ] drive {index} mounted but its root will not read: {error}");
+            return;
+        }
+    };
+    kprintln!(
+        "[usb ] drive {index} mounted: \"{}\", {} entries in the root",
+        volume.label,
+        entries.len()
+    );
+
+    // And read one, because a directory listing proves the directory was read
+    // and says nothing about whether a file can be. The two are different
+    // chains of clusters.
+    for entry in entries.iter().filter(|entry| !entry.is_directory).take(2) {
+        match volume.read_file(&entry.name) {
+            Ok(bytes) => {
+                let text = core::str::from_utf8(&bytes).unwrap_or("<not text>");
+                kprintln!(
+                    "[usb ]   {} is {} bytes and begins {:?}",
+                    entry.name,
+                    bytes.len(),
+                    text.lines().next().unwrap_or("")
+                );
+            }
+            Err(error) => kprintln!("[usb ]   {} will not read: {error}", entry.name),
+        }
     }
 }

@@ -81,6 +81,30 @@ holds them:
 000ffe10: 204f 5645 5220 5553 422e 2e2e 2e2e 2e2e   OVER USB.......
 ```
 
+## A filesystem, on a second stick
+
+```
+[usb ] port 2: 46f4:0001, class 08.06.50 in slot 2
+[usb ] QEMU QEMU HARDDISK: 131072 blocks of 512 bytes, 64 MiB
+[usb ] drive 1 mounted: "NEXUSOS", 5 entries in the root
+[usb ]   HELLO.TXT is 35 bytes and begins "NexusOS reads its own filesystem."
+```
+
+`fs/fat32.rs` used to call the virtio driver by name, which made "mount the
+stick" a rewrite rather than an argument. It takes a `Source` now, and neither
+it nor `fs/gpt.rs` knows or cares which kind of disk the sectors came from --
+a FAT32 filesystem is a FAT32 filesystem whether they arrive over one layer or
+four.
+
+Two sticks rather than one, on purpose. They prove different things: the raw
+one proves blocks reach the right place, the formatted one proves a filesystem
+can be read. And two devices means the driver has to enumerate more than one,
+which is a thing it could quietly have failed to do.
+
+The directory listing is not the whole claim either -- a listing proves the
+*directory's* cluster chain was followed and says nothing about a file's, which
+is a different chain. So it reads a file as well.
+
 ## What is not here
 
 **No interrupts.** Every wait is a poll with a deadline. This runs at start-up
@@ -100,11 +124,10 @@ eight blocks. A larger transfer needs either a bigger buffer or a scatter list.
 afterwards is not noticed; the port status change events that would say so are
 read off the event ring and discarded.
 
-**Not yet a filesystem, and not yet reachable from a program.** The kernel can
-read and write the drive's blocks. Nothing above it can: there is no block
-device handle for it, so `SYSTEM` and `PICTURES` still live on the virtio disk.
-That is the next piece of work and it is a smaller one than any of the four
-layers below it.
+**Not yet reachable from a program.** The kernel reads and writes the drive's
+blocks and mounts a filesystem off it; nothing *above* the kernel can, because
+there is no handle to hand a program. That is the next piece and it is smaller
+than any of the four layers below it.
 
 **Older controllers are named, not driven.** EHCI and UHCI are a different data
 structure, not a simpler version of this one, so a machine with one is told it

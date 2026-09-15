@@ -373,6 +373,14 @@ Invoke-Step 'boot test' {
         'QEMU QEMU HARDDISK: 2048 blocks of 512 bytes',
         'read block 5 and it holds what the image was built with',
         'wrote block 2047 and read it back: the drive can be written to',
+        # A second drive, with a filesystem on it. Two drives rather than one
+        # because they prove different things -- blocks reaching the right
+        # place, and a filesystem being readable through four layers of USB --
+        # and because two means the driver has to cope with more than one
+        # device, which is a thing it could quietly not do.
+        'port 2: 46f4:0001, class 08.06.50 in slot 2',
+        'drive 1 mounted: "NEXUSOS"',
+        'HELLO.TXT is 35 bytes',
 
         'loaded from BIN/RICH.LX',
         '[linux] spawned wrote: a linux program with memory of its own',

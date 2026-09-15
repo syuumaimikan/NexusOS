@@ -542,12 +542,23 @@ pub unsafe fn enumerate() {
             let mut attached = attached;
             // SAFETY: the device is addressed and its control ring is live.
             match unsafe { crate::drivers::usb_storage::open(&mut attached) } {
-                Ok(mut disk) => {
+                Ok(disk) => {
                     crate::drivers::usb_storage::describe(&disk);
-                    // SAFETY: the disk was just opened.
-                    unsafe { crate::drivers::usb_storage::verify(&mut attached, &mut disk) };
                     let index = ATTACHED.lock().len();
+                    let disk_index = DISKS.lock().len();
                     DISKS.lock().push((index, disk));
+                    ATTACHED.lock().push(attached);
+                    // Everything past here goes back through the public entry
+                    // points, which is why the pushes come first.
+                    //
+                    // The raw read-and-write check runs on the first drive
+                    // only: it writes, and a drive with a filesystem on it is
+                    // not a thing to put a marker into the last block of.
+                    if disk_index == 0 {
+                        crate::drivers::usb_storage::verify(disk_index);
+                    }
+                    crate::drivers::usb_storage::mount_and_list(disk_index);
+                    continue;
                 }
                 Err(trouble) => kprintln!("[usb ] it says it is a disk but would not open: {trouble}"),
             }

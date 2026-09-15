@@ -20,7 +20,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::drivers::virtio_blk::{self, SECTOR_SIZE};
+use crate::drivers::virtio_blk::SECTOR_SIZE;
 
 /// What a GPT header says it is.
 const SIGNATURE: &[u8; 8] = b"EFI PART";
@@ -41,7 +41,11 @@ const ESP_TYPE: [u8; 16] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GptError {
     /// The disk could not be read.
-    Disk(virtio_blk::BlockError),
+    ///
+    /// One variant and not one per kind of disk: this reader reaches its
+    /// sectors through [`crate::fs::fat32::Source`] now, and which driver
+    /// refused is that driver's business to have logged.
+    Unreadable,
     /// There is no GPT header where one belongs.
     NoSignature,
     /// The header claims a size the specification does not allow.
@@ -57,7 +61,7 @@ pub enum GptError {
 impl core::fmt::Display for GptError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Disk(error) => write!(f, "the disk could not be read: {error}"),
+            Self::Unreadable => f.write_str("the disk could not be read"),
             Self::NoSignature => f.write_str("there is no GPT header on this disk"),
             Self::BadHeaderSize(size) => write!(f, "the header claims to be {size} bytes"),
             Self::BadHeaderChecksum => f.write_str("the header's checksum does not match"),
@@ -103,8 +107,19 @@ impl Partition {
 
 /// Read the primary partition table.
 pub fn read() -> Result<Vec<Partition>, GptError> {
+    read_on(crate::fs::fat32::Source::Virtio)
+}
+
+/// The same, on a disk named rather than assumed.
+///
+/// # Errors
+///
+/// As [`read`].
+pub fn read_on(source: crate::fs::fat32::Source) -> Result<Vec<Partition>, GptError> {
     let mut header = [0u8; SECTOR_SIZE];
-    virtio_blk::read_sector(HEADER_LBA, &mut header).map_err(GptError::Disk)?;
+    source
+        .read_sector(HEADER_LBA, &mut header)
+        .map_err(|_| GptError::Unreadable)?;
 
     if &header[0..8] != SIGNATURE {
         return Err(GptError::NoSignature);
@@ -141,7 +156,9 @@ pub fn read() -> Result<Vec<Partition>, GptError> {
     let mut array = Vec::with_capacity(sectors * SECTOR_SIZE);
     let mut sector = [0u8; SECTOR_SIZE];
     for index in 0..sectors {
-        virtio_blk::read_sector(entries_lba + index as u64, &mut sector).map_err(GptError::Disk)?;
+        source
+            .read_sector(entries_lba + index as u64, &mut sector)
+            .map_err(|_| GptError::Unreadable)?;
         array.extend_from_slice(&sector);
     }
     if crc32(&array[..total]) != entries_crc {
