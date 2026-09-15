@@ -1,6 +1,7 @@
 //! Bounded read-only tool runtime and optional local inference. No ambient I/O or grant API.
 #![no_std]
 
+pub mod context;
 pub mod wire;
 
 #[cfg(feature = "model")]
@@ -196,6 +197,7 @@ pub struct Runtime {
     remaining: u8,
     state: State,
     audit: Option<Audit>,
+    context: Option<context::SystemContext>,
 }
 
 impl Runtime {
@@ -207,6 +209,7 @@ impl Runtime {
             remaining: 64,
             state: State::Ready,
             audit: None,
+            context: None,
         }
     }
 
@@ -216,7 +219,12 @@ impl Runtime {
     pub fn audit(&self) -> Option<Audit> {
         self.audit
     }
+    /// Only the latest successful observation, cleared on denial, failure or cancellation.
+    pub fn context(&self) -> Option<context::SystemContext> {
+        self.context
+    }
     pub fn cancel(&mut self) {
+        self.context = None;
         self.state = State::Cancelled;
     }
 
@@ -226,11 +234,13 @@ impl Runtime {
         now: u64,
         source: &mut impl SystemSource,
     ) -> Response {
+        self.context = None;
         let mut attempts = 0;
         let mut finished = now;
         let result = self.run(request, now, source, &mut attempts, &mut finished);
         let response = match result {
             Ok(snapshot) => {
+                self.context = Some(context::SystemContext::new(request, snapshot));
                 self.state = State::Complete;
                 Response {
                     session: request.session,

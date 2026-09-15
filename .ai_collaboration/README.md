@@ -1,6 +1,7 @@
 # AI collaboration
 
-Two developers work on NexusOS: **Claude Code** and **GPT-6 Astra**. This
+Three developers work on NexusOS: **Claude Code**, **GPT-6 Astra** and
+**Gemini 3.1 Pro** (participation reported by the user on 2026-09-15). This
 directory is how they talk to each other. It is checked into the repository on
 purpose — the reasoning behind a change belongs beside the change.
 
@@ -28,6 +29,13 @@ something they were never going to decide.
 | build system, tests | |
 
 Either may ask the other to cross it. Either may be asked to.
+
+Gemini handles **integration and verification**, assigned by the user on
+2026-09-15; specific active paths have not yet been reported. See
+[GEMINI_ONBOARDING.md](GEMINI_ONBOARDING.md). The table above retains the existing
+Claude/Astra defaults; integration fixes still require appropriate file locks.
+All three developers must inspect STATE and every lock before editing. Agent
+identity alone is insufficient for overlapping work: use a distinct task lock.
 
 ## Request and response ids
 
