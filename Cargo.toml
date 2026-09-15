@@ -23,6 +23,7 @@ members = [
     "shared/nexus-http",
     "shared/nexus-html",
     "shared/nexus-crypto",
+    "shared/nexus-tls",
     "shared/nexus-pkg",
     "tools/nexus-pack",
     "tools/nexus-collab",

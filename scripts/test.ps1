@@ -103,7 +103,7 @@ $HostLibraries = @(
     'nexus-abi', 'nexus-ai-core', 'nexus-config', 'nexus-crypto', 'nexus-dns', 'nexus-font',
     'nexus-html', 'nexus-http', 'nexus-i18n', 'nexus-image', 'nexus-ime', 'nexus-index',
     'nexus-inflate', 'nexus-json', 'nexus-look', 'nexus-machine', 'nexus-mm', 'nexus-net',
-    'nexus-netclient', 'nexus-pkg', 'nexus-shellwords', 'nexus-time', 'nexus-update',
+    'nexus-netclient', 'nexus-pkg', 'nexus-shellwords', 'nexus-time', 'nexus-tls', 'nexus-update',
     'nexus-user', 'nexus-window'
 )
 

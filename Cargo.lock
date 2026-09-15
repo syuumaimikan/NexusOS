@@ -320,6 +320,13 @@ name = "nexus-time"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-tls"
+version = "0.1.0"
+dependencies = [
+ "nexus-crypto",
+]
+
+[[package]]
 name = "nexus-ui"
 version = "0.1.0"
 dependencies = [
@@ -365,6 +372,7 @@ name = "nexus-wall"
 version = "0.1.0"
 dependencies = [
  "nexus-config",
+ "nexus-image",
  "nexus-look",
  "nexus-ui",
  "nexus-user",

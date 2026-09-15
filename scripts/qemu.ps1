@@ -96,7 +96,7 @@ function Get-NexusQemuArgs {
         # `+pdpe1gb` because the bootloader maps physical memory with gigabyte
         # pages when the processor has them, and a machine without the feature
         # exercises a different path.
-        '-cpu', 'qemu64,+pdpe1gb',
+        '-cpu', 'qemu64,+pdpe1gb,+rdrand,+rdseed',
         '-smp', "$Processors",
         '-m', $Memory,
 

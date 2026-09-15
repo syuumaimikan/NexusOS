@@ -36,6 +36,7 @@ mod panic;
 mod power;
 
 mod process;
+mod random;
 mod sched;
 mod selftest;
 mod serial;
@@ -179,6 +180,11 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
             // and a machine that cannot start its other processors should still
             // be able to turn itself off.
             power::init(&info);
+            // Before anything asks for a key. It reads CPUID and nothing
+            // else, so it is safe this early and the answer is wanted before
+            // the network comes up.
+            random::init();
+            random::self_test();
             adopt_local_apic(&info);
             bring_up_device_interrupts(&info);
             start_other_processors(&info);
@@ -537,6 +543,14 @@ fn monitor_thread(_argument: usize) {
                     kprintln!(
                         "[mon ] machine {asked} snapshots answered, {denied} requests refused"
                     );
+                }
+                let (given, refused) = random::statistics();
+                if given + refused > 0 {
+                    // Worth having in a log because the failure this reports is
+                    // silent otherwise: a machine whose generator stops
+                    // answering hands out no keys and says nothing, and the
+                    // only symptom is connections that will not start.
+                    kprintln!("[mon ] random {given} bytes given out, {refused} requests refused");
                 }
                 let (offs, reboots) = power::statistics();
                 if offs + reboots > 0 {
