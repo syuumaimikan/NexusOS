@@ -359,6 +359,13 @@ Invoke-Step 'boot test' {
         '[linux] spawned wrote: a program built for Linux, running on NexusOS',
         'exited with status 0 through the Linux boundary',
         'init: a Linux program ran and exited through the translation',
+        # And the second one, which asks for what a real libc asks for: memory
+        # of its own, a scattered write, and the register thread-local storage
+        # lives behind. It exits 1 by itself if `mmap` is refused, so the
+        # "exited through the translation" line below is the whole claim.
+        'loaded from BIN/RICH.LX',
+        '[linux] spawned wrote: a linux program with memory of its own',
+        'init: a Linux program that asked for memory ran and exited through the translation',
         'find: given one directory with read transfer',
         'find: asked for more authority than it holds, and was refused',
         'find: tried to write where it was reading, and was refused',

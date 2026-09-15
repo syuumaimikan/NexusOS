@@ -567,9 +567,11 @@ fn monitor_thread(_argument: usize) {
                 );
             }
         }
-        let (translated, refused) = compat::linux::statistics();
+        let (translated, refused, mapped) = compat::linux::statistics();
         if translated > 0 || refused > 0 {
-            kprintln!("[mon ] linux {translated} calls translated, {refused} answered ENOSYS");
+            kprintln!(
+                "[mon ] linux {translated} calls translated, {refused} answered ENOSYS,                  {mapped} pages mapped"
+            );
         }
         let (calls, unknown) = arch::syscall::statistics();
         let (entered, returned) = arch::syscall::yield_statistics();

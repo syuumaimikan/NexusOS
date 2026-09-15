@@ -200,6 +200,15 @@ $LinuxProgram = Join-Path $ProgramDir 'hello.lx'
 if ($LASTEXITCODE -ne 0) { throw 'could not emit the Linux program' }
 $linuxSize = (Get-Item $LinuxProgram).Length
 
+# And a second one that asks for what a real libc asks for: anonymous memory,
+# a scattered write, and the register that thread-local storage lives behind.
+# The first proves the boundary exists; this proves it is wide enough to be
+# worth having.
+$RichProgram = Join-Path $ProgramDir 'rich.lx'
+& $LinuxExe $RichProgram 'a linux program with memory of its own' rich
+if ($LASTEXITCODE -ne 0) { throw 'could not emit the richer Linux program' }
+$richSize = (Get-Item $RichProgram).Length
+
 # A package, built on this machine by the tool that makes them and read on the
 # other side by the program that installs them. Both use `shared/nexus-pkg`, so
 # the format has exactly one implementation: a packer with its own idea of the
@@ -359,6 +368,7 @@ Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed
 Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1.1.0, signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"
 Write-Host "  linux      : $linuxSize bytes of static Linux ELF -> BIN\HELLO.LX on the disk"
+Write-Host "  linux+     : $richSize bytes, mmap and writev -> BIN\RICH.LX on the disk"
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''
