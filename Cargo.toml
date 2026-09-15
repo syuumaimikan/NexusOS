@@ -50,6 +50,7 @@ members = [
     "user/nexus-store",
     "user/nexus-view",
     "user/nexus-launch",
+    "user/nexus-edit",
     "user/nexus-assist",
     "user/nexus-setup",
     "user/nexus-idle",

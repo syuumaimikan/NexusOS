@@ -1688,26 +1688,42 @@ in the code.
 | --- | --- | --- |
 | ~~Wallpaper and theming~~ | done | A wallpaper program given the bottom surface; the compositor composites it first and never reads a setting. |
 | ~~Japanese input~~ | kana done | Romaji to kana is a table and it is here. Kanji conversion needs a dictionary and a candidate window, and is not. |
-| Damage rectangles on a client's frame | small | A program saying *which* part of its surface changed. An animated wallpaper is a full-screen composite per frame without it, which is why it is capped at four a second. |
+| ~~Damage rectangles on a client's frame~~ | done | `damaged` may carry four `u32`s -- x, y, width, height in the client's own surface. Carrying nothing still means all of it, so nothing had to change to keep working. The numbers come from another process and are intersected with the sender's own tile; a client that lies *small* only cheats itself, which is the right way round. The recording wallpaper went from a flat four frames a second to the file's own twelve, because a video frame now costs the picture's area instead of the display. A drifting *pattern* still costs the whole surface, because it really does change all of it. |
 | ~~A package manager window~~ | done | A list of what is in `PKG/`, what each one's signature is worth, and how it compares with what is installed — with Enter bound to the same `install` the updater calls. See [packages.md](packages.md). |
 | ~~A settings window~~ | done | A window with one row per key that something actually reads, given the settings directory and nothing else. See [settings.md](settings.md). |
 | ~~A tool for the shared state two agents keep~~ | done | `nexus-collab`: atomic writes, validation before every write, sixteen backups, stale-lock reporting, and a refusal to release the other agent's lock that has no `--force` behind it. Host-side, no dependencies but this project's own JSON. See [collaboration.md](collaboration.md). |
 | ~~Turning the machine off, restarting it, standing it down~~ | done | ACPI's fixed registers, reached through a channel the compositor is lent and hands on. The test's pass condition is that QEMU **exits**. Battery and S3 are both AML, and both absent by name. See [power.md](power.md). |
 | ~~A picture or a recording as the wallpaper~~ | done | `look.picture` names a file in `PICTURES` and `look.fit` says how it meets a screen of a different shape. The wallpaper is lent the disk **read-only** for it. A recording is played the way the viewer plays one -- a table of contents and one frame at a time -- and is capped at four frames a second, because there are still no per-client damage rectangles and a full-screen frame costs a composite of the whole display. It says what it managed. |
-| A text editor | medium | The terminal's line editing, a file, and a scrollback that can be written into. |
-| Standard output for programs | medium | The thing that would let `ls` stop being built into the terminal. A channel a child inherits, and a pipe. |
+| ~~A text editor~~ | done | `user/nexus-edit`. Lent one directory, read **and write** -- the only window on this machine lent something it may change, and narrowed to a folder rather than to a right. Typing a character repaints one line, which is what the damage rectangles above were for. Tested across two boots: the second one requires the file to come back off the disk with the lines that went in. No selection, clipboard, undo, search or word wrap, and it says so. See [editor.md](editor.md). |
+| Standard output for programs | medium | The thing that would let `ls` stop being built into the terminal. A channel a child inherits, and a pipe. Half done: a *translated* program's `write` and `writev` reach the log (see below), but a Nexus program still has nowhere to write that another program can read. |
 | A real audio card | medium | AC'97 or Intel HD Audio: a DMA engine, a ring of buffers and a mixer. The speaker is one bit and says so. |
 | Loadable drivers | large | The kernel has no module loader, no driver ABI and no way to revoke one. Doing it badly is worse than not doing it. |
 
-* **A vertical seam at the screen's midpoint.** A one-pixel line at
-  `x = screen.width / 2`, running the full height, visible in every screenshot
-  including through windows that should cover it. It is *not* the window
-  ordering: `raise` rotates the raised slot to the end of `order` and the
-  composite loop draws that last, and the launcher's own border and highlight
-  are drawn over the windows behind it correctly. It is not a stride mismatch
-  either -- that would smear diagonally rather than leave one column. Cosmetic,
-  reproducible, and not yet understood; recorded here rather than left for
-  somebody to rediscover.
+* **~~A vertical seam at the screen's midpoint.~~** Investigated and **not
+  reproducible**; the original diagnosis was wrong. Every one of the thirteen
+  screendumps in `build/` was measured for a column that differs from both its
+  neighbours down most of the screen. Five such columns exist across all of
+  them, at x = 14, 970 and 1905 on a 1920-wide screen -- **none at 960**, which
+  is where this entry said to look.
+
+  Each one is a window border: the colour is the compositor's accent, and it
+  runs from the top of the desktop to y = 1149, one pixel above the taskbar,
+  which is exactly a maximised window's extent. The left and right borders are
+  different colours (`6280D5` and `AB6DB6`), which is the focused and unfocused
+  pair rather than an artifact. The claim that it showed *through* windows could
+  not be reproduced in any capture.
+
+  The reason it looked like a stray line is that this is a dark theme: at
+  x = 14 the desktop behind and the window interior are both `09101F`, so the
+  border reads as a line floating on uniform background rather than as an edge
+  between two things.
+
+  Left here rather than deleted, because "somebody saw a line" is worth keeping
+  next to "here is what the pixels actually say". If it is seen again, the
+  measurement is `build/` plus the column scan in this repository's history --
+  and the first question is which x, because 960 is not it.
+
+| ~~Enough of Linux for a real binary~~ | done | Three calls became eighteen. `mmap` (anonymous, private, zeroed, refusing `MAP_FIXED` and anything executable), `writev`, `arch_prctl(ARCH_SET_FS)` -- which is to say memory, the scattered write a libc's `printf` makes, and the register thread-local storage lives behind. `brk`, `rt_sigaction` and `ioctl` are refused with the errors Linux uses, each for a reason written down beside it. The test program checks `mmap`'s return and exits 1 if it was refused, so a machine that answered ENOSYS fails rather than appearing to pass. This is **not** "all Linux software" and is not on the way to it: what it is, is enough of the boundary that a program compiled elsewhere has a chance. |
 
 ### Not feasible as asked, and why
 
@@ -1727,9 +1743,16 @@ in the code.
   from another machine. Writing it *on* NexusOS needs an editor, an assembler
   and a linker that run here. The editor is close; the rest is a language
   implementation.
-* **USB storage.** xHCI, then USB enumeration, then mass storage, then SCSI.
-  Four layers, each of which is a driver on its own. The disk this machine uses
-  is virtio, which is one.
+* **~~USB storage.~~** Done, and it really was four layers: `xhci.rs`,
+  `xhci_rings.rs`, `usb.rs`, `usb_storage.rs`. The kernel reads and writes an
+  external drive's blocks, checked against an image whose every sector says its
+  own number -- so a driver returning the first sector for every request fails
+  rather than passes. A program reaches it too: `usb` in the shell lists drives,
+  lists a directory and reads a file, over a channel the compositor lends the
+  terminal. Writing *files* is refused by name -- the FAT32 reader cannot
+  allocate clusters, and a write that corrupted somebody's stick would be worse
+  than one that did not happen. No interrupts, no hubs, no hot-plug. See
+  [usb.md](usb.md).
 
 ### What "everyday use" means here
 

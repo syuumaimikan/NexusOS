@@ -943,7 +943,7 @@ fn memory_size(handle: u64) -> u64 {
 /// # Safety
 ///
 /// `register` must exist on this processor.
-unsafe fn read_msr(register: u32) -> u64 {
+pub unsafe fn read_msr(register: u32) -> u64 {
     let (low, high): (u32, u32);
     // SAFETY: upheld by the caller.
     unsafe {
@@ -963,7 +963,7 @@ unsafe fn read_msr(register: u32) -> u64 {
 /// # Safety
 ///
 /// `register` must exist, and `value` must be one it accepts.
-unsafe fn write_msr(register: u32, value: u64) {
+pub unsafe fn write_msr(register: u32, value: u64) {
     // SAFETY: upheld by the caller.
     unsafe {
         core::arch::asm!(

@@ -161,6 +161,12 @@ struct Terminal {
     /// the handle the commands say so rather than pretending the network is
     /// down.
     network: Option<Handle>,
+    /// Removable drives, if it was lent them.
+    ///
+    /// Separate from `root`, and a channel rather than a directory, because a
+    /// stick is not a fixed disk: it can be absent, and it can be pulled out
+    /// between two commands. See the kernel's `removable.rs`.
+    removable: Option<Handle>,
     /// The face to draw in, and whether to soften its edges.
     ///
     /// Read once, when the window opens. Unlike the wallpaper this does not
@@ -193,7 +199,7 @@ extern "C" fn main() -> ! {
     // window with a prompt in it, and a copy started without them says so
     // rather than failing at the first command.
     let mut buffer = [0u8; 32];
-    let mut handles = [Handle(0); 6];
+    let mut handles = [Handle(0); 7];
     let Ok(received) = nexus_user::receive(COMPOSITOR, &mut buffer, &mut handles) else {
         failed("term: FAILED: nothing arrived to draw on");
         finish();
@@ -224,6 +230,7 @@ extern "C" fn main() -> ! {
         sound: (received.handles >= 4).then(|| handles[3]),
         machine: (received.handles >= 5).then(|| handles[4]),
         network: (received.handles >= 6).then(|| handles[5]),
+        removable: (received.handles >= 7).then(|| handles[6]),
         width,
         height,
         lines: Vec::new(),
@@ -601,6 +608,7 @@ impl Terminal {
             "look" => self.look(),
             "sys" | "top" => self.sys(),
             "net" => self.net(),
+            "usb" => self.usb(words.argument(0), words.argument(1)),
             "lookup" | "dig" | "nslookup" => self.lookup(words.argument(0)),
             "scan" => self.scan(words.argument(0), words.argument(1), words.argument(2)),
             "uptime" => {
@@ -1208,6 +1216,197 @@ impl Terminal {
     ///
     /// What this machine's address is, and what it was told to use to reach
     /// anywhere else.
+    /// `usb`, `usb <drive>`, `usb <drive> <file>`.
+    ///
+    /// With nothing: what drives there are. With a drive: what is on it. With a
+    /// file as well: what is in it.
+    ///
+    /// Every request names the drive again, because the service works that way
+    /// and the service works that way because a stick can be pulled out between
+    /// two commands -- see the kernel's `removable.rs`.
+    fn usb(&mut self, drive: Option<&str>, file: Option<&str>) {
+        let Some(service) = self.removable else {
+            self.trouble(nexus_i18n::text("term.nousb"));
+            return;
+        };
+
+        let Some(drive) = drive else {
+            self.usb_drives(service);
+            return;
+        };
+        let Ok(number) = drive.parse::<u8>() else {
+            self.trouble(&nexus_i18n::format("term.usb.notanumber", &[("what", &drive)]));
+            return;
+        };
+
+        match file {
+            None => self.usb_list(service, number),
+            Some(name) => self.usb_show(service, number, name),
+        }
+    }
+
+    /// Ask the service something and get the answer.
+    ///
+    /// Returns the body after the four-byte tag, or the refusal's reason.
+    fn usb_ask(&mut self, service: Handle, request: &[u8]) -> Result<Vec<u8>, u16> {
+        if nexus_user::send(service, request, &[]).is_err() {
+            return Err(0);
+        }
+        let mut buffer = [0u8; 256];
+        let mut none = [Handle(0); 1];
+        let Ok(received) = nexus_user::receive(service, &mut buffer, &mut none) else {
+            return Err(0);
+        };
+        let reply = &buffer[..received.bytes];
+        if reply.len() < 4 {
+            return Err(0);
+        }
+        if &reply[..4] == b"ok  " {
+            return Ok(reply[4..].to_vec());
+        }
+        // A refusal carries two bytes of reason.
+        if reply.len() >= 6 {
+            return Err(u16::from_le_bytes([reply[4], reply[5]]));
+        }
+        Err(0)
+    }
+
+    /// What drives there are.
+    fn usb_drives(&mut self, service: Handle) {
+        let body = match self.usb_ask(service, b"drv?") {
+            Ok(body) => body,
+            Err(reason) => {
+                self.usb_trouble(reason);
+                return;
+            }
+        };
+        if body.is_empty() {
+            return;
+        }
+        let count = body[0] as usize;
+        if count == 0 {
+            self.plain(nexus_i18n::text("term.usb.none"));
+            return;
+        }
+        for index in 0..count {
+            let at = 1 + index * 13;
+            if at + 13 > body.len() {
+                break;
+            }
+            let blocks = u64::from_le_bytes(body[at..at + 8].try_into().unwrap_or_default());
+            let size = u32::from_le_bytes(body[at + 8..at + 12].try_into().unwrap_or_default());
+            let mounted = body[at + 12] != 0;
+            let megabytes = blocks * u64::from(size) / (1024 * 1024);
+            self.plain(&nexus_i18n::format(
+                if mounted {
+                    "term.usb.drive"
+                } else {
+                    "term.usb.drive.raw"
+                },
+                &[("n", &index), ("size", &megabytes)],
+            ));
+        }
+    }
+
+    /// What is on one.
+    fn usb_list(&mut self, service: Handle, drive: u8) {
+        let mut request = alloc::vec![b'l', b'i', b's', b't', drive];
+        request.extend_from_slice(b"");
+        let body = match self.usb_ask(service, &request) {
+            Ok(body) => body,
+            Err(reason) => {
+                self.usb_trouble(reason);
+                return;
+            }
+        };
+        if body.is_empty() {
+            return;
+        }
+        let count = body[0] as usize;
+        let mut at = 1usize;
+        for _ in 0..count {
+            if at >= body.len() {
+                break;
+            }
+            let length = body[at] as usize;
+            at += 1;
+            if at + length + 5 > body.len() {
+                break;
+            }
+            let name = String::from_utf8_lossy(&body[at..at + length]).into_owned();
+            at += length;
+            let directory = body[at] != 0;
+            at += 1;
+            let size = u32::from_le_bytes(body[at..at + 4].try_into().unwrap_or_default());
+            at += 4;
+            if directory {
+                self.plain(&format!("  {name}/"));
+            } else {
+                self.plain(&format!("  {name}  {size}"));
+            }
+        }
+        if count == 0 {
+            self.plain(nexus_i18n::text("term.usb.empty"));
+        }
+    }
+
+    /// What is in a file on one.
+    fn usb_show(&mut self, service: Handle, drive: u8, name: &str) {
+        // Read in pieces, because a message carries less than a file. The reply
+        // says how long the whole file is, so this knows what it is reading
+        // towards rather than asking until it gets nothing.
+        let mut offset = 0u32;
+        let mut whole = 0u32;
+        let mut text = String::new();
+
+        for _ in 0..64 {
+            let mut request = alloc::vec![b'r', b'e', b'a', b'd', drive];
+            request.extend_from_slice(&offset.to_le_bytes());
+            request.extend_from_slice(name.as_bytes());
+            let body = match self.usb_ask(service, &request) {
+                Ok(body) => body,
+                Err(reason) => {
+                    self.usb_trouble(reason);
+                    return;
+                }
+            };
+            if body.len() < 4 {
+                break;
+            }
+            whole = u32::from_le_bytes(body[..4].try_into().unwrap_or_default());
+            let piece = &body[4..];
+            if piece.is_empty() {
+                break;
+            }
+            text.push_str(&String::from_utf8_lossy(piece));
+            offset += piece.len() as u32;
+            if offset >= whole {
+                break;
+            }
+        }
+
+        for line in text.lines().take(40) {
+            self.plain(line);
+        }
+        nexus_user::log(&format!(
+            "term: usb {drive} {name} is {whole} bytes, read {offset}"
+        ))
+        .ok();
+    }
+
+    /// Say why the service refused.
+    fn usb_trouble(&mut self, reason: u16) {
+        let key = match reason {
+            1 => "term.usb.nodrive",
+            2 => "term.usb.nofilesystem",
+            3 => "term.usb.notfound",
+            5 => "term.usb.readonly",
+            _ => "term.usb.refused",
+        };
+        let said = nexus_i18n::text(key).to_string();
+        self.trouble(&said);
+    }
+
     fn net(&mut self) {
         let Some(service) = self.network else {
             self.trouble(nexus_i18n::text("term.nonetwork"));

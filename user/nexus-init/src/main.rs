@@ -646,9 +646,22 @@ fn ask_a_question() {
 /// the same spawn service, over the same channel, and the only difference is
 /// four characters of prefix saying which interface the program speaks.
 fn run_a_linux_program() {
-    const PROGRAM: &[u8] = b"linux:BIN/HELLO.LX";
+    // Two of them. The first asks for `write` and `exit_group` and proves the
+    // boundary exists at all. The second asks for anonymous memory, a scattered
+    // write and the register thread-local storage lives behind -- which is what
+    // every statically linked C or Rust program asks for before it prints
+    // anything, and is therefore the one that says whether the translation is
+    // wide enough to be worth having.
+    //
+    // The second exits 1 of its own accord if `mmap` is refused, so a machine
+    // that answered ENOSYS fails here rather than looking like it passed.
+    run_one(b"linux:BIN/HELLO.LX", "a Linux program");
+    run_one(b"linux:BIN/RICH.LX", "a Linux program that asked for memory");
+}
 
-    if nexus_user::send(SPAWNER, PROGRAM, &[]).is_err() {
+/// Start one translated program and wait for it.
+fn run_one(program: &[u8], what: &str) {
+    if nexus_user::send(SPAWNER, program, &[]).is_err() {
         failed("init: FAILED: could not reach the spawn service");
         return;
     }
@@ -675,8 +688,17 @@ fn run_a_linux_program() {
     // above the interface, so what is below sees a process like any other.
     match nexus_user::wait(process) {
         Ok(nexus_user::Ending::Exited(0)) => {
-            nexus_user::log("init: a Linux program ran and exited through the translation").ok();
+            nexus_user::log(&alloc::format!(
+                "init: {what} ran and exited through the translation"
+            ))
+            .ok();
         }
+        // Named rather than lumped in with the rest: the rich program exits 1
+        // when a call it needs was refused, and "it exited 1" is a different
+        // problem from "it would not start".
+        Ok(nexus_user::Ending::Exited(status)) => failed(&alloc::format!(
+            "init: FAILED: {what} exited with status {status}"
+        )),
         Ok(_) => failed("init: FAILED: the Linux program did not exit cleanly"),
         Err(_) => failed("init: FAILED: could not wait for the Linux program"),
     }

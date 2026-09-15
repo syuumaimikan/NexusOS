@@ -1239,6 +1239,12 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
     // a decision anything drawing windows should be making.
     let power = crate::power::endpoint();
 
+    // And removable drives. Held on the same terms as the rest: the compositor
+    // reads nothing through it and hands it to whichever window is for looking
+    // at files, which is a decision made here by the program that holds it
+    // rather than something a window could help itself to.
+    let removable = crate::removable::endpoint();
+
     let filesystem = match fs::store::root() {
         Ok(node) => Some(node),
         Err(error) => {
@@ -1285,6 +1291,10 @@ unsafe fn start_compositor(spawner: Arc<ipc::Endpoint>) -> Result<(), UserError>
     endowments.push((ipc::Object::Channel(sound), ipc::Rights::ALL));
     endowments.push((ipc::Object::Channel(machine), ipc::Rights::ALL));
     endowments.push((ipc::Object::Channel(power), ipc::Rights::ALL));
+    // Last, so that adding it does not move the numbers of everything before
+    // it -- a program names its handles by position, and inserting one in the
+    // middle would silently give every later one a different meaning.
+    endowments.push((ipc::Object::Channel(removable), ipc::Rights::ALL));
 
     // SAFETY: as above.
     unsafe {

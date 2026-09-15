@@ -21,3 +21,7 @@ nexus-index = { path = "../../shared/nexus-index" }
 nexus-machine = { path = "../../shared/nexus-machine" }
 nexus-update = { path = "../../shared/nexus-update" }
 nexus-look = { path = "../../shared/nexus-look" }
+nexus-http = { path = "../../shared/nexus-http" }
+nexus-tls = { path = "../../shared/nexus-tls" }
+nexus-json = { path = "../../shared/nexus-json" }
+nexus-netclient = { path = "../../shared/nexus-netclient" }

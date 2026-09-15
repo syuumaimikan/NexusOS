@@ -109,15 +109,14 @@ $HostLibraries = @(
 
 # Programs that run on the development machine rather than on Nexus: the package
 # signer, and the example guest binary.
-$HostTools = @('nexus-pack', 'nexus-collab', 'nexus-linux-example')
+$HostTools = @('nexus-pack', 'nexus-collab', 'nexus-roots', 'nexus-linux-example')
 
 # Programs that run on Nexus, built for the user target.
 $Programs = @(
     'nexus-ai', 'nexus-assist', 'nexus-browser', 'nexus-client', 'nexus-compositor',
-    'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install', 'nexus-launch',
-    'nexus-settings',
-    'nexus-setup', 'nexus-shell', 'nexus-store', 'nexus-term', 'nexus-ui', 'nexus-updater',
-    'nexus-view', 'nexus-wall'
+    'nexus-edit', 'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install',
+    'nexus-launch', 'nexus-settings', 'nexus-setup', 'nexus-shell', 'nexus-store',
+    'nexus-term', 'nexus-ui', 'nexus-updater', 'nexus-view', 'nexus-wall'
 )
 
 # The two that stand alone, each with its own target.
@@ -360,6 +359,32 @@ Invoke-Step 'boot test' {
         '[linux] spawned wrote: a program built for Linux, running on NexusOS',
         'exited with status 0 through the Linux boundary',
         'init: a Linux program ran and exited through the translation',
+        # And the second one, which asks for what a real libc asks for: memory
+        # of its own, a scattered write, and the register thread-local storage
+        # lives behind. It exits 1 by itself if `mmap` is refused, so the
+        # "exited through the translation" line below is the whole claim.
+        # The USB stick, all four layers of it: the controller, the device, the
+        # bulk-only wrapper and the SCSI commands inside it. Read *and* write,
+        # because the request was for both -- and the read is of a block that
+        # is not zero, so a driver returning the first block for every request
+        # fails here rather than passing.
+        'xHCI at',
+        'class 08.06.50',
+        'QEMU QEMU HARDDISK: 2048 blocks of 512 bytes',
+        'read block 5 and it holds what the image was built with',
+        'wrote block 2047 and read it back: the drive can be written to',
+        # A second drive, with a filesystem on it. Two drives rather than one
+        # because they prove different things -- blocks reaching the right
+        # place, and a filesystem being readable through four layers of USB --
+        # and because two means the driver has to cope with more than one
+        # device, which is a thing it could quietly not do.
+        'port 2: 46f4:0001, class 08.06.50 in slot 2',
+        'drive 1 mounted: "NEXUSOS"',
+        'HELLO.TXT is 35 bytes',
+
+        'loaded from BIN/RICH.LX',
+        '[linux] spawned wrote: a linux program with memory of its own',
+        'init: a Linux program that asked for memory ran and exited through the translation',
         'find: given one directory with read transfer',
         'find: asked for more authority than it holds, and was refused',
         'find: tried to write where it was reading, and was refused',

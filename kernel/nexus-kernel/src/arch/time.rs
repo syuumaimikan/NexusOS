@@ -83,6 +83,41 @@ pub fn frequency_hz() -> u64 {
     FREQUENCY_HZ.load(Ordering::Relaxed)
 }
 
+/// Spin for `milliseconds`, without yielding.
+///
+/// For a device driver waiting out a delay the hardware requires -- the twenty
+/// milliseconds a USB port needs after being powered before its connect status
+/// means anything. It spins rather than sleeping because it is used from the
+/// boot path, before there is a scheduler to sleep on, and because the waits it
+/// is for are tens of milliseconds once.
+pub fn spin_ms(milliseconds: u64) {
+    let deadline = uptime_us().saturating_add(milliseconds.saturating_mul(1000));
+    while uptime_us() < deadline {
+        core::hint::spin_loop();
+    }
+}
+
+/// Microseconds elapsed since the first timer started.
+///
+/// The same counter as [`uptime_ms`], in the unit a device driver waits in: a
+/// controller answers a reset in tens of milliseconds and a doorbell in tens of
+/// microseconds, so a deadline in milliseconds is either far too coarse or has
+/// to be written as a fraction.
+///
+/// Its *resolution* is still the timer's tick, which is coarser than a
+/// microsecond -- this changes the unit, not the clock. It is used for
+/// deadlines, where being a tick out costs a tick.
+#[must_use]
+pub fn uptime_us() -> u64 {
+    let frequency = frequency_hz();
+    if frequency == 0 {
+        return 0;
+    }
+    // Multiplied before dividing, which is why this cannot use `uptime_ms`:
+    // going through milliseconds would throw away everything below one.
+    ticks().saturating_mul(1_000_000) / frequency
+}
+
 /// Milliseconds elapsed since the first timer started.
 ///
 /// Approximate across a change of source: the tick count is preserved but the

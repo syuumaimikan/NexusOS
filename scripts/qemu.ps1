@@ -23,6 +23,22 @@ function Get-NexusDiskImage {
     return (Join-Path $BuildDir 'nexus-disk.img')
 }
 
+# The image behind the USB stick.
+#
+# A different file from the disk above on purpose: "the machine can read its
+# own disk" and "the machine can read a USB stick" are different claims, and
+# one image would let the second be mistaken for the first.
+function Get-NexusUsbImage {
+    param([Parameter(Mandatory = $true)][string]$BuildDir)
+    return (Join-Path $BuildDir 'nexus-usb.img')
+}
+
+# And the one with a filesystem on it.
+function Get-NexusUsbFsImage {
+    param([Parameter(Mandatory = $true)][string]$BuildDir)
+    return (Join-Path $BuildDir 'nexus-usb-fs.img')
+}
+
 # Refuse a data disk the firmware could boot from.
 #
 # The rule above is easy to state and easy to break: `make-disk.ps1 -SourceDir`
@@ -160,6 +176,39 @@ function Get-NexusQemuArgs {
         '-netdev', "user,id=nexusnet,hostfwd=tcp:127.0.0.1:${HostHttpPort}-:80",
         '-device', 'virtio-net-pci,netdev=nexusnet,disable-modern=on'
     )
+
+    # An xHCI controller, and a USB drive plugged into it.
+    #
+    # xHCI rather than the older UHCI or EHCI because it is what a machine built
+    # this decade actually has, and because the older ones are a different
+    # driver rather than a simpler version of this one. `qemu-xhci` is the
+    # standards-compliant model; `nec-usb-xhci` is a particular vendor's.
+    #
+    # The drive is a separate image from the one the kernel already drives, so
+    # that "the machine can read its own disk" and "the machine can read a USB
+    # stick" cannot be confused for one another.
+    $stick = Get-NexusUsbImage -BuildDir $BuildDir
+    $formatted = Get-NexusUsbFsImage -BuildDir $BuildDir
+    if ((Test-Path $stick) -or (Test-Path $formatted)) {
+        $arguments += @('-device', 'qemu-xhci,id=nexusxhci')
+    }
+    if (Test-Path $stick) {
+        $arguments += @(
+            '-drive', "if=none,id=nexusstick,format=raw,file=$stick",
+            '-device', 'usb-storage,bus=nexusxhci.0,drive=nexusstick'
+        )
+    }
+    # A second stick, with a filesystem on it. Two rather than one because the
+    # two prove different things: the raw one proves blocks reach the right
+    # place, and this one proves a filesystem can be read off a drive that
+    # arrives over four layers of USB. Having both also means the driver has to
+    # cope with more than one device, which is a thing it could quietly not do.
+    if (Test-Path $formatted) {
+        $arguments += @(
+            '-drive', "if=none,id=nexusformatted,format=raw,file=$formatted",
+            '-device', 'usb-storage,bus=nexusxhci.0,drive=nexusformatted'
+        )
+    }
 
     if ($MonitorPort -gt 0) {
         $arguments += @('-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait")

@@ -164,6 +164,12 @@ const SOUND: Handle = Handle(8);
 /// it -- so a program can be given the disk and the speaker and not this.
 const MACHINE: Handle = Handle(9);
 
+/// The channel a removable drive is reached through.
+///
+/// Held on the same terms as the rest and read by nothing here: what this
+/// program does with it is lend it to the window that looks at files.
+const REMOVABLE: Handle = Handle(11);
+
 /// The channel that stops the machine.
 ///
 /// Held to pass a request on, and never used on this program's own initiative.
@@ -282,6 +288,16 @@ mod key {
 /// state each is in, and it says what should happen to them. It cannot do any
 /// of it itself -- it has no handle to a window, no way to reach the display,
 /// and no idea where its own strip is.
+/// What a client says to this program.
+mod wire {
+    /// This client has drawn. Optionally followed by four little-endian `u32`s
+    /// -- x, y, width, height in the client's own surface -- saying which part
+    /// of it changed. Without them it means the whole surface, which is what
+    /// every client meant before the rectangle existed and what any client may
+    /// still mean.
+    pub const DAMAGED: &[u8] = b"damaged";
+}
+
 mod desk {
     /// Here is every window and what state it is in.
     pub const WINDOWS: &[u8] = b"win";
@@ -306,6 +322,8 @@ mod desk {
     pub const PACKAGES: &[u8] = b"pkgs";
     /// Show the pictures on this machine.
     pub const PICTURES: &[u8] = b"pics";
+    /// Open a window a file can be written in.
+    pub const EDITOR: &[u8] = b"edit";
     /// Start the agent.
     pub const ASSIST: &[u8] = b"asst";
     /// End the session.
@@ -455,6 +473,8 @@ const LAUNCHER: &[u8] = b"BIN/LAUNCH.ELF";
 const STORE: &[u8] = b"BIN/STORE.ELF";
 /// And the one that shows pictures.
 const VIEWER: &[u8] = b"BIN/VIEW.ELF";
+/// The editor.
+const EDITOR: &[u8] = b"BIN/EDIT.ELF";
 /// And the agent, which is given less than any of them.
 const ASSISTANT: &[u8] = b"BIN/ASSIST.ELF";
 /// The program that draws the strip along the bottom and says what a click in
@@ -482,6 +502,17 @@ const GAP: u32 = 8;
 /// from it. Taking space would mean the client's surface and its window were
 /// different sizes, which is a second rectangle to keep in step for the sake of
 /// fourteen pixels a client was going to fill with its own border anyway.
+/// How tall the bar along the top of a window is.
+///
+/// A client's surface is copied whole and then this is painted over the top of
+/// it, so the first fourteen rows a program draws are lost. `nexus_ui::TITLE_BAR`
+/// is the same number, for programs that want their first line to be visible.
+///
+/// Two constants rather than one, and worth saying why: sharing it would mean
+/// this program depending on `nexus-ui`, which depends on a font -- and the
+/// reason this bar has no text on it is that the compositor deliberately has no
+/// font. Fourteen pixels of decoration is not worth that dependency. If they
+/// ever disagree the cost is cosmetic, which is the trade being made.
 const TITLE: u32 = 14;
 /// How large the corner is that resizes a window.
 ///
@@ -625,6 +656,55 @@ fn strip(screen: &Screen) -> Region {
 /// Where a window is.
 fn region_of(tile: &Tile) -> Region {
     Region::of(tile.x, tile.y, tile.width, tile.height)
+}
+
+/// What part of its own surface a client says it changed.
+///
+/// A `damaged` message may carry four little-endian `u32`s -- x, y, width,
+/// height, in the client's own coordinates. One that carries nothing means the
+/// whole surface, which is what every client used to mean and still may.
+///
+/// # Why the clamping is not optional
+///
+/// The numbers come from another process. A rectangle reaching past the
+/// surface would have this program compositing from memory the client does not
+/// own, so it is intersected with the tile and anything left over is dropped.
+/// A client cannot enlarge its own window by claiming a bigger rectangle, and
+/// it cannot reach another window's pixels by claiming a negative one -- the
+/// values are unsigned and the intersection is with its own tile.
+///
+/// A client that lies *small* only cheats itself: the compositor will not
+/// repaint what it did not declare, so the parts it drew and did not mention
+/// are the parts that will look stale. That asymmetry is the right way round.
+fn damaged_region(tile: &Tile, message: &[u8]) -> Region {
+    if message.len() < wire::DAMAGED.len() + 16 {
+        return region_of(tile);
+    }
+    let at = wire::DAMAGED.len();
+    let x = read_u32(message, at);
+    let y = read_u32(message, at + 4);
+    let width = read_u32(message, at + 8);
+    let height = read_u32(message, at + 12);
+
+    // Saturating, so that a width near `u32::MAX` becomes the tile's edge
+    // rather than wrapping round to a tiny rectangle.
+    let left = tile.x.saturating_add(x.min(tile.width));
+    let top = tile.y.saturating_add(y.min(tile.height));
+    let right = left
+        .saturating_add(width)
+        .min(tile.x.saturating_add(tile.width));
+    let bottom = top
+        .saturating_add(height)
+        .min(tile.y.saturating_add(tile.height));
+    if right <= left || bottom <= top {
+        return Region::nothing();
+    }
+    Region {
+        left,
+        top,
+        right,
+        bottom,
+    }
 }
 
 /// Repaints performed, and how many pixels they were asked to cover.
@@ -1168,7 +1248,29 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
 /// is only which program is started and what the third number in its first
 /// message means -- a tint for a client, a count of window slots for the
 /// desktop.
-#[allow(clippy::too_many_arguments)]
+/// Where documents live on the store.
+const DOCUMENTS: &str = "DOCS";
+
+/// Open -- making it if it is not there -- the folder an editor may write in.
+///
+/// Made on demand rather than seeded by the kernel, because it is the one
+/// directory on this machine that exists for the person using it rather than
+/// for the system. A machine nobody has opened an editor on does not need one.
+fn open_documents() -> Result<nexus_user::Handle, nexus_user::Error> {
+    let directory = match nexus_user::open(FILESYSTEM, DOCUMENTS) {
+        Ok(directory) => directory,
+        Err(_) => nexus_user::create(FILESYSTEM, DOCUMENTS, nexus_user::Kind::Directory)?,
+    };
+    // Read, write and transfer. Not close: an editor cannot take the folder
+    // away from the program that lent it.
+    let lent = nexus_user::duplicate(
+        directory,
+        nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+    );
+    nexus_user::close(directory).ok();
+    lent
+}
+
 /// Open the root certificate store, read only, to lend to a browser.
 ///
 /// `None` when there is not one, which is an ordinary state on a machine whose
@@ -1207,6 +1309,7 @@ fn start_service(program: &[u8]) -> Option<nexus_user::Handle> {
     Some(handles[0])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_program(
     program: &[u8],
     index: usize,
@@ -1622,15 +1725,22 @@ fn serve(
                     .as_ref()
                     .map(|tile| nexus_user::receive(tile.channel, &mut message, &mut none))
                 {
-                    Some(Ok(_)) => {
+                    Some(Ok(received)) => {
+                        let mut drawn = region_of_wallpaper(screen);
                         if let Some(tile) = wallpaper.as_mut() {
                             tile.frames += 1;
+                            // What it says it changed, which for a recording
+                            // is the picture's own rectangle rather than the
+                            // whole display. That is the difference between a
+                            // moving wallpaper costing a full-screen composite
+                            // every frame and costing its own area.
+                            drawn = damaged_region(tile, &message[..received.bytes]);
                             if nexus_user::send(tile.channel, b"shown", &[]).is_err() {
                                 nexus_user::unwatch(set, KEY_WALL).ok();
                             }
                         }
                         painted += 1;
-                        pending = pending.union(region_of_wallpaper(screen));
+                        pending = pending.union(drawn);
                     }
                     _ => {
                         nexus_user::unwatch(set, KEY_WALL).ok();
@@ -1693,7 +1803,7 @@ fn serve(
                             pending = pending.union(region_of(tile));
                         }
                     }
-                    Ok(_) => {
+                    Ok(received) => {
                         tile.frames += 1;
                         composited += 1;
                         // Answered, so the client knows the buffer is free
@@ -1704,10 +1814,13 @@ fn serve(
                             // which is ordinary and not a failure.
                             stop_listening(set, tile, index);
                         }
-                        // That window and no other. This is what damage
-                        // tracking exists for: a client redrawing twice a
-                        // second used to cost the whole display every time.
-                        let drawn = region_of(tile);
+                        // That window and no other, and -- when the client
+                        // said so -- only the part of it that changed. This is
+                        // what damage tracking exists for: a client redrawing
+                        // twice a second used to cost the whole display every
+                        // time, and one that redraws a caret used to cost it
+                        // the whole window.
+                        let drawn = damaged_region(tile, &message[..received.bytes]);
                         pending = pending.union(drawn);
                     }
                     Err(_) => stop_listening(set, tile, index),
@@ -1882,6 +1995,13 @@ enum What {
     Packages,
     /// The picture window, which is given the filesystem to read from.
     Pictures,
+    /// The editor, which is given one directory to read *and write*.
+    ///
+    /// The only window on this machine lent a directory it may change. Not the
+    /// filesystem: a program that can write is a program that can destroy, and
+    /// the difference between "it can edit your documents" and "it can edit
+    /// anything" is one `open` here.
+    Editor,
     /// The agent, which is given the filesystem to read and the machine
     /// snapshot, and nothing that can change anything.
     Assistant,
@@ -1946,6 +2066,7 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::SETTINGS => Launched::Window(What::Settings),
         tag if tag == desk::PACKAGES => Launched::Window(What::Packages),
         tag if tag == desk::PICTURES => Launched::Window(What::Pictures),
+        tag if tag == desk::EDITOR => Launched::Window(What::Editor),
         tag if tag == desk::ASSIST => Launched::Window(What::Assistant),
         tag if tag == desk::QUIT => Launched::Leave,
         tag if tag == desk::HALT => Launched::Halt,
@@ -2113,6 +2234,10 @@ fn read_shell(
 
     if message == desk::PACKAGES {
         return open_window(screen, set, tiles, focus, order, What::Packages);
+    }
+
+    if message == desk::EDITOR {
+        return open_window(screen, set, tiles, focus, order, What::Editor);
     }
 
     if message == desk::PICTURES {
@@ -2305,12 +2430,16 @@ fn open_window(
             // which is what a shell is for -- and it is still a decision made
             // here, by the program that holds those handles, rather than
             // something the terminal could have helped itself to.
-            let (Ok(files), Ok(spawner), Ok(sound), Ok(machine), Ok(network)) = (
+            let (Ok(files), Ok(spawner), Ok(sound), Ok(machine), Ok(network), Ok(removable)) = (
                 nexus_user::duplicate(FILESYSTEM, lending),
                 nexus_user::duplicate(SPAWNER, lending),
                 nexus_user::duplicate(SOUND, lending),
                 nexus_user::duplicate(MACHINE, lending),
                 nexus_user::duplicate(NETWORK, lending),
+                // And removable drives, because a shell is where somebody looks
+                // at what is on a stick. Last in the list so that adding it does
+                // not move the numbers of the handles before it.
+                nexus_user::duplicate(REMOVABLE, lending),
             ) else {
                 failed("compositor: FAILED: could not lend a terminal what it needs");
                 return Some(Asked::Nothing);
@@ -2323,7 +2452,7 @@ fn open_window(
                 width,
                 height,
                 0,
-                &[files, spawner, sound, machine, network],
+                &[files, spawner, sound, machine, network, removable],
             )?
         }
         What::Settings => {
@@ -2376,6 +2505,27 @@ fn open_window(
                 &[files, record],
             )?
         }
+        What::Editor => {
+            // One directory, opened here, read and write. The viewer above is
+            // lent the filesystem read-only because a picture viewer that could
+            // write could delete a photograph; an editor has to write, so what
+            // it is lent is narrowed the other way -- to a single directory
+            // rather than to a single right.
+            let Ok(documents) = open_documents() else {
+                failed("compositor: FAILED: could not make a folder for the editor");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                EDITOR,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[documents],
+            )?
+        }
         What::Pictures => {
             // The filesystem, and read-only: a picture viewer that could write
             // is a picture viewer that can delete a photograph. Transfer as
@@ -2412,17 +2562,35 @@ fn open_window(
             let reading = nexus_user::rights::READ | nexus_user::rights::TRANSFER;
             let talking =
                 nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
-            let (Ok(files), Ok(machine)) = (
+            let (Ok(files), Ok(machine), Ok(network)) = (
                 nexus_user::duplicate(FILESYSTEM, reading),
                 nexus_user::duplicate(MACHINE, talking),
+                nexus_user::duplicate(NETWORK, talking),
             ) else {
                 failed("compositor: FAILED: could not lend the agent what it may have");
                 return Some(Asked::Nothing);
             };
+            let roots = open_roots();
+            let mut lent = alloc::vec::Vec::new();
+            lent.push(files);
+            lent.push(machine);
+            lent.push(network);
+            if let Some(r) = roots {
+                lent.push(r);
+            } else {
+                lent.push(nexus_user::Handle(0));
+            }
             let Some(ai_channel) = start_service(b"BIN/AI.ELF") else {
                 failed("compositor: FAILED: could not start the AI service");
                 return Some(Asked::Nothing);
             };
+            lent.push(ai_channel);
+            let Some(gemini_channel) = start_service(b"BIN/GEMINI.ELF") else {
+                failed("compositor: FAILED: could not start the Gemini agent");
+                return Some(Asked::Nothing);
+            };
+            lent.push(gemini_channel);
+            let lent_slice = lent.leak();
             start_program(
                 ASSISTANT,
                 slot,
@@ -2431,7 +2599,7 @@ fn open_window(
                 width,
                 height,
                 0,
-                &[files, machine, ai_channel],
+                lent_slice,
             )?
         }
         What::Launcher => {
@@ -2476,6 +2644,7 @@ fn open_window(
             What::Settings => "compositor: started the settings, and lent them the settings",
             What::Packages => "compositor: started the packages, and lent them the disk",
             What::Pictures => "compositor: started a picture window, and lent it the disk to read",
+            What::Editor => "compositor: started an editor, and lent it the documents folder",
             What::Assistant => {
                 "compositor: started the agent, and lent it the disk to read and nothing to write"
             }

@@ -121,6 +121,11 @@ const ENTRIES: &[Entry] = &[
         grave: false,
     },
     Entry {
+        key: "shell.editor",
+        tag: b"edit",
+        grave: false,
+    },
+    Entry {
         key: "shell.assist",
         tag: b"asst",
         grave: false,

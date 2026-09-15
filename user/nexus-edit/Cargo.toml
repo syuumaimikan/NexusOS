@@ -1,0 +1,18 @@
+[package]
+name = "nexus-edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A window you can write a file in."
+
+[[bin]]
+name = "nexus-edit"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-window = { path = "../nexus-window" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }

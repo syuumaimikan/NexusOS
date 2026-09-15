@@ -34,6 +34,7 @@ mod memory;
 mod net;
 mod panic;
 mod power;
+mod removable;
 
 mod process;
 mod random;
@@ -231,6 +232,24 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         Err(error) => kprintln!("[net ] no network card: {error}"),
     }
 
+    // The USB host controller, on the same terms again. A machine with nothing
+    // plugged in is the ordinary case and is reported rather than treated as a
+    // failure -- and so is a machine whose USB controller is an older kind this
+    // does not drive.
+    match drivers::xhci::start(&devices) {
+        Ok(()) => {
+            // SAFETY: the controller was just started, so its window is mapped.
+            unsafe { drivers::xhci::survey_ports() };
+            // And ask whatever is there what it is.
+            // SAFETY: the controller is running and the ports have been reset.
+            unsafe { drivers::usb::enumerate() };
+        }
+        Err(drivers::xhci::Trouble::NotPresent) => {
+            kprintln!("[usb ] no xHCI controller on this machine");
+        }
+        Err(error) => kprintln!("[usb ] the USB controller would not start: {error}"),
+    }
+
     // The display comes up only now, after the heap: translated strings are
     // built at runtime by substituting into templates, so drawing anything
     // localised allocates. Bringing the display up earlier cost a boot to an
@@ -323,6 +342,7 @@ fn start_system_threads() {
     sound::start_thread();
     machine::start_thread();
     power::start_thread();
+    removable::start_thread();
 
     display::progress(5, BOOT_STEPS);
 
@@ -567,9 +587,17 @@ fn monitor_thread(_argument: usize) {
                 );
             }
         }
-        let (translated, refused) = compat::linux::statistics();
+        let (served, turned_away) = removable::statistics();
+        if served > 0 || turned_away > 0 {
+            kprintln!(
+                "[mon ] removable {served} requests answered, {turned_away} refused"
+            );
+        }
+        let (translated, refused, mapped) = compat::linux::statistics();
         if translated > 0 || refused > 0 {
-            kprintln!("[mon ] linux {translated} calls translated, {refused} answered ENOSYS");
+            kprintln!(
+                "[mon ] linux {translated} calls translated, {refused} answered ENOSYS,                  {mapped} pages mapped"
+            );
         }
         let (calls, unknown) = arch::syscall::statistics();
         let (entered, returned) = arch::syscall::yield_statistics();

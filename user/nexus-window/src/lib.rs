@@ -50,6 +50,35 @@ mod wire {
     pub const DAMAGED: &[u8] = b"damaged";
 }
 
+/// The `damaged` message, with the rectangle on it when there is one.
+///
+/// A fixed buffer rather than a `Vec`: this is sent once a frame and a window
+/// program has a small heap. Twenty-three bytes, on the stack.
+fn damage_message(rectangle: Option<(u32, u32, u32, u32)>) -> [u8; wire::DAMAGED.len() + 16] {
+    let mut out = [0u8; wire::DAMAGED.len() + 16];
+    out[..wire::DAMAGED.len()].copy_from_slice(wire::DAMAGED);
+    if let Some((x, y, width, height)) = rectangle {
+        let at = wire::DAMAGED.len();
+        out[at..at + 4].copy_from_slice(&x.to_le_bytes());
+        out[at + 4..at + 8].copy_from_slice(&y.to_le_bytes());
+        out[at + 8..at + 12].copy_from_slice(&width.to_le_bytes());
+        out[at + 12..at + 16].copy_from_slice(&height.to_le_bytes());
+    }
+    out
+}
+
+/// How much of that message to send.
+///
+/// The word alone when there is no rectangle, so that a compositor which has
+/// never heard of rectangles sees exactly what it always saw.
+const fn damage_length(rectangle: Option<(u32, u32, u32, u32)>) -> usize {
+    if rectangle.is_some() {
+        wire::DAMAGED.len() + 16
+    } else {
+        wire::DAMAGED.len()
+    }
+}
+
 /// What a key is, as the kernel sends it and the compositor forwards it.
 mod raw {
     pub const CHARACTER: u8 = 1;
@@ -146,6 +175,31 @@ impl Key {
 pub trait App {
     /// Put a frame together. Called only when the surface is the program's.
     fn draw(&mut self, canvas: &mut Canvas);
+
+    /// Which part of the last frame actually changed.
+    ///
+    /// `None` -- the default -- means all of it, which is what every window
+    /// meant before this existed and is the right answer for one that redraws
+    /// its whole contents anyway.
+    ///
+    /// Returning a rectangle is what lets the compositor repaint a strip
+    /// instead of a window. It matters most for the things that change a little
+    /// and often: a caret, a clock, a progress bar, a frame of video. The
+    /// wallpaper is the extreme case -- a full-screen composite four times a
+    /// second was what capped an animated background at four frames.
+    ///
+    /// Called immediately after [`draw`](App::draw), so a program can record
+    /// what it touched while it is touching it.
+    ///
+    /// # Being honest about it
+    ///
+    /// A rectangle smaller than what was drawn leaves the rest stale on screen
+    /// until something else repaints it. The compositor does not check, and it
+    /// could not: it has no idea what the program meant to draw. A window that
+    /// is unsure should return `None` and cost a little more.
+    fn damage(&mut self) -> Option<(u32, u32, u32, u32)> {
+        None
+    }
 
     /// Act on a key. Returns whether anything on screen changed.
     ///
@@ -481,7 +535,12 @@ impl Window {
             if stale && sent_at.is_none() {
                 let mut canvas = self.canvas();
                 app.draw(&mut canvas);
-                if nexus_user::send(self.compositor, wire::DAMAGED, &[]).is_err() {
+                // Asked after drawing, so a program can note what it touched
+                // as it touches it rather than predicting it beforehand.
+                let rectangle = app.damage();
+                let message = damage_message(rectangle);
+                let length = damage_length(rectangle);
+                if nexus_user::send(self.compositor, &message[..length], &[]).is_err() {
                     ended = Ended::Disconnected;
                     break;
                 }

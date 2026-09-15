@@ -17,6 +17,9 @@ name = "nexus-ai"
 version = "0.1.0"
 dependencies = [
  "nexus-ai-core",
+ "nexus-http",
+ "nexus-json",
+ "nexus-tls",
  "nexus-user",
 ]
 
@@ -32,10 +35,14 @@ name = "nexus-assist"
 version = "0.1.0"
 dependencies = [
  "nexus-ai-core",
+ "nexus-http",
  "nexus-i18n",
  "nexus-index",
+ "nexus-json",
  "nexus-look",
  "nexus-machine",
+ "nexus-netclient",
+ "nexus-tls",
  "nexus-ui",
  "nexus-update",
  "nexus-user",
@@ -96,6 +103,16 @@ version = "0.1.0"
 [[package]]
 name = "nexus-dns"
 version = "0.1.0"
+
+[[package]]
+name = "nexus-edit"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
 
 [[package]]
 name = "nexus-find"
