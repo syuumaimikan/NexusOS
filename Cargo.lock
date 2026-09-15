@@ -31,6 +31,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-api"
+version = "0.1.0"
+dependencies = [
+ "nexus-machine",
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-assist"
 version = "0.1.0"
 dependencies = [
@@ -351,6 +359,7 @@ dependencies = [
 name = "nexus-term"
 version = "0.1.0"
 dependencies = [
+ "nexus-api",
  "nexus-config",
  "nexus-dns",
  "nexus-i18n",

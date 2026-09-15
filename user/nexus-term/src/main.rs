@@ -36,6 +36,7 @@ use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 use nexus_ui::{Canvas, Colour, Rect};
+use nexus_api::process::{Child, Spawn};
 use nexus_user::{Handle, Kind};
 
 /// Where this program's allocations come from.
@@ -1122,21 +1123,27 @@ impl Terminal {
 
     /// Start `program` with the two ends it is to use, and say what came back.
     ///
-    /// Returns the channel to it and its process, or `None` having already said
-    /// what went wrong. Both `output` and `input` are given away by this call,
-    /// whether it succeeds or not.
+    /// Returns the child, or `None` having already said what went wrong. Both
+    /// `output` and `input` are given away by this call, whether it succeeds or
+    /// not.
     ///
-    /// Split out from running one so that two can be started before either is
-    /// waited for, which is what a pipe needs: a shell that waited for the left
-    /// program before starting the right one would deadlock the moment the left
-    /// one filled the channel between them.
+    /// Split out from running one so that several can be started before any is
+    /// waited for, which is what a pipeline needs: a shell that waited for one
+    /// stage before starting the next would deadlock the moment the first
+    /// filled the channel between them.
+    ///
+    /// The wire format is `nexus_api::process`'s, not this file's. It used to
+    /// be here, and in the compositor, and in the launcher, and in the
+    /// assistant, and in `init` -- five copies of "a path, a zero byte, the
+    /// arguments, two handles back in a fixed order", which is five places for
+    /// it to drift.
     fn spawn_program(
         &mut self,
         program: &str,
         arguments: &str,
         output: Handle,
         input: Handle,
-    ) -> Option<(Handle, Handle)> {
+    ) -> Option<Child> {
         let Some(spawner) = self.spawner else {
             nexus_user::close(output).ok();
             nexus_user::close(input).ok();
@@ -1144,80 +1151,36 @@ impl Terminal {
             return None;
         };
 
-        // Three things to lend it, in the order every program on this machine
-        // expects: somewhere to write, somewhere to read, and the directory
-        // this shell is looking at.
-        //
-        // The directory is duplicated, not lent: sending a handle gives it up,
-        // and a shell that handed its own working directory to the first
-        // program it ran would have no files afterwards.
+        // The directory this shell is looking at, duplicated rather than lent:
+        // sending a handle gives it up, and a shell that handed its own working
+        // directory to the first program it ran would have no files afterwards.
         //
         // With `TRANSFER` on the copy, and that is not a detail. A handle is
         // only passable if it carries the right to be passed, so a copy made
         // with `READ` alone cannot be put in a message -- and the send fails
         // whole, taking the two channel ends with it, so the program never
-        // starts and nothing says why. Read is what the program gets to *do*
-        // with the directory; transfer is what this shell needs to hand it
-        // over at all.
-        let mut lent = alloc::vec![output, input];
+        // starts and nothing says why.
+        let mut spawn = Spawn::new(program).arguments(arguments).output(output).input(input);
         if let Some(directory) = self.directory() {
             if let Ok(copy) = nexus_user::duplicate(
                 directory,
                 nexus_user::rights::READ | nexus_user::rights::TRANSFER,
             ) {
-                lent.push(copy);
+                spawn = spawn.lend(copy);
             }
         }
 
-        // The path, a zero byte, then the arguments -- which the kernel sends
-        // down the new program's parent channel before handing it over, so they
-        // are waiting when it makes its first read. The zero byte goes in even
-        // when there are no arguments: it is what tells the kernel this caller
-        // uses arguments at all, and without it a program that reads them first
-        // waits for a message that never comes.
-        let mut request = alloc::vec::Vec::new();
-        request.extend_from_slice(program.as_bytes());
-        request.push(0);
-        request.extend_from_slice(arguments.as_bytes());
-
-        if let Err(error) = nexus_user::send(spawner, &request, &lent) {
-            // Named, because the three ways this fails look identical from the
-            // outside: no spawn service, a handle that cannot be passed on, and
-            // a message too large. The first version said only "no programs"
-            // and a missing `TRANSFER` right took an hour to find.
-            let text = nexus_i18n::format("term.cannotrun", &[("name", &program), ("why", &error)]);
-            self.trouble(&text);
-            return None;
-        }
-        let mut reply = [0u8; 128];
-        let mut handles = [Handle(0); 2];
-        let Ok(received) = nexus_user::receive(spawner, &mut reply, &mut handles) else {
-            self.trouble(nexus_i18n::text("term.noprograms"));
-            return None;
-        };
-        if received.handles != 2 {
-            let said = core::str::from_utf8(&reply[..received.bytes]).unwrap_or("");
-            let text = nexus_i18n::format("term.cannotrun", &[("name", &program), ("why", &said)]);
-            self.trouble(&text);
-            return None;
-        }
-        Some((handles[0], handles[1]))
-    }
-
-    /// A channel end that is already finished.
-    ///
-    /// For a program with nothing to read. It still gets a handle, so that the
-    /// numbering is the same for every program rather than depending on how it
-    /// was started; this end is dropped at once, which is what makes the
-    /// program's first read report the end of its input.
-    fn nothing_to_read(&mut self) -> Option<Handle> {
-        match nexus_user::channel() {
-            Ok((ours, theirs)) => {
-                nexus_user::close(ours).ok();
-                Some(theirs)
-            }
-            Err(_) => {
-                self.trouble(nexus_i18n::text("term.noprograms"));
+        match spawn.start(spawner) {
+            Ok(child) => Some(child),
+            Err(trouble) => {
+                // Named, because the ways this fails look identical from the
+                // outside: no spawn service, a handle that cannot be passed on,
+                // a message too large, and a path that is not there. The first
+                // version said only "no programs", and a missing `TRANSFER`
+                // right took an hour to find.
+                let text =
+                    nexus_i18n::format("term.cannotrun", &[("name", &program), ("why", &trouble)]);
+                self.trouble(&text);
                 None
             }
         }
@@ -1226,42 +1189,33 @@ impl Terminal {
     /// Show everything written to `mine` until the other end goes, and say how
     /// many bytes that was.
     ///
-    /// Read *while* the program runs, not after. A channel holds a bounded
-    /// number of messages, so a program that printed more than that into a
-    /// queue nobody was draining would block for ever waiting for room -- and
-    /// the shell would be blocked waiting for the program. This ends when the
-    /// other end closes, which is what the program exiting does to it.
+    /// The reading is `nexus_api::process::drain`; the lines are this file's,
+    /// because a message boundary is not a line boundary and how to break one
+    /// into the other is a decision about what a terminal is.
     fn show_output(&mut self, mine: Handle) -> usize {
-        let mut written = alloc::string::String::new();
-        let mut buffer = [0u8; nexus_user::MAX_MESSAGE];
-        let mut none = [Handle(0); 1];
-        let mut read = 0usize;
-        while let Ok(got) = nexus_user::receive(mine, &mut buffer, &mut none) {
-            read += got.bytes;
-            written.push_str(&alloc::string::String::from_utf8_lossy(&buffer[..got.bytes]));
-            // Shown a line at a time as it arrives, so a slow program is
-            // something you watch rather than something that appears all at
-            // once when it finishes.
-            while let Some(at) = written.find('\n') {
-                let line: alloc::string::String = written.drain(..=at).collect();
-                self.plain(line.trim_end_matches('\n'));
+        let mut held = alloc::string::String::new();
+        let mut lines: Vec<alloc::string::String> = Vec::new();
+        let read = nexus_api::process::drain(mine, |text| {
+            held.push_str(text);
+            while let Some(at) = held.find('\n') {
+                let line: alloc::string::String = held.drain(..=at).collect();
+                lines.push(alloc::string::String::from(line.trim_end_matches('\n')));
             }
-        }
+        });
         // Whatever it wrote without a line ending on the end is still output.
-        if !written.is_empty() {
-            let rest = core::mem::take(&mut written);
-            self.plain(&rest);
+        if !held.is_empty() {
+            lines.push(held);
         }
-        nexus_user::close(mine).ok();
+        for line in lines {
+            self.plain(&line);
+        }
         read
     }
 
     /// Wait for a program and say how it ended, unless it ended well.
-    fn finished(&mut self, program: &str, channel: Handle, process: Handle) -> Option<u32> {
-        let ending = nexus_user::wait(process);
-        nexus_user::close(channel).ok();
-        nexus_user::close(process).ok();
-        match ending {
+    fn finished(&mut self, child: Child) -> Option<u32> {
+        let program = alloc::string::String::from(child.program());
+        match child.wait() {
             Ok(nexus_user::Ending::Exited(0)) => Some(0),
             Ok(nexus_user::Ending::Exited(status)) => {
                 let text =
@@ -1290,19 +1244,20 @@ impl Terminal {
             self.trouble(nexus_i18n::text("term.noprograms"));
             return None;
         };
-        let Some(input) = self.nothing_to_read() else {
+        let Ok(input) = nexus_api::process::nothing_to_read() else {
             nexus_user::close(mine).ok();
             nexus_user::close(theirs).ok();
+            self.trouble(nexus_i18n::text("term.noprograms"));
             return None;
         };
-        let (channel, process) = self.spawn_program(program, arguments, theirs, input)?;
+        let child = self.spawn_program(program, arguments, theirs, input)?;
 
         let read = self.show_output(mine);
         // What the program wrote, not what the window now holds. The two are
         // different numbers and the second one is useless: a shell with a full
         // scrollback would report the same figure whatever the program did.
         nexus_user::log(&format!("term: {program} wrote {read} bytes")).ok();
-        self.finished(program, channel, process)
+        self.finished(child)
     }
 
     /// Take one side of a pipe and say which program it is and what it is given.
@@ -1361,9 +1316,10 @@ impl Terminal {
             return;
         };
         // And the first stage has nothing to read.
-        let Some(nothing) = self.nothing_to_read() else {
+        let Ok(nothing) = nexus_api::process::nothing_to_read() else {
             nexus_user::close(mine).ok();
             nexus_user::close(last_output).ok();
+            self.trouble(nexus_i18n::text("term.noprograms"));
             return;
         };
 
@@ -1392,7 +1348,7 @@ impl Terminal {
             return;
         }
 
-        let mut started: Vec<(alloc::string::String, Handle, Handle)> = Vec::new();
+        let mut started: Vec<Child> = Vec::new();
         let mut stopped = false;
         for (index, (program, arguments)) in stages.iter().enumerate() {
             let output = if index + 1 == stages.len() {
@@ -1407,7 +1363,7 @@ impl Terminal {
             };
 
             match self.spawn_program(program, arguments, output, input) {
-                Some((channel, process)) => started.push((program.clone(), channel, process)),
+                Some(child) => started.push(child),
                 None => {
                     stopped = true;
                     break;
@@ -1432,8 +1388,8 @@ impl Terminal {
                     nexus_user::close(reads).ok();
                 }
             }
-            for (program, channel, process) in started {
-                self.finished(&program, channel, process);
+            for child in started {
+                self.finished(child);
             }
             return;
         }
@@ -1449,8 +1405,8 @@ impl Terminal {
         // In order, because that is the order they finish in: a stage cannot
         // close its output until its input has ended, and its input ending is
         // the stage before it exiting.
-        for (program, channel, process) in started {
-            self.finished(&program, channel, process);
+        for child in started {
+            self.finished(child);
         }
     }
 
@@ -1568,20 +1524,10 @@ impl Terminal {
             return;
         };
 
-        let asked = nexus_machine::request();
-        if nexus_user::send(machine, &asked, &[]).is_err() {
-            self.trouble(nexus_i18n::text("term.nomachine"));
-            return;
-        }
-
-        let mut reply = [0u8; 128];
-        let mut none = [Handle(0); 1];
-        let Ok(received) = nexus_user::receive(machine, &mut reply, &mut none) else {
-            self.trouble(nexus_i18n::text("term.nomachine"));
-            return;
-        };
-
-        let snapshot = match nexus_machine::Snapshot::of(&reply[..received.bytes]) {
+        // The round trip is `nexus_api::machine`'s, and the shape of the reply
+        // is `shared/nexus-machine`'s -- which the kernel writes with, so the
+        // two cannot drift apart without a test noticing.
+        let snapshot = match nexus_api::machine::snapshot(machine) {
             Ok(snapshot) => snapshot,
             Err(why) => {
                 self.trouble(&alloc::format!("{why}"));

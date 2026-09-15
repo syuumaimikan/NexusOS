@@ -1,0 +1,15 @@
+[package]
+name = "nexus-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The interface a NexusOS program uses to reach the rest of the system: starting programs, walking paths, asking what the machine is doing."
+
+[lib]
+name = "nexus_api"
+path = "src/lib.rs"
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-machine = { path = "../../shared/nexus-machine" }

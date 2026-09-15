@@ -55,6 +55,7 @@ members = [
     "user/nexus-ls",
     "user/nexus-count",
     "user/nexus-text",
+    "user/nexus-api",
     "user/nexus-assist",
     "user/nexus-setup",
     "user/nexus-idle",
