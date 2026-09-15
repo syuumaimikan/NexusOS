@@ -20,3 +20,6 @@ nexus-shellwords = { path = "../../shared/nexus-shellwords" }
 nexus-config = { path = "../../shared/nexus-config" }
 nexus-look = { path = "../../shared/nexus-look" }
 nexus-ime = { path = "../../shared/nexus-ime" }
+nexus-machine = { path = "../../shared/nexus-machine" }
+nexus-netclient = { path = "../../shared/nexus-netclient" }
+nexus-dns = { path = "../../shared/nexus-dns" }

@@ -106,8 +106,29 @@ const INITIAL: [u64; 8] = [
     0x5be0cd19137e2179,
 ];
 
+/// SHA-384's starting state.
+///
+/// The fractional parts of the square roots of the *ninth to sixteenth* primes,
+/// where SHA-512 uses the first eight. That difference, and truncating the
+/// answer to forty-eight bytes, is the whole of what makes SHA-384 a different
+/// function rather than SHA-512 cut short -- and taking the first forty-eight
+/// bytes of a SHA-512 would be exactly that mistake.
+const INITIAL_384: [u64; 8] = [
+    0xcbbb9d5dc1059ed8,
+    0x629a292a367cd507,
+    0x9159015a3070dd17,
+    0x152fecd8f70e5939,
+    0x67332667ffc00b31,
+    0x8eb44a8768581511,
+    0xdb0c2e0d64f98fa7,
+    0x47b5481dbefa4fa4,
+];
+
 /// Bytes in a digest.
 pub const DIGEST: usize = 64;
+
+/// Bytes in a SHA-384 digest.
+pub const DIGEST_384: usize = 48;
 /// Bytes in a block.
 const BLOCK: usize = 128;
 
@@ -131,6 +152,21 @@ impl Hasher {
     pub const fn new() -> Self {
         Self {
             state: INITIAL,
+            buffer: [0; BLOCK],
+            buffered: 0,
+            length: 0,
+        }
+    }
+
+    /// Start a SHA-384 instead.
+    ///
+    /// Everything after this is identical -- the same block function, the same
+    /// padding, the same constants -- and only the starting state and the
+    /// length of the answer differ.
+    #[must_use]
+    pub const fn new_384() -> Self {
+        Self {
+            state: INITIAL_384,
             buffer: [0; BLOCK],
             buffered: 0,
             length: 0,
@@ -306,5 +342,66 @@ mod tests {
             }
             assert_eq!(hasher.finish(), whole, "chunks of {chunk}");
         }
+    }
+}
+
+/// The SHA-384 of one slice.
+#[must_use]
+pub fn digest_384(data: &[u8]) -> [u8; DIGEST_384] {
+    let mut hasher = Hasher::new_384();
+    hasher.update(data);
+    let whole = hasher.finish();
+    let mut out = [0u8; DIGEST_384];
+    out.copy_from_slice(&whole[..DIGEST_384]);
+    out
+}
+
+#[cfg(test)]
+mod sha384_tests {
+    use super::*;
+
+    fn hex(bytes: &[u8]) -> alloc::string::String {
+        use core::fmt::Write as _;
+        let mut text = alloc::string::String::new();
+        for byte in bytes {
+            write!(text, "{byte:02x}").unwrap();
+        }
+        text
+    }
+
+    #[test]
+    fn the_fips_180_4_vectors() {
+        assert_eq!(
+            hex(&digest_384(b"abc")),
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed             8086072ba1e7cc2358baeca134c825a7"
+                .replace(char::is_whitespace, "")
+        );
+        assert_eq!(
+            hex(&digest_384(b"")),
+            "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da             274edebfe76f65fbd51ad2f14898b95b"
+                .replace(char::is_whitespace, "")
+        );
+        assert_eq!(
+            hex(&digest_384(
+                b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn                  hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
+                    .iter()
+                    .copied()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .collect::<alloc::vec::Vec<u8>>()
+                    .as_slice()
+            )),
+            "09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712             fcc7c71a557e2db966c3e9fa91746039"
+                .replace(char::is_whitespace, "")
+        );
+    }
+
+    #[test]
+    fn it_is_not_sha512_truncated() {
+        // The mistake this exists to rule out. A SHA-384 that was SHA-512 cut
+        // short would make these equal, and it would be wrong in a way that
+        // only shows up against somebody else's implementation.
+        let long = digest(b"abc");
+        let short = digest_384(b"abc");
+        assert_ne!(&long[..DIGEST_384], &short[..]);
     }
 }

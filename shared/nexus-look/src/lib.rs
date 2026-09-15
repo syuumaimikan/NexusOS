@@ -35,6 +35,95 @@ pub mod key {
     pub const BOTTOM: &str = "look.bottom";
     /// What is picked out: focus rings, buttons, the things that can be pressed.
     pub const ACCENT: &str = "look.accent";
+    /// Which face text is drawn in.
+    pub const FONT: &str = "look.font";
+    /// Whether text has soft edges.
+    pub const SMOOTH: &str = "look.smooth";
+    /// A picture or a recording to put behind everything, instead of a pattern.
+    ///
+    /// A name inside `PICTURES`, not a path from anywhere: the wallpaper is
+    /// lent that one directory and nothing else, so a value naming a file
+    /// outside it names a file the wallpaper could not open if it tried.
+    pub const PICTURE: &str = "look.picture";
+    /// How a picture is fitted to a screen that is not its shape.
+    pub const FIT: &str = "look.fit";
+}
+
+/// What to do with a picture that is not the shape of the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fit {
+    /// Make it as large as fits, and show the pattern around it.
+    ///
+    /// Every pixel of the picture is on screen, which is what somebody who
+    /// chose a particular picture usually wants.
+    Whole,
+    /// Fill the screen, letting the long side run off the edges.
+    #[default]
+    Fill,
+    /// At its own size, in the middle.
+    ///
+    /// For a picture meant to be seen as it is -- a small one blown up to fill
+    /// a screen is not a better view of it.
+    Middle,
+}
+
+impl Fit {
+    /// The fit this text names, or the default.
+    #[must_use]
+    pub fn parse(text: Option<&str>) -> Self {
+        match text.map(str::trim) {
+            Some("whole") => Self::Whole,
+            Some("middle") => Self::Middle,
+            _ => Self::Fill,
+        }
+    }
+
+    /// What it is called in the settings file.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Whole => "whole",
+            Self::Fill => "fill",
+            Self::Middle => "middle",
+        }
+    }
+}
+
+/// Which face text is drawn in.
+///
+/// The same two names [`nexus_font::Face`] uses, kept here so that a program
+/// reading the settings file does not have to depend on the font crate to know
+/// what the value means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Font {
+    /// Hinted and sharp: every pixel is on or off.
+    #[default]
+    Crisp,
+    /// Anti-aliased: sixteen levels of coverage a pixel, softer edges.
+    Smooth,
+}
+
+impl Font {
+    /// The face this text names, or the default.
+    #[must_use]
+    pub fn parse(text: Option<&str>) -> Self {
+        match text.map(str::trim) {
+            Some("smooth") => Self::Smooth,
+            _ => Self::Crisp,
+        }
+    }
+
+    /// How it is written down.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Crisp => "crisp",
+            Self::Smooth => "smooth",
+        }
+    }
+
+    /// Every face there is, for something that lists them.
+    pub const ALL: [Self; 2] = [Self::Crisp, Self::Smooth];
 }
 
 /// What is drawn behind the windows.
@@ -169,12 +258,28 @@ impl Colour {
 }
 
 /// Everything about how this machine looks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Look {
     pub style: Style,
     pub top: Colour,
     pub bottom: Colour,
     pub accent: Colour,
+    pub font: Font,
+    /// Whether text is drawn with soft edges.
+    ///
+    /// Separate from the face because they answer different questions, and
+    /// because somebody who wants the crisp face and no blending is asking for
+    /// what this machine did before either existed.
+    pub smooth: bool,
+    /// A file in `PICTURES` to draw instead of the pattern, if there is one.
+    ///
+    /// Empty means there is not, which is not the same as a name that will not
+    /// read: a wallpaper that cannot open the file somebody chose says so in
+    /// the log and draws the pattern, and a wallpaper with no name set has
+    /// nothing to say.
+    pub picture: String,
+    /// How that picture is fitted to the screen.
+    pub fit: Fit,
 }
 
 impl Default for Look {
@@ -187,6 +292,15 @@ impl Default for Look {
             top: Colour::new(0x0B, 0x14, 0x28),
             bottom: Colour::new(0x04, 0x08, 0x14),
             accent: Colour::new(0x38, 0x8B, 0xE8),
+            // Off by default, so a machine nobody has changed looks exactly as
+            // it did before there was a choice. Turning it on is a decision
+            // somebody makes, not one made for them by an upgrade.
+            font: Font::Crisp,
+            smooth: false,
+            // Nothing, so a machine nobody has changed looks exactly as it did
+            // before a picture could be chosen.
+            picture: String::new(),
+            fit: Fit::Fill,
         }
     }
 }
@@ -225,6 +339,20 @@ impl Look {
                         look.accent = colour;
                     }
                 }
+                key::FONT => look.font = Font::parse(Some(value)),
+                // Anything that is not "yes" is no, which is how every other
+                // yes-or-no setting in this system reads.
+                key::SMOOTH => look.smooth = value.eq_ignore_ascii_case("yes"),
+                // A name rather than a path. Anything with a separator in it is
+                // refused here rather than at the point of opening, because
+                // "the wallpaper cannot open ../../etc" is a worse thing to
+                // read in a log than "that is not a name".
+                key::PICTURE => {
+                    if !value.contains('/') && !value.contains('\\') {
+                        look.picture = String::from(value);
+                    }
+                }
+                key::FIT => look.fit = Fit::parse(Some(value)),
                 _ => {}
             }
         }
@@ -235,6 +363,46 @@ impl Look {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_is_read_from_the_settings() {
+        let look = Look::parse("look.picture = NEXUS.JPG\nlook.fit = whole\n");
+        assert_eq!(look.picture, "NEXUS.JPG");
+        assert_eq!(look.fit, Fit::Whole);
+    }
+
+    #[test]
+    fn a_machine_with_no_picture_set_has_none() {
+        let look = Look::parse("look.style = stars\n");
+        assert!(look.picture.is_empty());
+        assert_eq!(look.fit, Fit::Fill);
+    }
+
+    #[test]
+    fn a_path_is_not_a_name() {
+        // The wallpaper is lent PICTURES and nothing else, so a value with a
+        // separator in it names a file it could not open anyway. Refused here,
+        // where the reason can be stated, rather than at the open.
+        for bad in [
+            "look.picture = ../system/settings.txt",
+            "look.picture = /system/settings.txt",
+            "look.picture = sub/dir.png",
+            "look.picture = ..\\system\\settings.txt",
+        ] {
+            assert!(Look::parse(bad).picture.is_empty(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_fit_that_is_not_one_falls_back_rather_than_failing() {
+        assert_eq!(Fit::parse(Some("sideways")), Fit::Fill);
+        assert_eq!(Fit::parse(None), Fit::Fill);
+        // And every name round-trips, so the settings window can write what it
+        // read.
+        for fit in [Fit::Whole, Fit::Fill, Fit::Middle] {
+            assert_eq!(Fit::parse(Some(fit.name())), fit);
+        }
+    }
 
     #[test]
     fn a_colour_reads_six_digits() {
@@ -322,6 +490,72 @@ mod tests {
         let look = Look::parse("look.accent = not-a-colour\nlook.style = grid\n");
         assert_eq!(look.accent, Look::default().accent);
         assert_eq!(look.style, Style::Grid);
+    }
+
+    #[test]
+    fn a_face_is_named_and_read_back() {
+        for font in Font::ALL {
+            assert_eq!(Font::parse(Some(font.name())), font);
+        }
+        assert_eq!(Font::parse(None), Font::Crisp);
+        assert_eq!(Font::parse(Some("something else")), Font::Crisp);
+    }
+
+    #[test]
+    fn smoothing_is_off_unless_it_says_yes() {
+        assert!(!Look::default().smooth);
+        assert!(
+            Look::parse(
+                "look.smooth = yes
+"
+            )
+            .smooth
+        );
+        assert!(
+            Look::parse(
+                "look.smooth = YES
+"
+            )
+            .smooth
+        );
+        assert!(
+            !Look::parse(
+                "look.smooth = no
+"
+            )
+            .smooth
+        );
+        assert!(
+            !Look::parse(
+                "look.smooth = 
+"
+            )
+            .smooth
+        );
+        assert!(
+            !Look::parse(
+                "look.smooth = perhaps
+"
+            )
+            .smooth
+        );
+    }
+
+    #[test]
+    fn the_face_and_the_smoothing_are_separate_settings() {
+        let look = Look::parse(
+            "look.font = smooth
+",
+        );
+        assert_eq!(look.font, Font::Smooth);
+        assert!(!look.smooth, "choosing a face must not turn blending on");
+
+        let look = Look::parse(
+            "look.smooth = yes
+",
+        );
+        assert_eq!(look.font, Font::Crisp);
+        assert!(look.smooth);
     }
 
     #[test]

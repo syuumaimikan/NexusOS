@@ -654,6 +654,10 @@ impl Volume {
 
     /// Inodes the filesystem has, and how many are free.
     #[must_use]
+    // Compiled always and called only by the build that runs the destructive
+    // filesystem checks. Kept rather than gated so that the code the test suite
+    // exercises is the same code the shipped kernel contains.
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
     pub fn inodes(&self) -> (u64, u64) {
         (self.superblock.inode_count, self.superblock.free_inodes)
     }
@@ -666,6 +670,10 @@ impl Volume {
 
     /// The sector the filesystem starts at, which is how it is found again.
     #[must_use]
+    // Compiled always and called only by the build that runs the destructive
+    // filesystem checks. Kept rather than gated so that the code the test suite
+    // exercises is the same code the shipped kernel contains.
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
     pub const fn start_lba(&self) -> u64 {
         self.start_lba
     }
@@ -822,6 +830,84 @@ impl Volume {
         // them. The second is the dangerous half.
         self.begin();
         match self.unlink_within(directory, number, &rebuilt) {
+            Ok(()) => self.commit(),
+            Err(error) => {
+                self.abandon();
+                Err(error)
+            }
+        }
+    }
+
+    /// Take a name away and leave what it named.
+    ///
+    /// Half of [`unlink`](Self::unlink), for the case where somebody still
+    /// holds the thing: the name goes now, so nothing can reach it again, and
+    /// the blocks are freed by [`discard`](Self::discard) when the last handle
+    /// closes. That is what every filesystem that has met this does, and the
+    /// alternative -- refusing -- makes replacing a file that another program
+    /// reads on a clock fail at random.
+    ///
+    /// Returns the inode the name pointed at, which the caller has to remember:
+    /// after this it is reachable by nothing else.
+    ///
+    /// If the machine stops between this and the discard, the inode and its
+    /// blocks are leaked. That is the safe direction, and the filesystem's own
+    /// check finds and reclaims exactly that.
+    pub fn unlink_name(&mut self, directory: u32, name: &str) -> Result<u32, FsError> {
+        check_name(name)?;
+        let parent = self.read_inode(directory)?;
+        if parent.kind != Kind::Directory {
+            return Err(FsError::WrongKind);
+        }
+
+        let contents = self.read_inode_data(&parent)?;
+        let entries = parse_directory(&contents)?;
+        let found = entries
+            .iter()
+            .find(|(_, existing, _)| existing == name)
+            .ok_or(FsError::NotFound)?;
+        let number = found.0;
+
+        // The same refusal as a full unlink: a directory with things in it is
+        // not removed by taking its name away, it is left unreachable with its
+        // contents unreachable inside it.
+        let victim = self.read_inode(number)?;
+        if victim.kind == Kind::Directory && !self.read_inode_data(&victim)?.is_empty() {
+            return Err(FsError::NotEmpty);
+        }
+
+        let mut rebuilt = Vec::with_capacity(contents.len());
+        for (inode, existing, kind) in &entries {
+            if existing != name {
+                rebuilt.extend_from_slice(&encode_entry(*inode, existing, *kind));
+            }
+        }
+
+        self.begin();
+        match self.write_inode_data(directory, &rebuilt, true) {
+            Ok(()) => {
+                self.commit()?;
+                Ok(number)
+            }
+            Err(error) => {
+                self.abandon();
+                Err(error)
+            }
+        }
+    }
+
+    /// Free an inode nothing names any more.
+    ///
+    /// The other half. Only ever called on an inode whose name has already
+    /// gone, which is what makes freeing it safe: no directory entry can lead
+    /// anybody back to the number being handed out again.
+    pub fn discard(&mut self, number: u32) -> Result<(), FsError> {
+        self.begin();
+        let done = self
+            .truncate(number)
+            .and_then(|()| self.free_inode(number))
+            .and_then(|()| self.write_superblock());
+        match done {
             Ok(()) => self.commit(),
             Err(error) => {
                 self.abandon();
@@ -1666,6 +1752,10 @@ impl Volume {
     /// It also requires the check to be *quiet* first and quiet again after, so
     /// that a check which reported damage on every filesystem it saw could not
     /// pass this by accident.
+    // Compiled always and called only by the build that runs the destructive
+    // filesystem checks. Kept rather than gated so that the code the test suite
+    // exercises is the same code the shipped kernel contains.
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
     pub fn check_self_test(&mut self) -> Result<String, FsError> {
         let before = self.check()?;
         if !before.clean() {
@@ -1730,6 +1820,10 @@ impl Volume {
     /// cannot be proved by reading it, and the state it recovers from cannot be
     /// produced by a machine that is working -- so the machine is given a way
     /// to stop half way on purpose. Nothing calls it but the test below.
+    // Compiled always and called only by the build that runs the destructive
+    // filesystem checks. Kept rather than gated so that the code the test suite
+    // exercises is the same code the shipped kernel contains.
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
     fn commit_and_stop(&mut self) -> Result<(), FsError> {
         let Some(pending) = self.pending.take() else {
             return Ok(());
@@ -1749,6 +1843,10 @@ impl Volume {
     /// that replayed nothing -- it would finish operations that never happened.
     ///
     /// Returns what it did, for the log.
+    // Compiled always and called only by the build that runs the destructive
+    // filesystem checks. Kept rather than gated so that the code the test suite
+    // exercises is the same code the shipped kernel contains.
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
     pub fn journal_self_test(&mut self) -> Result<String, FsError> {
         const NAME: &str = "journal-test";
         const BEFORE: &[u8] = b"the contents before the crash";

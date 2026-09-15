@@ -32,7 +32,11 @@ use core::arch::asm;
 /// Longest message a channel will carry.
 pub const MAX_MESSAGE: usize = 256;
 /// Most handles one message may carry.
-pub const MAX_HANDLES: usize = 4;
+///
+/// The same number the kernel enforces in `ipc::MAX_HANDLES`. It is also, in
+/// practice, how many kinds of authority a program may be given: everything a
+/// program is lent arrives in the message that starts it.
+pub const MAX_HANDLES: usize = 8;
 
 /// What a call returned when it did not succeed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +172,7 @@ enum Call {
     NodeReadAt = 29,
     NodeWriteAt = 30,
     Now = 31,
+    Random = 32,
 }
 
 /// Make a system call.
@@ -277,6 +282,53 @@ pub fn yield_now() {
 pub fn now() -> Result<u64, Error> {
     // SAFETY: takes no arguments.
     check(unsafe { syscall(Call::Now, 0, 0, 0, 0, 0, 0) })
+}
+
+/// Fill `buffer` with unpredictable bytes.
+///
+/// The only source of unguessable bytes a program has. It comes from the
+/// processor's hardware generator, and there is deliberately no fallback: a
+/// machine without one gets [`Error::NoDevice`] rather than something derived
+/// from the clock.
+///
+/// That refusal is the feature. A key made from the uptime counter is a key
+/// somebody who knows roughly when the machine booted can search in seconds --
+/// and the TLS handshake built on it would *succeed*, which is the worst
+/// possible outcome. A program that gets an error here must say so and stop,
+/// never carry on with a weaker key.
+///
+/// The buffer is either filled completely or left untouched; there is no
+/// partial fill, because half a key is a key with a known half.
+///
+/// # Errors
+///
+/// [`Error::NoDevice`] when the processor has no hardware generator, or its
+/// generator failed. [`Error::Invalid`] for an empty buffer, or one longer than
+/// 256 bytes -- ask again for more.
+pub fn random(buffer: &mut [u8]) -> Result<(), Error> {
+    // SAFETY: the pointer and length describe a live buffer in this process,
+    // which the kernel writes at most `buffer.len()` bytes into.
+    let result = unsafe {
+        syscall(
+            Call::Random,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+            0,
+            0,
+        )
+    };
+    let written = check(result)? as usize;
+    if written == buffer.len() {
+        Ok(())
+    } else {
+        // Cannot happen -- the kernel fills everything or nothing -- but a
+        // short fill silently accepted here would be exactly the guessable-key
+        // failure the rest of this is written to prevent.
+        buffer.fill(0);
+        Err(Error::NoDevice)
+    }
 }
 
 /// This thread's identifier.

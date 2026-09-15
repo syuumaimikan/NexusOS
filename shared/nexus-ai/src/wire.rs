@@ -52,6 +52,8 @@ pub fn encode_response(response: Response) -> [u8; RESPONSE_LEN] {
     out
 }
 
+/// Zero session/request IDs identify an unattributable malformed-frame reply,
+/// not a session or request a client may correlate with outstanding work.
 pub fn decode_response(bytes: &[u8]) -> Option<Response> {
     let (status, session, id) = fields(bytes, b"NAR1", RESPONSE_LEN)?;
     let response = Response {

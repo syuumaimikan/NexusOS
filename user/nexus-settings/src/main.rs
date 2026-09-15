@@ -246,6 +246,36 @@ impl Settings {
             Item::Row(
                 Row::typed(nexus_look::key::ACCENT, "settings.accent", "388be8").into_colour()
             ),
+            Item::Row(Row::choice(
+                nexus_look::key::FONT,
+                "settings.font",
+                nexus_look::Font::ALL
+                    .iter()
+                    .map(|font| font.name().to_string())
+                    .collect(),
+                "crisp"
+            )),
+            Item::Row(Row::choice(
+                nexus_look::key::SMOOTH,
+                "settings.smooth",
+                alloc::vec!["no".to_string(), "yes".to_string()],
+                "no"
+            )),
+            // A name rather than a list. The pictures on a machine are not
+            // something this window can enumerate -- it is lent the settings
+            // directory and nothing else, which is the right shape for what it
+            // does and means this is typed.
+            Item::Row(Row::typed(nexus_look::key::PICTURE, "settings.picture", "")),
+            Item::Row(Row::choice(
+                nexus_look::key::FIT,
+                "settings.fit",
+                alloc::vec![
+                    "fill".to_string(),
+                    "whole".to_string(),
+                    "middle".to_string()
+                ],
+                "fill"
+            )),
             Item::Heading("settings.machine"),
             Item::Row(Row::choice(
                 key::LANGUAGE,
@@ -385,6 +415,13 @@ impl Settings {
 
 impl App for Settings {
     fn draw(&mut self, canvas: &mut Canvas) {
+        // Both together, and from the settings file: the face and whether its
+        // edges are blended are what a person chose, and a window that ignored
+        // them would be a window that looks like it came from somewhere else.
+        canvas.set_text_style(
+            nexus_ui::font::Face::parse(Some(self.look.font.name())),
+            self.look.smooth,
+        );
         let top = Colour(self.look.top.packed());
         let bottom = Colour(self.look.bottom.packed());
         let accent = Colour(self.look.accent.packed());
@@ -419,8 +456,9 @@ impl App for Settings {
                         // A band behind the row rather than a different ink, so
                         // that the row the keys act on is obvious from across a
                         // desk and not only from a foot away.
-                        canvas.fill(
+                        canvas.fill_rounded(
                             Rect::new(line.x, line.y, line.width, line.height),
+                            4,
                             blend(bottom, accent, 64),
                         );
                     }
@@ -643,10 +681,17 @@ fn read_open(file: Handle, name: &str) -> Result<String, String> {
 fn write_text(directory: Handle, name: &str, text: &str) -> Result<(), String> {
     // Removed first: the filesystem has no truncate, so a shorter file written
     // over a longer one would keep the old ending.
+    //
+    // No longer a race. `remove` used to refuse while anybody held the file
+    // open, and several programs here read this one on a clock, so this failed
+    // at random and had to be retried. It unlinks now -- the name goes at once
+    // and the blocks go when the last handle closes -- so the retry that was
+    // here has gone with the reason for it.
     match nexus_user::remove(directory, name) {
         Ok(()) | Err(nexus_user::Error::NotFound) => {}
         Err(error) => return Err(format!("{name}: {error}")),
     }
+
     let file = nexus_user::create(directory, name, Kind::File)
         .map_err(|error| format!("{name}: {error}"))?;
     let contents = text.as_bytes();

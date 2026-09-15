@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
 name = "nexus-abi"
 version = "0.1.0"
 
@@ -17,6 +23,24 @@ dependencies = [
 [[package]]
 name = "nexus-ai-core"
 version = "0.1.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "nexus-assist"
+version = "0.1.0"
+dependencies = [
+ "nexus-ai-core",
+ "nexus-i18n",
+ "nexus-index",
+ "nexus-look",
+ "nexus-machine",
+ "nexus-ui",
+ "nexus-update",
+ "nexus-user",
+ "nexus-window",
+]
 
 [[package]]
 name = "nexus-boot"
@@ -34,6 +58,7 @@ dependencies = [
  "nexus-http",
  "nexus-i18n",
  "nexus-netclient",
+ "nexus-tls",
  "nexus-ui",
  "nexus-user",
 ]
@@ -44,6 +69,13 @@ version = "0.1.0"
 dependencies = [
  "nexus-ui",
  "nexus-user",
+]
+
+[[package]]
+name = "nexus-collab"
+version = "0.1.0"
+dependencies = [
+ "nexus-json",
 ]
 
 [[package]]
@@ -104,11 +136,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-image"
+version = "0.1.0"
+dependencies = [
+ "nexus-inflate",
+]
+
+[[package]]
 name = "nexus-ime"
 version = "0.1.0"
 
 [[package]]
 name = "nexus-index"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-inflate"
 version = "0.1.0"
 
 [[package]]
@@ -145,11 +188,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-launch"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-look",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-linux-example"
 version = "0.1.0"
 
 [[package]]
 name = "nexus-look"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-machine"
 version = "0.1.0"
 
 [[package]]
@@ -183,6 +241,13 @@ name = "nexus-pkg"
 version = "0.1.0"
 dependencies = [
  "nexus-crypto",
+]
+
+[[package]]
+name = "nexus-roots"
+version = "0.1.0"
+dependencies = [
+ "nexus-tls",
 ]
 
 [[package]]
@@ -246,9 +311,12 @@ name = "nexus-term"
 version = "0.1.0"
 dependencies = [
  "nexus-config",
+ "nexus-dns",
  "nexus-i18n",
  "nexus-ime",
  "nexus-look",
+ "nexus-machine",
+ "nexus-netclient",
  "nexus-shellwords",
  "nexus-time",
  "nexus-ui",
@@ -258,6 +326,13 @@ dependencies = [
 [[package]]
 name = "nexus-time"
 version = "0.1.0"
+
+[[package]]
+name = "nexus-tls"
+version = "0.1.0"
+dependencies = [
+ "nexus-crypto",
+]
 
 [[package]]
 name = "nexus-ui"
@@ -289,10 +364,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-view"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-image",
+ "nexus-look",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-wall"
 version = "0.1.0"
 dependencies = [
  "nexus-config",
+ "nexus-image",
  "nexus-look",
  "nexus-ui",
  "nexus-user",

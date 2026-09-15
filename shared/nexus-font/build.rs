@@ -35,12 +35,23 @@ fn main() {
 
     let mut charset = required_characters(&locales);
     charset.extend(extra_characters(&extra));
-    let (description, glyphs) = rasterise(&repo_root, &out_dir, &charset);
-    fs::write(
-        out_dir.join("wide_font.rs"),
-        emit_font(&description, &glyphs),
-    )
-    .unwrap();
+
+    // Two faces, because anti-aliasing is not a switch that can be applied to
+    // the first one. MS Gothic at sixteen pixels draws from hand-tuned embedded
+    // bitmaps, which have no soft edges to capture; a face with soft edges has
+    // to be asked for at rasterisation time and from a different renderer. So
+    // one face is crisp by construction and the other is smooth by
+    // construction, and the setting chooses between them.
+    let crisp = rasterise(&repo_root, &out_dir, &charset, "crisp", false);
+    let smooth = rasterise(&repo_root, &out_dir, &charset, "smooth", true);
+
+    fs::write(out_dir.join("wide_font.rs"), emit_font(&crisp, &smooth)).unwrap();
+}
+
+/// One rasterised face.
+struct Face {
+    description: String,
+    glyphs: Vec<Glyph>,
 }
 
 /// Every character that appears in any translation, plus printable ASCII.
@@ -147,8 +158,9 @@ struct Glyph {
     codepoint: u32,
     /// Advance width in pixels: 8 for half-width, 16 for full-width.
     width: u32,
-    /// Sixteen rows, most significant bit leftmost.
-    rows: [u16; CELL],
+    /// Sixteen rows of sixteen four-bit coverage values, leftmost pixel in the
+    /// most significant nibble.
+    rows: [u64; CELL],
 }
 
 /// Rasterise `characters` by asking the host to draw them.
@@ -173,8 +185,13 @@ fn rasterise(
     repo_root: &Path,
     out_dir: &Path,
     characters: &BTreeSet<char>,
-) -> (String, Vec<Glyph>) {
-    let none = || (String::from("built-in 8x8 only"), Vec::new());
+    name: &str,
+    smooth: bool,
+) -> Face {
+    let none = || Face {
+        description: String::from("built-in 8x8 only"),
+        glyphs: Vec::new(),
+    };
 
     let script = repo_root.join("scripts").join("generate-font.ps1");
     println!("cargo:rerun-if-changed={}", script.display());
@@ -188,20 +205,31 @@ fn rasterise(
     let text: String = characters.iter().collect();
     fs::write(&charset_path, &text).unwrap();
 
-    let glyph_path = out_dir.join("glyphs.txt");
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            &script.to_string_lossy(),
-            "-CharsetFile",
-            &charset_path.to_string_lossy(),
-            "-OutputFile",
-            &glyph_path.to_string_lossy(),
-        ])
-        .output();
+    let glyph_path = out_dir.join(format!("glyphs-{name}.txt"));
+    let mut arguments = vec![
+        String::from("-NoProfile"),
+        String::from("-ExecutionPolicy"),
+        String::from("Bypass"),
+        String::from("-File"),
+        script.to_string_lossy().into_owned(),
+        String::from("-CharsetFile"),
+        charset_path.to_string_lossy().into_owned(),
+        String::from("-OutputFile"),
+        glyph_path.to_string_lossy().into_owned(),
+    ];
+    if smooth {
+        // The same font, rasterised a different way.
+        //
+        // Not a different font, which was the first attempt and was wrong twice
+        // over: the faces that look soft at this size have CJK glyphs too wide
+        // for a sixteen-pixel cell, so the fitting logic dropped to eight or
+        // nine pixels and the smooth face came out half the height of the crisp
+        // one. Rendering the *same* face through the outline rasteriser keeps
+        // every metric identical -- same em size, same cap height, same
+        // advances -- and changes only the edges.
+        arguments.push(String::from("-Smooth"));
+    }
+    let output = Command::new("powershell").args(&arguments).output();
 
     match output {
         Ok(result) if result.status.success() => {}
@@ -225,7 +253,10 @@ fn rasterise(
     if glyphs.is_empty() {
         return none();
     }
-    (font_description(&table), glyphs)
+    Face {
+        description: font_description(&table),
+        glyphs,
+    }
 }
 
 /// The generator's `# font: ...` header, or a placeholder if it is absent.
@@ -258,10 +289,12 @@ fn parse_glyphs(text: &str) -> Vec<Glyph> {
             continue;
         };
 
-        let mut rows = [0u16; CELL];
+        // Sixteen hex digits a row, one per pixel, leftmost first. Sixteen
+        // nibbles is exactly a `u64`, which is why the row is one.
+        let mut rows = [0u64; CELL];
         let mut ok = true;
         for (index, field) in fields[2..].iter().enumerate() {
-            match u16::from_str_radix(field, 16) {
+            match u64::from_str_radix(field, 16) {
                 Ok(row) => rows[index] = row,
                 Err(_) => {
                     ok = false;
@@ -278,59 +311,138 @@ fn parse_glyphs(text: &str) -> Vec<Glyph> {
         }
     }
 
-    glyphs.sort_by_key(|glyph| glyph.codepoint);
     glyphs
 }
 
-/// Emit the glyph table.
-fn emit_font(description: &str, glyphs: &[Glyph]) -> String {
+/// Write the generated module: two faces over one list of codepoints.
+///
+/// The codepoint list is shared because both faces are rasterised from the same
+/// charset, so they cover the same characters in the same order. That is
+/// checked rather than assumed -- a mismatch would mean one face silently
+/// drawing a different character than the other, which is the kind of bug that
+/// looks like a font problem for a week.
+fn emit_font(crisp: &Face, smooth: &Face) -> String {
+    let glyphs = &crisp.glyphs;
+    let matched = smooth.glyphs.len() == glyphs.len()
+        && smooth
+            .glyphs
+            .iter()
+            .zip(glyphs.iter())
+            .all(|(one, other)| one.codepoint == other.codepoint);
+    if !smooth.glyphs.is_empty() && !matched {
+        println!(
+            "cargo:warning=the smooth face covers different characters than the crisp one;              using the crisp face for both"
+        );
+    }
+    let smooth_glyphs: &[Glyph] = if matched { &smooth.glyphs } else { glyphs };
+
     let mut out = String::new();
-    out.push_str("// Generated by build.rs. Do not edit.\n");
-    out.push_str("//\n");
-    out.push_str("// Rasterised from a font installed on the build machine and never\n");
-    out.push_str("// committed; see the `rasterise` function in build.rs for why.\n\n");
+    out.push_str(
+        "// Generated by build.rs. Do not edit.
+",
+    );
+    out.push_str(
+        "//
+",
+    );
+    out.push_str(
+        "// Rasterised from fonts installed on the build machine and never
+",
+    );
+    out.push_str(
+        "// committed; see the `rasterise` function in build.rs for why.
+
+",
+    );
+
+    let description = &crisp.description;
+    let _ = writeln!(
+        out,
+        "/// Which font the crisp table came from, reported at boot.
+pub const SOURCE: &str = {description:?};"
+    );
+    let smooth_description = if matched {
+        smooth.description.clone()
+    } else {
+        crisp.description.clone()
+    };
+    let _ = writeln!(
+        out,
+        "
+/// And the smooth one.
+pub const SMOOTH_SOURCE: &str = {smooth_description:?};"
+    );
+    let _ = writeln!(
+        out,
+        "
+/// Whether the two faces are actually different.
+pub const HAS_SMOOTH: bool = {};",
+        matched && !smooth.glyphs.is_empty()
+    );
 
     let _ = writeln!(
         out,
-        "/// Which font this table came from, reported at boot.\npub const SOURCE: &str = {description:?};"
+        "
+pub const GLYPH_COUNT: usize = {};",
+        glyphs.len()
     );
-    let _ = writeln!(out, "\npub const GLYPH_COUNT: usize = {};", glyphs.len());
     let _ = writeln!(
         out,
-        "\n/// Codepoints present in [`GLYPHS`], ascending, for binary search."
+        "
+/// Codepoints present in both faces, ascending, for binary search."
     );
     let _ = writeln!(out, "pub const CODEPOINTS: [u32; GLYPH_COUNT] = [");
     for glyph in glyphs {
         let _ = writeln!(out, "    {:#06x},", glyph.codepoint);
     }
-    out.push_str("];\n");
+    out.push_str(
+        "];
+",
+    );
 
     let _ = writeln!(
         out,
-        "\n/// Advance width in pixels for each entry of [`CODEPOINTS`]."
+        "
+/// Advance width in pixels for each entry of [`CODEPOINTS`]."
     );
     let _ = writeln!(out, "pub const WIDTHS: [u8; GLYPH_COUNT] = [");
     for glyph in glyphs {
         let _ = writeln!(out, "    {},", glyph.width);
     }
-    out.push_str("];\n");
-
-    let _ = writeln!(
-        out,
-        "\n/// Sixteen rows per glyph, most significant bit leftmost."
+    out.push_str(
+        "];
+",
     );
-    let _ = writeln!(out, "pub const GLYPHS: [[u16; 16]; GLYPH_COUNT] = [");
-    for glyph in glyphs {
-        out.push_str("    [");
-        for (index, row) in glyph.rows.iter().enumerate() {
-            if index > 0 {
-                out.push_str(", ");
+
+    for (name, note, face) in [
+        (
+            "CRISP",
+            "Sixteen rows a glyph, sixteen four-bit coverage values a row, leftmost pixel in the most significant nibble.",
+            glyphs.as_slice(),
+        ),
+        ("SMOOTH", "The same, from the anti-aliased face.", smooth_glyphs),
+    ] {
+        let _ = writeln!(out, "
+/// {note}");
+        // `static` and not `const`: a const array is copied at every use site,
+        // and these are a hundred and fifty kilobytes each. What the renderer
+        // wants is a reference to one row of one glyph, which is what a static
+        // gives it.
+        let _ = writeln!(out, "pub static {name}: [[u64; 16]; GLYPH_COUNT] = [");
+        for glyph in face {
+            out.push_str("    [");
+            for (index, row) in glyph.rows.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                let _ = write!(out, "{row:#018x}");
             }
-            let _ = write!(out, "{row:#06x}");
+            out.push_str("],
+");
         }
-        out.push_str("],\n");
+        out.push_str("];
+");
     }
-    out.push_str("];\n");
 
     out
 }

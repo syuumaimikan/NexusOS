@@ -30,7 +30,20 @@
 param(
     [Parameter(Mandatory = $true)][string]$CharsetFile,
     [Parameter(Mandatory = $true)][string]$OutputFile,
-    [string]$FontName
+    [string]$FontName,
+    # Rasterise with grayscale anti-aliasing instead of GDI's hinted bitmaps.
+    #
+    # This matters more than it sounds. MS Gothic -- the default face -- carries
+    # hand-tuned embedded bitmaps at sixteen pixels, and an embedded bitmap has
+    # no anti-aliasing in it: every pixel is on or off. Capturing coverage from
+    # it gives a table of zeros and fifteens, which is the crisp face and is
+    # exactly right for what it is.
+    #
+    # A face with soft edges has to be rendered a different way: GDI+ rather
+    # than GDI, and the hint that asks for grey coverage rather than for the
+    # embedded bitmap. That is what this switch does, and it is why there are
+    # two faces rather than one face with a flag.
+    [switch]$Smooth
 )
 
 $ErrorActionPreference = 'Stop'
@@ -122,21 +135,61 @@ function Resolve-FamilyName {
 # the channels carry *subpixel* coverage, so a thin vertical stroke can light
 # red and blue while leaving green nearly dark; sampling green alone dropped the
 # right-hand stem of every N and O and rendered the title as "NexusCS".
-function Get-GlyphRows {
+# How much ink covers each pixel, 0 to 15, everywhere in the scratch bitmap.
+#
+# White on black, so the grey level of a pixel *is* its coverage. Sixteen levels
+# rather than 256 because that is as much as the eye asks for at this size and a
+# quarter of the bytes: a full-width glyph is sixteen rows of sixteen nibbles,
+# which is a hundred and twenty-eight bytes.
+function Get-GlyphCoverage {
     param($Font, [char]$Character)
 
     $graphics.Clear($black)
-    [System.Windows.Forms.TextRenderer]::DrawText(
-        $graphics, [string]$Character, $Font,
-        (New-Object System.Drawing.Point(0, 0)), $white, $black, $Flags)
+    if ($Smooth) {
+        $graphics.TextRenderingHint =
+            [System.Drawing.Text.TextRenderingHint]::AntiAlias
+        $brush = New-Object System.Drawing.SolidBrush($white)
+        $graphics.DrawString([string]$Character, $Font, $brush,
+            (New-Object System.Drawing.PointF(0, 0)),
+            [System.Drawing.StringFormat]::GenericTypographic)
+        $brush.Dispose()
+    } else {
+        [System.Windows.Forms.TextRenderer]::DrawText(
+            $graphics, [string]$Character, $Font,
+            (New-Object System.Drawing.Point(0, 0)), $white, $black, $Flags)
+    }
 
-    $rows = New-Object 'int[]' $Scratch
+    $coverage = New-Object 'object[]' $Scratch
     for ($y = 0; $y -lt $Scratch; $y++) {
-        $row = 0
+        $line = New-Object 'int[]' 32
         for ($x = 0; $x -lt 32; $x++) {
             $pixel = $bitmap.GetPixel($x, $y)
             $ink = [Math]::Max($pixel.R, [Math]::Max($pixel.G, $pixel.B))
-            if ($ink -ge 90) { $row = $row -bor (1 -shl (31 - $x)) }
+            # 0..255 down to 0..15, rounded to nearest, so that a fully inked
+            # pixel reaches fifteen rather than stopping one short.
+            $line[$x] = [int][math]::Floor(($ink * 15 + 127) / 255)
+        }
+        $coverage[$y] = $line
+    }
+    return $coverage
+}
+
+# The same glyph as one bit per pixel, which is what every measurement below
+# uses: where the ink starts and stops does not depend on how soft its edges
+# are, and thresholding here leaves the fitting logic exactly as it was.
+function Get-GlyphRows {
+    param($Font, [char]$Character, $Coverage)
+
+    if ($null -eq $Coverage) {
+        $Coverage = Get-GlyphCoverage -Font $Font -Character $Character
+    }
+    $rows = New-Object 'int[]' $Scratch
+    for ($y = 0; $y -lt $Scratch; $y++) {
+        $row = 0
+        $line = $Coverage[$y]
+        for ($x = 0; $x -lt 32; $x++) {
+            # Six of fifteen is the old threshold of ninety out of 255.
+            if ($line[$x] -ge 6) { $row = $row -bor (1 -shl (31 - $x)) }
         }
         $rows[$y] = $row
     }
@@ -280,8 +333,10 @@ $rendered = @{}
 $inkTop = $Scratch
 $inkBottom = -1
 
+$covered = @{}
 foreach ($character in $characters) {
-    $rows = Get-GlyphRows -Font $font -Character $character
+    $coverage = Get-GlyphCoverage -Font $font -Character $character
+    $rows = Get-GlyphRows -Font $font -Character $character -Coverage $coverage
     for ($y = 0; $y -lt $Scratch; $y++) {
         if ($rows[$y] -ne 0) {
             if ($y -lt $inkTop) { $inkTop = $y }
@@ -289,6 +344,7 @@ foreach ($character in $characters) {
         }
     }
     $rendered[$character] = $rows
+    $covered[$character] = $coverage
 }
 
 if ($inkBottom -lt 0) { throw 'every glyph rasterised blank' }
@@ -307,7 +363,9 @@ if ($inkHeight -gt $CellHeight) {
 $lines = New-Object System.Collections.Generic.List[string]
 $lines.Add('# NexusOS glyph table')
 $lines.Add("# font: $description, cell ${FullWidth}x${CellHeight}")
-$lines.Add('# format: codepoint advance row0..row15 (hex, MSB leftmost)')
+$lines.Add('# format: codepoint advance row0..row15')
+$lines.Add('# each row is 16 hex digits, one per pixel, leftmost first, each')
+$lines.Add('# 0..F saying how much ink covers that pixel')
 
 foreach ($character in $characters) {
     $code = [int]$character
@@ -320,14 +378,18 @@ foreach ($character in $characters) {
     $fields = New-Object System.Collections.Generic.List[string]
     $fields.Add(('{0:X4}' -f $code))
     $fields.Add([string]$advance)
+    $coverage = $covered[$character]
     for ($y = 0; $y -lt $CellHeight; $y++) {
         $source = $y + $offset
-        $value = 0
-        if ($source -lt $Scratch) {
-            # The scratch rows are 32 bits wide; the cell keeps the leftmost 16.
-            $value = ($rows[$source] -shr 16) -band 0xFFFF
+        # Sixteen nibbles, leftmost pixel first. The scratch is 32 columns wide
+        # and the cell keeps the leftmost sixteen.
+        $digits = New-Object System.Text.StringBuilder
+        for ($x = 0; $x -lt $FullWidth; $x++) {
+            $value = 0
+            if ($source -lt $Scratch) { $value = $coverage[$source][$x] }
+            [void]$digits.Append(('{0:X1}' -f $value))
         }
-        $fields.Add(('{0:X4}' -f $value))
+        $fields.Add($digits.ToString())
     }
     $lines.Add([string]::Join(' ', $fields))
 }

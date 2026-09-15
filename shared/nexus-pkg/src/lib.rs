@@ -623,8 +623,8 @@ mod tests {
         // Scribble in both fields. Neither is part of what is hashed, so the
         // answer must not move -- which is what lets a package be signed after
         // it has been hashed.
-        for index in at::DIGEST..at::SIGNATURE + 64 {
-            bytes[index] ^= 0xA5;
+        for byte in &mut bytes[at::DIGEST..at::SIGNATURE + 64] {
+            *byte ^= 0xA5;
         }
         assert_eq!(digest_of(&bytes), before);
     }

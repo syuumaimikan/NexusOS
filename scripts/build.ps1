@@ -126,6 +126,25 @@ $SettingsElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-sett
 $StagedSettings = Publish-Program -Elf $SettingsElf -ProgramDir $ProgramDir -Name 'set.elf'
 $settingsSize = [math]::Round((Get-Item $StagedSettings).Length / 1KB, 1)
 
+$AssistElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-assist"
+$StagedAssist = Publish-Program -Elf $AssistElf -ProgramDir $ProgramDir -Name 'assist.elf'
+$assistSize = [math]::Round((Get-Item $StagedAssist).Length / 1KB, 1)
+
+# GPT-6 Astra's read-only AI service, staged at their request so that a normal
+# build carries it. Nothing starts it yet: it is a service a program would be
+# handed a channel to, and no program is handed one.
+$AiElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-ai"
+$StagedAi = Publish-Program -Elf $AiElf -ProgramDir $ProgramDir -Name 'ai.elf'
+$aiSize = [math]::Round((Get-Item $StagedAi).Length / 1KB, 1)
+
+$ViewElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-view"
+$StagedView = Publish-Program -Elf $ViewElf -ProgramDir $ProgramDir -Name 'view.elf'
+$viewSize = [math]::Round((Get-Item $StagedView).Length / 1KB, 1)
+
+$LaunchElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-launch"
+$StagedLaunch = Publish-Program -Elf $LaunchElf -ProgramDir $ProgramDir -Name 'launch.elf'
+$launchSize = [math]::Round((Get-Item $StagedLaunch).Length / 1KB, 1)
+
 $StoreElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-store"
 $StagedStore = Publish-Program -Elf $StoreElf -ProgramDir $ProgramDir -Name 'store.elf'
 $storeSize = [math]::Round((Get-Item $StagedStore).Length / 1KB, 1)
@@ -209,6 +228,43 @@ $notes = Join-Path $PackageDir 'notes.txt'
 A second file, so that the entry table has to be walked rather than guessed.
 '@, $utf8)
 
+# A picture, so the viewer has something to show on a machine nobody has put a
+# file on yet. Staged beside the programs because the kernel copies `.PNG` out
+# of the image's program directory onto the store, the same way it does `.NEX`.
+$Picture = Join-Path $ProgramDir 'nexus.png'
+& powershell -NoProfile -File (Join-Path $PSScriptRoot 'make-picture.ps1') -OutputFile $Picture | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "could not draw the picture (exit $LASTEXITCODE)" }
+$pictureSize = [math]::Round((Get-Item $Picture).Length / 1KB, 1)
+
+# And a recording, for the same reason and by the same route: `.AVI` is copied
+# out of the image's program directory into PICTURES alongside the stills.
+$Video = Join-Path $ProgramDir 'nexus.avi'
+& powershell -NoProfile -File (Join-Path $PSScriptRoot 'make-video.ps1') -OutputFile $Video | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "could not draw the recording (exit $LASTEXITCODE)" }
+$videoSize = [math]::Round((Get-Item $Video).Length / 1KB, 1)
+
+# The root certificate store, which is what makes `https://` mean anything.
+#
+# Built here rather than committed as a binary, because the interesting property
+# is that it was filtered by the machine's own X.509 parser: a certificate that
+# went in and did not come out is one this machine could never have used, and
+# the tool says so rather than leaving it to be found later as a site that will
+# not load. Staged beside the programs because the kernel copies `.NXR` out of
+# the image onto the store, the same way it does `.NEX` and `.PNG`.
+Write-Host '==> Building the root certificate store' -ForegroundColor Cyan
+Push-Location $RepoRoot
+try {
+    & cargo build --offline -q -p nexus-roots
+    if ($LASTEXITCODE -ne 0) { throw 'could not build nexus-roots' }
+} finally { Pop-Location }
+
+$RootsExe = Join-Path $RepoRoot 'target\debug\nexus-roots.exe'
+$RootsPem = Join-Path $RepoRoot 'roots\mozilla-ca-bundle.pem'
+$RootsOut = Join-Path $ProgramDir 'roots.nxr'
+& $RootsExe $RootsPem --out $RootsOut
+if ($LASTEXITCODE -ne 0) { throw 'could not build the root certificate store' }
+$rootsSize = [math]::Round((Get-Item $RootsOut).Length / 1KB, 1)
+
 $Package = Join-Path $ProgramDir 'demo.nex'
 $SigningKey = Join-Path $RepoRoot 'keys\development.key'
 & $PackExe $Package $SigningKey 'demo' '1.0.0' "demo/hello.txt=$greeting" "demo/notes.txt=$notes"
@@ -282,6 +338,13 @@ Write-Host "  terminal   : $termSize KiB  -> BIN\TERM.ELF on the disk"
 Write-Host "  wallpaper  : $wallSize KiB  -> BIN\WALL.ELF on the disk"
 Write-Host "  settings   : $settingsSize KiB  -> BIN\SET.ELF on the disk"
 Write-Host "  packages   : $storeSize KiB  -> BIN\STORE.ELF on the disk"
+Write-Host "  viewer     : $viewSize KiB  -> BIN\VIEW.ELF on the disk"
+Write-Host "  launcher   : $launchSize KiB  -> BIN\LAUNCH.ELF on the disk"
+Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
+Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
+Write-Host "  picture    : $pictureSize KiB  -> PICTURES\NEXUS.PNG on the disk"
+Write-Host "  recording  : $videoSize KiB  -> PICTURES\NEXUS.AVI on the disk"
+Write-Host "  root store : $rootsSize KiB  -> SYSTEM\ROOTS.NXR on the disk"
 Write-Host "  package    : $packageSize KiB  -> PKG\DEMO.NEX on the disk (signed)"
 Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1.1.0, signed)"
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"

@@ -24,10 +24,13 @@
 
 extern crate alloc;
 
+pub mod chacha;
 pub mod ed25519;
 pub mod field;
 pub mod password;
 pub mod scalar;
+pub mod sha256;
 pub mod sha512;
+pub mod x25519;
 
 pub use ed25519::{public_key, sign, verify, PUBLIC_KEY, SECRET_KEY, SIGNATURE};

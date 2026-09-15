@@ -75,8 +75,6 @@ pub enum StoreError {
     NoPartition,
     /// The filesystem itself said no.
     Fs(FsError),
-    /// Something still holds a handle to the thing being removed.
-    Busy,
 }
 
 impl core::fmt::Display for StoreError {
@@ -86,7 +84,6 @@ impl core::fmt::Display for StoreError {
             Self::PartitionTable(error) => write!(f, "the partition table: {error}"),
             Self::NoPartition => f.write_str("the disk has no NexusFS partition"),
             Self::Fs(error) => write!(f, "{error}"),
-            Self::Busy => f.write_str("something still has that open"),
         }
     }
 }
@@ -281,6 +278,9 @@ pub fn boot_log() -> Result<String, StoreError> {
 /// that allocates a block it then forgets about.
 ///
 /// Returns a line describing what happened, or the error that stopped it.
+// Compiled always and called only by the build that runs the destructive
+// filesystem checks; see `deep-selftest`.
+#[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
 pub fn self_test() -> Result<String, StoreError> {
     let mut guard = VOLUME.lock();
     let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
@@ -417,6 +417,9 @@ pub fn self_test() -> Result<String, StoreError> {
 /// allocator and then nothing is done with it. That is exactly what a kernel
 /// with a bug in its write path leaves behind, and there is no other way to
 /// produce it on a machine that is working.
+// Compiled always and called only by the build that runs the destructive
+// filesystem checks; see `deep-selftest`.
+#[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
 pub fn check_self_test() -> Result<String, StoreError> {
     let mut guard = VOLUME.lock();
     let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
@@ -429,6 +432,9 @@ pub fn check_self_test() -> Result<String, StoreError> {
 /// one says the filesystem does what it is asked; this one says it survives not
 /// being allowed to finish -- which cannot be shown by using it correctly, only
 /// by stopping it half way on purpose.
+// Compiled always and called only by the build that runs the destructive
+// filesystem checks; see `deep-selftest`.
+#[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
 pub fn journal_self_test() -> Result<String, StoreError> {
     let mut guard = VOLUME.lock();
     let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
@@ -436,6 +442,9 @@ pub fn journal_self_test() -> Result<String, StoreError> {
 }
 
 /// Remove a name and everything under it.
+// Compiled always and called only by the build that runs the destructive
+// filesystem checks; see `deep-selftest`.
+#[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
 fn remove_tree(volume: &mut Volume, parent: u32, name: &str) -> Result<(), FsError> {
     let entry = volume.lookup(parent, name)?;
     if entry.kind == Kind::Directory {
@@ -456,6 +465,29 @@ fn remove_tree(volume: &mut Volume, parent: u32, name: &str) -> Result<(), FsErr
 /// next file to be created put there. The count is what makes that impossible,
 /// and [`remove_child`] consults it.
 static OPEN: IrqSpinLock<BTreeMap<u32, u32>> = IrqSpinLock::new(BTreeMap::new());
+
+/// Inodes whose name has been taken away while somebody still held them.
+///
+/// The value is whether the name is *already* gone. It matters because the two
+/// steps of removing an open file -- taking the name away, and freeing the
+/// blocks once the last handle closes -- cannot happen under one lock: the
+/// first is disk work, and holding a lock that masks interrupts across a
+/// journalled write would stop every other open and close on the machine for
+/// milliseconds.
+///
+/// So the ownership rule is written down instead, and it is short:
+///
+/// * This map is only ever touched while [`OPEN`] is held. That makes "is
+///   anybody still holding this" and "and its name is gone" one atomic step,
+///   which is the only thing that has to be atomic.
+/// * Whoever *removes* an entry is the one who frees the inode. Removing is the
+///   token; there is no second claim to it.
+/// * An entry that says `false` means the name has not gone yet, and a handle
+///   closing must leave it alone -- the removal still in flight will see that
+///   nobody is left and finish the job itself.
+///
+/// Neither lock is ever held across the disk work.
+static REMOVAL: IrqSpinLock<BTreeMap<u32, bool>> = IrqSpinLock::new(BTreeMap::new());
 
 /// An open file or directory.
 ///
@@ -486,24 +518,52 @@ impl Node {
 
 impl Drop for Node {
     fn drop(&mut self) {
-        let mut open = OPEN.lock();
-        if let Some(count) = open.get_mut(&self.inode) {
-            *count -= 1;
-            if *count == 0 {
-                open.remove(&self.inode);
+        // The decision under the lock; the disk work after it.
+        let free = {
+            let mut open = OPEN.lock();
+            let mut last = false;
+            if let Some(count) = open.get_mut(&self.inode) {
+                *count -= 1;
+                if *count == 0 {
+                    open.remove(&self.inode);
+                    last = true;
+                }
             }
+            // Freed here only if the name has already gone. An entry saying
+            // `false` belongs to a removal still in flight, which will notice
+            // that nobody is left and finish the job itself.
+            if last {
+                let mut removal = REMOVAL.lock();
+                if removal.get(&self.inode) == Some(&true) {
+                    removal.remove(&self.inode);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if free {
+            discard(self.inode);
         }
     }
 }
 
-/// Whether anything still holds a handle to `inode`.
-fn is_open(inode: u32) -> bool {
-    OPEN.lock().contains_key(&inode)
-}
-
-/// How many handles name `inode`.
-fn holders(inode: u32) -> u32 {
-    OPEN.lock().get(&inode).copied().unwrap_or(0)
+/// Give an inode's blocks back. Only ever called on one nothing names.
+fn discard(inode: u32) {
+    let mut volume = VOLUME.lock();
+    let Some(volume) = volume.as_mut() else {
+        return;
+    };
+    if let Err(error) = volume.discard(inode) {
+        // Said rather than silent: the inode and its blocks are leaked, which
+        // is the safe direction and is exactly what the filesystem's own check
+        // finds and reclaims. Nothing else can go wrong from here, because
+        // nothing can name it.
+        crate::kprintln!("[fs  ] inode {inode} could not be freed after its name went: {error}");
+    }
 }
 
 /// Put a file into the store, under a directory, if it is not already there.
@@ -623,9 +683,21 @@ pub fn create_child(parent: &Node, name: &str, directory: bool) -> Result<Arc<No
 
 /// Remove a name, and the thing it named.
 ///
-/// Refused while a handle names it. Freeing an inode somebody is holding would
-/// leave that handle pointing at a number the filesystem is free to hand to the
-/// next file, and reading through it would then read that file.
+/// A name nobody holds goes with its blocks, in one transaction.
+///
+/// A name somebody *does* hold goes on its own: the entry leaves the directory
+/// now, so nothing can reach it again, and the blocks are freed when the last
+/// handle closes. That is what unlink means everywhere else, and this
+/// filesystem refused instead until it became clear what refusing costs --
+/// several programs here read the settings file on a clock, their reads take
+/// microseconds, and replacing that file therefore failed at random with an
+/// error no program could do anything sensible about.
+///
+/// What refusing was protecting against is real and is still prevented. An
+/// inode freed while somebody holds it would leave that handle naming a number
+/// the filesystem is free to give the next file, and reading through it would
+/// read that file. It cannot happen here because freeing is what the last close
+/// does, not what the remove does.
 pub fn remove_child(parent: &Node, name: &str) -> Result<(), StoreError> {
     if !parent.directory {
         return Err(StoreError::Fs(FsError::WrongKind));
@@ -635,27 +707,65 @@ pub fn remove_child(parent: &Node, name: &str) -> Result<(), StoreError> {
         let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
         volume.lookup(parent.inode, name)?
     };
-    if is_open(entry.inode) {
-        // Said rather than silent. "Busy" reaches a program as one error code
-        // among several, and from inside that program it is indistinguishable
-        // from a disk that is broken -- so the one fact that would explain it,
-        // which only the kernel has, is put where somebody can read it.
-        //
-        // Not a fault in itself: a program removing a file it still holds open
-        // is being told to close it first, and `init` asks for exactly this on
-        // purpose to check that the refusal happens.
-        crate::kprintln!(
-            "[fs  ] \"{name}\" cannot be removed yet: inode {} is open by {} handle(s)",
-            entry.inode,
-            holders(entry.inode)
-        );
-        return Err(StoreError::Busy);
+
+    // Whether anybody holds it, decided and noted in the same breath, so that a
+    // handle closing cannot fall between the two.
+    let held = {
+        let open = OPEN.lock();
+        let held = open.contains_key(&entry.inode);
+        if held {
+            REMOVAL.lock().insert(entry.inode, false);
+        }
+        held
+    };
+
+    if !held {
+        let mut volume = VOLUME.lock();
+        let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+        volume.unlink(parent.inode, name)?;
+        return Ok(());
     }
 
-    let mut volume = VOLUME.lock();
-    let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
-    volume.unlink(parent.inode, name)?;
+    // The name first. Until it is gone the inode is reachable, so freeing
+    // anything before this would be freeing something a name still points at.
+    let inode = {
+        let mut volume = VOLUME.lock();
+        let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+        match volume.unlink_name(parent.inode, name) {
+            Ok(inode) => inode,
+            Err(error) => {
+                REMOVAL.lock().remove(&entry.inode);
+                return Err(StoreError::Fs(error));
+            }
+        }
+    };
+
+    // And now either somebody is still holding it, in which case the note is
+    // marked and the last one out frees it -- or every holder went while the
+    // name was being taken away, in which case this is the last one out.
+    let free_now = {
+        let open = OPEN.lock();
+        let mut removal = REMOVAL.lock();
+        if open.contains_key(&inode) {
+            removal.insert(inode, true);
+            false
+        } else {
+            removal.remove(&inode).is_some()
+        }
+    };
+    if free_now {
+        discard(inode);
+    }
     Ok(())
+}
+
+/// How many names have been taken away from something still open.
+///
+/// For the monitor. A number that grows and never falls is a handle nobody is
+/// closing, which is worth being able to see.
+#[must_use]
+pub fn pending_removals() -> usize {
+    REMOVAL.lock().len()
 }
 
 /// Everything in an open directory.

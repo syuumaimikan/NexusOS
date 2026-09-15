@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NexusOS — a desktop operating system written from nothing</title>
+<meta name="description" content="A capability-based desktop operating system for x86-64 and UEFI, written in Rust from the bootloader up. No Linux, no BSD, no libc.">
+<style>
+:root {
+  --ground: #0b1428;
+  --ground-deep: #040814;
+  --panel: #111c33;
+  --panel-edge: #1f2e4d;
+  --ink: #e6ecf5;
+  --ink-quiet: #8a9ab4;
+  --accent: #388be8;
+  --accent-quiet: #2a5f9e;
+  --warn: #e08070;
+  --good: #58c08a;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--ground-deep);
+  color: var(--ink);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+        "Noto Sans", "Noto Sans JP", Arial, sans-serif;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover, a:focus { text-decoration: underline; }
+
+.wrap { max-width: var(--measure); margin: 0 auto; padding: 0 1.25rem; }
+
+/* ---- the mark, drawn rather than fetched ---- */
+
+header {
+  background: linear-gradient(180deg, var(--ground) 0%, var(--ground-deep) 100%);
+  border-bottom: 1px solid var(--panel-edge);
+  padding: 4rem 0 3rem;
+}
+
+.badge { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
+.badge svg { flex: none; }
+
+h1 {
+  margin: 0;
+  font-size: clamp(2rem, 6vw, 3rem);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  margin: 0.75rem 0 0;
+  font-size: clamp(1.05rem, 2.6vw, 1.3rem);
+  color: var(--ink-quiet);
+  max-width: 34rem;
+}
+
+.lede { margin-top: 2rem; font-size: 1.05rem; }
+.lede strong { color: var(--ink); }
+
+h2 {
+  margin: 3.5rem 0 1rem;
+  font-size: 1.5rem;
+  letter-spacing: -0.01em;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--panel-edge);
+}
+
+h3 { margin: 2rem 0 0.5rem; font-size: 1.1rem; }
+
+p, li { color: #cdd7e6; }
+
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", monospace;
+  font-size: 0.875em;
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+pre {
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 8px;
+  padding: 1rem 1.15rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+
+blockquote {
+  margin: 1.5rem 0;
+  padding: 0.1rem 0 0.1rem 1.15rem;
+  border-left: 3px solid var(--accent-quiet);
+  color: var(--ink-quiet);
+}
+
+/* ---- the cards ---- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.85rem;
+  margin: 1.5rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cards a {
+  display: block;
+  height: 100%;
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  color: inherit;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+.cards a:hover, .cards a:focus {
+  border-color: var(--accent-quiet);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+.cards b { display: block; color: var(--accent); font-weight: 600; }
+.cards span { display: block; color: var(--ink-quiet); font-size: 0.9rem; margin-top: 0.2rem; }
+
+/* ---- the honest table ---- */
+
+.scroll { overflow-x: auto; margin: 1.25rem 0; }
+
+table { border-collapse: collapse; width: 100%; font-size: 0.925rem; }
+th, td {
+  text-align: left;
+  padding: 0.55rem 0.8rem;
+  border-bottom: 1px solid var(--panel-edge);
+  vertical-align: top;
+}
+th { color: var(--ink-quiet); font-weight: 600; white-space: nowrap; }
+td:first-child { white-space: nowrap; }
+
+.yes { color: var(--good); }
+.no { color: var(--warn); }
+
+footer {
+  margin-top: 4rem;
+  padding: 2rem 0 3rem;
+  border-top: 1px solid var(--panel-edge);
+  color: var(--ink-quiet);
+  font-size: 0.9rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cards a { transition: none; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="badge">
+      <!-- The same mark the machine draws at boot: a node with twelve spokes. -->
+      <svg width="56" height="56" viewBox="0 0 100 100" aria-hidden="true">
+        <g stroke="#388be8" stroke-width="3" stroke-linecap="round">
+          <line x1="50" y1="50" x2="86" y2="50"/><line x1="50" y1="50" x2="68" y2="19"/>
+          <line x1="50" y1="50" x2="50" y2="14"/><line x1="50" y1="50" x2="32" y2="19"/>
+          <line x1="50" y1="50" x2="14" y2="50"/><line x1="50" y1="50" x2="32" y2="81"/>
+          <line x1="50" y1="50" x2="50" y2="86"/><line x1="50" y1="50" x2="68" y2="81"/>
+        </g>
+        <circle cx="50" cy="50" r="9" fill="#388be8"/>
+      </svg>
+      <div>
+        <h1>NexusOS</h1>
+        <p class="tagline">A desktop operating system written from nothing, in Rust.</p>
+      </div>
+    </div>
+
+    <p class="lede">
+      Not a Linux distribution and not a BSD fork. The bootloader, the kernel, the
+      filesystem, the TCP stack, the compositor, the font rasteriser, the PNG and
+      JPEG decoders and every program on the desktop were written for this system.
+      There is <strong>no libc</strong>, no <code>std</code>, and no floating point
+      in the kernel.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<h2>The idea it is built on</h2>
+
+<p>
+  <strong>Nothing is ambient.</strong> A program starts holding one channel and
+  nothing else. Every other power it has arrived in a message: a directory
+  handle, a channel to a service, a page of shared memory. There is no path from
+  a program to a file it was not lent, no way to start a program except by asking
+  something that holds the authority to, and no global namespace to look anything
+  up in.
+</p>
+
+<p>
+  Handles carry rights — <code>READ</code>, <code>WRITE</code>,
+  <code>TRANSFER</code>, <code>CLOSE</code>. <code>TRANSFER</code> is the right to
+  cross a channel at all. A handle lent without <code>CLOSE</code> cannot be taken
+  away from the lender, and <code>duplicate</code> may only narrow rights, never
+  widen them.
+</p>
+
+<blockquote>
+  This is not aspirational. The agent window is lent one directory with read and
+  transfer, and the first thing it does is try to create a file there and report
+  being refused. A program that merely does not write is not a program that
+  cannot.
+</blockquote>
+
+<h2>What it does</h2>
+
+<ul class="cards">
+  <li><a href="nexusfs.html"><b>A journalling filesystem</b><span>Written here, with crash-consistency checks that run on the machine</span></a></li>
+  <li><a href="networking.html"><b>TCP/IP</b><span>DHCP, ARP, DNS, TCP and an HTTP client, all written for this system</span></a></li>
+  <li><a href="browsing.html"><b>A browser</b><span>Fetches, parses and lays out a page in a window</span></a></li>
+  <li><a href="terminal.html"><b>A terminal</b><span>With a real shell, history, and network tools</span></a></li>
+  <li><a href="pictures.html"><b>Pictures</b><span>PNG, BMP and baseline JPEG, decoded by decoders written here</span></a></li>
+  <li><a href="video.html"><b>Video</b><span>Motion-JPEG, played without ever reading the file into memory</span></a></li>
+  <li><a href="packages.html"><b>Signed packages</b><span>Ed25519 signatures, and an installer that refuses a bad one</span></a></li>
+  <li><a href="agent.html"><b>An agent</b><span>That asks permission for every tool and is refused by name</span></a></li>
+  <li><a href="settings.html"><b>Settings</b><span>One text file, and every window follows it</span></a></li>
+  <li><a href="appearance-text.html"><b>Fonts and anti-aliasing</b><span>Two faces, a blending switch, and a rasteriser written here</span></a></li>
+  <li><a href="i18n.html"><b>English and Japanese</b><span>Switchable at runtime; no user-visible string lives in code</span></a></li>
+  <li><a href="japanese-input.html"><b>Japanese input</b><span>Romaji to kana, as a table</span></a></li>
+  <li><a href="sound.html"><b>Sound</b><span>One bit of it, and the documentation says so</span></a></li>
+  <li><a href="power.html"><b>Power</b><span>Off, restart and sleep — and why the battery is not here</span></a></li>
+  <li><a href="updates.html"><b>Updates</b><span>Signed, verified, and applied at boot</span></a></li>
+  <li><a href="first-run.html"><b>A setup wizard</b><span>Answered with the same keys a person would press</span></a></li>
+  <li><a href="collaboration.html"><b>Two AI developers</b><span>How Claude Code and GPT-6 Astra keep out of each other's way</span></a></li>
+</ul>
+
+<h2>What is honestly not here</h2>
+
+<p>
+  This table is the part of the documentation worth reading first. Everything the
+  system cannot do is named, with the reason, rather than left to be discovered.
+</p>
+
+<div class="scroll">
+<table>
+  <thead>
+    <tr><th>Not here</th><th>Why</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="no">HTTPS</td>
+      <td>TLS needs a cipher suite, a key exchange, certificate parsing and a chain of trust. The browser fetches <code>http://</code> only, and says so.</td>
+    </tr>
+    <tr>
+      <td class="no">Threads in a process</td>
+      <td>One thread per process. Anything wanting concurrency inside a program is an event loop, because there is no second thread to give it.</td>
+    </tr>
+    <tr>
+      <td class="no">Standard output, pipes, fork</td>
+      <td>None of them. A program is given channels, not file descriptors. It is why <code>ls</code> is built into the terminal rather than being a program.</td>
+    </tr>
+    <tr>
+      <td class="no">A battery reading</td>
+      <td>ACPI's fixed registers give shutdown and reset, and both work. The battery is an AML <em>method</em>, and running AML means writing an interpreter. See <a href="power.html">power</a>.</td>
+    </tr>
+    <tr>
+      <td class="no">Suspend to RAM</td>
+      <td>S3 means saving processor state and reinitialising every device on the way back. Getting it wrong is a machine that does not come back.</td>
+    </tr>
+    <tr>
+      <td class="no">Loadable drivers</td>
+      <td>No module loader, no driver ABI, no way to revoke one. Doing it badly is worse than not doing it.</td>
+    </tr>
+    <tr>
+      <td class="no">Windows software</td>
+      <td>A PE loader is a fortnight. The Win32 subsystem behind it is what Wine has been writing since 1993.</td>
+    </tr>
+    <tr>
+      <td class="no">A compiler on the machine</td>
+      <td>Writing software <em>for</em> NexusOS works today, from another machine. Writing it <em>on</em> NexusOS needs an editor, an assembler and a linker that run here.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  The full list, with sizes and reasons, is in
+  <a href="NEXUSOS_ROADMAP.html">the roadmap</a>.
+</p>
+
+<h2>The rules it is written under</h2>
+
+<ul>
+  <li><strong>Build after writing code.</strong> Never leave the tree broken.</li>
+  <li><strong>No <code>todo!()</code>, no <code>unimplemented!()</code>, no mock layer.</strong>
+      If a thing is not implemented, it is absent and the roadmap says so.</li>
+  <li><strong><code>unsafe</code> is allowed</strong> and carries a
+      <code>// SAFETY:</code> comment saying why it holds.</li>
+  <li><strong>Nothing is "verified" because it compiled.</strong> It is verified
+      because it ran.</li>
+  <li><strong>Never ignore a warning.</strong></li>
+  <li><strong>Every user-visible string</strong> lives in <code>locales/</code>,
+      in both languages, or the build fails.</li>
+</ul>
+
+<h2>Running it</h2>
+
+<pre><code>powershell -File scripts/build.ps1   # kernel, bootloader, programs, disk image
+powershell -File scripts/run.ps1     # boot it in QEMU
+powershell -File scripts/test.ps1    # the whole suite</code></pre>
+
+<p>
+  The suite is nineteen stages. The first four run on the build machine and take
+  seconds; the rest boot a real machine under QEMU and read its serial log. Among
+  them: a boot from the disk image alone, so the firmware reads the partition
+  table and filesystem this project writes; a persistence test that boots twice
+  and requires the second boot to find what the first one wrote; an input test
+  that sends real keystrokes through the same 8042 controller; and six
+  fault-injection builds that break the kernel one way each and require every
+  one to be <em>reported</em> rather than resetting the machine.
+</p>
+
+<p>
+  Which crates get linted and tested is not a list somebody maintains — it is
+  checked against <code>cargo metadata</code>, and a crate that is on no list
+  fails the suite by name. That check exists because the list had gone short: the
+  bootloader's entry point, the first code that runs on the machine, had never
+  been linted at all.
+</p>
+
+<h2>Reading the source</h2>
+
+<div class="scroll">
+<table>
+  <thead>
+    <tr><th>Where</th><th>What</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>boot/nexus-boot</code></td><td>A dependency-free UEFI loader: page tables, memory map, ELF segments, handover</td></tr>
+    <tr><td><code>kernel/nexus-kernel</code></td><td>Memory, scheduling, channels, capabilities, the filesystem, the network card</td></tr>
+    <tr><td><code>shared/</code></td><td>Libraries both sides use: JSON, DEFLATE, PNG/JPEG, DNS, HTTP, HTML, crypto, fonts</td></tr>
+    <tr><td><code>user/</code></td><td>Every program a person sees: the compositor, the desktop, the terminal, the browser</td></tr>
+    <tr><td><code>scripts/</code></td><td>The build and the whole test suite</td></tr>
+    <tr><td><code>docs/</code></td><td>This documentation, including the honest list of what is absent</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>Architecture</h2>
+
+<ul class="cards">
+  <li><a href="NEXUSOS_ROADMAP.html"><b>Roadmap</b><span>Every phase, and an honest table of what is not here</span></a></li>
+  <li><a href="NEXUSOS_ARCHITECTURE_AUDIT.html"><b>Architecture audit</b><span>What the system is, checked against what it claims</span></a></li>
+  <li><a href="nexusfs.html"><b>NexusFS</b><span>Inodes, a journal, and the two-lock discipline for unlink</span></a></li>
+  <li><a href="collaboration.html"><b>Collaboration protocol</b><span>What two AI developers may and may not do to each other's work</span></a></li>
+</ul>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>
+      NexusOS is written by Claude Code and GPT-6 Astra. Every claim on this page
+      is checked by something that runs; where a thing is absent, it says so.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

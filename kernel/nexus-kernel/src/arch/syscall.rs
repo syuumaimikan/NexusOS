@@ -291,11 +291,18 @@ pub enum Call {
     /// clock resets every boot. Uptime is a duration and is always available;
     /// this is a moment and depends on the machine having a clock at all.
     Now = 31,
+    /// Fill a buffer with unpredictable bytes. `(pointer, length)`.
+    ///
+    /// The only source of unguessable bytes a program has, and the reason TLS
+    /// can exist above it. It fails rather than returning something plausible
+    /// on a machine whose processor has no hardware generator; see
+    /// [`crate::random`] for why that refusal is the whole point.
+    Random = 32,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 32;
+    pub const COUNT: usize = 33;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -332,6 +339,7 @@ impl Call {
             29 => Some(Self::NodeReadAt),
             30 => Some(Self::NodeWriteAt),
             31 => Some(Self::Now),
+            32 => Some(Self::Random),
             _ => None,
         }
     }
@@ -492,6 +500,7 @@ extern "sysv64" fn dispatch(
             // rather than saying it does not know.
             None => ENODEV,
         },
+        Some(Call::Random) => random(argument0, argument1),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -1223,6 +1232,43 @@ fn copy_out(bytes: &[u8], pointer: u64, capacity: u64) -> u64 {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer as *mut u8, length);
     }
     bytes.len() as u64
+}
+
+// -- Randomness ----------------------------------------------------------------
+
+/// The most unpredictable bytes one call will produce.
+///
+/// Enough for any key this machine makes -- a TLS client needs two lots of
+/// thirty-two -- and small enough that the scratch buffer lives on the kernel
+/// stack. A program that wants more asks again, which is free.
+const MAX_RANDOM: u64 = 256;
+
+/// [`Call::Random`]: fill a user buffer with unpredictable bytes.
+///
+/// Returns the length on success, and [`ENODEV`] when this processor has no
+/// hardware generator. That refusal is the point of the call rather than a
+/// shortcoming of it: the alternative is handing back something derived from
+/// the clock, which would let every TLS connection this machine makes be
+/// broken by somebody who knows roughly when it booted.
+///
+/// Nothing is written unless everything was produced. [`crate::random::bytes`]
+/// is all-or-nothing for the same reason -- half a key is not a weaker key, it
+/// is a key with a known half -- and this preserves that all the way out to the
+/// caller.
+fn random(pointer: u64, length: u64) -> u64 {
+    if length == 0 || length > MAX_RANDOM {
+        return EINVAL;
+    }
+    let mut scratch = [0u8; MAX_RANDOM as usize];
+    let wanted = length as usize;
+    if !crate::random::bytes(&mut scratch[..wanted]) {
+        return ENODEV;
+    }
+    let written = copy_out(&scratch[..wanted], pointer, length);
+    // The bytes were real key material a moment ago and this stack frame is
+    // about to be reused by whatever runs next on this kernel stack.
+    scratch.fill(0);
+    written
 }
 
 // -- Processes -----------------------------------------------------------------

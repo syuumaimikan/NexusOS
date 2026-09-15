@@ -110,7 +110,15 @@ impl core::ops::BitOr for Rights {
 /// A small bound, and a real one: each handle in a message is authority in
 /// flight, and a message that could carry an unbounded number of them would let
 /// a sender make the receiving table grow without the receiver agreeing to it.
-pub const MAX_HANDLES: usize = 4;
+///
+/// Eight rather than four since the terminal needed five. A program is started
+/// with everything it will ever be lent in one message -- deliberately, so that
+/// a program cannot be half-endowed and cannot block waiting for a second
+/// message nobody is going to send -- so this bound is also the bound on how
+/// many kinds of authority one program may hold. Four turned out to be a limit
+/// on the system's design rather than on a sender's ambition, which is the
+/// wrong thing for it to be.
+pub const MAX_HANDLES: usize = 8;
 
 /// One message in flight.
 ///

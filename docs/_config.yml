@@ -1,0 +1,22 @@
+# GitHub Pages serves this directory as the site root.
+#
+# `index.html` is hand-written and is what a person lands on. Everything else
+# here is Markdown that Jekyll renders, so that a link like `nexusfs.html`
+# reaches `nexusfs.md` -- which means the documentation stays readable in the
+# repository *and* on the web without being written twice.
+
+title: NexusOS
+description: A desktop operating system written from nothing, in Rust.
+theme: jekyll-theme-slate
+
+# The collaboration directory and the AI subtree are documentation for the two
+# developers rather than for a reader of the site.
+exclude:
+  - AI/
+
+# Relative links between Markdown files are written as `foo.md` in the
+# repository, because that is what works when reading it on GitHub. This
+# rewrites them to `foo.html` for the site.
+relative_links:
+  enabled: true
+  collections: false

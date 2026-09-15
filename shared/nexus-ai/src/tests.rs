@@ -274,3 +274,70 @@ fn bounded_correction_can_recover() {
     );
     assert_eq!(runtime.audit().unwrap().attempts, 2);
 }
+
+#[test]
+fn policy_classification_does_not_expand_service_authority() {
+    for (tool, policy, service) in [
+        (Tool::SystemInfo, Ok(()), Ok(())),
+        (Tool::FileRead, Ok(()), Err(Status::Unsupported)),
+        (
+            Tool::FileWrite,
+            Err(Status::ConfirmRequired),
+            Err(Status::ConfirmRequired),
+        ),
+        (
+            Tool::FileRemove,
+            Err(Status::ConfirmRequired),
+            Err(Status::ConfirmRequired),
+        ),
+        (
+            Tool::TerminalExecute,
+            Err(Status::ConfirmRequired),
+            Err(Status::ConfirmRequired),
+        ),
+        (
+            Tool::ProcessStop,
+            Err(Status::ConfirmRequired),
+            Err(Status::ConfirmRequired),
+        ),
+        (
+            Tool::SettingsWrite,
+            Err(Status::Privileged),
+            Err(Status::Privileged),
+        ),
+        (
+            Tool::NetworkConnect,
+            Err(Status::ConfirmRequired),
+            Err(Status::ConfirmRequired),
+        ),
+        (
+            Tool::KernelMemory,
+            Err(Status::Blocked),
+            Err(Status::Blocked),
+        ),
+    ] {
+        assert_eq!(permitted(tool), policy, "{tool:?}");
+        assert_eq!(authorize(tool), service, "{tool:?}");
+        let mut backend = source();
+        let response = Runtime::new(1).execute(request(tool), 100, &mut backend);
+        assert_eq!(response.status, service.err().unwrap_or(Status::Verified));
+        assert_eq!(backend.calls, if tool == Tool::SystemInfo { 2 } else { 0 });
+    }
+}
+
+#[test]
+fn unattributable_error_reply_round_trips_without_becoming_a_request() {
+    let response = Response::error(0, 0, Status::Invalid);
+    assert_eq!(
+        wire::decode_response(&wire::encode_response(response)),
+        Some(response)
+    );
+    assert_eq!(
+        wire::decode_request(&wire::encode_request(Request {
+            session: 0,
+            id: 0,
+            tool: Tool::SystemInfo,
+        })),
+        None
+    );
+}

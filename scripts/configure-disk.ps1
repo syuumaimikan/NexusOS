@@ -59,28 +59,57 @@ $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $arguments -Pas
 
 function Wait-For {
     param([string]$Text, [int]$Seconds)
+    return $null -ne (Wait-ForAny -Texts @($Text) -Seconds $Seconds)
+}
+
+<#
+.SYNOPSIS
+    Wait until the log contains any one of several markers, and say which.
+
+.DESCRIPTION
+    Because waiting for *one* marker means waiting the whole timeout whenever
+    the answer is the other one, and here that answer is the ordinary case.
+
+    This script used to wait four minutes for `setup: this machine has not been
+    set up` before looking to see whether the machine said it was already
+    configured -- which it says in the first second of every boot. Six stages
+    of the suite call this, so that was twenty-four minutes of a run spent
+    waiting for a sentence that was never coming.
+#>
+function Wait-ForAny {
+    param([string[]]$Texts, [int]$Seconds)
     for ($waited = 0; $waited -lt $Seconds; $waited++) {
         Start-Sleep -Seconds 1
-        if ($process.HasExited) { return $false }
+        $gone = $process.HasExited
         if (Test-Path $Log) {
             $sofar = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
-            if ($sofar.Contains($Text)) { return $true }
+            foreach ($text in $Texts) {
+                if ($sofar.Contains($text)) { return $text }
+            }
         }
+        # Checked after reading, not before: a machine that has just stopped
+        # may have written the thing being waited for on its way out.
+        if ($gone) { return $null }
     }
-    return $false
+    return $null
 }
 
 try {
-    if (-not (Wait-For -Text 'setup: this machine has not been set up' -Seconds $Timeout)) {
-        # Already configured, or it never got that far. The first is ordinary --
-        # this runs against whatever disk is there -- and the second is caught
-        # by whatever test comes next, loudly.
-        $sofar = if (Test-Path $Log) { (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", '' } else { '' }
-        if ($sofar.Contains('machine already set up')) {
-            Write-Host '    already set up; nothing to answer' -ForegroundColor DarkGray
-            exit 0
-        }
-        throw 'the wizard never appeared, and the machine is not set up either'
+    # Either the wizard comes up, or the machine says it is already configured.
+    # Both are ordinary -- this runs against whatever disk is there -- and both
+    # are said in the first seconds of a boot, so there is no reason to wait for
+    # one of them in particular.
+    $answer = Wait-ForAny -Texts @(
+        'setup: this machine has not been set up',
+        'machine already set up'
+    ) -Seconds $Timeout
+
+    if ($answer -eq 'machine already set up') {
+        Write-Host '    already set up; nothing to answer' -ForegroundColor DarkGray
+        exit 0
+    }
+    if ($null -eq $answer) {
+        throw 'the wizard never appeared, and the machine never said it was set up either'
     }
 
     $client = New-Object System.Net.Sockets.TcpClient('127.0.0.1', $MonitorPort)

@@ -1669,6 +1669,21 @@ in the code.
 
 ### Feasible next, in order of value
 
+| ~~JPEG~~ | done | Baseline sequential, greyscale and YCbCr, 4:4:4 / 4:2:2 / 4:2:0, restart markers. Integer transform, because the kernel has no FPU. Progressive refused by name. |
+| ~~Motion-JPEG video~~ | done | A sequence of JPEGs and a clock, which is what it turned out to be. The file is **not** read: only its table of contents, sixteen bytes a frame, walked with an eight-byte read apiece — because the kernel will not make a memory object larger than sixteen mebibytes, and a player that held the recording would be a player with a running time compiled into it. Fifty to sixty-six frames a second decoded, for a recording that asks for twelve. See [video.md](video.md). Real video — H.264, VP9 — is still tens of thousands of lines and years of patent history. |
+
+| ~~`remove` should unlink~~ | done | It refused while anybody held the file open, so replacing a file another program read on a clock failed at random. The name now goes at once and the blocks go when the last handle closes. `init` proves the property that refusal was protecting: after the name has gone, a handle that was already open still reads the same bytes. |
+
+| ~~An agent with a capability model~~ | done | A window that picks a tool, asks GPT-6 Astra's permission model, and is refused by name when it may not. No language model, and it says so on its own first line. See [agent.md](agent.md). |
+
+| ~~Network tools~~ | done | `net`, `lookup` and `scan` in the terminal, on the stack that was already there. A connect scan, no raw sockets, and the documentation says so. See [network-tools.md](network-tools.md). |
+| ~~Choosing a font, and soft edges~~ | done | Two faces and a blending switch, both settings. See [appearance-text.md](appearance-text.md). |
+
+| ~~Looking at pictures~~ | done | PNG and BMP, decoded by a DEFLATE written here, in a window given the disk read-only. See [pictures.md](pictures.md). |
+| ~~A faster boot~~ | done | Sixteen seconds to four, by not writing a thousand blocks across somebody's disk every time they switch the machine on. |
+| ~~Asking what the machine is doing~~ | done | A capability-gated snapshot service: memory, processors, processes, threads. No process names. See the kernel's `machine.rs`. |
+
+
 | What | Size | What it needs |
 | --- | --- | --- |
 | ~~Wallpaper and theming~~ | done | A wallpaper program given the bottom surface; the compositor composites it first and never reads a setting. |
@@ -1676,16 +1691,33 @@ in the code.
 | Damage rectangles on a client's frame | small | A program saying *which* part of its surface changed. An animated wallpaper is a full-screen composite per frame without it, which is why it is capped at four a second. |
 | ~~A package manager window~~ | done | A list of what is in `PKG/`, what each one's signature is worth, and how it compares with what is installed — with Enter bound to the same `install` the updater calls. See [packages.md](packages.md). |
 | ~~A settings window~~ | done | A window with one row per key that something actually reads, given the settings directory and nothing else. See [settings.md](settings.md). |
+| ~~A tool for the shared state two agents keep~~ | done | `nexus-collab`: atomic writes, validation before every write, sixteen backups, stale-lock reporting, and a refusal to release the other agent's lock that has no `--force` behind it. Host-side, no dependencies but this project's own JSON. See [collaboration.md](collaboration.md). |
+| ~~Turning the machine off, restarting it, standing it down~~ | done | ACPI's fixed registers, reached through a channel the compositor is lent and hands on. The test's pass condition is that QEMU **exits**. Battery and S3 are both AML, and both absent by name. See [power.md](power.md). |
+| ~~A picture or a recording as the wallpaper~~ | done | `look.picture` names a file in `PICTURES` and `look.fit` says how it meets a screen of a different shape. The wallpaper is lent the disk **read-only** for it. A recording is played the way the viewer plays one -- a table of contents and one frame at a time -- and is capped at four frames a second, because there are still no per-client damage rectangles and a full-screen frame costs a composite of the whole display. It says what it managed. |
 | A text editor | medium | The terminal's line editing, a file, and a scrollback that can be written into. |
 | Standard output for programs | medium | The thing that would let `ls` stop being built into the terminal. A channel a child inherits, and a pipe. |
 | A real audio card | medium | AC'97 or Intel HD Audio: a DMA engine, a ring of buffers and a mixer. The speaker is one bit and says so. |
 | Loadable drivers | large | The kernel has no module loader, no driver ABI and no way to revoke one. Doing it badly is worse than not doing it. |
 
+* **A vertical seam at the screen's midpoint.** A one-pixel line at
+  `x = screen.width / 2`, running the full height, visible in every screenshot
+  including through windows that should cover it. It is *not* the window
+  ordering: `raise` rotates the raised slot to the end of `order` and the
+  composite loop draws that last, and the launcher's own border and highlight
+  are drawn over the windows behind it correctly. It is not a stride mismatch
+  either -- that would smear diagonally rather than leave one column. Cosmetic,
+  reproducible, and not yet understood; recorded here rather than left for
+  somebody to rediscover.
+
 ### Not feasible as asked, and why
 
-* **Video wallpaper.** A video is a codec — H.264 or VP9 — which is tens of
-  thousands of lines and years of patent history. An *animated* wallpaper drawn
-  procedurally is a weekend; a video one is not this machine's next step.
+* **Video wallpaper, in a useful sense.** Motion-JPEG plays now, so a
+  Motion-JPEG wallpaper is a small piece of work — but it would be a wallpaper
+  that costs a full-screen composite per frame, because there are still no
+  per-client damage rectangles, and is therefore capped at four frames a
+  second. That is a slideshow with extra steps. The honest order is damage
+  rectangles first. A wallpaper in a *real* video format is still a codec:
+  H.264 or VP9, tens of thousands of lines and years of patent history.
 * **Running Windows software.** A PE loader is a fortnight. The Win32 subsystem
   behind it — the window manager, GDI, the registry, COM — is what Wine has been
   writing since 1993. The Linux translation layer here is real and small because

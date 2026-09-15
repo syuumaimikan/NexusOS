@@ -13,12 +13,21 @@
 //! last byte lands -- and, more to the point, the only one that does not need
 //! the whole page in memory twice.
 //!
-//! # What it does not do
+//! # HTTPS
 //!
-//! No HTTPS. There is no TLS on this machine, and a client that pretended
-//! otherwise -- by asking for `http` when it was told `https`, say -- would be
-//! quietly downgrading somebody's connection. So `https` is refused, in words,
-//! and the reason is said.
+//! A URL knows whether it is secure; nothing else here does. The bytes this
+//! writes and reads are the same either way, and what carries them -- a plain
+//! connection or a TLS one -- is the caller's business. That division is why
+//! adding TLS did not change a line of the request writer or the response
+//! reader.
+//!
+//! The one rule that is enforced here is that `https` never becomes `http`.
+//! A client that quietly retried in the clear when TLS failed would turn every
+//! failure into a silent downgrade, which is precisely the attack TLS exists to
+//! stop. So the scheme is carried through, and `Url::secure` is the only thing
+//! that decides it.
+//!
+//! # What it does not do
 //!
 //! No keep-alive: every request says `Connection: close` and the connection
 //! ending is part of how the body's end is known. No compression, because
@@ -37,6 +46,9 @@ use alloc::vec::Vec;
 /// The port a URL means when it does not say.
 pub const DEFAULT_PORT: u16 = 80;
 
+/// And the same for `https`.
+pub const DEFAULT_SECURE_PORT: u16 = 443;
+
 /// The most header bytes this will read before giving up on a response.
 ///
 /// A bound rather than a trust: the headers come from a server that need not be
@@ -50,6 +62,14 @@ pub struct Url {
     /// The name or address to connect to, without the port.
     pub host: String,
     pub port: u16,
+    /// Whether this is `https`, and so must go through TLS.
+    ///
+    /// The whole scheme, reduced to the one bit of it anybody acts on. It is
+    /// carried rather than re-derived so that a redirect, a relative link and a
+    /// typed address all reach the connection with the same answer -- a
+    /// relative link on an `https` page is an `https` link, and a browser that
+    /// forgot that would drop out of TLS on the second page.
+    pub secure: bool,
     /// Everything from the first `/`, with the query still on it. Always starts
     /// with `/`, because a request line without one is not a request line.
     pub path: String,
@@ -59,10 +79,21 @@ impl Url {
     /// How this would be written down, to show somebody.
     #[must_use]
     pub fn to_text(&self) -> String {
-        if self.port == DEFAULT_PORT {
-            format!("http://{}{}", self.host, self.path)
+        let scheme = if self.secure { "https" } else { "http" };
+        if self.port == self.usual_port() {
+            format!("{scheme}://{}{}", self.host, self.path)
         } else {
-            format!("http://{}:{}{}", self.host, self.port, self.path)
+            format!("{scheme}://{}:{}{}", self.host, self.port, self.path)
+        }
+    }
+
+    /// The port this scheme means when a URL does not say.
+    #[must_use]
+    pub const fn usual_port(&self) -> u16 {
+        if self.secure {
+            DEFAULT_SECURE_PORT
+        } else {
+            DEFAULT_PORT
         }
     }
 }
@@ -81,9 +112,6 @@ pub enum UrlError {
 impl core::fmt::Display for UrlError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Scheme(what) if what == "https" => f.write_str(
-                "this machine cannot speak https yet, and will not quietly ask for http instead",
-            ),
             Self::Scheme(what) => write!(f, "nothing here speaks {what}"),
             Self::NoHost => f.write_str("that address has no host in it"),
             Self::BadPort => f.write_str("that port is not a number"),
@@ -107,9 +135,11 @@ pub fn parse(text: &str) -> Result<Url, UrlError> {
         Some(at) => (text[..at].to_ascii_lowercase(), &text[at + 3..]),
         None => (String::from("http"), text),
     };
-    if scheme != "http" {
-        return Err(UrlError::Scheme(scheme));
-    }
+    let secure = match scheme.as_str() {
+        "http" => false,
+        "https" => true,
+        _ => return Err(UrlError::Scheme(scheme)),
+    };
 
     // The fragment never goes to the server. It names a place inside the page,
     // which is the client's business and nobody else's.
@@ -136,7 +166,14 @@ pub fn parse(text: &str) -> Result<Url, UrlError> {
                 .map_err(|_| UrlError::BadPort)?;
             (&authority[..at], port)
         }
-        None => (authority, DEFAULT_PORT),
+        None => (
+            authority,
+            if secure {
+                DEFAULT_SECURE_PORT
+            } else {
+                DEFAULT_PORT
+            },
+        ),
     };
     if host.is_empty() {
         return Err(UrlError::NoHost);
@@ -145,6 +182,7 @@ pub fn parse(text: &str) -> Result<Url, UrlError> {
     Ok(Url {
         host: host.to_ascii_lowercase(),
         port,
+        secure,
         path: if path.is_empty() {
             String::from("/")
         } else {
@@ -173,14 +211,18 @@ pub fn resolve(base: &Url, link: &str) -> Result<Url, UrlError> {
     if link.starts_with('#') || link.is_empty() {
         return Ok(base.clone());
     }
-    // Scheme-relative: keep the scheme, take the rest.
+    // Scheme-relative: keep the scheme, take the rest. Keeping it matters --
+    // `//other.test/q` on an https page is https, and reading it as http would
+    // be a downgrade nobody asked for.
     if let Some(rest) = link.strip_prefix("//") {
-        return parse(rest);
+        let scheme = if base.secure { "https" } else { "http" };
+        return parse(&format!("{scheme}://{rest}"));
     }
     if let Some(rest) = link.strip_prefix('/') {
         return Ok(Url {
             host: base.host.clone(),
             port: base.port,
+            secure: base.secure,
             path: format!("/{rest}"),
         });
     }
@@ -192,6 +234,7 @@ pub fn resolve(base: &Url, link: &str) -> Result<Url, UrlError> {
     Ok(Url {
         host: base.host.clone(),
         port: base.port,
+        secure: base.secure,
         path: tidy(&format!("{directory}{link}")),
     })
 }
@@ -646,11 +689,64 @@ mod tests {
     }
 
     #[test]
-    fn https_is_refused_rather_than_downgraded() {
-        let error = parse("https://example.com").expect_err("refused");
-        assert_eq!(error, UrlError::Scheme(String::from("https")));
-        // And it says why, in words somebody can act on.
-        assert!(alloc::format!("{error}").contains("https"));
+    fn https_means_port_443() {
+        let url = parse("https://example.com/page").expect("usable");
+        assert!(url.secure);
+        assert_eq!(url.port, 443);
+        assert_eq!(url.to_text(), "https://example.com/page");
+    }
+
+    #[test]
+    fn https_on_an_unusual_port_keeps_both() {
+        let url = parse("https://example.com:8443/x").expect("usable");
+        assert!(url.secure);
+        assert_eq!(url.port, 8443);
+        // The port shows, because 8443 is not what https means by default and
+        // hiding it would make two different addresses look like one.
+        assert_eq!(url.to_text(), "https://example.com:8443/x");
+    }
+
+    #[test]
+    fn a_relative_link_on_a_secure_page_stays_secure() {
+        // The rule that stops a browser falling out of TLS on the second page.
+        let base = parse("https://example.com/a/b.html").expect("usable");
+        for link in ["next.html", "/elsewhere", "?q=1", "../up.html"] {
+            let followed = resolve(&base, link).expect("usable");
+            assert!(followed.secure, "{link} lost https");
+            assert_eq!(followed.port, 443, "{link} lost the port");
+        }
+    }
+
+    #[test]
+    fn a_scheme_relative_link_takes_the_scheme_it_was_found_under() {
+        let secure = parse("https://example.com/a/").expect("usable");
+        let followed = resolve(&secure, "//other.test/q").expect("usable");
+        assert!(followed.secure, "a // link on an https page is https");
+        assert_eq!(followed.host, "other.test");
+        assert_eq!(followed.port, 443);
+
+        let plain = parse("http://example.com/a/").expect("usable");
+        let followed = resolve(&plain, "//other.test/q").expect("usable");
+        assert!(!followed.secure);
+        assert_eq!(followed.port, 80);
+    }
+
+    #[test]
+    fn an_absolute_link_may_change_the_scheme_either_way() {
+        // Following a link is not a downgrade: a page may legitimately link to
+        // an http page, and the address bar will say so. What must not happen
+        // is the *same* address quietly changing scheme, which is the case the
+        // tests above cover.
+        let base = parse("https://example.com/a/").expect("usable");
+        assert!(!resolve(&base, "http://plain.test/").expect("usable").secure);
+        let base = parse("http://example.com/a/").expect("usable");
+        assert!(resolve(&base, "https://secure.test/").expect("usable").secure);
+    }
+
+    #[test]
+    fn the_scheme_is_read_whatever_case_it_is_typed_in() {
+        assert!(parse("HTTPS://Example.COM/").expect("usable").secure);
+        assert!(!parse("HtTp://Example.COM/").expect("usable").secure);
     }
 
     #[test]

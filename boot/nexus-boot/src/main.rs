@@ -104,8 +104,25 @@ fn fail(message: &str) -> ! {
 }
 
 /// UEFI application entry point.
+///
+/// # Safety
+///
+/// The caller is the firmware, and what it must guarantee is exactly what the
+/// UEFI specification already requires of it: `system_table` points at a live
+/// `EFI_SYSTEM_TABLE` whose boot services have not been exited, and
+/// `image_handle` is this image's own handle. Nothing in this function can
+/// check either -- a bad table is a wild pointer dereferenced on the first
+/// line -- so the obligation is written down here rather than pretended away.
+///
+/// It was a safe `fn` until the bootloader binary was first linted, which is
+/// its own small lesson: `--lib` had been quietly covering only the library
+/// half of this crate, and the file that runs first on the machine had never
+/// been checked at all.
 #[no_mangle]
-pub extern "efiapi" fn efi_main(image_handle: Handle, system_table: *mut SystemTable) -> Status {
+pub unsafe extern "efiapi" fn efi_main(
+    image_handle: Handle,
+    system_table: *mut SystemTable,
+) -> Status {
     serial::init();
 
     log_raw!("\n");

@@ -1086,12 +1086,6 @@ fn use_the_filesystem() {
         failed("init: FAILED: a name that is not there was opened");
         return;
     }
-    // And removing something that is still open.
-    if nexus_user::remove(ours, NOTE) != Err(nexus_user::Error::Filesystem) {
-        failed("init: FAILED: a file was removed while it was still open");
-        return;
-    }
-
     // The directory now has the file in it, and says so.
     let Ok(length) = nexus_user::list(ours, &mut buffer) else {
         failed("init: FAILED: could not read its own directory");
@@ -1107,6 +1101,59 @@ fn use_the_filesystem() {
     }
     if names != 1 || !correct {
         failed("init: FAILED: its directory does not hold what it wrote");
+        return;
+    }
+
+    // Removing a name while somebody still holds what it names.
+    //
+    // This used to be refused, and the check here was that it was. It is not
+    // refused any more: the name goes now and the blocks go when the last
+    // handle closes, which is what unlink means everywhere else and what stops
+    // replacing a file another program reads on a clock from failing at random.
+    //
+    // The property that refusal was protecting is still the one worth checking,
+    // and it is stronger stated this way: after the name has gone, the handle
+    // that was already open must still read the same bytes. If the inode had
+    // been freed, that handle would be naming a number the filesystem is free
+    // to give the next file.
+    if let Err(error) = nexus_user::remove(ours, NOTE) {
+        failed(&alloc::format!(
+            "init: FAILED: a name could not be taken away while it was open: {error}"
+        ));
+        return;
+    }
+    let mut after = [0u8; 64];
+    match nexus_user::read_at(note, 0, &mut after) {
+        Ok(count) if &after[..count] == WRITTEN => {}
+        _ => {
+            failed("init: FAILED: an open file stopped reading once its name had gone");
+            return;
+        }
+    }
+    // And the name really is gone.
+    if nexus_user::open(ours, NOTE) != Err(nexus_user::Error::NotFound) {
+        failed("init: FAILED: a name that was removed can still be opened");
+        return;
+    }
+    nexus_user::log("init: a name was taken away and the open file went on reading").ok();
+
+    // And put it back, because the next boot looks for it.
+    //
+    // The old handle still reads the old file, which is the whole point of what
+    // was just proved -- and it is now a file with no name, whose blocks go
+    // when that handle closes. So this is a *new* file that happens to have the
+    // same name and the same contents, and the difference is worth knowing when
+    // reading the log.
+    nexus_user::close(note).ok();
+    let note = match nexus_user::create(ours, NOTE, nexus_user::Kind::File) {
+        Ok(handle) => handle,
+        Err(_) => {
+            failed("init: FAILED: could not make its file again after removing the name");
+            return;
+        }
+    };
+    if nexus_user::write(note, WRITTEN) != Ok(WRITTEN.len()) {
+        failed("init: FAILED: could not write its file again");
         return;
     }
 

@@ -16,3 +16,4 @@ nexus-user = { path = "../nexus-user" }
 nexus-ui = { path = "../nexus-ui" }
 nexus-config = { path = "../../shared/nexus-config" }
 nexus-look = { path = "../../shared/nexus-look" }
+nexus-image = { path = "../../shared/nexus-image" }

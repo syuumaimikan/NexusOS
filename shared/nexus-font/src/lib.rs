@@ -132,7 +132,7 @@ const BUILTIN: [[u8; 8]; (LAST_CHARACTER - FIRST_CHARACTER + 1) as usize] = [
     [0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // ~
 ];
 
-/// Generated glyphs: GLYPH_COUNT, CODEPOINTS, WIDTHS, GLYPHS.
+/// Generated glyphs: GLYPH_COUNT, CODEPOINTS, WIDTHS, CRISP, SMOOTH.
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/wide_font.rs"));
 }
@@ -145,12 +145,95 @@ pub const HALF_WIDTH: u32 = 8;
 /// Advance width of a full-width glyph, in pixels.
 pub const FULL_WIDTH: u32 = 16;
 
-/// A glyph ready to draw: sixteen rows, most significant bit leftmost.
+/// Which face to draw with.
+///
+/// Two, and they are different tables rather than one table drawn two ways.
+/// The crisp face comes from a font with hand-tuned embedded bitmaps at this
+/// size, which have no soft edges to soften; the smooth face is rasterised with
+/// grey coverage from a face chosen for having them. Anti-aliasing is not a
+/// switch that can be applied to the first one after the fact, which is why
+/// there are two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Face {
+    /// Hinted, sharp, every pixel on or off.
+    #[default]
+    Crisp,
+    /// Anti-aliased, softer, sixteen levels of coverage a pixel.
+    Smooth,
+}
+
+impl Face {
+    /// The face this text names, or the default.
+    #[must_use]
+    pub fn parse(text: Option<&str>) -> Self {
+        match text.map(str::trim) {
+            Some("smooth") => Self::Smooth,
+            _ => Self::Crisp,
+        }
+    }
+
+    /// How it is written down.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Crisp => "crisp",
+            Self::Smooth => "smooth",
+        }
+    }
+
+    /// Every face there is, for something that lists them.
+    pub const ALL: [Self; 2] = [Self::Crisp, Self::Smooth];
+}
+
+/// How a glyph's ink is stored.
+#[derive(Clone, Copy)]
+enum Ink {
+    /// One bit a pixel, most significant bit leftmost. The built-in face.
+    Bits([u16; CELL_HEIGHT as usize]),
+    /// Sixteen rows of sixteen four-bit coverage values, leftmost pixel in the
+    /// most significant nibble. A generated face.
+    Coverage(&'static [u64; CELL_HEIGHT as usize]),
+}
+
+/// A glyph ready to draw.
 #[derive(Clone, Copy)]
 pub struct Glyph {
-    pub rows: [u16; CELL_HEIGHT as usize],
+    ink: Ink,
     /// How far the cursor moves after drawing, in pixels at scale 1.
     pub advance: u32,
+}
+
+impl Glyph {
+    /// How much ink covers one pixel of the cell, 0 to 255.
+    ///
+    /// The renderer's whole interface to a glyph. A face stored as bits answers
+    /// nothing or everything; a face stored as coverage answers sixteen levels
+    /// widened to eight bits, which is what lets the same drawing code produce
+    /// a hard edge or a soft one without knowing which face it has.
+    #[must_use]
+    pub fn alpha(&self, x: u32, y: u32) -> u8 {
+        if y >= CELL_HEIGHT || x >= FULL_WIDTH {
+            return 0;
+        }
+        match &self.ink {
+            Ink::Bits(rows) => {
+                if rows[y as usize] & (0x8000 >> x) != 0 {
+                    255
+                } else {
+                    0
+                }
+            }
+            Ink::Coverage(rows) => {
+                // The leftmost pixel is the most significant nibble.
+                let shift = (FULL_WIDTH - 1 - x) * 4;
+                let level = ((rows[y as usize] >> shift) & 0xF) as u32;
+                // Fifteen has to reach 255, so multiply by seventeen rather
+                // than shifting: a shift leaves full ink at 240 and every
+                // letter slightly grey.
+                (level * 17) as u8
+            }
+        }
+    }
 }
 
 /// Drawn when a character has no glyph in either tier.
@@ -160,6 +243,7 @@ pub struct Glyph {
 /// and for the same reason.
 fn missing(advance: u32) -> Glyph {
     let mut rows = [0u16; CELL_HEIGHT as usize];
+    #[allow(clippy::needless_late_init)]
     let right_edge = if advance == HALF_WIDTH {
         0x0100
     } else {
@@ -178,7 +262,10 @@ fn missing(advance: u32) -> Glyph {
         rows[row] = 0x8000 | right_edge;
         row += 1;
     }
-    Glyph { rows, advance }
+    Glyph {
+        ink: Ink::Bits(rows),
+        advance,
+    }
 }
 
 /// Widen a built-in 8x8 bitmap into the 16-pixel cell.
@@ -195,7 +282,7 @@ fn from_builtin(bitmap: &[u8; 8]) -> Glyph {
         index += 1;
     }
     Glyph {
-        rows,
+        ink: Ink::Bits(rows),
         advance: HALF_WIDTH,
     }
 }
@@ -207,11 +294,24 @@ fn from_builtin(bitmap: &[u8; 8]) -> Glyph {
 /// generated face was produced.
 #[must_use]
 pub fn glyph(character: char) -> Glyph {
+    glyph_of(Face::Crisp, character)
+}
+
+/// The glyph for `character` in a particular face.
+#[must_use]
+pub fn glyph_of(face: Face, character: char) -> Glyph {
     let codepoint = character as u32;
 
     if let Ok(index) = generated::CODEPOINTS.binary_search(&codepoint) {
+        let rows = match face {
+            Face::Smooth if generated::HAS_SMOOTH => &generated::SMOOTH[index],
+            // Asking for a face that was not generated gives the one that was,
+            // rather than nothing. A machine whose build could not find a
+            // second font should look plain, not empty.
+            _ => &generated::CRISP[index],
+        };
         return Glyph {
-            rows: generated::GLYPHS[index],
+            ink: Ink::Coverage(rows),
             advance: u32::from(generated::WIDTHS[index]),
         };
     }
@@ -260,6 +360,19 @@ pub fn generated_glyph_count() -> usize {
 #[must_use]
 pub fn generated_source() -> &'static str {
     generated::SOURCE
+}
+
+/// Which font the smooth face came from, or the crisp one's name when the
+/// build found only one.
+#[must_use]
+pub fn smooth_source() -> &'static str {
+    generated::SMOOTH_SOURCE
+}
+
+/// Whether the build produced a second, anti-aliased face.
+#[must_use]
+pub fn has_smooth_face() -> bool {
+    generated::HAS_SMOOTH
 }
 
 // The kernel binary has no host test harness -- it is `no_main` with its own

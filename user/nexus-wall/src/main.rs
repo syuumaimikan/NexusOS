@@ -47,7 +47,38 @@ const COMPOSITOR: Handle = Handle(1);
 const SURFACE_AT: usize = 0x0000_0000_4800_0000;
 
 /// How much heap: the settings file, and nothing else.
-const HEAP: usize = 256 * 1024;
+const HEAP: usize = 12 * 1024 * 1024;
+
+/// The directory a wallpaper picture is looked for in.
+///
+/// One directory, and the same one the picture viewer shows. The wallpaper is
+/// lent `PICTURES` read-only and nothing else, so a setting naming anything
+/// outside it names a file this program could not open if it tried -- which is
+/// why `nexus_look` refuses a value with a separator in it rather than leaving
+/// that to be discovered here.
+const PICTURES: &str = "PICTURES";
+
+/// The largest wallpaper file this will read.
+///
+/// A recording is read a frame at a time and is not bounded by this; a still
+/// picture is read whole, and eight mebibytes is a very large photograph.
+const MAX_PICTURE: usize = 8 * 1024 * 1024;
+
+/// The most pixels a wallpaper may have.
+///
+/// A 4K screen is 8.3 megapixels, so this allows a picture rather larger than
+/// any screen this runs on. Four bytes each, which is most of the heap above --
+/// and the reason the heap is what it is.
+const MOST_PIXELS: usize = 12 * 1024 * 1024 / 4;
+
+/// How often a recording's frames are shown, at most.
+///
+/// Four a second. Not a choice about what looks good: there are no per-client
+/// damage rectangles in this system, so a full-screen wallpaper frame costs a
+/// composite of the whole display, and the roadmap has said so since before
+/// there was anything to play. A recording asking for thirty is shown at four
+/// and the log says what it managed.
+const VIDEO_MS: u64 = 250;
 
 /// What the settings file is called.
 const SETTINGS_NAME: &str = "settings.txt";
@@ -70,14 +101,18 @@ const SETTINGS_MAX: usize = 16 * 1024;
 /// program that needs them is a text editor redrawing one line.
 const FRAME_MS: u64 = 250;
 
-/// How often the settings are looked at again, in frames of the above.
+/// How often the settings are looked at again, in milliseconds.
 ///
 /// Two seconds. A wallpaper that re-read the file every frame would be a
 /// wallpaper opening a file four times a second for an answer that changes when
 /// somebody types a command.
-const RECHECK: u32 = 8;
+///
+/// Milliseconds and not frames: a still pattern has no frames, and a moving one
+/// turned out not to be counting them reliably either.
+const RECHECK_MS: u64 = 2_000;
 
-/// And how often a still pattern looks, since it has no frames of its own.
+/// How long a still pattern waits before looking, since it has nothing else to
+/// wake it.
 const STILL_RECHECK_MS: u64 = 2_000;
 
 /// What the compositor says.
@@ -109,7 +144,7 @@ extern "C" fn main() -> ! {
     // draw. Without the second it draws the default, which is what this system
     // looked like before it could be changed.
     let mut buffer = [0u8; 32];
-    let mut handles = [Handle(0); 2];
+    let mut handles = [Handle(0); 3];
     let Ok(received) = nexus_user::receive(COMPOSITOR, &mut buffer, &mut handles) else {
         failed("wall: FAILED: nothing arrived to draw on");
         finish();
@@ -123,6 +158,10 @@ extern "C" fn main() -> ! {
     let mut height = read_u32(&buffer, 4);
     let mut surface = handles[0];
     let settings = (received.handles >= 2).then(|| handles[1]);
+    // The pictures directory, read-only, when the compositor had one to lend.
+    // Without it a picture cannot be drawn and the pattern is what there is,
+    // which is what this program did before it could draw one at all.
+    let pictures = (received.handles >= 3).then(|| handles[2]);
 
     let Ok(mapped) = nexus_user::memory_map(surface, SURFACE_AT, true) else {
         failed("wall: FAILED: could not map its surface");
@@ -133,7 +172,9 @@ extern "C" fn main() -> ! {
         finish();
     }
 
-    let mut look = read_look(settings);
+    // The defaults only when there is genuinely nothing to read, which on a
+    // machine nobody has configured is the truth.
+    let mut look = read_look(settings).unwrap_or_default();
     nexus_user::log(&alloc::format!(
         "wall: {width}x{height} behind the windows, {} on {}",
         look.style.name(),
@@ -152,16 +193,35 @@ extern "C" fn main() -> ! {
     }
 
     let mut frame = 0u32;
-    let mut since_check = 0u32;
+    // When the settings were last read, on the machine's own clock.
+    //
+    // A clock and not a count of timed-out waits, which is what this was and
+    // which was wrong in a way that only showed up on a moving pattern: the
+    // recheck sat inside the `ready == 0` branch, so it happened only when a
+    // wait *expired*. An animated wallpaper is answered by the compositor on
+    // nearly every wait, so the branch almost never ran and a setting changed
+    // while the stars were drifting went unnoticed for over a minute.
+    let mut last_check = nexus_user::uptime();
     let mut stale = true;
     let mut in_flight = false;
+
+    // Whatever the settings name, opened once. Reopened only when the name or
+    // the fit changes -- decoding a wallpaper on every settings re-read would
+    // be decoding it every two seconds for the life of the machine.
+    let mut behind = open_picture(pictures, &look);
+    // When the next frame of a recording is due.
+    let mut next_due = nexus_user::uptime();
+    // Whether the rate it managed has been said. Once, after enough frames to
+    // mean anything: a wallpaper that reported its frame rate every second
+    // would be a wallpaper filling the log.
+    let mut said_rate = false;
 
     // Bounded, so a wallpaper whose compositor stops answering cannot spin.
     // Large, because at four frames a second this is most of a day and the
     // thing it draws is meant to be there all of it.
     for _ in 0..16_000_000u64 {
         if stale && !in_flight {
-            draw(&look, width, height, frame);
+            draw(&look, behind.as_ref(), width, height, frame);
             if nexus_user::send(COMPOSITOR, wire::DAMAGED, &[]).is_err() {
                 break;
             }
@@ -172,7 +232,12 @@ extern "C" fn main() -> ! {
         // A still pattern waits to be woken and costs nothing; a moving one
         // wakes on its own. What decides is the pattern, which is the only
         // thing that knows whether anything would change.
-        let wait = if look.style.moves() {
+        // A recording wakes on its own clock; a moving pattern on the frame
+        // clock; a still one waits to be woken and costs nothing. What decides
+        // is what is actually being drawn.
+        let wait = if matches!(behind, Some(Behind::Moving { .. })) {
+            VIDEO_MS
+        } else if look.style.moves() {
             FRAME_MS
         } else {
             STILL_RECHECK_MS
@@ -182,27 +247,63 @@ extern "C" fn main() -> ! {
             break;
         };
 
+        // Looked at again every so often, so that changing a setting shows up
+        // without anything having to tell this program. Before the wake is
+        // dealt with, and whatever woke it: how long it has been is a question
+        // about the clock, not about why this loop is running.
+        let now = nexus_user::uptime();
+        if now.saturating_sub(last_check) >= RECHECK_MS {
+            last_check = now;
+            // Nothing when it could not be read, and the look is left alone.
+            let Some(fresh) = read_look(settings) else {
+                continue;
+            };
+            if fresh != look {
+                nexus_user::log(&alloc::format!(
+                    "wall: the look changed to {} on {}",
+                    fresh.style.name(),
+                    fresh.top.to_text()
+                ))
+                .ok();
+                // Reopened only when the file or the fit actually changed.
+                // Everything else -- a colour, the style, the font -- leaves a
+                // decoded wallpaper alone, and re-decoding it on every settings
+                // change would cost a full decode every time somebody moved a
+                // slider.
+                let different = fresh.picture != look.picture || fresh.fit != look.fit;
+                look = fresh;
+                if different {
+                    if let Some(old) = behind.take() {
+                        old.close();
+                    }
+                    behind = open_picture(pictures, &look);
+                    next_due = nexus_user::uptime();
+                }
+                stale = true;
+            }
+        }
+
         if ready == 0 {
             frame = frame.wrapping_add(1);
-            since_check += 1;
             if look.style.moves() {
                 stale = true;
             }
-            // Looked at again every so often, so that changing a setting shows
-            // up without anything having to tell this program.
-            if since_check >= RECHECK || !look.style.moves() {
-                since_check = 0;
-                let now = read_look(settings);
-                if now != look {
-                    nexus_user::log(&alloc::format!(
-                        "wall: the look changed to {} on {}",
-                        now.style.name(),
-                        now.top.to_text()
-                    ))
-                    .ok();
-                    look = now;
+            // A recording, if it is time. The deadline moves by one interval
+            // rather than to "now", so that a decode taking most of an interval
+            // does not make every frame later than the last -- and is reset if
+            // it has fallen more than a second behind, because a machine that
+            // cannot keep up should play slowly rather than sprint for ever
+            // after a schedule it will never meet.
+            if matches!(behind, Some(Behind::Moving { .. })) && now >= next_due {
+                if next_frame(behind.as_mut().expect("just matched")) {
                     stale = true;
                 }
+                next_due = if now.saturating_sub(next_due) > 1000 {
+                    now + VIDEO_MS
+                } else {
+                    next_due + VIDEO_MS
+                };
+                said_rate = say_rate(behind.as_ref(), said_rate);
             }
             continue;
         }
@@ -241,26 +342,363 @@ extern "C" fn main() -> ! {
 }
 
 /// What the settings say this machine should look like.
-fn read_look(settings: Option<Handle>) -> Look {
-    let Some(directory) = settings else {
-        return Look::default();
-    };
-    let Ok(file) = nexus_user::open(directory, SETTINGS_NAME) else {
-        return Look::default();
-    };
+fn read_look(settings: Option<Handle>) -> Option<Look> {
+    let directory = settings?;
+    // `None` means "could not read it", not "it says the defaults".
+    //
+    // The difference is not academic. Replacing a file here means removing the
+    // name and making it again, because there is no truncate -- so there is a
+    // window, short but real, in which the name does not exist. A reader that
+    // answered that window with the defaults would throw away somebody's
+    // wallpaper because another program was half-way through saving it, and
+    // then throw away the *new* setting too by treating the defaults as the
+    // current state.
+    //
+    // That is exactly what happened: the wallpaper reported changing to the
+    // default gradient in the middle of a save, and then never noticed the
+    // style that was actually written.
+    let file = nexus_user::open(directory, SETTINGS_NAME).ok()?;
     let size = nexus_user::size(file).unwrap_or(0).min(SETTINGS_MAX);
     let mut bytes = alloc::vec![0u8; size];
     let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
     nexus_user::close(file).ok();
     bytes.truncate(read);
-    match String::from_utf8(bytes) {
-        Ok(text) => Look::parse(&text),
-        Err(_) => Look::default(),
+    // An empty file is a file being written, not a file asking for defaults.
+    if bytes.is_empty() {
+        return None;
+    }
+    String::from_utf8(bytes).ok().map(|text| Look::parse(&text))
+}
+
+/// A picture or a recording, opened and ready to draw.
+///
+/// A still picture is decoded once and kept. A recording keeps its file open
+/// and its table of contents -- sixteen bytes a frame -- and decodes one frame
+/// at a time, which is the same discipline the picture viewer follows and for
+/// the same reason: a recording is not something that fits in memory.
+enum Behind {
+    /// One picture, decoded.
+    Still(nexus_image::Picture),
+    /// A recording, and where it has got to.
+    Moving {
+        file: Handle,
+        frames: alloc::vec::Vec<nexus_image::avi::Frame>,
+        at: usize,
+        /// The frame on screen now, decoded.
+        showing: Option<nexus_image::Picture>,
+        /// Somewhere to read a compressed frame into, kept between frames.
+        compressed: alloc::vec::Vec<u8>,
+        /// How many have been decoded and how long that took, so the machine
+        /// can say what it managed rather than what was asked for.
+        decoded: u32,
+        decoding_ms: u64,
+        /// What the file asks for, in microseconds between frames.
+        interval_us: u32,
+    },
+}
+
+impl Behind {
+    /// Whatever should be drawn now.
+    fn picture(&self) -> Option<&nexus_image::Picture> {
+        match self {
+            Self::Still(picture) => Some(picture),
+            Self::Moving { showing, .. } => showing.as_ref(),
+        }
+    }
+
+    /// Give the file back, if there is one.
+    fn close(self) {
+        if let Self::Moving { file, .. } = self {
+            nexus_user::close(file).ok();
+        }
+    }
+}
+
+/// Open whatever `look.picture` names, if anything.
+///
+/// `None` for every reason: no directory lent, no name set, a name that will
+/// not open, bytes that are not a picture. Each says so in the log *except*
+/// "no name set", which is not a problem and would be noise repeated every
+/// time the settings are re-read.
+fn open_picture(pictures: Option<Handle>, look: &Look) -> Option<Behind> {
+    if look.picture.is_empty() {
+        return None;
+    }
+    let root = pictures?;
+    let Ok(directory) = nexus_user::open(root, PICTURES) else {
+        nexus_user::log("wall: there is no PICTURES directory to take a wallpaper from").ok();
+        return None;
+    };
+    // As typed, and then uppercased.
+    //
+    // Names on this store are uppercase -- the kernel seeds them from an image
+    // whose directory is FAT, where they are -- so `nexus.jpg` typed into the
+    // settings names nothing. Uppercasing is following the filesystem's own
+    // convention rather than being clever: somebody typing a filename should
+    // not have to know that.
+    let opened = nexus_user::open(directory, &look.picture)
+        .or_else(|_| nexus_user::open(directory, &look.picture.to_uppercase()));
+    nexus_user::close(directory).ok();
+    let Ok(file) = opened else {
+        nexus_user::log(&alloc::format!("wall: {} will not open", look.picture)).ok();
+        return None;
+    };
+
+    let size = nexus_user::size(file).unwrap_or(0);
+    let mut head = alloc::vec![0u8; size.min(64 * 1024)];
+    let read = nexus_user::read_at(file, 0, &mut head).unwrap_or(0);
+    head.truncate(read);
+
+    if nexus_image::kind(&head) == Some("avi") {
+        let reel = match nexus_image::avi::read(&head) {
+            Ok(reel) => reel,
+            Err(why) => {
+                nexus_user::log(&alloc::format!(
+                    "wall: {} is not a recording: {why}",
+                    look.picture
+                ))
+                .ok();
+                nexus_user::close(file).ok();
+                return None;
+            }
+        };
+        if reel.movi_at == 0 {
+            nexus_user::log(&alloc::format!(
+                "wall: {}'s headers run further in than this reads",
+                look.picture
+            ))
+            .ok();
+            nexus_user::close(file).ok();
+            return None;
+        }
+        let frames = walk_frames(file, reel.movi_at, reel.movi_end);
+        if frames.is_empty() {
+            nexus_user::log(&alloc::format!("wall: {} has no frames", look.picture)).ok();
+            nexus_user::close(file).ok();
+            return None;
+        }
+        nexus_user::log(&alloc::format!(
+            "wall: playing {} behind everything, {}x{}, {} frames",
+            look.picture,
+            reel.width,
+            reel.height,
+            frames.len()
+        ))
+        .ok();
+        let mut behind = Behind::Moving {
+            file,
+            frames,
+            at: 0,
+            showing: None,
+            compressed: alloc::vec::Vec::new(),
+            decoded: 0,
+            decoding_ms: 0,
+            interval_us: reel.interval_us,
+        };
+        next_frame(&mut behind);
+        return Some(behind);
+    }
+
+    // A still picture, read whole.
+    if size > MAX_PICTURE {
+        nexus_user::log(&alloc::format!(
+            "wall: {} is {} bytes, which is more than this will read",
+            look.picture,
+            size
+        ))
+        .ok();
+        nexus_user::close(file).ok();
+        return None;
+    }
+    let mut bytes = alloc::vec![0u8; size];
+    let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
+    nexus_user::close(file).ok();
+    bytes.truncate(read);
+
+    match nexus_image::decode(&bytes, look.bottom.packed(), MOST_PIXELS) {
+        Ok(picture) => {
+            nexus_user::log(&alloc::format!(
+                "wall: showing {} behind everything, {}x{}",
+                look.picture,
+                picture.width,
+                picture.height
+            ))
+            .ok();
+            Some(Behind::Still(picture))
+        }
+        Err(why) => {
+            nexus_user::log(&alloc::format!("wall: {}: {why}", look.picture)).ok();
+            None
+        }
+    }
+}
+
+/// Move a recording on by one frame. Says whether anything changed.
+fn next_frame(behind: &mut Behind) -> bool {
+    let Behind::Moving {
+        file,
+        frames,
+        at,
+        showing,
+        compressed,
+        decoded,
+        decoding_ms,
+        ..
+    } = behind
+    else {
+        return false;
+    };
+    let Some(frame) = frames.get(*at).copied() else {
+        return false;
+    };
+
+    compressed.resize(frame.bytes as usize, 0);
+    if nexus_user::read_at(*file, frame.at, compressed) != Ok(compressed.len()) {
+        return false;
+    }
+    let began = nexus_user::uptime();
+    let Ok(picture) = nexus_image::decode(compressed, 0, MOST_PIXELS) else {
+        return false;
+    };
+    *decoding_ms += nexus_user::uptime().saturating_sub(began);
+    *decoded += 1;
+    *showing = Some(picture);
+    *at = (*at + 1) % frames.len();
+    true
+}
+
+/// Build a recording's table of contents by walking its chunk headers.
+///
+/// One eight-byte read per chunk and no frame data -- the same walk the picture
+/// viewer does, and for the same reason: a wallpaper that read a recording into
+/// memory would be a wallpaper with a running time compiled into it.
+fn walk_frames(file: Handle, from: u64, to: u64) -> alloc::vec::Vec<nexus_image::avi::Frame> {
+    let mut frames = alloc::vec::Vec::new();
+    let mut at = from;
+    let mut header = [0u8; 8];
+    while at + 8 <= to && frames.len() < 12_000 {
+        if nexus_user::read_at(file, at, &mut header) != Ok(header.len()) {
+            break;
+        }
+        let (kind, length) = nexus_image::avi::chunk(&header);
+        if at + 8 + u64::from(length) > to {
+            break;
+        }
+        if nexus_image::avi::is_frame(kind) && length > 0 {
+            frames.push(nexus_image::avi::Frame {
+                at: at + 8,
+                bytes: length,
+            });
+        }
+        let next = nexus_image::avi::next_chunk(at, length);
+        if next <= at {
+            break;
+        }
+        at = next;
+    }
+    frames
+}
+
+/// Say, once, what a recording actually managed.
+///
+/// Asked for is one thing and achieved is another, and a machine that reported
+/// only the first would be a machine where every recording plays perfectly.
+/// There are no per-client damage rectangles here, so a full-screen wallpaper
+/// frame costs a composite of the whole display -- which is why this is capped
+/// at four a second before the decoder is even reached, and why the number
+/// worth reporting is the *decode* rate rather than the frame rate.
+fn say_rate(behind: Option<&Behind>, already: bool) -> bool {
+    if already {
+        return true;
+    }
+    let Some(Behind::Moving {
+        decoded,
+        decoding_ms,
+        interval_us,
+        ..
+    }) = behind
+    else {
+        return already;
+    };
+    if *decoded < 20 || *decoding_ms == 0 {
+        return false;
+    }
+    let milli = (u64::from(*decoded) * 1_000_000 / *decoding_ms) as u32;
+    let asked = if *interval_us == 0 {
+        0
+    } else {
+        (1_000_000_000u64 / u64::from(*interval_us)) as u32
+    };
+    nexus_user::log(&alloc::format!(
+        "wall: decoding at {}.{} frames a second; the recording asks for {}.{}, \
+         and a full-screen wallpaper is shown at {}.0",
+        milli / 1000,
+        (milli % 1000) / 100,
+        asked / 1000,
+        (asked % 1000) / 100,
+        1000 / VIDEO_MS
+    ))
+    .ok();
+    true
+}
+
+/// Draw a picture over the whole background, fitted the way the settings ask.
+///
+/// Nearest-neighbour and integer-only, for each pixel of the destination
+/// working out which source pixel it came from. Done this way round rather than
+/// by walking the source, because walking the source leaves gaps when scaling
+/// up and writes the same destination pixel repeatedly when scaling down.
+fn draw_picture(
+    canvas: &mut nexus_ui::Canvas,
+    picture: &nexus_image::Picture,
+    fit: nexus_look::Fit,
+    width: u32,
+    height: u32,
+) {
+    if picture.width == 0 || picture.height == 0 || width == 0 || height == 0 {
+        return;
+    }
+
+    const ONE: u64 = 65536;
+    let by_width = ONE * u64::from(width) / u64::from(picture.width);
+    let by_height = ONE * u64::from(height) / u64::from(picture.height);
+    let scale = match fit {
+        // The smaller, so all of it fits and the pattern shows around it.
+        nexus_look::Fit::Whole => by_width.min(by_height).max(1),
+        // The larger, so it covers -- the long side runs off the edges, which
+        // is what filling a screen means.
+        nexus_look::Fit::Fill => by_width.max(by_height).max(1),
+        nexus_look::Fit::Middle => ONE,
+    };
+
+    let across = ((u64::from(picture.width) * scale) / ONE).max(1) as u32;
+    let down = ((u64::from(picture.height) * scale) / ONE).max(1) as u32;
+    // Centred, which for Fill means the parts that run off do so evenly.
+    let left = (width as i64 - across as i64) / 2;
+    let top = (height as i64 - down as i64) / 2;
+
+    for row in 0..down {
+        let y = top + i64::from(row);
+        if y < 0 || y >= i64::from(height) {
+            continue;
+        }
+        let source_row = (u64::from(row) * u64::from(picture.height) / u64::from(down)) as u32;
+        for column in 0..across {
+            let x = left + i64::from(column);
+            if x < 0 || x >= i64::from(width) {
+                continue;
+            }
+            let source_column =
+                (u64::from(column) * u64::from(picture.width) / u64::from(across)) as u32;
+            if let Some(pixel) = picture.at(source_column, source_row) {
+                canvas.set(x as u32, y as u32, nexus_ui::Colour(pixel));
+            }
+        }
     }
 }
 
 /// Draw the whole background.
-fn draw(look: &Look, width: u32, height: u32, frame: u32) {
+fn draw(look: &Look, behind: Option<&Behind>, width: u32, height: u32, frame: u32) {
     // SAFETY: the surface is mapped here, writable, and at least
     // `width * height * 4` bytes -- checked when it was taken and again after
     // every replacement.
@@ -284,6 +722,14 @@ fn draw(look: &Look, width: u32, height: u32, frame: u32) {
             canvas.gradient(canvas.bounds(), top, bottom);
             grid(&mut canvas, look, width, height);
         }
+    }
+
+    // And the picture over it, when there is one. Over rather than instead:
+    // a picture fitted whole, or one smaller than the screen, shows the
+    // pattern around it -- which is better than a black border and is why the
+    // pattern is drawn even when it will mostly be covered.
+    if let Some(picture) = behind.and_then(Behind::picture) {
+        draw_picture(&mut canvas, picture, look.fit, width, height);
     }
 }
 

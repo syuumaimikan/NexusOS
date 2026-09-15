@@ -19,3 +19,4 @@ nexus-netclient = { path = "../../shared/nexus-netclient" }
 nexus-dns = { path = "../../shared/nexus-dns" }
 nexus-http = { path = "../../shared/nexus-http" }
 nexus-html = { path = "../../shared/nexus-html" }
+nexus-tls = { path = "../../shared/nexus-tls" }

@@ -152,6 +152,22 @@ struct Terminal {
     scrolled: usize,
     /// Turns romaji into kana, when it is asked to.
     ime: nexus_ime::Ime,
+    /// The channel that says what the machine is doing, if this shell has one.
+    machine: Option<Handle>,
+    /// The network, if this shell was lent it.
+    ///
+    /// A shell is where network tools live on every system somebody has used,
+    /// and the compositor is what decides whether this one gets them. Without
+    /// the handle the commands say so rather than pretending the network is
+    /// down.
+    network: Option<Handle>,
+    /// The face to draw in, and whether to soften its edges.
+    ///
+    /// Read once, when the window opens. Unlike the wallpaper this does not
+    /// watch the settings file: a terminal that changed face mid-session would
+    /// reflow every line of scrollback under somebody's cursor, and opening a
+    /// new one is both cheap and what a person would do anyway.
+    style: (nexus_ui::font::Face, bool),
 }
 
 #[unsafe(naked)]
@@ -177,7 +193,7 @@ extern "C" fn main() -> ! {
     // window with a prompt in it, and a copy started without them says so
     // rather than failing at the first command.
     let mut buffer = [0u8; 32];
-    let mut handles = [Handle(0); 4];
+    let mut handles = [Handle(0); 6];
     let Ok(received) = nexus_user::receive(COMPOSITOR, &mut buffer, &mut handles) else {
         failed("term: FAILED: nothing arrived to draw on");
         finish();
@@ -206,6 +222,8 @@ extern "C" fn main() -> ! {
         here: (received.handles >= 2).then(|| handles[1]),
         spawner: (received.handles >= 3).then(|| handles[2]),
         sound: (received.handles >= 4).then(|| handles[3]),
+        machine: (received.handles >= 5).then(|| handles[4]),
+        network: (received.handles >= 6).then(|| handles[5]),
         width,
         height,
         lines: Vec::new(),
@@ -215,7 +233,9 @@ extern "C" fn main() -> ! {
         recalled: None,
         scrolled: 0,
         ime: nexus_ime::Ime::new(),
+        style: (nexus_ui::font::Face::Crisp, false),
     };
+    terminal.style = terminal.read_style();
 
     terminal.note(nexus_i18n::text("term.welcome"));
     if terminal.root.is_none() {
@@ -579,6 +599,10 @@ impl Terminal {
             "beep" => self.beep(words.argument(0), words.argument(1)),
             "set" => self.set(words.argument(0), words.argument(1)),
             "look" => self.look(),
+            "sys" | "top" => self.sys(),
+            "net" => self.net(),
+            "lookup" | "dig" | "nslookup" => self.lookup(words.argument(0)),
+            "scan" => self.scan(words.argument(0), words.argument(1), words.argument(2)),
             "uptime" => {
                 let milliseconds = nexus_user::uptime();
                 let text = nexus_i18n::format(
@@ -624,6 +648,10 @@ impl Terminal {
             "term.help.beep",
             "term.help.set",
             "term.help.look",
+            "term.help.sys",
+            "term.help.net",
+            "term.help.lookup",
+            "term.help.scan",
             "term.help.uptime",
             "term.help.history",
             "term.help.clear",
@@ -1036,8 +1064,15 @@ impl Terminal {
             Ok(()) => {
                 let said = nexus_i18n::format("term.setting", &[("key", &key), ("value", &value)]);
                 self.note(&said);
+                // In the log too. What a program draws cannot be checked from
+                // outside the machine, and "did that setting actually save" is
+                // exactly the question a test needs to be able to ask.
+                nexus_user::log(&format!("term: set {key} to {value}")).ok();
             }
-            Err(why) => self.trouble(&why),
+            Err(why) => {
+                self.trouble(&why);
+                nexus_user::log(&format!("term: could not set {key}: {why}")).ok();
+            }
         }
     }
 
@@ -1074,6 +1109,351 @@ impl Terminal {
         self.plain(&text);
         let choices = nexus_i18n::format("term.look.styles", &[("styles", &styles.join(" "))]);
         self.note(&choices);
+    }
+
+    /// What the settings file says text should look like.
+    fn read_style(&self) -> (nexus_ui::font::Face, bool) {
+        let Some(directory) = self.system() else {
+            return (nexus_ui::font::Face::Crisp, false);
+        };
+        let look = match read_text(directory, SETTINGS_NAME) {
+            Some(text) => nexus_look::Look::parse(&text),
+            None => nexus_look::Look::default(),
+        };
+        nexus_user::close(directory).ok();
+        (
+            nexus_ui::font::Face::parse(Some(look.font.name())),
+            look.smooth,
+        )
+    }
+
+    /// `sys`
+    ///
+    /// What the machine is doing. The numbers come from the kernel over a
+    /// channel this shell was lent -- there is no call that answers them, and a
+    /// shell started without that channel says so rather than making something
+    /// up.
+    ///
+    /// `top` is the same command, because that is what a person who has used
+    /// another system will type.
+    fn sys(&mut self) {
+        let Some(machine) = self.machine else {
+            self.trouble(nexus_i18n::text("term.nomachine"));
+            return;
+        };
+
+        let asked = nexus_machine::request();
+        if nexus_user::send(machine, &asked, &[]).is_err() {
+            self.trouble(nexus_i18n::text("term.nomachine"));
+            return;
+        }
+
+        let mut reply = [0u8; 128];
+        let mut none = [Handle(0); 1];
+        let Ok(received) = nexus_user::receive(machine, &mut reply, &mut none) else {
+            self.trouble(nexus_i18n::text("term.nomachine"));
+            return;
+        };
+
+        let snapshot = match nexus_machine::Snapshot::of(&reply[..received.bytes]) {
+            Ok(snapshot) => snapshot,
+            Err(why) => {
+                self.trouble(&alloc::format!("{why}"));
+                return;
+            }
+        };
+
+        let mebibytes = |bytes: u64| bytes / (1024 * 1024);
+        let lines = [
+            nexus_i18n::format(
+                "term.sys.memory",
+                &[
+                    ("used", &mebibytes(snapshot.memory_used())),
+                    ("total", &mebibytes(snapshot.memory_total)),
+                    ("percent", &snapshot.memory_percent()),
+                ],
+            ),
+            nexus_i18n::format(
+                "term.sys.heap",
+                &[
+                    ("used", &(snapshot.heap_used / 1024)),
+                    ("total", &(snapshot.heap_total / 1024)),
+                ],
+            ),
+            nexus_i18n::format(
+                "term.sys.processes",
+                &[
+                    ("running", &snapshot.processes_running),
+                    ("started", &snapshot.processes_started),
+                    ("ended", &snapshot.processes_ended),
+                ],
+            ),
+            nexus_i18n::format(
+                "term.sys.threads",
+                &[
+                    ("threads", &snapshot.threads),
+                    ("processors", &snapshot.processors),
+                    ("switches", &snapshot.context_switches),
+                ],
+            ),
+        ];
+        for line in lines {
+            self.plain(&line);
+        }
+    }
+
+    // -- the network ----------------------------------------------------------
+
+    /// `net`
+    ///
+    /// What this machine's address is, and what it was told to use to reach
+    /// anywhere else.
+    fn net(&mut self) {
+        let Some(service) = self.network else {
+            self.trouble(nexus_i18n::text("term.nonetwork"));
+            return;
+        };
+        match nexus_netclient::interface(service) {
+            Ok(here) => {
+                for (key, address) in [
+                    ("term.net.address", here.address),
+                    ("term.net.gateway", here.gateway),
+                    ("term.net.resolver", here.resolver),
+                ] {
+                    let said = nexus_i18n::format(key, &[("address", &dotted(address))]);
+                    self.plain(&said);
+                }
+                // The numbers, in the log as well as the window. What a program
+                // put on screen cannot be checked from outside the machine, and
+                // an address is exactly the kind of thing worth checking.
+                nexus_user::log(&format!(
+                    "term: net {} via {} resolving with {}",
+                    dotted(here.address),
+                    dotted(here.gateway),
+                    dotted(here.resolver)
+                ))
+                .ok();
+            }
+            Err(why) => self.trouble(&format!("{why}")),
+        }
+    }
+
+    /// Turn a name or a dotted address into an address.
+    ///
+    /// Shared by `lookup` and `scan`, because scanning a name has to do this
+    /// first and a second copy of it is a second thing to get wrong.
+    fn resolve(&mut self, name: &str, say: bool) -> Option<[u8; 4]> {
+        if let Some(address) = nexus_dns::as_address(name) {
+            if say {
+                let found = nexus_i18n::format(
+                    "term.lookup.found",
+                    &[("name", &name), ("address", &dotted(address))],
+                );
+                self.plain(&found);
+            }
+            return Some(address);
+        }
+        let service = self.network?;
+        let Ok(here) = nexus_netclient::interface(service) else {
+            self.trouble(nexus_i18n::text("term.nonetwork"));
+            return None;
+        };
+        if here.resolver == [0, 0, 0, 0] {
+            self.trouble(nexus_i18n::text("term.noresolver"));
+            return None;
+        }
+        let Ok(port) = nexus_netclient::bind(service) else {
+            self.trouble(nexus_i18n::text("term.nonetwork"));
+            return None;
+        };
+
+        // An identifier that differs between two lookups in a row, so a late
+        // answer to the first is not read as the answer to the second.
+        let id = (nexus_user::uptime() as u16) | 1;
+        let answer = match nexus_dns::question(id, name) {
+            Ok(message) => {
+                nexus_netclient::send_datagram(
+                    service,
+                    port,
+                    here.resolver,
+                    nexus_dns::PORT,
+                    &message,
+                )
+                .ok();
+                self.wait_for_answer(service, port, id, name, here.resolver)
+            }
+            Err(error) => {
+                self.trouble(&format!("{error}"));
+                None
+            }
+        };
+        nexus_netclient::unbind(service, port).ok();
+        answer
+    }
+
+    /// Wait for the resolver to answer, up to [`LOOKUP_MS`].
+    fn wait_for_answer(
+        &mut self,
+        service: Handle,
+        port: u16,
+        id: u16,
+        name: &str,
+        resolver: [u8; 4],
+    ) -> Option<[u8; 4]> {
+        let deadline = nexus_user::uptime() + LOOKUP_MS;
+        while nexus_user::uptime() < deadline {
+            let Ok(Some((from, source, bytes))) = nexus_netclient::read_datagram(service, port)
+            else {
+                nexus_user::sleep(20).ok();
+                continue;
+            };
+            // From the server that was asked, on the port it was asked on.
+            // Neither is sufficient against somebody on the path and both are
+            // free; with the identifier they are what a forgery has to guess.
+            if from != resolver || source != nexus_dns::PORT {
+                continue;
+            }
+            match nexus_dns::answer(&bytes, id, name) {
+                Ok(answer) => {
+                    for address in &answer.addresses {
+                        let found = nexus_i18n::format(
+                            "term.lookup.found",
+                            &[("name", &name), ("address", &dotted(*address))],
+                        );
+                        self.plain(&found);
+                    }
+                    return answer.addresses.first().copied();
+                }
+                // A stale answer to something else. The question outstanding
+                // may still be answered.
+                Err(nexus_dns::Error::NotOurs) => continue,
+                Err(error) => {
+                    self.trouble(&format!("{error}"));
+                    return None;
+                }
+            }
+        }
+        let none = nexus_i18n::format("term.lookup.none", &[("name", &name)]);
+        self.trouble(&none);
+        None
+    }
+
+    /// `lookup <name>`
+    fn lookup(&mut self, name: Option<&str>) {
+        let Some(name) = name else {
+            self.trouble(nexus_i18n::text("term.needname"));
+            return;
+        };
+        if self.network.is_none() {
+            self.trouble(nexus_i18n::text("term.nonetwork"));
+            return;
+        }
+        self.resolve(name, true);
+    }
+
+    /// `scan <host> [first] [last]`
+    ///
+    /// Opens a connection to each port and closes it. Ports that answer are
+    /// listed; the rest are counted.
+    ///
+    /// This is the whole of what a system with no raw sockets can do, and it is
+    /// worth being plain about that: there is no half-open scan here, no
+    /// spoofed source, and nothing that could be mistaken for one. Every port
+    /// this touches sees an ordinary connection from this machine's own
+    /// address.
+    fn scan(&mut self, host: Option<&str>, first: Option<&str>, last: Option<&str>) {
+        let Some(host) = host else {
+            self.trouble(nexus_i18n::text("term.needhost"));
+            return;
+        };
+        let Some(service) = self.network else {
+            self.trouble(nexus_i18n::text("term.nonetwork"));
+            return;
+        };
+        let Some(address) = self.resolve(host, false) else {
+            return;
+        };
+
+        // A range if one was given, and the usual suspects otherwise. Bounded
+        // either way: every port would be sixty-five thousand connections from
+        // a program that cannot draw while it runs.
+        let ports: Vec<u16> = match (first.and_then(|port| port.parse::<u16>().ok()), last) {
+            (Some(from), Some(to)) => {
+                let to = to.parse::<u16>().unwrap_or(from).max(from);
+                (from..=to).take(MOST_PORTS).collect()
+            }
+            (Some(only), None) => alloc::vec![only],
+            _ => COMMON_PORTS.to_vec(),
+        };
+
+        let starting = nexus_i18n::format(
+            "term.scan.start",
+            &[
+                ("host", &host),
+                ("address", &dotted(address)),
+                ("count", &ports.len()),
+            ],
+        );
+        self.note(&starting);
+
+        let mut open = 0usize;
+        // Four at a time, because the kernel holds four outbound streams and
+        // asking for a fifth is refused. In rounds rather than one at a time,
+        // so fourteen ports take about a second instead of six.
+        for group in ports.chunks(AT_ONCE) {
+            let mut trying: Vec<(u16, u32)> = Vec::new();
+            for port in group {
+                if let Ok(id) = nexus_netclient::open(service, address, *port) {
+                    trying.push((*port, id));
+                }
+            }
+
+            let deadline = nexus_user::uptime() + SCAN_MS;
+            let mut answered: Vec<u16> = Vec::new();
+            while !trying.is_empty() && nexus_user::uptime() < deadline {
+                trying.retain(|(port, id)| match nexus_netclient::read(service, *id) {
+                    // Still trying. Kept for the next look.
+                    Ok((nexus_netclient::State::Connecting, _, _)) => true,
+                    Ok(_) => {
+                        answered.push(*port);
+                        nexus_netclient::close(service, *id).ok();
+                        false
+                    }
+                    Err(_) => {
+                        nexus_netclient::close(service, *id).ok();
+                        false
+                    }
+                });
+                if !trying.is_empty() {
+                    nexus_user::sleep(20).ok();
+                }
+            }
+            // Whatever is still connecting when the deadline passes did not
+            // answer, which is not the same as refusing -- and this cannot tell
+            // those apart, so it claims neither.
+            for (_, id) in &trying {
+                nexus_netclient::close(service, *id).ok();
+            }
+
+            answered.sort_unstable();
+            for port in answered {
+                open += 1;
+                let line = nexus_i18n::format("term.scan.open", &[("port", &port)]);
+                self.plain(&line);
+            }
+        }
+
+        let done = nexus_i18n::format(
+            "term.scan.done",
+            &[("open", &open), ("count", &ports.len())],
+        );
+        self.note(&done);
+        nexus_user::log(&format!(
+            "term: scanned {} ports of {}, {open} answered",
+            ports.len(),
+            dotted(address)
+        ))
+        .ok();
     }
 
     /// `beep`
@@ -1145,6 +1525,7 @@ impl Terminal {
         // `width * height * 4` bytes -- checked when it was taken and again
         // after every replacement.
         let mut canvas = unsafe { Canvas::packed(SURFACE_AT, self.width, self.height) };
+        canvas.set_text_style(self.style.0, self.style.1);
 
         let ground = Colour::rgb(0x07, 0x0B, 0x12);
         let plain = Colour::rgb(0xCF, 0xD8, 0xE6);
@@ -1219,6 +1600,37 @@ impl Terminal {
     }
 }
 
+/// The ports a scan tries when it is not told which.
+///
+/// The ones a machine on a network usually answers on, and few enough that
+/// trying all of them takes a second rather than a minute.
+const COMMON_PORTS: [u16; 14] = [
+    21, 22, 23, 25, 53, 80, 110, 143, 443, 587, 993, 995, 3306, 8080,
+];
+
+/// How many connections a scan has outstanding at once.
+///
+/// Four, because the kernel holds four outbound streams and asking for a fifth
+/// is refused.
+const AT_ONCE: usize = 4;
+
+/// The most ports one scan will try.
+const MOST_PORTS: usize = 256;
+
+/// How long a scan waits for one connection before giving up on it.
+const SCAN_MS: u64 = 400;
+
+/// How long a name lookup waits for an answer.
+const LOOKUP_MS: u64 = 4_000;
+
+/// An address, as people write them.
+fn dotted(address: [u8; 4]) -> String {
+    format!(
+        "{}.{}.{}.{}",
+        address[0], address[1], address[2], address[3]
+    )
+}
+
 /// What the settings file is called.
 const SETTINGS_NAME: &str = "settings.txt";
 
@@ -1237,10 +1649,17 @@ fn read_text(directory: Handle, name: &str) -> Option<String> {
 fn write_text(directory: Handle, name: &str, text: &str) -> Result<(), String> {
     // Removed first: the filesystem has no truncate, so a shorter file written
     // over a longer one would keep the old ending.
+    //
+    // No longer a race. `remove` used to refuse while anybody held the file
+    // open, and several programs here read this one on a clock, so this failed
+    // at random and had to be retried. It unlinks now -- the name goes at once
+    // and the blocks go when the last handle closes -- so the retry that was
+    // here has gone with the reason for it.
     match nexus_user::remove(directory, name) {
         Ok(()) | Err(nexus_user::Error::NotFound) => {}
         Err(error) => return Err(format!("{name}: {error}")),
     }
+
     let file = nexus_user::create(directory, name, Kind::File)
         .map_err(|error| format!("{name}: {error}"))?;
     let contents = text.as_bytes();

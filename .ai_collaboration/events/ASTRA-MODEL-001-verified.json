@@ -1,0 +1,16 @@
+{
+  "task": "ASTRA-MODEL-001",
+  "agent": "gpt6_astra",
+  "timestamp": "2026-09-14T21:43:38.321002+00:00",
+  "status": "verified",
+  "artifacts": {
+    "build/model-92a1db5cb0a641f786ffee13ca4180ae/serial.log": "e04aefc227552cfa3bd0c8d7b9e4534e81a14d0f7f0c7a0e4fa92f9fdb41ae11",
+    "build/model-92a1db5cb0a641f786ffee13ca4180ae/programs/model.elf": "132552138a6c31339157271578666fc27dacce2d137d565c91b294d156dd3b26",
+    "build/model-92a1db5cb0a641f786ffee13ca4180ae/programs/init.elf": "d0da1c16c36b2c162b5bfad1c6ccc6b975599103fa4b5540f50432280c13c8a8",
+    "build/model-92a1db5cb0a641f786ffee13ca4180ae/esp/nexus/kernel.elf": "8db826ec9ea311568aaefb16392b353a74c99dcc03171d270d0e547d62e4ef93"
+  },
+  "regressions_found": [
+    "Temporary manifest example-before-source ordering blocked concurrent Cargo builds; source now present and follow-up response sent.",
+    "Finite extreme weights overflowed intermediate RMS normalization but produced finite zero logits; primitives now reject numerical failure, regression passes."
+  ]
+}

@@ -37,6 +37,45 @@ pub fn halt_forever() -> ! {
     }
 }
 
+/// Reset the processor by taking an interrupt with no table to handle it.
+///
+/// The last resort in [`crate::power::restart`], after the ACPI reset register
+/// and the 8042 have both been tried. Loading an empty interrupt descriptor
+/// table turns the next interrupt into a double fault, and with nothing to
+/// handle that either the processor triple-faults and resets.
+///
+/// It always works. It is last because it gives the machine no chance to do
+/// anything tidy: no device is quiesced and no firmware handler runs.
+///
+/// # Safety
+///
+/// This resets the machine. Nothing after it runs, and anything not already on
+/// the disk is gone -- which for this kernel is nothing, because the block
+/// cache writes through.
+pub unsafe fn triple_fault() -> ! {
+    // A descriptor table of no entries, at address zero.
+    #[repr(C, packed)]
+    struct Pointer {
+        limit: u16,
+        base: u64,
+    }
+    let nothing = Pointer { limit: 0, base: 0 };
+
+    // SAFETY: the caller is asking for a reset. `lidt` with an empty table is
+    // valid; the `int3` that follows then has no handler to dispatch to.
+    unsafe {
+        core::arch::asm!(
+            "lidt [{table}]",
+            "int3",
+            table = in(reg) &nothing,
+            options(nostack)
+        );
+    }
+    // Not reached on any processor that exists, and halting is the only
+    // sensible thing to write for one that somehow continued.
+    halt_forever()
+}
+
 /// Halt until the next interrupt arrives.
 #[inline]
 pub fn wait_for_interrupt() {

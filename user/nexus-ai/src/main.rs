@@ -3,6 +3,11 @@
 #![no_main]
 
 use core::panic::PanicInfo;
+
+// Required when the optional model feature links alloc; these binaries do not allocate.
+#[cfg(feature = "model")]
+#[global_allocator]
+static ALLOCATOR: nexus_user::heap::Allocator = nexus_user::heap::Allocator;
 use nexus_ai_core::{wire, Response, Runtime, Snapshot, Status, SystemSource, Unavailable};
 use nexus_user::Handle;
 

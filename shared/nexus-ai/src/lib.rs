@@ -1,7 +1,12 @@
-//! Bounded read-only tool runtime. No inference, ambient I/O or grant API.
+//! Bounded read-only tool runtime and optional local inference. No ambient I/O or grant API.
 #![no_std]
 
 pub mod wire;
+
+#[cfg(feature = "model")]
+extern crate alloc;
+#[cfg(feature = "model")]
+pub mod model;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -99,14 +104,25 @@ impl Status {
     }
 }
 
-/// Fixed allowlist. Classification does not authorize even a SAFE operation.
-pub fn authorize(tool: Tool) -> Result<(), Status> {
+/// Policy classification only, independent of a service's implemented tools.
+/// `Ok(())` grants no authority: callers still need a suitably scoped OS
+/// capability and must validate arguments. Confirmation outcomes remain denials.
+pub fn permitted(tool: Tool) -> Result<(), Status> {
     match requirement(tool).1 {
         Level::Blocked => Err(Status::Blocked),
         Level::Privileged => Err(Status::Privileged),
         Level::ConfirmRequired => Err(Status::ConfirmRequired),
-        Level::Safe if tool == Tool::SystemInfo => Ok(()),
-        Level::Safe => Err(Status::Unsupported),
+        Level::Safe => Ok(()),
+    }
+}
+
+/// Fixed service allowlist after policy evaluation. This does not grant an OS
+/// capability. Other capability-holding executors may use [`permitted`] instead.
+pub fn authorize(tool: Tool) -> Result<(), Status> {
+    permitted(tool)?;
+    match tool {
+        Tool::SystemInfo => Ok(()),
+        _ => Err(Status::Unsupported),
     }
 }
 
@@ -183,6 +199,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Session IDs correlate requests; the owning channel supplies authority.
     pub const fn new(session: u64) -> Self {
         Self {
             session,
@@ -264,6 +281,7 @@ impl Runtime {
         if self.remaining == 0 {
             return Err(Status::Exhausted);
         }
+        // Valid denied requests consume budget too: probing is not free.
         self.last_id = request.id;
         self.remaining -= 1;
         authorize(request.tool)?;
@@ -286,6 +304,8 @@ impl Runtime {
             if second.uptime_ms < first.uptime_ms || second.uptime_ms >= deadline {
                 return Err(Status::Expired);
             }
+            // With the current single-thread adapter this identity check holds
+            // by construction; it does not verify machine-wide system health.
             if first.thread_id != 0 && second.thread_id == first.thread_id {
                 return Ok(second);
             }

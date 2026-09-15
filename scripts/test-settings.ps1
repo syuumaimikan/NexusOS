@@ -175,6 +175,19 @@ try {
         }
         Start-Sleep -Seconds 2
 
+        # And the two rows that decide what text looks like. The cursor is on
+        # the accent, so one step down is the face and two is the blending.
+        Write-Host '==> Turning on the smooth face' -ForegroundColor Cyan
+        Send-Keys @('down', 'right')
+        if (-not (Wait-For -Text 'settings: look.font is now smooth' -Seconds 30)) {
+            $failures += 'the settings window never wrote the face'
+        }
+        Send-Keys @('down', 'right')
+        if (-not (Wait-For -Text 'settings: look.smooth is now yes' -Seconds 30)) {
+            $failures += 'the settings window never turned on smoothing'
+        }
+        Start-Sleep -Seconds 3
+
         if ($Shot) {
             $Ppm = Join-Path $BuildDir 'settings.ppm'
             Invoke-Screendump -Writer $writer -Path $Ppm
@@ -196,7 +209,9 @@ $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
 $wanted = @(
     'compositor: started the settings, and lent them the settings',
     'settings: a window for what this machine is',
-    'settings: look.accent is now 40d090'
+    'settings: look.accent is now 40d090',
+    'settings: look.font is now smooth',
+    'settings: look.smooth is now yes'
 )
 if ($style) {
     $wanted += "settings: look.style is now $style"

@@ -140,7 +140,15 @@ const POINTER: Handle = Handle(4);
 const NETWORK: Handle = Handle(6);
 
 /// The filesystem, held to lend to a terminal and read by nothing here.
+///
+/// Except for one file: [`open_roots`] reaches through it for the root
+/// certificate store, so that a browser can be handed that one file rather than
+/// the disk it sits on.
 const FILESYSTEM: Handle = Handle(7);
+
+/// Where the root certificate store lives on the store.
+const SYSTEM: &str = "SYSTEM";
+const ROOTS: &str = "ROOTS.NXR";
 
 /// The speaker, held on the same terms and never used by this program.
 ///
@@ -148,6 +156,22 @@ const FILESYSTEM: Handle = Handle(7);
 /// opinion about when a machine should beep, and that belongs to whatever the
 /// person is actually using.
 const SOUND: Handle = Handle(8);
+/// And what the machine is doing: memory, processors, processes.
+///
+/// Lent to the terminal, which is where somebody asks a machine about itself.
+/// Held separately from everything else because it is the one endowment that
+/// describes the person using the machine rather than what a program may do to
+/// it -- so a program can be given the disk and the speaker and not this.
+const MACHINE: Handle = Handle(9);
+
+/// The channel that stops the machine.
+///
+/// Held to pass a request on, and never used on this program's own initiative.
+/// A compositor that could turn the machine off by itself would be a
+/// compositor with an opinion about when somebody has finished, which is not a
+/// decision anything drawing windows should make. The desktop asks; this sends
+/// the ask on.
+const POWER: Handle = Handle(10);
 
 /// The directory the system's settings live in.
 ///
@@ -280,6 +304,10 @@ mod desk {
     pub const SETTINGS: &[u8] = b"sett";
     /// Show what there is to install.
     pub const PACKAGES: &[u8] = b"pkgs";
+    /// Show the pictures on this machine.
+    pub const PICTURES: &[u8] = b"pics";
+    /// Start the agent.
+    pub const ASSIST: &[u8] = b"asst";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -287,12 +315,35 @@ mod desk {
     /// except the power switch, and a dock that ended it *itself* would be a
     /// dock deciding when the display stops.
     pub const QUIT: &[u8] = b"quit";
+    /// Turn the machine off.
+    pub const HALT: &[u8] = b"halt";
+    /// Restart it.
+    pub const RESTART: &[u8] = b"rest";
+    /// Put the screen out until somebody touches the machine.
+    pub const SLEEP: &[u8] = b"slep";
 
     /// What state a window can be in, as the desktop is told it.
     pub const GONE: u8 = 0;
     pub const SHOWN: u8 = 1;
     pub const AWAY: u8 = 2;
     pub const FOCUSED: u8 = 3;
+}
+
+/// What the kernel's power service is asked, and answers.
+///
+/// Four-byte tags and a little-endian version, the same shape as every other
+/// service on this machine. The reply is read rather than assumed: a machine
+/// that cannot turn itself off says so, and a button that appeared to work and
+/// did not would be worse than one that said it could not.
+mod power {
+    /// Turn the machine off.
+    pub const OFF: &[u8] = b"off ";
+    /// Restart it.
+    pub const BOOT: &[u8] = b"boot";
+    /// The version of the protocol this program speaks.
+    pub const VERSION: u16 = 1;
+    /// It worked.
+    pub const GOOD: &[u8] = b"ok  ";
 }
 
 /// Where this program maps the framebuffer.
@@ -378,6 +429,14 @@ fn tell_language(channel: Handle) {
 /// so it is a key nothing else uses rather than a chord.
 const LEAVE_KEY: u32 = 10;
 
+/// Which function key opens the launcher.
+///
+/// F3. F1 is the interface language and F2 is the input script, both handled by
+/// the kernel before this program ever sees them, so F3 is the first one free.
+/// The same reasoning as `LEAVE_KEY`: the keyboard decoder reports the key and
+/// not the shift state, so a chord is not available to bind.
+const LAUNCH_KEY: u32 = 3;
+
 /// The program this one gives surfaces to.
 const CLIENT: &[u8] = b"BIN/CLIENT.ELF";
 /// The one it runs instead, once, on a machine nobody has set up.
@@ -390,8 +449,14 @@ const TERMINAL: &[u8] = b"BIN/TERM.ELF";
 const WALLPAPER: &[u8] = b"BIN/WALL.ELF";
 /// And the one that changes the file the other two read.
 const SETTINGS_WINDOW: &[u8] = b"BIN/SET.ELF";
+/// And the one somebody types a name into.
+const LAUNCHER: &[u8] = b"BIN/LAUNCH.ELF";
 /// And the one that shows what is installed and installs more.
 const STORE: &[u8] = b"BIN/STORE.ELF";
+/// And the one that shows pictures.
+const VIEWER: &[u8] = b"BIN/VIEW.ELF";
+/// And the agent, which is given less than any of them.
+const ASSISTANT: &[u8] = b"BIN/ASSIST.ELF";
 /// The program that draws the strip along the bottom and says what a click in
 /// it means.
 const SHELL: &[u8] = b"BIN/SHELL.ELF";
@@ -823,13 +888,32 @@ extern "C" fn main() -> ! {
 /// one; a machine that refused to show a desktop because a decoration failed
 /// would be trading everything for nothing.
 fn start_wallpaper(screen: &Screen) -> Option<Tile> {
-    let Ok(theirs) = nexus_user::duplicate(
-        SETTINGS,
-        nexus_user::rights::READ | nexus_user::rights::TRANSFER,
-    ) else {
+    let reading = nexus_user::rights::READ | nexus_user::rights::TRANSFER;
+    let Ok(theirs) = nexus_user::duplicate(SETTINGS, reading) else {
         nexus_user::log("compositor: no settings to lend the wallpaper; it will draw the default")
             .ok();
         return None;
+    };
+
+    // And the disk, **read-only**, so that a picture or a recording can be put
+    // behind everything. Read and transfer, and neither write nor close: a
+    // wallpaper that could write to the disk would be the program with the
+    // least reason to and the most time in which to.
+    //
+    // It is given the root rather than PICTURES because opening a named child
+    // is what a directory handle is for, and narrowing it here would mean this
+    // program deciding that a wallpaper can only ever come from one place --
+    // which is true today and is the wallpaper's own rule, written in its own
+    // file, where somebody changing it can see it.
+    let lent: alloc::vec::Vec<Handle> = match nexus_user::duplicate(FILESYSTEM, reading) {
+        Ok(files) => alloc::vec![theirs, files],
+        Err(_) => {
+            // Not fatal. Without it the wallpaper draws a pattern, which is
+            // what it did before it could draw anything else.
+            nexus_user::log("compositor: no disk to lend the wallpaper; it can draw patterns only")
+                .ok();
+            alloc::vec![theirs]
+        }
     };
 
     let tile = start_program(
@@ -842,7 +926,7 @@ fn start_wallpaper(screen: &Screen) -> Option<Tile> {
         screen.width,
         screen.usable_height(),
         0,
-        &[theirs],
+        &lent,
     );
     if tile.is_none() {
         nexus_user::log("compositor: the wallpaper would not start; the background stays plain")
@@ -1085,6 +1169,44 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
 /// message means -- a tint for a client, a count of window slots for the
 /// desktop.
 #[allow(clippy::too_many_arguments)]
+/// Open the root certificate store, read only, to lend to a browser.
+///
+/// `None` when there is not one, which is an ordinary state on a machine whose
+/// disk has just been made and not a failure. The browser is told, and says so
+/// when somebody types an `https://` address, rather than falling back to
+/// `http://` -- which would be the one genuinely bad answer.
+fn open_roots() -> Option<nexus_user::Handle> {
+    let directory = nexus_user::open(FILESYSTEM, SYSTEM).ok()?;
+    let file = nexus_user::open(directory, ROOTS).ok();
+    // The directory handle was the means, not the thing lent. Closed here so
+    // that nothing but the file itself can leave this function.
+    nexus_user::close(directory).ok();
+    let file = file?;
+    // Read and transfer: enough to read it and to be given it, and no write,
+    // so the program it goes to cannot alter what it trusts.
+    let narrowed = nexus_user::duplicate(
+        file,
+        nexus_user::rights::READ | nexus_user::rights::TRANSFER,
+    )
+    .ok();
+    nexus_user::close(file).ok();
+    narrowed
+}
+
+fn start_service(program: &[u8]) -> Option<nexus_user::Handle> {
+    if nexus_user::send(SPAWNER, program, &[]).is_err() {
+        return None;
+    }
+    let mut reply = [0u8; 64];
+    let mut handles = [nexus_user::Handle(0); 2];
+    let received = nexus_user::receive(SPAWNER, &mut reply, &mut handles).ok()?;
+    if received.handles != 2 || !reply[..received.bytes].starts_with(b"started ") {
+        return None;
+    }
+    nexus_user::close(handles[1]).ok();
+    Some(handles[0])
+}
+
 fn start_program(
     program: &[u8],
     index: usize,
@@ -1311,6 +1433,21 @@ fn serve(
     // numbers are worth having when the last window closes, which on a machine
     // somebody is using is the middle of the session and not the end of it.
     let mut leaving = false;
+    // Which slot the launcher is in, when one is open. Tracked here rather than
+    // on the tile because it is a property of the session -- there is at most
+    // one -- and a second launcher would be a second thing reading the same
+    // keystrokes.
+    let mut launcher: Option<usize> = None;
+    // What the launcher asked for, acted on after the loop over ready keys.
+    // Not inside it: starting a window takes a slot, and taking a slot while
+    // iterating over the slots is how a program indexes an array it has just
+    // changed the shape of.
+    let mut wanted: Option<Launched> = None;
+    // The machine has been told to stop. Everything carries on for the half
+    // second it takes, except that the screen says so.
+    let mut stopping = false;
+    // The screen is out. Not a power state; see `read_shell`.
+    let mut asleep = false;
     let mut summarised = false;
     // How many frames the wallpaper has drawn, for the summary.
     let mut painted = 0u32;
@@ -1337,6 +1474,16 @@ fn serve(
             break;
         }
 
+        if stopping {
+            // One last frame, over everything, and then this program stops
+            // drawing. The kernel is already on its way; what this is for is
+            // that the last thing on screen says what is happening rather than
+            // being whatever was there when the button was pressed.
+            say_goodnight(screen);
+            nexus_user::log("compositor: stopped drawing; the machine is going").ok();
+            break;
+        }
+
         let mut keys = [0u64; CLIENTS * 2 + 2];
         let Ok(count) = nexus_user::wait_any(set, &mut keys) else {
             failed("compositor: FAILED: could not wait on its clients");
@@ -1346,9 +1493,33 @@ fn serve(
             break;
         }
 
+        if asleep {
+            // Anything at all: a key, a click, a window finishing. The screen
+            // comes back and the whole of it is repainted, because what is on
+            // the framebuffer is the black rectangle this put there.
+            asleep = false;
+            nexus_user::log("compositor: awake").ok();
+            pending = pending.union(everything(screen));
+        }
+
         for key in &keys[..count] {
             if *key == KEY_KEYBOARD {
                 match read_key(set, tiles, shell, &mut focus) {
+                    Some(Typed::Launch) => {
+                        // Already open: bring it back rather than start a
+                        // second one. Pressing the key twice is something
+                        // people do, and two launchers reading the same keys
+                        // would be a mess neither of them could see.
+                        if let Some(slot) = launcher {
+                            if matches!(tiles.get(slot), Some(Some(tile)) if tile.live) {
+                                raise(&mut order, slot);
+                                focus = slot;
+                                pending = pending.union(everything(screen));
+                                continue;
+                            }
+                        }
+                        wanted = Some(Launched::Window(What::Launcher));
+                    }
                     Some(typed) => {
                         if matches!(typed, Typed::Forwarded) {
                             forwarded += 1;
@@ -1416,6 +1587,23 @@ fn serve(
                         opened += 1;
                         everything(screen)
                     }
+                    Some(Asked::Stopping) => {
+                        // The kernel has been told and the machine goes in
+                        // about half a second. What is left to do is put
+                        // something on the screen that says so, because a
+                        // machine that appears to have frozen and then turns
+                        // off is indistinguishable from one that crashed.
+                        stopping = true;
+                        everything(screen)
+                    }
+                    Some(Asked::Sleeping) => {
+                        // Not a power state. The screen goes out and this stops
+                        // compositing; the next key or click brings it back.
+                        // `power.rs` explains at length why the honest version
+                        // of sleep on this machine lives here and not there.
+                        asleep = true;
+                        everything(screen)
+                    }
                     None => return,
                 };
                 announce(shell, tiles, focus, &mut reported);
@@ -1480,6 +1668,31 @@ fn serve(
                 let mut message = [0u8; 32];
                 let mut none = [Handle(0); 1];
                 match nexus_user::receive(tile.channel, &mut message, &mut none) {
+                    Ok(received) if Some(index) == launcher => {
+                        // The launcher is the one client whose messages are
+                        // read rather than counted. What it sends is one of the
+                        // same four-byte requests the desktop sends, and this
+                        // program does exactly what it does for the desktop --
+                        // decides whether to, which program that means, and
+                        // what to lend it.
+                        //
+                        // Narrow on purpose. `show`, `hide` and the window list
+                        // are the desktop's business and are not accepted here;
+                        // a launcher that could put windows away would be a
+                        // second desktop.
+                        let asked = &message[..received.bytes.min(message.len())];
+                        if let Some(what) = launched(asked) {
+                            wanted = Some(what);
+                        } else {
+                            // Anything else is a frame, which it does draw.
+                            tile.frames += 1;
+                            composited += 1;
+                            if nexus_user::send(tile.channel, b"shown", &[]).is_err() {
+                                stop_listening(set, tile, index);
+                            }
+                            pending = pending.union(region_of(tile));
+                        }
+                    }
                     Ok(_) => {
                         tile.frames += 1;
                         composited += 1;
@@ -1519,6 +1732,53 @@ fn serve(
         // things become ready in the same instant this is one composite instead
         // of three, and the two that were skipped were never on screen long
         // enough for anybody to see them.
+        // What the launcher asked for, now that the loop over ready keys is
+        // done and the tile array is nobody's to index.
+        if let Some(asked) = wanted.take() {
+            match asked {
+                Launched::Window(what) => {
+                    let opening_launcher = matches!(what, What::Launcher);
+                    match open_window(screen, set, tiles, &mut focus, &mut order, what) {
+                        Some(Asked::Opened) => {
+                            opened += 1;
+                            if opening_launcher {
+                                launcher = Some(focus);
+                            }
+                            announce(shell, tiles, focus, &mut reported);
+                            pending = pending.union(everything(screen));
+                        }
+                        Some(_) => {}
+                        None => return,
+                    }
+                }
+                Launched::Leave => leaving = true,
+                Launched::Halt => {
+                    if ask_power(true) {
+                        stopping = true;
+                        pending = pending.union(everything(screen));
+                    }
+                }
+                Launched::Restart => {
+                    if ask_power(false) {
+                        stopping = true;
+                        pending = pending.union(everything(screen));
+                    }
+                }
+                Launched::Sleep => {
+                    asleep = true;
+                    pending = pending.union(everything(screen));
+                }
+            }
+        }
+
+        if asleep {
+            // Nothing is composited while the screen is out. The damage that
+            // built up is kept: waking repaints everything anyway, so what this
+            // saves is the work of drawing frames nobody can see.
+            go_dark(screen);
+            continue;
+        }
+
         if !pending.is_empty() {
             batched += 1;
             repaint(
@@ -1620,6 +1880,18 @@ enum What {
     /// The package window, which is given both the filesystem and the record of
     /// what is installed.
     Packages,
+    /// The picture window, which is given the filesystem to read from.
+    Pictures,
+    /// The agent, which is given the filesystem to read and the machine
+    /// snapshot, and nothing that can change anything.
+    Assistant,
+    /// The launcher, which is given nothing at all.
+    ///
+    /// It has no spawner, no filesystem and no directory. What it does is ask
+    /// this program for one of the things the desktop's own buttons ask for --
+    /// so the authority it needs is the authority to *ask*, which every client
+    /// already has, and not the authority to start anything.
+    Launcher,
 }
 
 /// What reading from the keyboard turned out to be.
@@ -1631,6 +1903,8 @@ enum Typed {
     Forwarded,
     /// The key that ends the session.
     Leave,
+    /// The key that opens the launcher.
+    Launch,
 }
 
 /// What reading from the desktop turned out to be.
@@ -1645,6 +1919,106 @@ enum Asked {
     Changed,
     /// It asked for a program and one was started.
     Opened,
+    /// It asked for the machine to stop, and the kernel has been told. The
+    /// machine goes shortly; what is left to do here is put something on the
+    /// screen that says so and then stop drawing.
+    Stopping,
+    /// It asked for the screen to go out until somebody touches the machine.
+    Sleeping,
+}
+
+/// What the launcher asked for, if it asked for anything.
+///
+/// The same tags the desktop uses, and deliberately the same set: the launcher
+/// is a keyboard for a menu that already existed, so there is nothing here the
+/// strip does not already offer. `quit`, `halt`, `rest` and `slep` are included
+/// because they are on the strip too -- and a launcher that could start any
+/// program but not turn the machine off would be a launcher people stopped
+/// using for half of what they wanted.
+fn launched(asked: &[u8]) -> Option<Launched> {
+    if asked.len() < 4 {
+        return None;
+    }
+    Some(match &asked[..4] {
+        tag if tag == desk::OPEN => Launched::Window(What::Client),
+        tag if tag == desk::BROWSE => Launched::Window(What::Browser),
+        tag if tag == desk::TERMINAL => Launched::Window(What::Terminal),
+        tag if tag == desk::SETTINGS => Launched::Window(What::Settings),
+        tag if tag == desk::PACKAGES => Launched::Window(What::Packages),
+        tag if tag == desk::PICTURES => Launched::Window(What::Pictures),
+        tag if tag == desk::ASSIST => Launched::Window(What::Assistant),
+        tag if tag == desk::QUIT => Launched::Leave,
+        tag if tag == desk::HALT => Launched::Halt,
+        tag if tag == desk::RESTART => Launched::Restart,
+        tag if tag == desk::SLEEP => Launched::Sleep,
+        _ => return None,
+    })
+}
+
+/// One of the things the launcher may ask for.
+enum Launched {
+    /// Start a window of this kind.
+    Window(What),
+    /// End the session.
+    Leave,
+    /// Turn the machine off.
+    Halt,
+    /// Restart it.
+    Restart,
+    /// Put the screen out.
+    Sleep,
+}
+
+/// Ask the kernel to stop the machine. Says whether it was accepted.
+///
+/// The reply is read. The kernel refuses a shutdown on a machine whose firmware
+/// gave it no way to do one -- and the whole reason it refuses rather than
+/// accepting and quietly failing is so that this can tell a person.
+fn ask_power(off: bool) -> bool {
+    let tag = if off { power::OFF } else { power::BOOT };
+    let mut request = [0u8; 6];
+    request[..4].copy_from_slice(tag);
+    request[4..].copy_from_slice(&power::VERSION.to_le_bytes());
+
+    if nexus_user::send(POWER, &request, &[]).is_err() {
+        nexus_user::log("compositor: FAILED: the power service could not be asked").ok();
+        return false;
+    }
+
+    let mut reply = [0u8; 64];
+    let mut lent = [Handle(0); 1];
+    let Ok(received) = nexus_user::receive(POWER, &mut reply, &mut lent) else {
+        nexus_user::log("compositor: FAILED: the power service did not answer").ok();
+        return false;
+    };
+    // Every handle the service sent back is closed, whatever it was. A service
+    // that started lending things would otherwise leak them into this program
+    // one reply at a time.
+    for handle in lent.iter().take(received.handles) {
+        nexus_user::close(*handle).ok();
+    }
+
+    if reply.get(..4) == Some(power::GOOD) {
+        nexus_user::log(if off {
+            "compositor: the machine is being turned off"
+        } else {
+            "compositor: the machine is being restarted"
+        })
+        .ok();
+        return true;
+    }
+
+    // The two-byte reason, said rather than swallowed.
+    let why = if received.bytes >= 6 {
+        u16::from_le_bytes([reply[4], reply[5]])
+    } else {
+        0
+    };
+    nexus_user::log(&alloc::format!(
+        "compositor: the machine will not stop from software (reason {why})"
+    ))
+    .ok();
+    false
 }
 
 /// Tell the desktop which windows exist and what state each is in.
@@ -1741,9 +2115,34 @@ fn read_shell(
         return open_window(screen, set, tiles, focus, order, What::Packages);
     }
 
+    if message == desk::PICTURES {
+        return open_window(screen, set, tiles, focus, order, What::Pictures);
+    }
+
+    if message == desk::ASSIST {
+        return open_window(screen, set, tiles, focus, order, What::Assistant);
+    }
+
     if message == desk::QUIT {
         nexus_user::log("compositor: the desktop asked to end the session").ok();
         return Some(Asked::Ended);
+    }
+
+    if message == desk::HALT || message == desk::RESTART {
+        let off = message == desk::HALT;
+        return Some(if ask_power(off) {
+            Asked::Stopping
+        } else {
+            // The kernel refused, or the channel has gone. Nothing happens and
+            // the log says what. A desktop that showed "shutting down" over a
+            // machine that was not would be lying to the person looking at it.
+            Asked::Nothing
+        });
+    }
+
+    if message == desk::SLEEP {
+        nexus_user::log("compositor: the desktop asked for the screen to go out").ok();
+        return Some(Asked::Sleeping);
     }
 
     if message.len() >= 8 && (message.starts_with(desk::SHOW) || message.starts_with(desk::HIDE)) {
@@ -1785,9 +2184,44 @@ fn open_window(
     order: &mut [usize; CLIENTS],
     what: What,
 ) -> Option<Asked> {
-    let Some(slot) = tiles.iter().position(Option::is_none) else {
-        nexus_user::log("compositor: the desktop asked for a window and there was no room").ok();
-        return Some(Asked::Nothing);
+    // A slot nothing has ever used, or failing that the one that has been
+    // dead longest.
+    //
+    // A window that ends keeps its slot, on purpose: its tab stays drawn,
+    // because a gap where a tab was is a strip that reshuffles under the
+    // pointer. But *only* looking for an unused slot made the window limit a
+    // limit on how many windows a session could ever open rather than on how
+    // many it could have at once -- four, and then nothing would start. Found
+    // by the launcher, which is the fifth window somebody opens on a machine
+    // that boots with three.
+    let slot = match tiles.iter().position(Option::is_none) {
+        Some(slot) => slot,
+        None => {
+            let Some(slot) = tiles
+                .iter()
+                .position(|tile| matches!(tile, Some(tile) if !tile.live))
+            else {
+                nexus_user::log(
+                    "compositor: something asked for a window and every slot is in use",
+                )
+                .ok();
+                return Some(Asked::Nothing);
+            };
+            // Its handles go back before the slot is taken. A dead tile still
+            // holds a channel, a process and a page of shared memory, and a
+            // compositor that reused the slot without closing them would leak
+            // three handles per window for the life of the session.
+            if let Some(dead) = tiles[slot].take() {
+                nexus_user::memory_unmap(dead.surface, dead.mapped_at).ok();
+                nexus_user::close(dead.surface).ok();
+                nexus_user::close(dead.process).ok();
+                nexus_user::close(dead.channel).ok();
+                nexus_user::unwatch(set, channel_key(slot)).ok();
+                nexus_user::unwatch(set, process_key(slot)).ok();
+                nexus_user::log("compositor: reused the slot of a window that had ended").ok();
+            }
+            slot
+        }
     };
 
     // Offset from the ones before it, so a new window is visibly a new window
@@ -1823,6 +2257,30 @@ fn open_window(
                 failed("compositor: FAILED: could not lend the network to a browser");
                 return Some(Asked::Nothing);
             };
+            // And the root certificate store, which is what makes `https://`
+            // mean anything. The *file*, opened here, and not the directory it
+            // is in and certainly not the disk: a browser is the program on
+            // this machine most likely to be handed something hostile, and the
+            // whole of what it can reach on the store should be the one file it
+            // needs to check a certificate with.
+            //
+            // Read only, so it cannot rewrite the list of authorities its own
+            // security rests on. A browser that could edit its root store is a
+            // browser one bug away from trusting anybody.
+            let roots = open_roots();
+            if roots.is_none() {
+                // Not fatal. The browser starts, `http://` works, and `https://`
+                // says there is no root store rather than pretending.
+                nexus_user::log(
+                    "compositor: no root certificate store; this browser cannot verify https",
+                )
+                .ok();
+            }
+            let mut lent = alloc::vec::Vec::with_capacity(2);
+            lent.push(theirs);
+            if let Some(roots) = roots {
+                lent.push(roots);
+            }
             start_program(
                 BROWSER,
                 slot,
@@ -1831,7 +2289,7 @@ fn open_window(
                 width,
                 height,
                 0,
-                &[theirs],
+                &lent,
             )?
         }
         What::Terminal => {
@@ -1840,10 +2298,19 @@ fn open_window(
             // disk away from the program that lent it.
             let lending =
                 nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
-            let (Ok(files), Ok(spawner), Ok(sound)) = (
+            // And the network, because a shell is where network tools live on
+            // every system anybody has used. It is the widest thing a terminal
+            // is given and it is worth naming: a shell with the disk, the
+            // spawner and the network can do most of what this machine can do,
+            // which is what a shell is for -- and it is still a decision made
+            // here, by the program that holds those handles, rather than
+            // something the terminal could have helped itself to.
+            let (Ok(files), Ok(spawner), Ok(sound), Ok(machine), Ok(network)) = (
                 nexus_user::duplicate(FILESYSTEM, lending),
                 nexus_user::duplicate(SPAWNER, lending),
                 nexus_user::duplicate(SOUND, lending),
+                nexus_user::duplicate(MACHINE, lending),
+                nexus_user::duplicate(NETWORK, lending),
             ) else {
                 failed("compositor: FAILED: could not lend a terminal what it needs");
                 return Some(Asked::Nothing);
@@ -1856,7 +2323,7 @@ fn open_window(
                 width,
                 height,
                 0,
-                &[files, spawner, sound],
+                &[files, spawner, sound, machine, network],
             )?
         }
         What::Settings => {
@@ -1909,6 +2376,85 @@ fn open_window(
                 &[files, record],
             )?
         }
+        What::Pictures => {
+            // The filesystem, and read-only: a picture viewer that could write
+            // is a picture viewer that can delete a photograph. Transfer as
+            // well, because that is the right a handle needs to cross a channel
+            // at all.
+            let Ok(files) = nexus_user::duplicate(
+                FILESYSTEM,
+                nexus_user::rights::READ | nexus_user::rights::TRANSFER,
+            ) else {
+                failed("compositor: FAILED: could not lend the disk to a picture window");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                VIEWER,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[files],
+            )?
+        }
+        What::Assistant => {
+            // The narrowest set anything here is given, and deliberately so.
+            // An agent decides for itself what to do, which is what makes it an
+            // agent and what makes the question "what can it do to my machine"
+            // worth answering exactly: it can read files in the directory it
+            // was handed, and it can ask how busy the machine is.
+            //
+            // Not write. Not the spawner. Not the network. Everything else it
+            // might be asked to do is refused by name, with the permission it
+            // would have needed, which is more useful than being unable to ask.
+            let reading = nexus_user::rights::READ | nexus_user::rights::TRANSFER;
+            let talking =
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
+            let (Ok(files), Ok(machine)) = (
+                nexus_user::duplicate(FILESYSTEM, reading),
+                nexus_user::duplicate(MACHINE, talking),
+            ) else {
+                failed("compositor: FAILED: could not lend the agent what it may have");
+                return Some(Asked::Nothing);
+            };
+            let Some(ai_channel) = start_service(b"BIN/AI.ELF") else {
+                failed("compositor: FAILED: could not start the AI service");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                ASSISTANT,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[files, machine, ai_channel],
+            )?
+        }
+        What::Launcher => {
+            // Nothing lent. Not a narrow set -- none.
+            //
+            // And placed in the middle rather than offset like the others: a
+            // launcher is a thing somebody is looking straight at for two
+            // seconds, and having it appear wherever the next free slot happens
+            // to put it would mean hunting for it every time.
+            let wide = (screen.width / 2).clamp(MIN_SIZE, screen.width.saturating_sub(GAP * 2));
+            let tall = (screen.usable_height() * 2 / 3)
+                .clamp(MIN_SIZE, screen.usable_height().saturating_sub(GAP * 2));
+            start_program(
+                LAUNCHER,
+                slot,
+                screen.x + (screen.width.saturating_sub(wide)) / 2,
+                screen.y + (screen.usable_height().saturating_sub(tall)) / 3,
+                wide,
+                tall,
+                0,
+                &[],
+            )?
+        }
     };
     if nexus_user::watch(set, tile.channel, channel_key(slot)).is_err()
         || nexus_user::watch(set, tile.process, process_key(slot)).is_err()
@@ -1924,9 +2470,16 @@ fn open_window(
         match what {
             What::Client => "compositor: started a window because someone pressed the desktop",
             What::Browser => "compositor: started a browser, and lent it the network",
-            What::Terminal => "compositor: started a terminal, and lent it the filesystem",
+            What::Terminal => {
+                "compositor: started a terminal, and lent it the filesystem and the network"
+            }
             What::Settings => "compositor: started the settings, and lent them the settings",
             What::Packages => "compositor: started the packages, and lent them the disk",
+            What::Pictures => "compositor: started a picture window, and lent it the disk to read",
+            What::Assistant => {
+                "compositor: started the agent, and lent it the disk to read and nothing to write"
+            }
+            What::Launcher => "compositor: started the launcher, and lent it nothing at all",
         }
     ))
     .ok();
@@ -1988,6 +2541,15 @@ fn read_key(
     if message[0] == key::FUNCTION && read_u32(&message, 1) == LEAVE_KEY {
         nexus_user::log("compositor: somebody asked to end the session").ok();
         return Some(Typed::Leave);
+    }
+
+    // Not forwarded either, and for the same reason: it is addressed to the
+    // session rather than to whatever happens to have focus. A window that saw
+    // it would be a window that could be confused into thinking F3 was typed
+    // at it.
+    if message[0] == key::FUNCTION && read_u32(&message, 1) == LAUNCH_KEY {
+        nexus_user::log("compositor: somebody asked for the launcher").ok();
+        return Some(Typed::Launch);
     }
 
     if message[0] == key::TAB {
@@ -2389,6 +2951,34 @@ fn clamp(value: i64, low: u32, high: u32) -> u32 {
 /// a compositor that repainted only the damaged window would leave a hole in
 /// whatever was above it, and getting that right needs damage arithmetic this
 /// does not have and does not yet need.
+/// Put the screen out.
+///
+/// Every pixel, because what is wanted is a dark screen and not a dark desktop:
+/// a person who asks for sleep and gets the wallpaper dimmed has not got what
+/// they asked for.
+///
+/// Nothing is saved first. Waking repaints the whole screen from the windows
+/// themselves, which is what a compositor does anyway, and is why this can
+/// throw the framebuffer away rather than keep a copy of it.
+fn go_dark(screen: &Screen) {
+    fill(screen, 0, 0, screen.screen_width, screen.screen_height, 0);
+}
+
+/// The last thing on the screen before the machine stops.
+///
+/// Everything above the strip goes dark; the strip is left alone. The desktop
+/// has already written what is happening into it, and this program draws no
+/// text -- it fills rectangles and copies other people's pixels, and a font in
+/// here would be a font in the one program that has no business having an
+/// opinion about words.
+///
+/// So the division is: the thing that can draw text says what is happening, and
+/// the thing that owns the screen makes sure it is the only thing left on it.
+fn say_goodnight(screen: &Screen) {
+    let above = screen.taskbar_y();
+    fill(screen, 0, 0, screen.screen_width, above, 0x0004_0814);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn repaint(
     screen: &Screen,

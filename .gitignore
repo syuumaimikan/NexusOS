@@ -4,3 +4,14 @@
 *.img
 *.vhd
 .vscode/
+
+# The collaboration tool's copies of STATE.json before each change. They are
+# for undoing a bad edit in the working tree; git already has the history, so
+# committing them would be keeping the same thing twice and adding a file to
+# every diff.
+/.ai_collaboration/backups/
+
+# What an interrupted atomic write leaves behind. Nothing should ever create
+# one of these that survives, and if something does it is rubbish rather than
+# a file anybody can read.
+*.writing

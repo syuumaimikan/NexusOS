@@ -1,0 +1,23 @@
+[package]
+name = "nexus-assist"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "An agent you can type a question at, which can only do what it was lent."
+
+[[bin]]
+name = "nexus-assist"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-window = { path = "../nexus-window" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+nexus-ai-core = { path = "../../shared/nexus-ai" }
+nexus-index = { path = "../../shared/nexus-index" }
+nexus-machine = { path = "../../shared/nexus-machine" }
+nexus-update = { path = "../../shared/nexus-update" }
+nexus-look = { path = "../../shared/nexus-look" }

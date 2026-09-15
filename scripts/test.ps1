@@ -3,26 +3,46 @@
     Runs the full NexusOS test suite.
 
 .DESCRIPTION
-    Eight layers, cheapest first, so a failure surfaces as early as possible:
+    Twenty-two stages, cheapest first, so a failure surfaces as early as possible.
+
+    The first four run on this machine and take seconds:
 
       1. formatting
-      2. lints, over every crate including the kernel
-      3. host unit tests (UEFI layouts, ELF parsing, memory-map normalization,
-         descriptor encoding)
-      4. a boot test: build, boot in QEMU, and require the serial log to contain
-         every marker a healthy boot produces
-      5. a boot from the disk image alone, which is the only run where the
-         firmware reads the partition table and filesystem this project writes
-      6. a persistence test, which boots twice on one disk and requires the
-         second boot to find what the first one wrote
-      7. an input test, which sends real keystrokes through QEMU's monitor and
-         checks what the kernel made of them
-      8. injection tests, which break the kernel one way per build -- a real
-         CPU exception, a broken TLB shootdown -- and check that
-         each is reported rather than resetting the machine
+      2. lints, over every crate in the workspace -- which is checked, not
+         assumed; see Assert-EveryCrateLinted
+      3. host unit tests: every library, plus the drawing code
+      4. the collaboration tool, driven as a binary rather than as a library
+
+    The rest boot a real machine under QEMU and read its serial log. Nothing
+    below is verified by having compiled:
+
+      5. a boot test, with the filesystem's destructive checks on
+      6. a boot from the disk image alone, the only run where the firmware
+         reads the partition table and filesystem this project writes
+      7. persistence: boot twice on one disk, and require the second boot to
+         find what the first one wrote
+      8. the network: DHCP, DNS and a fetch
+      9. updates
+     10. first-run setup, answered with the keys a person would press
+     11. the terminal
+     12. appearance: change the look and watch the desktop follow
+     13. settings
+     14. packages, including one whose signature does not hold
+     15. pictures and a recording, decoded by this system's own decoders
+     16. the agent
+     17. browsing
+     18. input, through QEMU's monitor and the same 8042 controller
+     19. the wallpaper: put a picture and then a recording behind everything
+     20. the launcher: open it with F3, type two letters that only a
+         subsequence match finds, and require the thing named to start
+     21. power: press the buttons that stop the machine, and require it to
+         stop -- the one stage whose pass condition is that QEMU exits
+     22. injection: break the kernel one way per build -- a real CPU exception,
+         a broken TLB shootdown -- and require each to be reported rather than
+         resetting the machine
 
 .PARAMETER SkipFaults
-    Skip layer 8, which is the slowest because it boots QEMU six times.
+    Skip stage 22, which is the slowest because it boots QEMU six times.
 #>
 [CmdletBinding()]
 param(
@@ -73,29 +93,141 @@ Invoke-Step 'formatting' {
     } finally { Pop-Location }
 }
 
+# Every crate in the workspace, sorted into the target it is built for. These
+# lists are checked against `cargo metadata` below, which is the point of them:
+# the bootloader -- the first code that runs on the machine -- went unlinted
+# because nobody had put it on a list, and the whole of user space went unlinted
+# for the same reason. A list maintained only by hand will eventually be short
+# by one crate, and nothing will say so.
+$HostLibraries = @(
+    'nexus-abi', 'nexus-ai-core', 'nexus-config', 'nexus-crypto', 'nexus-dns', 'nexus-font',
+    'nexus-html', 'nexus-http', 'nexus-i18n', 'nexus-image', 'nexus-ime', 'nexus-index',
+    'nexus-inflate', 'nexus-json', 'nexus-look', 'nexus-machine', 'nexus-mm', 'nexus-net',
+    'nexus-netclient', 'nexus-pkg', 'nexus-shellwords', 'nexus-time', 'nexus-tls', 'nexus-update',
+    'nexus-user', 'nexus-window'
+)
+
+# Programs that run on the development machine rather than on Nexus: the package
+# signer, and the example guest binary.
+$HostTools = @('nexus-pack', 'nexus-collab', 'nexus-linux-example')
+
+# Programs that run on Nexus, built for the user target.
+$Programs = @(
+    'nexus-ai', 'nexus-assist', 'nexus-browser', 'nexus-client', 'nexus-compositor',
+    'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install', 'nexus-launch',
+    'nexus-settings',
+    'nexus-setup', 'nexus-shell', 'nexus-store', 'nexus-term', 'nexus-ui', 'nexus-updater',
+    'nexus-view', 'nexus-wall'
+)
+
+# The two that stand alone, each with its own target.
+$Bootloader = 'nexus-boot'
+$Kernel = 'nexus-kernel'
+
+<#
+.SYNOPSIS
+    Fail if any workspace crate is on none of the lists above, or on two.
+#>
+function Assert-EveryCrateLinted {
+    $covered = @($HostLibraries) + @($HostTools) + @($Programs) + @($Bootloader) + @($Kernel)
+
+    $twice = $covered | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name }
+    if ($twice) {
+        throw "listed more than once, so one of the lists is wrong: $($twice -join ', ')"
+    }
+
+    $metadata = & cargo metadata --no-deps --format-version 1 2>$null | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
+    $members = $metadata.packages | ForEach-Object { $_.name }
+
+    $missing = $members | Where-Object { $covered -notcontains $_ }
+    if ($missing) {
+        throw ("in the workspace and on no lint list: {0}. " -f ($missing -join ', ')) +
+        'Add each to $HostLibraries, $HostTools or $Programs in scripts/test.ps1.'
+    }
+
+    $ghosts = $covered | Where-Object { $members -notcontains $_ }
+    if ($ghosts) {
+        throw ("on a lint list and not in the workspace: {0}" -f ($ghosts -join ', '))
+    }
+
+    Write-Host "    every one of $($members.Count) crates is on a list" -ForegroundColor DarkGray
+}
+
 Invoke-Step 'clippy' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-crypto', '-p', 'nexus-index', '-p', 'nexus-net', '-p', 'nexus-pkg', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-look', '-p', 'nexus-ime', '-p', 'nexus-user', '-p', 'nexus-window', '--lib', '--', '-D', 'warnings') 'clippy'
+        Assert-EveryCrateLinted
 
-        # And the kernel, which needs its own target and core rebuilt for it,
-        # and so was left out until it had accumulated a dozen findings nobody
-        # had seen. It is the largest crate in the tree; leaving the biggest
-        # thing unlinted made the step read as passing when it covered a third
-        # of the code.
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', 'nexus-kernel',
+        # The libraries and their tests. `--tests` is not decoration: a lint
+        # error in test code failed nothing here until a stray `--all-targets`
+        # run turned two of them up, and test code is code -- this suite's own
+        # reliability rests on it.
+        $arguments = @('+nightly', 'clippy')
+        foreach ($crate in $HostLibraries) { $arguments += @('-p', $crate) }
+        $arguments += @('--lib', '--tests', '--', '-D', 'warnings')
+        Invoke-Native 'cargo' $arguments 'clippy (libraries)'
+
+        $arguments = @('+nightly', 'clippy')
+        foreach ($crate in $HostTools) { $arguments += @('-p', $crate) }
+        $arguments += @('--', '-D', 'warnings')
+        Invoke-Native 'cargo' $arguments 'clippy (tools)'
+
+        # The bootloader is a UEFI binary. It was on the library list with
+        # `--lib`, which matched its small library and quietly checked none of
+        # `main.rs` -- five findings, in the file that runs first.
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', $Bootloader, '--',
+            '-D', 'warnings') 'clippy (boot)'
+
+        # The kernel, which needs its own target and core rebuilt for it, and so
+        # was left out until it had accumulated a dozen findings nobody had seen.
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', $Kernel,
             '--target', 'targets/x86_64-nexus.json',
             '-Zbuild-std=core,compiler_builtins,alloc',
             '-Zbuild-std-features=compiler-builtins-mem',
             '--', '-D', 'warnings') 'clippy (kernel)'
+
+        # And every program a person actually uses. These had been linted by
+        # hand as each was written -- the whole of user space turned up exactly
+        # one finding when it was first checked together, which is the good news
+        # -- but linting by hand is a habit, and a habit is one bad afternoon
+        # from lapsing.
+        $arguments = @('+nightly', 'clippy')
+        foreach ($crate in $Programs) { $arguments += @('-p', $crate) }
+        $arguments += @('--target', 'targets/x86_64-nexus-user.json',
+            '-Zbuild-std=core,compiler_builtins,alloc',
+            '-Zbuild-std-features=compiler-builtins-mem',
+            '--', '-D', 'warnings')
+        Invoke-Native 'cargo' $arguments 'clippy (programs)'
     } finally { Pop-Location }
 }
 
 Invoke-Step 'host unit tests' {
     Push-Location $RepoRoot
     try {
-        Invoke-Native 'cargo' @('+nightly', 'test', '-p', 'nexus-abi', '-p', 'nexus-boot', '-p', 'nexus-mm', '-p', 'nexus-time', '-p', 'nexus-config', '-p', 'nexus-update', '-p', 'nexus-dns', '-p', 'nexus-http', '-p', 'nexus-html', '-p', 'nexus-shellwords', '-p', 'nexus-look', '-p', 'nexus-ime', '-p', 'nexus-crypto', '-p', 'nexus-user', '--lib') 'unit tests'
+        # Every library, rather than the subset that happened to be listed.
+        # nexus-index, nexus-net, nexus-pkg and nexus-ai-core between them had
+        # sixty tests this suite had never run, all of them passing -- which is
+        # the worst way for that to be true, because nobody would have noticed
+        # when they stopped.
+        #
+        # nexus-ui is a program rather than a library, but its tests run on the
+        # host and it is the drawing code every window goes through, so it runs
+        # here too.
+        $arguments = @('+nightly', 'test')
+        foreach ($crate in $HostLibraries) { $arguments += @('-p', $crate) }
+        $arguments += @('-p', $Bootloader, '-p', 'nexus-ui', '--lib')
+        Invoke-Native 'cargo' $arguments 'unit tests'
     } finally { Pop-Location }
+}
+
+Invoke-Step 'the collaboration tool' {
+    # Its own tests cover the library; this drives the real binary through a
+    # session and checks what it refuses to do. Here rather than at the end
+    # because it needs no machine and takes two seconds, and the suite is
+    # ordered cheapest first.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-collab.ps1')) 'collaboration tool tests'
 }
 
 Invoke-Step 'boot test' {
@@ -199,6 +331,7 @@ Invoke-Step 'boot test' {
         'starts holding directory handle',
         'init: made a directory and a file',
         'init: appended to a file and changed four bytes in the middle',
+        'init: a name was taken away and the open file went on reading',
         'process lifetime verified',
         'wait set verified',
         'one wait covered a channel and a process, and reported both',
@@ -585,6 +718,22 @@ Invoke-Step 'packages' {
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-store.ps1')) 'package tests'
 }
 
+Invoke-Step 'pictures' {
+    # A real PNG, written by a reference encoder, carried onto the store by the
+    # kernel at boot, and decoded inside the guest by this system's own DEFLATE.
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-view.ps1')) 'picture tests'
+}
+
+Invoke-Step 'the agent' {
+    # Not a test of a language model; there is not one. What it checks is that
+    # an agent decides what to do, asks permission, and is refused by name when
+    # it may not -- including the question whose only correct outcome is a
+    # refusal rather than a deletion.
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-assist.ps1')) 'agent tests'
+}
+
 Invoke-Step 'browsing' {
     # Needs a machine somebody has set up, because there is no desktop to press
     # until the wizard has been answered.
@@ -599,6 +748,32 @@ Invoke-Step 'input' {
     # does nothing.
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-input.ps1')) 'input tests'
+}
+
+Invoke-Step 'the wallpaper' {
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-wallpaper.ps1')) 'wallpaper tests'
+}
+
+Invoke-Step 'the launcher' {
+    # Needs a desktop to press F3 at.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-launch.ps1')) 'launcher tests'
+}
+
+Invoke-Step 'power' {
+    # After everything that needs a running machine, because this is the one
+    # stage that deliberately stops one. Outside the `-SkipFaults` guard: it is
+    # not a fault-injection test, and somebody skipping the slow six-boot stage
+    # should not also lose the check that the machine can be turned off.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-power.ps1')) 'power tests'
 }
 
 if (-not $SkipFaults) {

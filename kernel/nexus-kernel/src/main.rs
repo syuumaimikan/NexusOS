@@ -29,10 +29,14 @@ mod fs;
 mod i18n;
 mod input;
 mod ipc;
+mod machine;
 mod memory;
 mod net;
 mod panic;
+mod power;
+
 mod process;
+mod random;
 mod sched;
 mod selftest;
 mod serial;
@@ -172,6 +176,15 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     let acpi_info = match unsafe { acpi::init(boot_info.acpi_rsdp) } {
         Ok(info) => {
             acpi::report(&info);
+            // Before the APIC, because this only reads what was already parsed
+            // and a machine that cannot start its other processors should still
+            // be able to turn itself off.
+            power::init(&info);
+            // Before anything asks for a key. It reads CPUID and nothing
+            // else, so it is safe this early and the answer is wanted before
+            // the network comes up.
+            random::init();
+            random::self_test();
             adopt_local_apic(&info);
             bring_up_device_interrupts(&info);
             start_other_processors(&info);
@@ -308,6 +321,8 @@ fn start_system_threads() {
     // The speaker, which says the machine is up in the one way a person who
     // is not looking at the screen can hear.
     sound::start_thread();
+    machine::start_thread();
+    power::start_thread();
 
     display::progress(5, BOOT_STEPS);
 
@@ -336,6 +351,16 @@ fn monitor_thread(_argument: usize) {
     let mut reported = 0u64;
     loop {
         sched::sleep_ms(5000);
+
+        // Nothing is worth saying about a machine that is stopping, and the
+        // last lines of its log should be why it stopped rather than how many
+        // context switches it had got through. Reaping still happens: a thread
+        // that finished still has a stack to give back, and the machine may
+        // yet be told to carry on.
+        if power::stopping() {
+            sched::reap_finished();
+            continue;
+        }
 
         let reaped = sched::reap_finished();
         let stats = sched::stats();
@@ -428,6 +453,12 @@ fn monitor_thread(_argument: usize) {
                     drivers::virtio_blk::capacity(),
                     if blocking { "block" } else { "spin" }
                 );
+                let pending = fs::store::pending_removals();
+                if pending > 0 {
+                    // Names taken away from files somebody still holds. A number that
+                    // grows and never falls is a handle nobody is closing.
+                    kprintln!("[mon ] {pending} removed name(s) still held open");
+                }
                 let (hits, misses, writes, evictions) = fs::cache::statistics();
                 kprintln!(
                     "[mon ] block cache {}% of {} reads served from memory,              {writes} written through, {evictions} evicted",
@@ -507,6 +538,27 @@ fn monitor_thread(_argument: usize) {
                     "[mon ] sound {notes} notes played, {hushed} refused,              {tones} tones on the speaker{}",
                     if speaker { "" } else { " (never used)" }
                 );
+                let (asked, denied) = machine::statistics();
+                if asked + denied > 0 {
+                    kprintln!(
+                        "[mon ] machine {asked} snapshots answered, {denied} requests refused"
+                    );
+                }
+                let (given, refused) = random::statistics();
+                if given + refused > 0 {
+                    // Worth having in a log because the failure this reports is
+                    // silent otherwise: a machine whose generator stops
+                    // answering hands out no keys and says nothing, and the
+                    // only symptom is connections that will not start.
+                    kprintln!("[mon ] random {given} bytes given out, {refused} requests refused");
+                }
+                let (offs, reboots) = power::statistics();
+                if offs + reboots > 0 {
+                    // Only ever seen once, on the last report before the
+                    // machine goes -- which is exactly when it is worth having
+                    // in the log, because it says the request was heard.
+                    kprintln!("[mon ] power {offs} shutdowns and {reboots} restarts asked for");
+                }
             }
             let (served, turned_down) = net::service::statistics();
             if served > 0 || turned_down > 0 {
@@ -1218,6 +1270,15 @@ fn filesystem_self_test() {
 /// Not a special case for one file: every `.NEX` in the image's program
 /// directory is copied. A system that hard-coded one package's name would need
 /// changing to ship two.
+///
+/// Pictures travel the same way, into `PICTURES`, for the same reason: a
+/// machine whose picture viewer had nothing to show on a fresh disk would be a
+/// machine where that program could not be used until somebody had already
+/// used it to put a file somewhere.
+///
+/// And the root certificate store, into `SYSTEM`, where the argument is
+/// strongest of all: it is the thing that would have to be fetched securely in
+/// order to be able to fetch anything securely.
 fn seed_packages() {
     let Ok(partitions) = fs::gpt::read() else {
         return;
@@ -1232,21 +1293,40 @@ fn seed_packages() {
         return;
     };
     for entry in files {
-        if entry.is_directory || !entry.name.as_str().ends_with(".NEX") {
+        if entry.is_directory {
             continue;
         }
-        let path = alloc::format!("BIN/{}", entry.name.as_str());
+        let name = entry.name.as_str();
+        // Where each kind of thing belongs once it is off the image. By the
+        // ending, because the image's directory is flat and the store's is not.
+        let into = if name.ends_with(".NEX") {
+            "PKG"
+        } else if name.ends_with(".PNG")
+            || name.ends_with(".BMP")
+            || name.ends_with(".JPG")
+            || name.ends_with(".AVI")
+        {
+            "PICTURES"
+        } else if name.ends_with(".NXR") {
+            // The root certificate store. It travels the same way and for the
+            // same reason as everything else here: a machine that had to fetch
+            // its list of certificate authorities before it could verify a
+            // certificate would have nothing to verify the fetch with.
+            "SYSTEM"
+        } else {
+            continue;
+        };
+        let path = alloc::format!("BIN/{name}");
         let Ok(contents) = volume.read_file(path.as_str()) else {
             kprintln!("[pkg ] {path} is in the image but will not read");
             continue;
         };
-        match fs::store::seed("PKG", entry.name.as_str(), &contents) {
+        match fs::store::seed(into, name, &contents) {
             Ok(true) => kprintln!(
-                "[pkg ] PKG/{} placed on the store from the image, {} bytes",
-                entry.name.as_str(),
+                "[pkg ] {into}/{name} placed on the store from the image, {} bytes",
                 contents.len()
             ),
-            Ok(false) => kprintln!("[pkg ] PKG/{} is already on the store", entry.name.as_str()),
+            Ok(false) => kprintln!("[pkg ] {into}/{name} is already on the store"),
             Err(error) => kprintln!("[pkg ] could not place {path}: {error}"),
         }
     }
