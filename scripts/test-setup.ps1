@@ -52,7 +52,8 @@ $Disk = Join-Path $BuildDir 'nexus-setup-disk.img'
 $ProgramDir = Join-Path $BuildDir 'programs'
 Write-Host '==> Making a disk that has never been configured' -ForegroundColor Cyan
 & powershell -NoProfile -ExecutionPolicy Bypass `
-    -File (Join-Path $PSScriptRoot 'make-disk.ps1') -Output $Disk -ProgramDir $ProgramDir
+    -File (Join-Path $PSScriptRoot 'make-disk.ps1') -Output $Disk -ProgramDir $ProgramDir `
+    -SizeMiB (Get-NexusDiskSizes).SizeMiB -FatMiB (Get-NexusDiskSizes).FatMiB
 if ($LASTEXITCODE -ne 0) { throw 'could not make the disk' }
 
 $MonitorPort = Get-Random -Minimum 24000 -Maximum 26000

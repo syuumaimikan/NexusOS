@@ -23,6 +23,19 @@ function Get-NexusDiskImage {
     return (Join-Path $BuildDir 'nexus-disk.img')
 }
 
+# How big the disk NexusOS drives is, and how much of it is FAT32.
+#
+# Here rather than in `build.ps1` for the reason this whole file exists: four
+# test scripts build their own fresh copy of that disk, and when the size lived
+# in `build.ps1` alone they went on making the old sixty-four megabyte one. The
+# machine then booted with a disk a different size from the one the build had
+# made, which showed up as `disk 131072 sectors` in a log that should have said
+# 16777216 -- and as two tests that could not find a desktop, because the
+# configuration had been on the image that got replaced.
+function Get-NexusDiskSizes {
+    return @{ SizeMiB = 8192; FatMiB = 256 }
+}
+
 # The image behind the USB stick.
 #
 # A different file from the disk above on purpose: "the machine can read its
@@ -114,6 +127,26 @@ function Assert-NotBootable {
     }
 }
 
+# Refuse a data disk that is not the size the build makes.
+#
+# Checked rather than remembered, for the same reason as the rule above it. A
+# script that built its own copy of this disk and forgot the size produced an
+# image the machine booted perfectly well -- and the configuration, the store
+# and everything else a previous run had put there were on the image that had
+# just been replaced. It reads as "the desktop never appeared", two tests later,
+# in a script that did nothing wrong.
+function Assert-DiskSize {
+    param([Parameter(Mandatory = $true)][string]$Image)
+
+    $want = [long](Get-NexusDiskSizes).SizeMiB * 1MB
+    $got = (Get-Item $Image).Length
+    if ($got -ne $want) {
+        throw ("$(Split-Path -Leaf $Image) is $([math]::Round($got / 1MB)) MiB and the build " +
+            "makes $([math]::Round($want / 1MB)) MiB. Something rebuilt it without asking " +
+            'Get-NexusDiskSizes; run build.ps1 to make it again.')
+    }
+}
+
 # The image the firmware boots from, when a run is about that.
 #
 # A separate file from the data disk, and the separation is the point. Both hold
@@ -192,6 +225,7 @@ function Get-NexusQemuArgs {
         $disk = Get-NexusDiskImage -BuildDir $BuildDir
         if (Test-Path $disk) {
             Assert-NotBootable -Image $disk
+            Assert-DiskSize -Image $disk
             $arguments += @(
                 '-drive', "if=none,id=nexusdisk,format=raw,file=$disk",
                 '-device', 'virtio-blk-pci,drive=nexusdisk,disable-modern=on'

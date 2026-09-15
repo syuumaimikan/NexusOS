@@ -46,7 +46,8 @@ try {
             -ProgramDir $Programs -Name $Names[$name] | Out-Null
     }
     & powershell -NoProfile -File (Join-Path $PSScriptRoot 'make-disk.ps1') `
-        -Output (Join-Path $RunDir 'nexus-disk.img') -ProgramDir $Programs
+        -Output (Join-Path $RunDir 'nexus-disk.img') -ProgramDir $Programs `
+        -SizeMiB (Get-NexusDiskSizes).SizeMiB -FatMiB (Get-NexusDiskSizes).FatMiB
     if ($LASTEXITCODE -ne 0) { throw 'AI test disk creation failed' }
 } finally { Pop-Location }
 

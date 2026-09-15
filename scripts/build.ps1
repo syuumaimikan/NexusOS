@@ -32,6 +32,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'stage.ps1')
+# For `Get-NexusDiskSizes`: how big the disk is belongs in one place, with
+# the rest of what the machine is.
+. (Join-Path $PSScriptRoot 'qemu.ps1')
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
@@ -367,8 +370,9 @@ $usbFsSize = [math]::Round((Get-Item $UsbFsImage).Length / 1MB, 0)
 # gigabyte a second -- so the size costs eight seconds and eight gigabytes of
 # disk, and nothing at boot.
 $DiskImage = Join-Path $BuildDir 'nexus-disk.img'
-$DiskMiB = 8192
-$DiskFatMiB = 256
+$sizes = Get-NexusDiskSizes
+$DiskMiB = $sizes.SizeMiB
+$DiskFatMiB = $sizes.FatMiB
 $stale = -not (Test-Path $DiskImage)
 if (-not $stale) {
     # An image of the wrong size is stale whatever its timestamp says. Without

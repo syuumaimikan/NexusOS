@@ -53,7 +53,8 @@ $Disk = Join-Path $BuildDir 'nexus-update-disk.img'
 $ProgramDir = Join-Path $BuildDir 'programs'
 Write-Host '==> Making a disk with nothing installed on it' -ForegroundColor Cyan
 & powershell -NoProfile -ExecutionPolicy Bypass `
-    -File (Join-Path $PSScriptRoot 'make-disk.ps1') -Output $Disk -ProgramDir $ProgramDir | Out-Null
+    -File (Join-Path $PSScriptRoot 'make-disk.ps1') -Output $Disk -ProgramDir $ProgramDir `
+    -SizeMiB (Get-NexusDiskSizes).SizeMiB -FatMiB (Get-NexusDiskSizes).FatMiB | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'could not make the disk' }
 
 # One boot, returning what it said on the serial line. The standard disk path is
