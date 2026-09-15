@@ -33,30 +33,47 @@
 
 .PARAMETER SizeMiB
     How large to make the image.
+
+.PARAMETER FatMiB
+    How much of it the FAT32 partition takes. The rest, less the backup GPT, is
+    NexusFS's.
+
+.NOTES
+    The image is streamed rather than built in memory.
+
+    It used to be one `byte[]` the size of the whole disk, which is fine at
+    sixty-four megabytes and impossible at eight gigabytes: .NET will not hand
+    out an array that large, and labelling sixteen million sectors in a
+    PowerShell loop takes minutes. So only the head -- the partition table and
+    the whole FAT32 partition -- is built in memory, exactly as before, and
+    everything past it is written a chunk at a time. Eight gigabytes takes about
+    seven seconds.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Output,
     [string]$SourceDir,
     [string]$ProgramDir,
-    [int]$SizeMiB = 64
+    [int]$SizeMiB = 64,
+    [int]$FatMiB = 40
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $SectorSize = 512
-$TotalSectors = $SizeMiB * 1024 * 1024 / $SectorSize
+$TotalSectors = [long]$SizeMiB * 1024 * 1024 / $SectorSize
 
 # The partition starts a megabyte in, which is where every partitioner has put
 # the first one for fifteen years: it clears the GPT and aligns the filesystem
 # to any erase block a flash device is likely to have.
 $PartitionStart = 2048
 
-# Forty megabytes of it, which is what a FAT32 needs to be a FAT32: below 65525
-# clusters the specification says the volume is FAT16, and half-kilobyte
-# clusters is what keeps a sixty-four megabyte image above that line.
-$EspSectors = 40 * 1024 * 1024 / $SectorSize
+# Some of it for the FAT32 partition. Forty megabytes by default, which is what
+# a FAT32 needs to be a FAT32: below 65525 clusters the specification says the
+# volume is FAT16, and half-kilobyte clusters is what keeps a sixty-four
+# megabyte image above that line.
+$EspSectors = [long]$FatMiB * 1024 * 1024 / $SectorSize
 $PartitionEnd = $PartitionStart + $EspSectors - 1
 $PartitionSectors = $PartitionEnd - $PartitionStart + 1
 
@@ -71,32 +88,69 @@ $NexusStart = $PartitionEnd + 1
 $NexusEnd = $TotalSectors - 34
 $NexusSectors = $NexusEnd - $NexusStart + 1
 
-$image = New-Object byte[] ($TotalSectors * $SectorSize)
+# Eight digits, so the label is a fixed width and one sector's is the same
+# length as another's. That caps the disk at a hundred million sectors, which is
+# forty-seven gigabytes -- checked rather than assumed, because past it every
+# label would be a character longer and the reader would find the wrong text.
+if ($TotalSectors -gt 99999999) {
+    throw "$SizeMiB MiB is $TotalSectors sectors; the eight-digit sector label stops at 99999999"
+}
+
+# Only the head is held in memory: the partition table and the whole FAT32
+# partition. Everything past it is written straight out below, so the array is
+# forty megabytes rather than eight gigabytes.
+$HeadSectors = $PartitionEnd + 1
+$image = New-Object byte[] ($HeadSectors * $SectorSize)
 
 # ---------------------------------------------------------------------------
 # Sector labels, everywhere. Overwritten by whatever is laid on top.
 # ---------------------------------------------------------------------------
-for ($sector = 0; $sector -lt $TotalSectors; $sector++) {
-    $label = 'NEXUSOS-SECTOR-{0:D8}' -f $sector
-    $bytes = [System.Text.Encoding]::ASCII.GetBytes($label)
-    [Array]::Copy($bytes, 0, $image, $sector * $SectorSize, $bytes.Length)
+# In C# rather than PowerShell. Sixteen million iterations of `-f` and
+# `Array.Copy` is minutes; this is under a second, and the same bytes come out.
+Add-Type -TypeDefinition @"
+public static class NexusSectorLabel {
+    static readonly byte[] Prefix =
+        System.Text.Encoding.ASCII.GetBytes("NEXUSOS-SECTOR-");
+
+    /// Write each sector's own number, as text, at the start of it.
+    public static void Fill(byte[] buffer, long firstSector, int sectorSize) {
+        int sectors = buffer.Length / sectorSize;
+        for (int index = 0; index < sectors; index++) {
+            int at = index * sectorSize;
+            for (int k = 0; k < Prefix.Length; k++) { buffer[at + k] = Prefix[k]; }
+            long number = firstSector + index;
+            for (int digit = 7; digit >= 0; digit--) {
+                buffer[at + Prefix.Length + digit] = (byte)('0' + (number % 10));
+                number /= 10;
+            }
+        }
+    }
 }
+"@
+
+[NexusSectorLabel]::Fill($image, 0, $SectorSize)
+
+# Which buffer the setters below write into. The head, for all but the last
+# thing built: the backup GPT lives in the last thirty-four sectors of an image
+# whose head stops forty megabytes in, so it is built in its own small buffer
+# and this is pointed at that instead.
+$script:Canvas = $image
 
 function Set-U16 { param([int]$Offset, [int]$Value)
-    $image[$Offset] = $Value -band 0xFF
-    $image[$Offset + 1] = ($Value -shr 8) -band 0xFF
+    $script:Canvas[$Offset] = $Value -band 0xFF
+    $script:Canvas[$Offset + 1] = ($Value -shr 8) -band 0xFF
 }
 function Set-U32 { param([int]$Offset, [uint32]$Value)
-    for ($i = 0; $i -lt 4; $i++) { $image[$Offset + $i] = [byte](($Value -shr (8 * $i)) -band 0xFF) }
+    for ($i = 0; $i -lt 4; $i++) { $script:Canvas[$Offset + $i] = [byte](($Value -shr (8 * $i)) -band 0xFF) }
 }
 function Set-U64 { param([int]$Offset, [uint64]$Value)
-    for ($i = 0; $i -lt 8; $i++) { $image[$Offset + $i] = [byte](($Value -shr (8 * $i)) -band 0xFF) }
+    for ($i = 0; $i -lt 8; $i++) { $script:Canvas[$Offset + $i] = [byte](($Value -shr (8 * $i)) -band 0xFF) }
 }
 function Set-Bytes { param([int]$Offset, [byte[]]$Value)
-    [Array]::Copy($Value, 0, $image, $Offset, $Value.Length)
+    [Array]::Copy($Value, 0, $script:Canvas, $Offset, $Value.Length)
 }
 function Clear-Range { param([int]$Offset, [int]$Length)
-    [Array]::Clear($image, $Offset, $Length)
+    [Array]::Clear($script:Canvas, $Offset, $Length)
 }
 
 # CRC-32, which the GPT uses for its header and its entry array. Written out
@@ -138,6 +192,14 @@ function Get-Crc32 { param([byte[]]$Data, [int]$Offset, [int]$Length)
 # firmware that checks will refuse it. At four kilobytes a sixty-four megabyte
 # image has sixteen thousand clusters and is not a FAT32 volume at all.
 $SectorsPerCluster = 1
+# Except on a partition large enough that half-kilobyte clusters would make the
+# allocation table itself enormous -- four bytes per cluster, twice over. A
+# quarter-gigabyte partition at one sector per cluster spends eight megabytes on
+# the two tables; at eight sectors it spends one, and still has four hundred
+# thousand clusters, which is well clear of the 65525 the format needs.
+while ($PartitionSectors / $SectorsPerCluster -gt 1000000 -and $SectorsPerCluster -lt 64) {
+    $SectorsPerCluster *= 2
+}
 $ReservedSectors = 32
 $FatCount = 2
 
@@ -479,10 +541,13 @@ Set-Bytes -Offset ($second + 56) -Value $nexusName
 
 $entriesCrc = Get-Crc32 -Data $image -Offset $entries -Length ($EntryCount * $EntrySize)
 
+# `Base` is the sector the current buffer starts at, so that a header bound for
+# the last sector of an eight-gigabyte image can be built in a thirty-four
+# sector buffer of its own.
 function Write-GptHeader {
-    param([int]$Lba, [int]$Alternate, [int]$EntriesLba)
+    param([long]$Lba, [long]$Alternate, [long]$EntriesLba, [long]$Base = 0)
 
-    $header = $Lba * $SectorSize
+    $header = [int](($Lba - $Base) * $SectorSize)
     Clear-Range -Offset $header -Length $SectorSize
     Set-Bytes -Offset $header -Value ([System.Text.Encoding]::ASCII.GetBytes('EFI PART'))
     Set-U32 -Offset ($header + 8) -Value ([uint32]0x00010000)
@@ -501,17 +566,53 @@ function Write-GptHeader {
 
     # The header's own checksum covers exactly its 92 bytes, with the checksum
     # field zero -- which is why it is written last.
-    $crc = Get-Crc32 -Data $image -Offset $header -Length 92
+    $crc = Get-Crc32 -Data $script:Canvas -Offset $header -Length 92
     Set-U32 -Offset ($header + 16) -Value $crc
 }
 
 $BackupEntriesLba = $TotalSectors - 33
-[Array]::Copy($image, $entries, $image, $BackupEntriesLba * $SectorSize, $EntryCount * $EntrySize)
-
 Write-GptHeader -Lba 1 -Alternate ($TotalSectors - 1) -EntriesLba $EntryLba
-Write-GptHeader -Lba ($TotalSectors - 1) -Alternate 1 -EntriesLba $BackupEntriesLba
 
-[System.IO.File]::WriteAllBytes($Output, $image)
+# The backup, in the last thirty-four sectors: thirty-two of entries, one spare,
+# and the header itself on the very last one. Built in its own buffer because
+# that is nowhere near the head.
+$TailStart = $TotalSectors - 34
+$tail = New-Object byte[] (34 * $SectorSize)
+[NexusSectorLabel]::Fill($tail, $TailStart, $SectorSize)
+$script:Canvas = $tail
+[Array]::Copy($image, $entries, $tail, ($BackupEntriesLba - $TailStart) * $SectorSize,
+    $EntryCount * $EntrySize)
+Write-GptHeader -Lba ($TotalSectors - 1) -Alternate 1 -EntriesLba $BackupEntriesLba -Base $TailStart
+$script:Canvas = $image
+
+# ---------------------------------------------------------------------------
+# Out to the file: the head, then labelled sectors for the gap, then the tail.
+# ---------------------------------------------------------------------------
+$stream = [System.IO.File]::Create($Output)
+try {
+    $stream.Write($image, 0, $image.Length)
+
+    # Eight megabytes at a time. The buffer is relabelled rather than
+    # reallocated, so this costs one allocation however large the disk is.
+    $ChunkSectors = 16384
+    $chunk = New-Object byte[] ($ChunkSectors * $SectorSize)
+    $sector = [long]$HeadSectors
+    while ($sector -lt $TailStart) {
+        $take = [long][math]::Min([long]$ChunkSectors, $TailStart - $sector)
+        [NexusSectorLabel]::Fill($chunk, $sector, $SectorSize)
+        $stream.Write($chunk, 0, [int]($take * $SectorSize))
+        $sector += $take
+    }
+
+    $stream.Write($tail, 0, $tail.Length)
+} finally {
+    $stream.Close()
+}
+
+$actual = (Get-Item $Output).Length
+if ($actual -ne $TotalSectors * $SectorSize) {
+    throw "wrote $actual bytes, meant to write $($TotalSectors * $SectorSize)"
+}
 
 $used = ($script:NextCluster - 2) * $ClusterBytes
 Write-Host ("  disk       : {0} MiB, GPT with FAT32 ({1} clusters, {2} KiB used) and {3} MiB for NexusFS  -> {4}" -f `

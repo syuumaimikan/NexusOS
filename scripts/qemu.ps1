@@ -51,23 +51,66 @@ function Get-NexusUsbFsImage {
 # So it is checked rather than remembered. The short name FAT32 stores is the
 # eleven bytes `BOOTX64 EFI`, and finding them anywhere in the image means a
 # directory entry names that file.
+#
+# Read in pieces, and only the first half-gigabyte of them. Both halves of that
+# matter now the disk is eight gigabytes: `ReadAllBytes` cannot return an array
+# that large at all, and reading the whole of it on every one of the twenty-odd
+# scripts that boot the machine would cost more than the boot does. The bound is
+# not a guess -- a directory entry can only be inside the FAT32 partition, which
+# begins one megabyte in and is a quarter-gigabyte long, so half a gigabyte
+# covers all of it and the table in front of it.
 function Assert-NotBootable {
     param([Parameter(Mandatory = $true)][string]$Image)
 
     $needle = [System.Text.Encoding]::ASCII.GetBytes('BOOTX64 EFI')
-    $bytes = [System.IO.File]::ReadAllBytes($Image)
-    $last = $bytes.Length - $needle.Length
-    for ($index = 0; $index -le $last; $index++) {
-        if ($bytes[$index] -ne $needle[0]) { continue }
-        $found = $true
-        for ($offset = 1; $offset -lt $needle.Length; $offset++) {
-            if ($bytes[$index + $offset] -ne $needle[$offset]) { $found = $false; break }
+    $Scan = 512MB
+    $ChunkSize = 8MB
+
+    $stream = [System.IO.File]::OpenRead($Image)
+    try {
+        # One chunk plus the needle's length less one, so that a name lying
+        # across a chunk boundary is still whole in the buffer. Without the
+        # overlap the check would pass for a file that happened to land there,
+        # which is the kind of hole that only shows up once.
+        $overlap = $needle.Length - 1
+        $buffer = New-Object byte[] ($ChunkSize + $overlap)
+        $held = 0
+        $read = 0L
+        while ($read -lt $Scan) {
+            $want = [int][math]::Min([long]$ChunkSize, $Scan - $read)
+            $got = $stream.Read($buffer, $held, $want)
+            if ($got -le 0) { break }
+            $read += $got
+            $usable = $held + $got
+
+            # `Array.IndexOf` for the first byte, and the shell's own loop only
+            # at the handful of places it lands. Comparing every byte in
+            # PowerShell instead took eighty seconds on an eight-gigabyte image
+            # and ten on a sixty-four megabyte one -- which every script that
+            # boots the machine was paying, every time.
+            $last = $usable - $needle.Length
+            $index = 0
+            while ($index -le $last) {
+                $index = [Array]::IndexOf($buffer, $needle[0], $index, $last - $index + 1)
+                if ($index -lt 0) { break }
+                $found = $true
+                for ($offset = 1; $offset -lt $needle.Length; $offset++) {
+                    if ($buffer[$index + $offset] -ne $needle[$offset]) { $found = $false; break }
+                }
+                if ($found) {
+                    throw ("$(Split-Path -Leaf $Image) contains EFI\BOOT\BOOTX64.EFI, so the " +
+                        'firmware would have two disks to choose between and could boot the ' +
+                        'wrong kernel. Build it with -ProgramDir, not -SourceDir.')
+                }
+                $index++
+            }
+
+            # Carry the tail forward for the next pass to look at again.
+            $held = [math]::Min($overlap, $usable)
+            [Array]::Copy($buffer, $usable - $held, $buffer, 0, $held)
         }
-        if ($found) {
-            throw ("$(Split-Path -Leaf $Image) contains EFI\BOOT\BOOTX64.EFI, so the firmware " +
-                'would have two disks to choose between and could boot the wrong kernel. ' +
-                'Build it with -ProgramDir, not -SourceDir.')
-        }
+    } finally {
+        $stream.Close()
     }
 }
 

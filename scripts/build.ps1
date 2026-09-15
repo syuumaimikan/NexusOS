@@ -358,8 +358,24 @@ $usbFsSize = [math]::Round((Get-Item $UsbFsImage).Length / 1MB, 0)
 #
 # The bootable image is a different file, made by test-image.ps1, which is the
 # only run that is about whether an image boots.
+#
+# Eight gigabytes of it, a quarter of a gigabyte as FAT32 for programs and the
+# rest as NexusFS. It was sixty-four megabytes, which was enough for a machine
+# whose whole software collection was three megabytes of its own programs and
+# is not enough for one meant to hold software brought in from outside. The
+# image is written sparsely-ish -- labelled sectors all the way down, at about a
+# gigabyte a second -- so the size costs eight seconds and eight gigabytes of
+# disk, and nothing at boot.
 $DiskImage = Join-Path $BuildDir 'nexus-disk.img'
+$DiskMiB = 8192
+$DiskFatMiB = 256
 $stale = -not (Test-Path $DiskImage)
+if (-not $stale) {
+    # An image of the wrong size is stale whatever its timestamp says. Without
+    # this, changing the size above would leave every existing checkout running
+    # on the old disk and wondering why it had not grown.
+    if ((Get-Item $DiskImage).Length -ne [long]$DiskMiB * 1MB) { $stale = $true }
+}
 if (-not $stale) {
     $imageTime = (Get-Item $DiskImage).LastWriteTimeUtc
     $newest = Get-ChildItem -Path $ProgramDir -File |
@@ -370,7 +386,8 @@ if (-not $stale) {
 if ($stale) {
     Write-Host '==> Making the disk image' -ForegroundColor Cyan
     & powershell -NoProfile -ExecutionPolicy Bypass `
-        -File (Join-Path $PSScriptRoot 'make-disk.ps1') -Output $DiskImage -ProgramDir $ProgramDir
+        -File (Join-Path $PSScriptRoot 'make-disk.ps1') -Output $DiskImage `
+        -ProgramDir $ProgramDir -SizeMiB $DiskMiB -FatMiB $DiskFatMiB
     if ($LASTEXITCODE -ne 0) { throw 'could not make the disk image' }
 }
 

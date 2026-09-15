@@ -50,6 +50,15 @@ pub const BLOCK_SIZE: usize = 4096;
 /// Sectors in a block.
 const SECTORS_PER_BLOCK: u64 = (BLOCK_SIZE / SECTOR_SIZE) as u64;
 
+// A block has to fit in one request, because that is what the two functions
+// below now assume. If the block size ever grew past what the driver carries,
+// every read and write would come back `BadLength` -- at run time, on a machine
+// that had already been built. Said here instead, at build time.
+const _: () = assert!(
+    SECTORS_PER_BLOCK <= virtio_blk::MAX_TRANSFER_SECTORS as u64,
+    "a filesystem block no longer fits in one virtio request"
+);
+
 /// How many blocks are kept.
 ///
 /// Two hundred and fifty-six of them, which is a megabyte. Enough to hold the
@@ -166,10 +175,9 @@ pub fn read(lba: u64, buffer: &mut [u8; BLOCK_SIZE]) -> Result<(), BlockError> {
     // whatever the evicted block left there, and a second reader arriving in
     // between -- which cannot happen while this lock is held, but would the day
     // someone made the miss path concurrent -- would be handed it.
-    for index in 0..SECTORS_PER_BLOCK {
-        let offset = index as usize * SECTOR_SIZE;
-        virtio_blk::read_sector(lba + index, &mut buffer[offset..offset + SECTOR_SIZE])?;
-    }
+    // One request for the whole block, not eight. The driver carries up to a
+    // block at a time, and a block is what this cache deals in.
+    virtio_blk::read_sectors(lba, &mut buffer[..])?;
     MISSES.fetch_add(1, Ordering::Relaxed);
 
     let slot = cache.place(lba);
@@ -186,10 +194,7 @@ pub fn read(lba: u64, buffer: &mut [u8; BLOCK_SIZE]) -> Result<(), BlockError> {
 pub fn write(lba: u64, buffer: &[u8; BLOCK_SIZE]) -> Result<(), BlockError> {
     let mut cache = CACHE.lock();
 
-    for index in 0..SECTORS_PER_BLOCK {
-        let offset = index as usize * SECTOR_SIZE;
-        virtio_blk::write_sector(lba + index, &buffer[offset..offset + SECTOR_SIZE])?;
-    }
+    virtio_blk::write_sectors(lba, &buffer[..])?;
     WRITES.fetch_add(1, Ordering::Relaxed);
 
     let slot = match cache.find(lba) {

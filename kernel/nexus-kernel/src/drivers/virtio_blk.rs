@@ -113,6 +113,24 @@ const STATUS_OK: u8 = 0;
 /// Bytes in a disk sector, as virtio defines it regardless of the medium.
 pub const SECTOR_SIZE: usize = 512;
 
+/// Sectors one request may carry.
+///
+/// Eight, which is four kilobytes, which is one filesystem block. That is the
+/// number that matters: every read and write above this driver is a block, and
+/// at one sector per request each of them cost eight round trips to the device
+/// and eight waits for an interrupt. Formatting an eight-gigabyte NexusFS
+/// writes sixteen thousand blocks of inode table, and at eight requests apiece
+/// it did not finish.
+pub const MAX_TRANSFER_SECTORS: usize = 8;
+
+/// Frames the scratch region takes, as an order: two pages.
+const SCRATCH_ORDER: usize = 1;
+/// And how many bytes that is.
+const SCRATCH_BYTES: usize = 4096 << SCRATCH_ORDER;
+/// Where the data begins inside it. The second page, so that the header and the
+/// status byte in the first are nowhere near what the device may overwrite.
+const SCRATCH_DATA: u64 = 4096;
+
 /// One entry of the descriptor table.
 #[repr(C)]
 struct Descriptor {
@@ -143,8 +161,11 @@ pub enum BlockError {
     OutOfMemory,
     /// The device reported a queue this driver cannot fit.
     QueueTooLarge(u16),
-    /// The request named a sector past the end of the disk.
+    /// The request named a sector past the end of the disk, or ran off it.
     OutOfRange,
+    /// The buffer was not a whole number of sectors, or was more of them than
+    /// one request carries.
+    BadLength,
     /// The device never completed the request.
     Timeout,
     /// The device reported a failure.
@@ -163,6 +184,10 @@ impl core::fmt::Display for BlockError {
             Self::OutOfMemory => f.write_str("out of memory for the virtqueue"),
             Self::QueueTooLarge(size) => write!(f, "the device wants a queue of {size}"),
             Self::OutOfRange => f.write_str("the sector is past the end of the disk"),
+            Self::BadLength => write!(
+                f,
+                "a request carries between one and {MAX_TRANSFER_SECTORS} whole sectors"
+            ),
             Self::Timeout => f.write_str("the device never completed the request"),
             Self::Failed(status) => write!(f, "the device reported status {status}"),
         }
@@ -296,16 +321,20 @@ pub unsafe fn init(devices: &[Device]) -> Result<u64, BlockError> {
             1usize << (order + 12),
         );
 
-        // One page for the request header, the sector, and the status byte.
-        // Contiguous because the device reads it by physical address, and one
-        // page is ample: a header is sixteen bytes and a sector five hundred
-        // and twelve.
-        let Some(scratch_physical) = memory::allocate_frame() else {
+        // Two pages for the request header, the data and the status byte.
+        // Contiguous because the device reads it by physical address, and two
+        // rather than one because the second is entirely data: a request may
+        // carry eight sectors, which is one filesystem block.
+        let Some(scratch_physical) = memory::allocate_block(SCRATCH_ORDER) else {
             memory::free_block(queue_physical, order);
             outb(port + register::DEVICE_STATUS, status::FAILED);
             return Err(BlockError::OutOfMemory);
         };
-        core::ptr::write_bytes(layout::phys_to_virt(scratch_physical) as *mut u8, 0, 4096);
+        core::ptr::write_bytes(
+            layout::phys_to_virt(scratch_physical) as *mut u8,
+            0,
+            SCRATCH_BYTES,
+        );
 
         // The device is told the queue's *page number*, which is the whole
         // reason the queue has to be page aligned.
@@ -383,21 +412,59 @@ fn order_for(bytes: usize) -> usize {
 
 /// Read one sector into `buffer`.
 pub fn read_sector(sector: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+    let length = buffer.len().min(SECTOR_SIZE);
+    let mut copy = [0u8; SECTOR_SIZE];
+    read_sectors(sector, &mut copy)?;
+    buffer[..length].copy_from_slice(&copy[..length]);
+    Ok(())
+}
+
+/// Read `buffer.len() / 512` consecutive sectors into `buffer`.
+///
+/// # Errors
+///
+/// [`BlockError::BadLength`] unless the buffer is a whole number of sectors and
+/// no more than [`MAX_TRANSFER_SECTORS`] of them; otherwise as the device says.
+pub fn read_sectors(sector: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+    let count = check_length(buffer.len())?;
     transfer(request::READ, sector, buffer)?;
-    SECTORS_READ.fetch_add(1, Ordering::Relaxed);
+    SECTORS_READ.fetch_add(count as u64, Ordering::Relaxed);
     Ok(())
 }
 
 /// Write one sector from `buffer`.
 pub fn write_sector(sector: u64, buffer: &[u8]) -> Result<(), BlockError> {
-    // The scratch page is filled here rather than inside `transfer`, which does
-    // not know which direction it is going.
     let mut copy = [0u8; SECTOR_SIZE];
     let length = buffer.len().min(SECTOR_SIZE);
     copy[..length].copy_from_slice(&buffer[..length]);
-    transfer(request::WRITE, sector, &mut copy)?;
-    SECTORS_WRITTEN.fetch_add(1, Ordering::Relaxed);
+    write_sectors(sector, &copy)
+}
+
+/// Write `buffer.len() / 512` consecutive sectors from `buffer`.
+///
+/// # Errors
+///
+/// As [`read_sectors`].
+pub fn write_sectors(sector: u64, buffer: &[u8]) -> Result<(), BlockError> {
+    let count = check_length(buffer.len())?;
+    // Copied into a buffer of this function's own rather than handed over,
+    // because the device is given a physical address and the caller's slice is
+    // wherever the caller put it. `transfer` takes it by exclusive reference
+    // because a read fills it; nothing is read back here.
+    let mut copy = [0u8; MAX_TRANSFER_SECTORS * SECTOR_SIZE];
+    copy[..buffer.len()].copy_from_slice(buffer);
+    transfer(request::WRITE, sector, &mut copy[..buffer.len()])?;
+    SECTORS_WRITTEN.fetch_add(count as u64, Ordering::Relaxed);
     Ok(())
+}
+
+/// How many sectors a buffer of `bytes` is, if it is a legal size.
+fn check_length(bytes: usize) -> Result<usize, BlockError> {
+    if bytes == 0 || !bytes.is_multiple_of(SECTOR_SIZE) || bytes > MAX_TRANSFER_SECTORS * SECTOR_SIZE
+    {
+        return Err(BlockError::BadLength);
+    }
+    Ok(bytes / SECTOR_SIZE)
 }
 
 /// Sectors on the disk, or zero if there is none.
@@ -420,6 +487,15 @@ pub fn statistics() -> (u64, u64) {
 /// Generous enough that a busy host does not look like a broken device, and
 /// bounded so that a broken device does not look like a hang.
 const COMPLETION_SPINS: u32 = 50_000_000;
+
+/// Spins before giving up on the device answering straight away.
+///
+/// Sized by what it is waiting for rather than by feel: a virtio request to an
+/// emulated disk is tens of microseconds, and this is a few hundred thousand
+/// spins, which is the same order. Too small and every request pays for a
+/// context switch; too large and a thread waiting on a genuinely slow device
+/// holds a processor that something else could be using.
+const HANDOFF_SPINS: u32 = 400_000;
 
 /// Do one request, in whichever direction.
 fn transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
@@ -469,18 +545,24 @@ fn one_transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockEr
         *guard.as_ref().ok_or(BlockError::NoDevice)?
     };
 
-    if sector >= disk.capacity {
+    // The *last* sector the request touches, not the first. Checking only the
+    // first would let a request that starts inside the disk run off the end of
+    // it, which is the whole reason a multi-sector request needs a check the
+    // single-sector one did not.
+    let count = (buffer.len() / SECTOR_SIZE) as u64;
+    if sector >= disk.capacity || count == 0 || disk.capacity - sector < count {
         return Err(BlockError::OutOfRange);
     }
 
     let queue = layout::phys_to_virt(disk.queue_physical);
     let scratch = layout::phys_to_virt(disk.scratch_physical);
 
-    // The scratch page, laid out: header, then the sector, then one byte for
-    // the device to report on. Kept apart because the device is told each one's
-    // address separately and writes only the last.
+    // The scratch region, laid out: the header and the status byte in the first
+    // page, the data in the second. Kept apart because the device is told each
+    // one's address separately, and the data is given a page of its own so that
+    // a full eight-sector transfer has room without reaching the status byte.
     let header_physical = disk.scratch_physical;
-    let data_physical = disk.scratch_physical + 512;
+    let data_physical = disk.scratch_physical + SCRATCH_DATA;
     let status_physical = disk.scratch_physical + 1024;
 
     // SAFETY: the scratch page is mapped through the direct map, owned by this
@@ -497,8 +579,8 @@ fn one_transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockEr
         if kind == request::WRITE {
             core::ptr::copy_nonoverlapping(
                 buffer.as_ptr(),
-                (scratch + 512) as *mut u8,
-                buffer.len().min(SECTOR_SIZE),
+                (scratch + SCRATCH_DATA) as *mut u8,
+                buffer.len(),
             );
         }
     }
@@ -526,7 +608,7 @@ fn one_transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockEr
         });
         descriptors.add(1).write_volatile(Descriptor {
             address: data_physical,
-            length: SECTOR_SIZE as u32,
+            length: buffer.len() as u32,
             flags: descriptor::NEXT | data_flags,
             next: 2,
         });
@@ -578,9 +660,9 @@ fn one_transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockEr
 
         if kind == request::READ {
             core::ptr::copy_nonoverlapping(
-                (scratch + 512) as *const u8,
+                (scratch + SCRATCH_DATA) as *const u8,
                 buffer.as_mut_ptr(),
-                buffer.len().min(SECTOR_SIZE),
+                buffer.len(),
             );
         }
     }
@@ -595,6 +677,24 @@ fn one_transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockEr
 /// bounded the same way and does not need to be, because it is only ever
 /// entered once an interrupt has been seen to arrive.
 fn wait_for_completion(used: *const u16, before: u16, generation: u64) -> Result<(), BlockError> {
+    // A short spin first, however this is going to wait.
+    //
+    // An emulated disk answers in microseconds, and going to sleep for that
+    // costs two context switches and the latency of being picked again -- which
+    // measured at milliseconds, not microseconds. Formatting an eight-gigabyte
+    // NexusFS is sixteen thousand block writes, and at a millisecond each that
+    // is a boot that never finishes. This catches the ordinary case without
+    // sleeping at all; the block below is still there for the request that
+    // really is slow, so nothing is busy-waiting on a disk that is thinking.
+    for _ in 0..HANDOFF_SPINS {
+        // SAFETY: the used ring is mapped through the direct map and this is
+        // its index field, written by the device and read here.
+        if unsafe { used.add(1).read_volatile() } != before {
+            return Ok(());
+        }
+        core::hint::spin_loop();
+    }
+
     if BLOCKING.load(Ordering::Relaxed) && crate::sched::current_id().is_some() {
         let mut generation = generation;
         loop {
