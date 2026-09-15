@@ -183,6 +183,12 @@ foreach ($tool in @('cat', 'head', 'grep')) {
     $textSizes += [math]::Round((Get-Item $staged).Length / 1KB, 1)
 }
 
+# `nex`, which runs a program written in the language this repository has. Not
+# Python and not C, and named so nobody arrives expecting either.
+$NexElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-nex"
+$StagedNex = Publish-Program -Elf $NexElf -ProgramDir $ProgramDir -Name 'nex.elf'
+$nexSize = [math]::Round((Get-Item $StagedNex).Length / 1KB, 1)
+
 $StoreElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-store"
 $StagedStore = Publish-Program -Elf $StoreElf -ProgramDir $ProgramDir -Name 'store.elf'
 $storeSize = [math]::Round((Get-Item $StagedStore).Length / 1KB, 1)
@@ -452,6 +458,7 @@ Write-Host "  files      : $filesSize KiB  -> BIN\FILES.ELF on the disk"
 Write-Host "  ls         : $lsSize KiB  -> BIN\LS.ELF on the disk"
 Write-Host "  count      : $countSize KiB  -> BIN\COUNT.ELF on the disk"
 Write-Host "  cat/head/grep: $($textSizes -join '/') KiB  -> BIN\{CAT,HEAD,GREP}.ELF on the disk"
+Write-Host "  nex        : $nexSize KiB  -> BIN\NEX.ELF on the disk"
 Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
 Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
 Write-Host "  gemini agt : $geminiSize KiB  -> BIN\GEMINI.ELF on the disk"

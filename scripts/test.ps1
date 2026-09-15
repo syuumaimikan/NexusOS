@@ -782,6 +782,14 @@ Invoke-Step 'the wallpaper' {
         (Join-Path $PSScriptRoot 'test-wallpaper.ps1')) 'wallpaper tests'
 }
 
+Invoke-Step 'the language' {
+    # Needs a desktop to type a program into.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-nex.ps1')) 'Nex tests'
+}
+
 Invoke-Step 'kanji conversion' {
     # Needs a desktop to type into.
     Invoke-Native 'powershell' @('-NoProfile', '-File',

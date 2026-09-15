@@ -1,0 +1,17 @@
+[package]
+name = "nexus-nex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Runs a Nex program on NexusOS."
+
+[[bin]]
+name = "nexus-nex"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-api = { path = "../nexus-api" }
+nexus-lang = { path = "../../shared/nexus-lang" }

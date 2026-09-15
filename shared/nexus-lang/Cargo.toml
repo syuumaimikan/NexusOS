@@ -1,0 +1,7 @@
+[package]
+name = "nexus-lang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Nex: a small language that runs on NexusOS. Not Python, not C, and named so nobody expects either."
