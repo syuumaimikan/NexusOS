@@ -345,21 +345,15 @@ pub fn verify_pkcs1(
     }
 }
 
-/// SHA-384, which is SHA-512 with a different start and a truncated end.
+/// SHA-384, for the RSA-SHA384 certificates that exist and are not rare.
+///
+/// In `nexus_crypto` rather than here, because it is SHA-512's block function
+/// with a different starting state -- and a second copy of that function would
+/// be a second thing to keep right. It is emphatically *not* SHA-512 truncated,
+/// which is the mistake it would be easy to make and which
+/// `sha512::sha384_tests` rules out by name.
 fn sha384_of(message: &[u8]) -> Vec<u8> {
-    // Not in `nexus_crypto` because nothing needed it until now, and a second
-    // copy of SHA-512's compression function would be a second thing to keep
-    // right. `sha512` is used and truncated, which is *not* SHA-384 -- so this
-    // is deliberately not offered as one.
-    //
-    // RSA-SHA384 certificates exist and are rare. Rather than a subtly wrong
-    // hash, this refuses: `verify_pkcs1` with `sha384` set gets a digest that
-    // will not match, and the caller sees `Mismatch`.
-    //
-    // The honest fix is SHA-384's own initial values in `nexus_crypto`, which
-    // is twenty lines and is on the roadmap.
-    let _ = message;
-    vec![0u8; 48]
+    nexus_crypto::sha512::digest_384(message).to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +596,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_real_sha384_signature_verifies() {
+        // RSA-SHA384 certificates exist and are not rare, and this used to be a
+        // refusal with a note saying so. OpenSSL made this signature and
+        // verifies it itself.
+        let (modulus, exponent) = test_key();
+        let message = include_bytes!("../fixtures/signed.txt");
+        let signature = include_bytes!("../fixtures/signed384.pkcs1");
+
+        verify_pkcs1(&modulus, &exponent, signature, message, true)
+            .expect("a real SHA-384 signature should verify");
+
+        // And it must not verify as SHA-256, nor the SHA-256 one as SHA-384:
+        // the hash is named in the padding, so confusing them is a verifier
+        // accepting a signature over a different digest.
+        assert!(verify_pkcs1(&modulus, &exponent, signature, message, false).is_err());
+        let sha256_signature = include_bytes!("../fixtures/signed.pkcs1");
+        assert!(verify_pkcs1(&modulus, &exponent, sha256_signature, message, true).is_err());
     }
 
     #[test]
