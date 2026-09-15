@@ -123,6 +123,19 @@ pub struct LoadedImage {
     pub segments: [LoadedSegment; MAX_SEGMENTS],
     /// How many entries of `segments` are valid.
     pub segment_count: usize,
+    /// Where the program header table ended up in the loaded image, as a
+    /// virtual address, or zero if no loadable segment covers it.
+    ///
+    /// A System V program is told this in its auxiliary vector as `AT_PHDR`,
+    /// and a C library reads it to find its own `PT_TLS` and `PT_GNU_RELRO`
+    /// before `main` runs. It is not the file offset: the table has to be
+    /// *inside* a segment that was loaded, and where it landed is what the
+    /// program can actually read.
+    pub program_headers: u64,
+    /// Bytes in one program header, from `e_phentsize`.
+    pub program_header_size: u16,
+    /// How many there are, from `e_phnum`.
+    pub program_header_count: u16,
 }
 
 /// Read a little-endian `u16` at `offset`, or `None` if it would run past the end.
@@ -351,6 +364,24 @@ where
         Ok(())
     })?;
 
+    // Where the program header table can be read from, once the image is in
+    // place. Found by asking which loadable segment covers the file offset the
+    // header gave, rather than assuming the first one starts at offset zero --
+    // which is true of every static executable seen so far and is not a rule.
+    let mut program_headers = 0u64;
+    for_each_load_segment(image, phoff, phentsize, phnum, |header| {
+        if program_headers != 0 || header.filesz == 0 {
+            return Ok(());
+        }
+        let start = header.offset;
+        let end = start + header.filesz;
+        let table_end = phoff + u64::from(phentsize) * u64::from(phnum);
+        if phoff >= start && table_end <= end {
+            program_headers = header.vaddr + (phoff - start);
+        }
+        Ok(())
+    })?;
+
     Ok(LoadedImage {
         entry_point,
         virt_base,
@@ -358,6 +389,9 @@ where
         image_size,
         segments,
         segment_count,
+        program_headers,
+        program_header_size: phentsize,
+        program_header_count: phnum,
     })
 }
 
@@ -368,6 +402,91 @@ mod tests {
     extern crate alloc;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    /// Build one whose single `PT_LOAD` starts at file offset zero, so the
+    /// headers are inside the image the program can read.
+    ///
+    /// That is what a real static executable looks like, and it is the shape
+    /// `program_headers` exists to describe. The helper above deliberately
+    /// makes the other shape -- segments after the headers -- so both are
+    /// covered.
+    fn synthetic_elf_covering_headers(base: u64, entry: u64, payload: &[u8]) -> Vec<u8> {
+        let phoff = EHDR_SIZE as u64;
+        let data_offset = EHDR_SIZE + PHDR_SIZE;
+        let mut file = vec![0u8; data_offset];
+
+        file[0..4].copy_from_slice(&ELF_MAGIC);
+        file[4] = ELFCLASS64;
+        file[5] = ELFDATA2LSB;
+        file[6] = 1; // EV_CURRENT
+        file[16..18].copy_from_slice(&ET_EXEC.to_le_bytes());
+        file[18..20].copy_from_slice(&EM_X86_64.to_le_bytes());
+        file[24..32].copy_from_slice(&entry.to_le_bytes());
+        file[32..40].copy_from_slice(&phoff.to_le_bytes());
+        file[54..56].copy_from_slice(&(PHDR_SIZE as u16).to_le_bytes());
+        file[56..58].copy_from_slice(&1u16.to_le_bytes());
+
+        file.extend_from_slice(payload);
+        let length = file.len() as u64;
+
+        // One segment, from offset zero, covering the whole file.
+        file[EHDR_SIZE..EHDR_SIZE + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        file[EHDR_SIZE + 4..EHDR_SIZE + 8].copy_from_slice(&(PF_R | PF_X).to_le_bytes());
+        file[EHDR_SIZE + 8..EHDR_SIZE + 16].copy_from_slice(&0u64.to_le_bytes());
+        file[EHDR_SIZE + 16..EHDR_SIZE + 24].copy_from_slice(&base.to_le_bytes());
+        file[EHDR_SIZE + 32..EHDR_SIZE + 40].copy_from_slice(&length.to_le_bytes());
+        file[EHDR_SIZE + 40..EHDR_SIZE + 48].copy_from_slice(&length.to_le_bytes());
+
+        file
+    }
+
+    /// The program header table has to be reported at the address it can be
+    /// read from once the image is in place, not at its offset in the file.
+    ///
+    /// A System V program is handed this as `AT_PHDR`, and a C library follows
+    /// it to find its own `PT_TLS`. Pointing it at a file offset would have it
+    /// reading whatever happens to live at address 64.
+    #[test]
+    fn reports_where_the_program_headers_landed() {
+        const BASE: u64 = 0x40_0000;
+        let payload = b"code";
+        let image = synthetic_elf_covering_headers(BASE, BASE + EHDR_SIZE as u64, payload);
+
+        let destination = Destination::new(4);
+        let at = destination.base;
+        // SAFETY: `at` points at page-aligned, writable, host-owned memory large
+        // enough for the one-page image above.
+        let loaded = unsafe { load(&image, |_pages| Some(at), |physical| physical) }
+            .expect("image should load");
+
+        assert_eq!(loaded.program_headers, BASE + EHDR_SIZE as u64);
+        assert_eq!(loaded.program_header_size, PHDR_SIZE as u16);
+        assert_eq!(loaded.program_header_count, 1);
+    }
+
+    /// And zero when no loadable segment covers them, which is honest rather
+    /// than a plausible address.
+    ///
+    /// `synthetic_elf` puts every segment *after* the headers, so nothing maps
+    /// them. A loader that answered `virt_base + phoff` regardless would hand a
+    /// program a pointer into its own code.
+    #[test]
+    fn reports_no_program_headers_when_none_are_mapped() {
+        const VADDR: u64 = 0x40_0000;
+        let payload = b"code";
+        let image = synthetic_elf(
+            VADDR,
+            &[(VADDR, PF_R | PF_X, payload, payload.len() as u64)],
+        );
+
+        let destination = Destination::new(4);
+        let at = destination.base;
+        // SAFETY: as above.
+        let loaded = unsafe { load(&image, |_pages| Some(at), |physical| physical) }
+            .expect("image should load");
+
+        assert_eq!(loaded.program_headers, 0);
+    }
 
     /// Build a minimal but valid ELF64 executable with the given `PT_LOAD`
     /// segments, described as `(vaddr, flags, file_bytes, memsz)`.

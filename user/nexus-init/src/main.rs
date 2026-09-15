@@ -646,7 +646,7 @@ fn ask_a_question() {
 /// the same spawn service, over the same channel, and the only difference is
 /// four characters of prefix saying which interface the program speaks.
 fn run_a_linux_program() {
-    // Two of them. The first asks for `write` and `exit_group` and proves the
+    // Three of them. The first asks for `write` and `exit_group` and proves the
     // boundary exists at all. The second asks for anonymous memory, a scattered
     // write and the register thread-local storage lives behind -- which is what
     // every statically linked C or Rust program asks for before it prints
@@ -657,6 +657,18 @@ fn run_a_linux_program() {
     // that answered ENOSYS fails here rather than looking like it passed.
     run_one(b"linux:BIN/HELLO.LX", "a Linux program");
     run_one(b"linux:BIN/RICH.LX", "a Linux program that asked for memory");
+
+    // And a third, about the filesystem. It creates a file, writes to it,
+    // closes it, opens it again, stats it, reads it back and compares the
+    // bytes; then it lists a directory, asks where it is, asks for randomness,
+    // and checks that its auxiliary vector has the sixteen bytes every C
+    // library reads before `main`. Each of those steps exits with its own
+    // number when it is wrong, so a failure names the call rather than the
+    // program -- see `files_machine_code` for which number is which.
+    run_one(
+        b"linux:BIN/FILES.LX",
+        "a Linux program that wrote a file and read it back",
+    );
 }
 
 /// Start one translated program and wait for it.

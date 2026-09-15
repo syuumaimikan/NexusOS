@@ -214,6 +214,15 @@ $linuxSize = (Get-Item $LinuxProgram).Length
 $RichProgram = Join-Path $ProgramDir 'rich.lx'
 & $LinuxExe $RichProgram 'a linux program with memory of its own' rich
 if ($LASTEXITCODE -ne 0) { throw 'could not emit the richer Linux program' }
+
+# And a third, about files: it writes one, reads it back and checks the bytes,
+# then lists a directory and reads its own auxiliary vector. Every step of it
+# exits with its own number when what came back is wrong, so it is a test and
+# not a demonstration.
+$FilesProgram = Join-Path $ProgramDir 'files.lx'
+& $LinuxExe $FilesProgram 'a linux program wrote a file and read it back' files
+if ($LASTEXITCODE -ne 0) { throw 'could not emit the Linux file program' }
+$filesLinuxSize = (Get-Item $FilesProgram).Length
 $richSize = (Get-Item $RichProgram).Length
 
 # A package, built on this machine by the tool that makes them and read on the
@@ -430,6 +439,7 @@ Write-Host "  update     : $newerSize KiB  -> PKG\DEMO11.NEX on the disk (demo 1
 Write-Host "  tampered   : one byte changed after signing -> PKG\BAD.NEX on the disk"
 Write-Host "  linux      : $linuxSize bytes of static Linux ELF -> BIN\HELLO.LX on the disk"
 Write-Host "  linux+     : $richSize bytes, mmap and writev -> BIN\RICH.LX on the disk"
+Write-Host "  linux files: $filesLinuxSize bytes, opens and reads a file -> BIN\FILES.LX on the disk"
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''

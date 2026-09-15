@@ -570,6 +570,20 @@ impl HandleTable {
         }
     }
 
+    /// One whose handle numbers begin at `first`.
+    ///
+    /// For a process running a foreign interface that has already spoken for
+    /// some of the low numbers. A Linux program's file descriptors 0, 1 and 2
+    /// are its standard input, output and error; its descriptors are its
+    /// handles, so its handles must not start at 1, or its first `open` would
+    /// return the number every `printf` writes to.
+    #[must_use]
+    pub fn starting_at(first: u32) -> Self {
+        let table = Self::new();
+        table.next.store(first, Ordering::Relaxed);
+        table
+    }
+
     /// Add `object` with `rights`, returning the handle.
     pub fn insert(&self, object: Object, rights: Rights) -> u32 {
         let id = self.next.fetch_add(1, Ordering::Relaxed);

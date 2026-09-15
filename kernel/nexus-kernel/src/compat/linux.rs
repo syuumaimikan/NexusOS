@@ -41,6 +41,7 @@
 
 use alloc::string::String;
 
+use super::linux_files as files;
 use crate::kprintln;
 
 /// The Linux call numbers this understands.
@@ -72,6 +73,27 @@ mod call {
     pub const SET_TID_ADDRESS: u64 = 218;
     pub const EXIT_GROUP: u64 = 231;
     pub const CLOCK_GETTIME: u64 = 228;
+
+    // Files. `open` and `stat` are the old forms and `openat` and `newfstatat`
+    // the ones every current libc actually emits; both are here because a
+    // statically linked binary from a few years ago emits the old ones and
+    // there is no reason to make that the difference between running and not.
+    pub const OPEN: u64 = 2;
+    pub const STAT: u64 = 4;
+    pub const FSTAT: u64 = 5;
+    pub const LSEEK: u64 = 8;
+    pub const ACCESS: u64 = 21;
+    pub const GETCWD: u64 = 79;
+    pub const MKDIR: u64 = 83;
+    pub const UNLINK: u64 = 87;
+    pub const RMDIR: u64 = 84;
+    pub const GETDENTS64: u64 = 217;
+    pub const OPENAT: u64 = 257;
+    pub const MKDIRAT: u64 = 258;
+    pub const UNLINKAT: u64 = 263;
+    pub const NEWFSTATAT: u64 = 262;
+    pub const FACCESSAT: u64 = 269;
+    pub const GETRANDOM: u64 = 318;
 }
 
 /// Errors, as Linux returns them: negative, in the return register.
@@ -80,7 +102,7 @@ mod call {
 /// answer, and a caller tells the two apart by whether it is in the top page of
 /// the address space. That convention is why a Linux `write` can return a byte
 /// count and an error in the same register.
-mod error {
+pub(super) mod error {
     /// Function not implemented.
     pub const ENOSYS: u64 = (-38i64) as u64;
     /// Bad file descriptor.
@@ -195,7 +217,80 @@ pub fn dispatch(
         }
         call::READ => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            read(argument0)
+            read(argument0, argument1, argument2)
+        }
+
+        // Files. Every one of these is a walk through the machine's own store,
+        // reached by the same operations a Nexus program uses: see
+        // `compat::linux_files`.
+        call::OPENAT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::openat(argument0, argument1, argument2)
+        }
+        // `open(path, flags)` is `openat(AT_FDCWD, path, flags)`. Written as
+        // that rather than as a second implementation, because two of them
+        // would be two things to keep in step.
+        call::OPEN => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::openat(files::AT_FDCWD as u32 as u64, argument0, argument1)
+        }
+        call::LSEEK => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::lseek(argument0, argument1, argument2)
+        }
+        call::FSTAT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::fstat(argument0, argument1)
+        }
+        call::NEWFSTATAT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::newfstatat(argument0, argument1, argument2)
+        }
+        call::STAT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::newfstatat(files::AT_FDCWD as u32 as u64, argument0, argument1)
+        }
+        call::GETDENTS64 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::getdents64(argument0, argument1, argument2)
+        }
+        call::FACCESSAT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::faccessat(argument0, argument1)
+        }
+        call::ACCESS => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::faccessat(files::AT_FDCWD as u32 as u64, argument0)
+        }
+        call::GETCWD => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::getcwd(argument0, argument1)
+        }
+        call::MKDIRAT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::mkdirat(argument0, argument1)
+        }
+        call::MKDIR => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::mkdirat(files::AT_FDCWD as u32 as u64, argument0)
+        }
+        call::UNLINKAT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::unlinkat(argument0, argument1)
+        }
+        // `unlink` and `rmdir` are the same operation on a store that knows
+        // which of the two a name is.
+        call::UNLINK | call::RMDIR => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::unlinkat(files::AT_FDCWD as u32 as u64, argument0)
+        }
+        call::GETRANDOM => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::getrandom(argument0, argument1)
+        }
+        call::CLOSE => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::close(argument0)
         }
         call::MMAP => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -237,12 +332,10 @@ pub fn dispatch(
         // `rt_sigprocmask` -- there are no signals to block, so blocking them
         // succeeds trivially and honestly.
         //
-        // `close` -- there is no descriptor table; nothing was open.
-        //
         // `set_tid_address` returns this thread's identifier, which is what
         // Linux does, and the address is not recorded because nothing here
         // clears it on exit.
-        call::MPROTECT | call::RT_SIGPROCMASK | call::CLOSE => {
+        call::MPROTECT | call::RT_SIGPROCMASK => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             0
         }
@@ -298,8 +391,12 @@ pub fn dispatch(
 /// not have, and saying so is the truth: a translated program has no file
 /// descriptor table because nothing has given it one.
 fn write(descriptor: u64, buffer: u64, count: u64) -> u64 {
-    if descriptor != 1 && descriptor != 2 {
+    if descriptor == files::STDIN {
         return error::EBADF;
+    }
+    // Anything that is not one of the three a program starts with is a file.
+    if descriptor != files::STDOUT && descriptor != files::STDERR {
+        return files::write(descriptor, buffer, count);
     }
     let wanted = (count as usize).min(MAX_WRITE);
     if wanted == 0 {
@@ -397,20 +494,23 @@ fn writev(descriptor: u64, vectors: u64, count: u64) -> u64 {
     written
 }
 
-/// `read(fd, ...)`.
+/// `read(fd, buffer, count)`.
 ///
-/// Zero, which on Linux means end of file, and only for standard input.
+/// Standard input gives zero, which on Linux means end of file: the keyboard
+/// belongs to the compositor, which hands keys to windows, and a program
+/// running under this layer has no window. End of file is the honest answer --
+/// a program that reads gets nothing and stops, rather than blocking for ever
+/// on input that cannot arrive.
 ///
-/// A translated program has no descriptor table and there is nothing typing at
-/// it: the keyboard belongs to the compositor, which hands keys to windows, and
-/// a program running under this layer has no window. End of file is the honest
-/// answer -- a program that reads gets nothing and stops, rather than blocking
-/// for ever on input that cannot arrive.
-fn read(descriptor: u64) -> u64 {
-    if descriptor != 0 {
+/// Anything else is a file, and goes to the store.
+fn read(descriptor: u64, buffer: u64, count: u64) -> u64 {
+    if descriptor == files::STDIN {
+        return 0;
+    }
+    if descriptor == files::STDOUT || descriptor == files::STDERR {
         return error::EBADF;
     }
-    0
+    files::read(descriptor, buffer, count)
 }
 
 /// `mmap(address, length, protection, flags)`.

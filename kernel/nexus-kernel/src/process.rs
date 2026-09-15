@@ -261,7 +261,15 @@ impl Process {
             name: String::from(name),
             personality,
             address_space,
-            handles: HandleTable::new(),
+            // A Linux process's handles start at three, because its handles
+            // are its file descriptors and nought, one and two are spoken for.
+            // See `compat::linux_files`.
+            handles: match personality {
+                Personality::Nexus => HandleTable::new(),
+                Personality::Linux => {
+                    HandleTable::starting_at(crate::compat::linux_files::FIRST_HANDLE)
+                }
+            },
             completion: Arc::new(Completion {
                 id,
                 name: String::from(name),
@@ -285,6 +293,14 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         DESTROYED.fetch_add(1, Ordering::Relaxed);
+        // Here rather than in the exit path, so that a process which was killed
+        // is forgotten as thoroughly as one that ended by asking to. What is
+        // dropped is a handful of file positions; leaving them would be a map
+        // that grows by one entry for every file every translated program has
+        // ever opened, for as long as the machine is up.
+        if self.personality == Personality::Linux {
+            crate::compat::linux_files::forget(self.id.0);
+        }
     }
 }
 

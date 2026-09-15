@@ -782,6 +782,15 @@ Invoke-Step 'the wallpaper' {
         (Join-Path $PSScriptRoot 'test-wallpaper.ps1')) 'wallpaper tests'
 }
 
+Invoke-Step 'the Linux translation' {
+    # No desktop needed: the three translated programs are run by `init`, long
+    # before anything draws. The last of them writes a file, and the script
+    # looks for that file in the host's copy of the disk -- which is the check
+    # a layer that accepted every byte and kept none would fail.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-linux.ps1')) 'Linux translation tests'
+}
+
 Invoke-Step 'the launcher' {
     # Needs a desktop to press F3 at.
     Invoke-Native 'powershell' @('-NoProfile', '-File',

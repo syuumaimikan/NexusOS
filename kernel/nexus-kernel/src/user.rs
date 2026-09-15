@@ -1539,7 +1539,7 @@ pub unsafe fn start_from_disk_as(
         // SAFETY: `stack` is the frame just mapped at the top of this address
         // space, it is this kernel's to write through the direct map until the
         // process runs, and the layout is written entirely inside it.
-        crate::process::Personality::Linux => unsafe { system_v_stack(stack, name) },
+        crate::process::Personality::Linux => unsafe { system_v_stack(stack, name, &loaded) },
     };
 
     sched::spawn_user(name, loaded.entry_point, stack_pointer, process)
@@ -1565,10 +1565,16 @@ pub unsafe fn start_from_disk_as(
 /// have put there, and a program that reads it finds whatever was in the page
 /// if nobody did.
 ///
-/// This is the smallest honest version of it: one argument, which is the
-/// program's name, no environment, and an empty auxiliary vector. A program
-/// that needs `AT_PHDR` or `AT_RANDOM` will find them absent, which is what
-/// `AT_NULL` immediately means and what such a program is required to cope with.
+/// One argument, which is the program's name; one environment variable; and an
+/// auxiliary vector with the entries a C library reads before `main`.
+///
+/// The auxiliary vector used to be empty here, and `AT_NULL` straight away is a
+/// legal thing for a kernel to put there -- but it is not a thing any real
+/// program survives. `AT_PHDR` is how a libc finds its own `PT_TLS` to set up
+/// thread-local storage; `AT_RANDOM` is sixteen bytes a program is required to
+/// be given and is where the stack guard comes from, so a binary built with
+/// `-fstack-protector` -- which is every distribution's default -- reads that
+/// pointer before it reaches `main` and dies on the spot if it is null.
 ///
 /// `rsp` is sixteen-byte aligned, because the ABI says so and because the first
 /// `movaps` in any compiled function faults if it is not.
@@ -1577,44 +1583,123 @@ pub unsafe fn start_from_disk_as(
 ///
 /// `stack` must be the physical frame mapped at the top of the target address
 /// space, and nothing else may be writing it.
-unsafe fn system_v_stack(stack: u64, name: &str) -> u64 {
-    /// Bytes set aside at the very top for the program's name.
-    const NAME_ROOM: u64 = 32;
+unsafe fn system_v_stack(stack: u64, name: &str, loaded: &nexus_abi::elf::LoadedImage) -> u64 {
+    /// Auxiliary vector types, as `elf.h` numbers them.
+    mod at {
+        pub const PHDR: u64 = 3;
+        pub const PHENT: u64 = 4;
+        pub const PHNUM: u64 = 5;
+        pub const PAGESZ: u64 = 6;
+        pub const ENTRY: u64 = 9;
+        pub const UID: u64 = 11;
+        pub const EUID: u64 = 12;
+        pub const GID: u64 = 13;
+        pub const EGID: u64 = 14;
+        pub const CLKTCK: u64 = 17;
+        pub const SECURE: u64 = 23;
+        pub const RANDOM: u64 = 25;
+    }
+
+    /// Bytes set aside at the very top for the strings and the random bytes.
+    const ROOM: u64 = 128;
+    /// What `AT_RANDOM` points at: sixteen bytes, and the number is the ABI's.
+    const RANDOM_BYTES: usize = 16;
+    /// The environment this machine offers, with its terminator. One variable,
+    /// because a program that looks up `PATH` or `HOME` and finds nothing
+    /// behaves correctly, and one that finds an invented value goes looking in
+    /// a directory that does not exist.
+    const ENVIRONMENT: &[u8] = b"NEXUS=1\0";
 
     let page = layout::phys_to_virt(stack);
     let bottom = DISK_STACK_TOP - layout::PAGE_SIZE;
+    // Where an address in the target's stack is in this kernel's view of it.
+    let at_kernel = |address: u64| page + (address - bottom);
 
-    // The name string, as high in the page as it will go.
-    let name_at = DISK_STACK_TOP - NAME_ROOM;
-    let bytes = name.as_bytes();
-    let taken = bytes.len().min(NAME_ROOM as usize - 1);
-    // SAFETY: the destination is inside the page, and the length is bounded by
-    // the room set aside for it.
+    // The strings and the random bytes, packed up from the start of the room
+    // reserved at the very top.
+    let mut put = DISK_STACK_TOP - ROOM;
+
+    let random_at = put;
+    let mut seed = [0u8; RANDOM_BYTES];
+    // If the generator is not ready this stays zero, which is worse than real
+    // randomness and better than a null pointer: the program starts, and its
+    // stack guard is a constant. Said in the log rather than hidden.
+    if !crate::random::bytes(&mut seed) {
+        kprintln!("[linux] no randomness for AT_RANDOM; the stack guard will be a constant");
+    }
+    // SAFETY: every write below lands between `put` and `DISK_STACK_TOP`, which
+    // is the top `ROOM` bytes of the page this function owns.
     unsafe {
         core::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            (page + (name_at - bottom)) as *mut u8,
-            taken,
+            seed.as_ptr(),
+            at_kernel(random_at) as *mut u8,
+            RANDOM_BYTES,
         );
+    }
+    put += RANDOM_BYTES as u64;
+
+    let environment_at = put;
+    // SAFETY: as above.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            ENVIRONMENT.as_ptr(),
+            at_kernel(environment_at) as *mut u8,
+            ENVIRONMENT.len(),
+        );
+    }
+    put += ENVIRONMENT.len() as u64;
+
+    let name_at = put;
+    let bytes = name.as_bytes();
+    let taken = bytes.len().min((DISK_STACK_TOP - put) as usize - 1);
+    // SAFETY: as above; `taken` is bounded by what is left of the reserved room.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), at_kernel(name_at) as *mut u8, taken);
         // The terminator, which is what makes it a C string -- and every
         // program that reads `argv[0]` reads it as one.
-        core::ptr::write_volatile((page + (name_at - bottom) + taken as u64) as *mut u8, 0);
+        core::ptr::write_volatile((at_kernel(name_at) + taken as u64) as *mut u8, 0);
     }
 
-    // Six words: argc, one argument, the null that ends the arguments, the null
-    // that ends the environment, and the two that are `AT_NULL`.
-    let words: u64 = 6;
+    let vector: [(u64, u64); 12] = [
+        (at::PHDR, loaded.program_headers),
+        (at::PHENT, u64::from(loaded.program_header_size)),
+        (at::PHNUM, u64::from(loaded.program_header_count)),
+        (at::PAGESZ, layout::PAGE_SIZE),
+        (at::ENTRY, loaded.entry_point),
+        // One machine, one user, and that user is the one who turned it on.
+        (at::UID, 0),
+        (at::EUID, 0),
+        (at::GID, 0),
+        (at::EGID, 0),
+        // Not running set-user-id, so a libc need not drop anything.
+        (at::SECURE, 0),
+        // Ticks a second, which is what `times` is measured in. A hundred is
+        // what Linux reports and what a program assumes when it has to.
+        (at::CLKTCK, 100),
+        (at::RANDOM, random_at),
+    ];
+
+    // argc, argv[0] and the null ending the arguments; one environment pointer
+    // and the null ending those; then the pairs, and the `AT_NULL` that ends
+    // them.
+    let words = 3 + 2 + (vector.len() as u64 + 1) * 2;
     let vector_at = (name_at - words * 8) & !15;
 
-    // SAFETY: as above; the vector lies below the name and inside the page.
+    // SAFETY: the vector lies below the strings and inside the page, and every
+    // slot written is within the `words` counted above.
     unsafe {
-        let slot = (page + (vector_at - bottom)) as *mut u64;
+        let slot = at_kernel(vector_at) as *mut u64;
         slot.write_volatile(1); // argc
         slot.add(1).write_volatile(name_at); // argv[0]
         slot.add(2).write_volatile(0); // argv is null-terminated
-        slot.add(3).write_volatile(0); // and so is the environment
-        slot.add(4).write_volatile(0); // AT_NULL
-        slot.add(5).write_volatile(0); // with a value of nothing
+        slot.add(3).write_volatile(environment_at); // envp[0]
+        slot.add(4).write_volatile(0); // and so is the environment
+        for (index, (kind, value)) in vector.iter().enumerate() {
+            slot.add(5 + index * 2).write_volatile(*kind);
+            slot.add(6 + index * 2).write_volatile(*value);
+        }
+        slot.add(5 + vector.len() * 2).write_volatile(0); // AT_NULL
+        slot.add(6 + vector.len() * 2).write_volatile(0); // with a value of nothing
     }
 
     vector_at

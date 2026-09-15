@@ -594,9 +594,10 @@ fn monitor_thread(_argument: usize) {
             );
         }
         let (translated, refused, mapped) = compat::linux::statistics();
+        let open = compat::linux_files::open_count();
         if translated > 0 || refused > 0 {
             kprintln!(
-                "[mon ] linux {translated} calls translated, {refused} answered ENOSYS,                  {mapped} pages mapped"
+                "[mon ] linux {translated} calls translated, {refused} answered ENOSYS,                  {mapped} pages mapped, {open} files open"
             );
         }
         let (calls, unknown) = arch::syscall::statistics();
