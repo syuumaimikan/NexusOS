@@ -1,0 +1,18 @@
+[package]
+name = "nexus-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "One window for the store and the removable drives, with copying between them."
+
+[[bin]]
+name = "nexus-files"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-window = { path = "../nexus-window" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }

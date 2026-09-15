@@ -126,6 +126,11 @@ const ENTRIES: &[Entry] = &[
         grave: false,
     },
     Entry {
+        key: "shell.files",
+        tag: b"file",
+        grave: false,
+    },
+    Entry {
         key: "shell.assist",
         tag: b"asst",
         grave: false,

@@ -153,6 +153,10 @@ $EditElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-edit"
 $StagedEdit = Publish-Program -Elf $EditElf -ProgramDir $ProgramDir -Name 'edit.elf'
 $editSize = [math]::Round((Get-Item $StagedEdit).Length / 1KB, 1)
 
+$FilesElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-files"
+$StagedFiles = Publish-Program -Elf $FilesElf -ProgramDir $ProgramDir -Name 'files.elf'
+$filesSize = [math]::Round((Get-Item $StagedFiles).Length / 1KB, 1)
+
 $StoreElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-store"
 $StagedStore = Publish-Program -Elf $StoreElf -ProgramDir $ProgramDir -Name 'store.elf'
 $storeSize = [math]::Round((Get-Item $StagedStore).Length / 1KB, 1)
@@ -391,6 +395,7 @@ Write-Host "  packages   : $storeSize KiB  -> BIN\STORE.ELF on the disk"
 Write-Host "  viewer     : $viewSize KiB  -> BIN\VIEW.ELF on the disk"
 Write-Host "  launcher   : $launchSize KiB  -> BIN\LAUNCH.ELF on the disk"
 Write-Host "  editor     : $editSize KiB  -> BIN\EDIT.ELF on the disk"
+Write-Host "  files      : $filesSize KiB  -> BIN\FILES.ELF on the disk"
 Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
 Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
 Write-Host "  gemini agt : $geminiSize KiB  -> BIN\GEMINI.ELF on the disk"

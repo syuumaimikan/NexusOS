@@ -51,6 +51,7 @@ members = [
     "user/nexus-view",
     "user/nexus-launch",
     "user/nexus-edit",
+    "user/nexus-files",
     "user/nexus-assist",
     "user/nexus-setup",
     "user/nexus-idle",

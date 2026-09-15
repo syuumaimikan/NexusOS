@@ -49,8 +49,10 @@ mod ask {
     pub const LIST: &[u8] = b"list";
     /// The contents of a file.
     pub const READ: &[u8] = b"read";
-    /// Replace a file's contents.
+    /// Replace a file's contents, or add to them.
     pub const WRITE: &[u8] = b"writ";
+    /// Remove a file.
+    pub const REMOVE: &[u8] = b"dele";
 }
 
 /// What it gets back.
@@ -67,10 +69,14 @@ mod why {
     pub const NOT_FOUND: u16 = 3;
     /// The request did not parse.
     pub const MALFORMED: u16 = 4;
-    /// Writing is not implemented for this filesystem yet.
+    /// The volume will not be written to.
     pub const READ_ONLY: u16 = 5;
     /// More was asked for than one message carries.
     pub const TOO_BIG: u16 = 6;
+    /// There is no room left on the drive.
+    pub const FULL: u16 = 7;
+    /// The name will not fit the eight-and-three form this filesystem uses.
+    pub const BAD_NAME: u16 = 8;
 }
 
 /// The most a reply carries.
@@ -213,14 +219,8 @@ fn answer(message: &[u8]) -> Vec<u8> {
     match tag {
         _ if tag == ask::LIST => list(drive, rest),
         _ if tag == ask::READ => read(drive, rest),
-        // Writing a FAT32 file needs the allocator this reader does not have:
-        // finding free clusters, chaining them, and updating both copies of the
-        // table. Refused by name rather than half-done, because a write that
-        // corrupted somebody's stick would be much worse than one that did not
-        // happen. The blocks underneath *can* be written -- see
-        // `usb_storage::write_block` -- so this is the filesystem's gap and not
-        // the driver's.
-        _ if tag == ask::WRITE => refuse(why::READ_ONLY),
+        _ if tag == ask::WRITE => write(drive, rest),
+        _ if tag == ask::REMOVE => remove(drive, rest),
         _ => refuse(why::MALFORMED),
     }
 }
@@ -301,6 +301,100 @@ fn list(drive: usize, path: &[u8]) -> Vec<u8> {
     }
     out[4] = fitted;
     out
+}
+
+/// Turn a filesystem error into the reason a caller is told.
+fn reason(error: fat32::FatError) -> Vec<u8> {
+    refuse(match error {
+        fat32::FatError::NotFound => why::NOT_FOUND,
+        fat32::FatError::ReadOnly => why::READ_ONLY,
+        fat32::FatError::Full => why::FULL,
+        fat32::FatError::BadName => why::BAD_NAME,
+        _ => why::NO_FILESYSTEM,
+    })
+}
+
+/// `writ`: put bytes into a file.
+///
+/// The body is the drive, four bytes of offset, one byte of name length, the
+/// name, and then the data. An offset of zero replaces the file; anything else
+/// appends at that point, which is how a caller writes a file larger than one
+/// message.
+///
+/// # What appending costs
+///
+/// Each piece is a read of the whole file, a truncate, an extend and a write of
+/// the whole file — so writing a file in *n* pieces costs *n²* work. That is
+/// fine for the few kilobytes a person types and would not be for a megabyte,
+/// and it is written down here rather than discovered. Doing better means
+/// keeping an open file's state in the service, which is a handle, which is the
+/// thing a removable drive should not have.
+fn write(drive: usize, body: &[u8]) -> Vec<u8> {
+    if drive >= usb_storage::shapes().len() {
+        return refuse(why::NO_DRIVE);
+    }
+    if body.len() < 5 {
+        return refuse(why::MALFORMED);
+    }
+    let offset = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    let name_length = body[4] as usize;
+    if body.len() < 5 + name_length {
+        return refuse(why::MALFORMED);
+    }
+    let Ok(name) = core::str::from_utf8(&body[5..5 + name_length]) else {
+        return refuse(why::MALFORMED);
+    };
+    let data = &body[5 + name_length..];
+
+    let Some(volume) = mount(drive) else {
+        return refuse(why::NO_FILESYSTEM);
+    };
+
+    let whole = if offset == 0 {
+        data.to_vec()
+    } else {
+        // What is there now, cut to the offset. Cut rather than assumed to be
+        // that long: a caller that skipped a piece would otherwise leave a hole
+        // full of whatever the last file in those clusters held.
+        let mut existing = volume.read_file(name).unwrap_or_default();
+        if offset > existing.len() {
+            return refuse(why::MALFORMED);
+        }
+        existing.truncate(offset);
+        existing.extend_from_slice(data);
+        existing
+    };
+
+    match volume.write_file(name, &whole) {
+        Ok(()) => {
+            ANSWERED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let mut out = Vec::with_capacity(8);
+            out.extend_from_slice(GOOD);
+            out.extend_from_slice(&(whole.len() as u32).to_le_bytes());
+            out
+        }
+        Err(error) => reason(error),
+    }
+}
+
+/// `dele`: remove a file.
+fn remove(drive: usize, name: &[u8]) -> Vec<u8> {
+    if drive >= usb_storage::shapes().len() {
+        return refuse(why::NO_DRIVE);
+    }
+    let Ok(name) = core::str::from_utf8(name) else {
+        return refuse(why::MALFORMED);
+    };
+    let Some(volume) = mount(drive) else {
+        return refuse(why::NO_FILESYSTEM);
+    };
+    match volume.remove_file(name) {
+        Ok(()) => {
+            ANSWERED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            GOOD.to_vec()
+        }
+        Err(error) => reason(error),
+    }
 }
 
 /// `read`: part of a file.

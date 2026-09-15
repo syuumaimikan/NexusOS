@@ -114,7 +114,7 @@ $HostTools = @('nexus-pack', 'nexus-collab', 'nexus-roots', 'nexus-linux-example
 # Programs that run on Nexus, built for the user target.
 $Programs = @(
     'nexus-ai', 'nexus-assist', 'nexus-browser', 'nexus-client', 'nexus-compositor',
-    'nexus-edit', 'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install',
+    'nexus-edit', 'nexus-files', 'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install',
     'nexus-launch', 'nexus-settings', 'nexus-setup', 'nexus-shell', 'nexus-store',
     'nexus-term', 'nexus-ui', 'nexus-updater', 'nexus-view', 'nexus-wall'
 )

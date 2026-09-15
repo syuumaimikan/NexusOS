@@ -324,6 +324,8 @@ mod desk {
     pub const PICTURES: &[u8] = b"pics";
     /// Open a window a file can be written in.
     pub const EDITOR: &[u8] = b"edit";
+    /// Open a window for moving files about.
+    pub const FILES: &[u8] = b"file";
     /// Start the agent.
     pub const ASSIST: &[u8] = b"asst";
     /// End the session.
@@ -475,6 +477,8 @@ const STORE: &[u8] = b"BIN/STORE.ELF";
 const VIEWER: &[u8] = b"BIN/VIEW.ELF";
 /// The editor.
 const EDITOR: &[u8] = b"BIN/EDIT.ELF";
+/// The file manager.
+const FILES: &[u8] = b"BIN/FILES.ELF";
 /// And the agent, which is given less than any of them.
 const ASSISTANT: &[u8] = b"BIN/ASSIST.ELF";
 /// The program that draws the strip along the bottom and says what a click in
@@ -1995,6 +1999,13 @@ enum What {
     Packages,
     /// The picture window, which is given the filesystem to read from.
     Pictures,
+    /// The file manager, which is given the disk and the removable drives.
+    ///
+    /// The widest thing lent to a window that is not a terminal, and worth
+    /// naming: it can read and write the store, and read and write anything
+    /// plugged in. That is what a file manager *is*, and the alternative is a
+    /// file manager that cannot move a file, which is not one.
+    Files,
     /// The editor, which is given one directory to read *and write*.
     ///
     /// The only window on this machine lent a directory it may change. Not the
@@ -2067,6 +2078,7 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::PACKAGES => Launched::Window(What::Packages),
         tag if tag == desk::PICTURES => Launched::Window(What::Pictures),
         tag if tag == desk::EDITOR => Launched::Window(What::Editor),
+        tag if tag == desk::FILES => Launched::Window(What::Files),
         tag if tag == desk::ASSIST => Launched::Window(What::Assistant),
         tag if tag == desk::QUIT => Launched::Leave,
         tag if tag == desk::HALT => Launched::Halt,
@@ -2238,6 +2250,10 @@ fn read_shell(
 
     if message == desk::EDITOR {
         return open_window(screen, set, tiles, focus, order, What::Editor);
+    }
+
+    if message == desk::FILES {
+        return open_window(screen, set, tiles, focus, order, What::Files);
     }
 
     if message == desk::PICTURES {
@@ -2505,6 +2521,27 @@ fn open_window(
                 &[files, record],
             )?
         }
+        What::Files => {
+            let lending =
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
+            let (Ok(files), Ok(drives)) = (
+                nexus_user::duplicate(FILESYSTEM, lending),
+                nexus_user::duplicate(REMOVABLE, lending),
+            ) else {
+                failed("compositor: FAILED: could not lend a file manager what it needs");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                FILES,
+                slot,
+                screen.x + GAP + step,
+                screen.y + GAP + step,
+                width,
+                height,
+                0,
+                &[files, drives],
+            )?
+        }
         What::Editor => {
             // One directory, opened here, read and write. The viewer above is
             // lent the filesystem read-only because a picture viewer that could
@@ -2645,6 +2682,9 @@ fn open_window(
             What::Packages => "compositor: started the packages, and lent them the disk",
             What::Pictures => "compositor: started a picture window, and lent it the disk to read",
             What::Editor => "compositor: started an editor, and lent it the documents folder",
+            What::Files => {
+                "compositor: started a file manager, and lent it the disk and the drives"
+            }
             What::Assistant => {
                 "compositor: started the agent, and lent it the disk to read and nothing to write"
             }

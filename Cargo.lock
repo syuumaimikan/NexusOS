@@ -115,6 +115,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-files"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-find"
 version = "0.1.0"
 dependencies = [
