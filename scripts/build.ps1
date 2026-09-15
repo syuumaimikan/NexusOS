@@ -160,6 +160,19 @@ $FilesElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-files"
 $StagedFiles = Publish-Program -Elf $FilesElf -ProgramDir $ProgramDir -Name 'files.elf'
 $filesSize = [math]::Round((Get-Item $StagedFiles).Length / 1KB, 1)
 
+# `ls`, which is a program now rather than a method on the shell. Small, and
+# the first one on this machine that exists because a program can be given
+# somewhere to write.
+$LsElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-ls"
+$StagedLs = Publish-Program -Elf $LsElf -ProgramDir $ProgramDir -Name 'ls.elf'
+$lsSize = [math]::Round((Get-Item $StagedLs).Length / 1KB, 1)
+
+# `count`, which reads its standard input to the end. The other half of a pipe:
+# `ls | count` is one channel with each end handed to a different program.
+$CountElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-count"
+$StagedCount = Publish-Program -Elf $CountElf -ProgramDir $ProgramDir -Name 'count.elf'
+$countSize = [math]::Round((Get-Item $StagedCount).Length / 1KB, 1)
+
 $StoreElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-store"
 $StagedStore = Publish-Program -Elf $StoreElf -ProgramDir $ProgramDir -Name 'store.elf'
 $storeSize = [math]::Round((Get-Item $StagedStore).Length / 1KB, 1)
@@ -426,6 +439,8 @@ Write-Host "  viewer     : $viewSize KiB  -> BIN\VIEW.ELF on the disk"
 Write-Host "  launcher   : $launchSize KiB  -> BIN\LAUNCH.ELF on the disk"
 Write-Host "  editor     : $editSize KiB  -> BIN\EDIT.ELF on the disk"
 Write-Host "  files      : $filesSize KiB  -> BIN\FILES.ELF on the disk"
+Write-Host "  ls         : $lsSize KiB  -> BIN\LS.ELF on the disk"
+Write-Host "  count      : $countSize KiB  -> BIN\COUNT.ELF on the disk"
 Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
 Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
 Write-Host "  gemini agt : $geminiSize KiB  -> BIN\GEMINI.ELF on the disk"

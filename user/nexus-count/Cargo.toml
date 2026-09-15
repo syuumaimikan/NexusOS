@@ -1,0 +1,15 @@
+[package]
+name = "nexus-count"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Counts what arrives on standard input. The other half of a pipe."
+
+[[bin]]
+name = "nexus-count"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }

@@ -258,6 +258,47 @@ extern "C" fn main() -> ! {
     finish()
 }
 
+/// The words this shell handles itself, and so cannot pipe.
+///
+/// They write into the window rather than to a handle. A pipe that quietly
+/// dropped the right-hand side of `help | count` would be worse than one that
+/// says it cannot do it.
+const BUILT_IN: &[&str] = &[
+    "help", "?", "clear", "cls", "echo", "pwd", "dir", "cd", "cat", "type", "write", "append",
+    "mkdir", "rm", "del", "run", "date", "beep", "set", "look", "sys", "top", "net", "usb",
+    "lookup", "dig", "nslookup", "scan", "uptime", "history",
+];
+
+/// Split a typed line at its first `|`, if it has one outside quotes.
+///
+/// Outside quotes, because `echo "a | b"` is one argument containing a bar and
+/// not a pipe. The scan is the same one `nexus_shellwords` does and it is done
+/// again here rather than shared, because this needs the *position* of the bar
+/// in the original text and the splitter returns words.
+fn split_pipe(line: &str) -> Option<(alloc::string::String, alloc::string::String)> {
+    let mut quote: Option<char> = None;
+    for (at, character) in line.char_indices() {
+        match quote {
+            Some(open) if character == open => quote = None,
+            Some(_) => {}
+            None if character == '\'' || character == '"' => quote = Some(character),
+            None if character == '|' => {
+                let left = line[..at].trim();
+                let right = line[at + 1..].trim();
+                if left.is_empty() || right.is_empty() {
+                    return None;
+                }
+                return Some((
+                    alloc::string::String::from(left),
+                    alloc::string::String::from(right),
+                ));
+            }
+            None => {}
+        }
+    }
+    None
+}
+
 impl Terminal {
     /// Draw, say so, and act on whatever comes back.
     fn run(&mut self, mut surface: Handle) {
@@ -580,6 +621,16 @@ impl Terminal {
         // their business and not the serial console's.
         nexus_user::log(&format!("term: ran {command}")).ok();
 
+        // `a | b` before anything else, because it is about two commands and
+        // everything below is about one. Only programs can be piped: the
+        // built-in commands write into the window rather than to a handle, and
+        // a pipe that silently ignored its right-hand side would be worse than
+        // one that says it cannot.
+        if let Some((left, right)) = split_pipe(line) {
+            self.pipe_line(&left, &right);
+            return;
+        }
+
         match command {
             "help" | "?" => self.help(),
             "clear" | "cls" => {
@@ -594,7 +645,14 @@ impl Terminal {
                 let text = format!("/{}", self.path.join("/"));
                 self.plain(&text);
             }
-            "ls" | "dir" => self.list(words.argument(0)),
+            // `ls` is a program now, in `user/nexus-ls`, and `dir` is the same
+            // program under the name somebody coming from the other tradition
+            // would type. Neither is in this file any more, which is what the
+            // note at the top of it has been waiting for.
+            "dir" => {
+                let arguments = words.arguments().join(" ");
+                self.run_program("BIN/LS.ELF", &arguments);
+            }
             "cd" => self.change(words.argument(0)),
             "cat" | "type" => self.show(words.argument(0)),
             "write" => self.write_file(words.argument(0), &words.arguments().join(" ")),
@@ -632,9 +690,24 @@ impl Terminal {
                 let text = lines.join("\n");
                 self.plain(&text);
             }
+            // Not a word this shell knows, so it may be a program. `ls` is one
+            // now, which is why it is no longer in the list above.
             other => {
-                let text = nexus_i18n::format("term.unknown", &[("command", &other)]);
-                self.trouble(&text);
+                let program = alloc::format!("BIN/{}.ELF", other.to_uppercase());
+                if self.spawner.is_none() {
+                    let text = nexus_i18n::format("term.unknown", &[("command", &other)]);
+                    self.trouble(&text);
+                    return;
+                }
+                let arguments = words.arguments().join(" ");
+                if self.run_program(&program, &arguments).is_none() {
+                    // `run_program` has already said what went wrong when it
+                    // started and failed. This is the other case: nothing of
+                    // that name exists, which reads better as "no such command"
+                    // than as the loader's complaint about a missing file.
+                    let text = nexus_i18n::format("term.unknown", &[("command", &other)]);
+                    self.trouble(&text);
+                }
             }
         }
     }
@@ -651,6 +724,8 @@ impl Terminal {
             "term.help.mkdir",
             "term.help.rm",
             "term.help.run",
+            "term.help.program",
+            "term.help.pipe",
             "term.help.echo",
             "term.help.date",
             "term.help.beep",
@@ -711,61 +786,6 @@ impl Terminal {
         self.here = Some(at);
         true
     }
-
-    /// `ls`
-    fn list(&mut self, name: Option<&str>) {
-        let Some(directory) = self.directory() else {
-            self.trouble(nexus_i18n::text("term.nofiles"));
-            return;
-        };
-        // A name opens that directory for the listing and leaves the shell
-        // where it was, which is what `ls somewhere` means everywhere else.
-        let (target, borrowed) = match name {
-            Some(name) if !name.is_empty() && name != "." => {
-                match nexus_user::open(directory, name) {
-                    Ok(handle) => (handle, true),
-                    Err(error) => {
-                        let text = nexus_i18n::format(
-                            "term.cannotopen",
-                            &[("name", &name), ("why", &error)],
-                        );
-                        self.trouble(&text);
-                        return;
-                    }
-                }
-            }
-            _ => (directory, false),
-        };
-
-        let mut packed = [0u8; 4096];
-        let read = nexus_user::list(target, &mut packed);
-        if borrowed {
-            nexus_user::close(target).ok();
-        }
-        let Ok(length) = read else {
-            self.trouble(nexus_i18n::text("term.notadirectory"));
-            return;
-        };
-
-        let mut names: Vec<String> = Vec::new();
-        for entry in nexus_user::entries(&packed[..length]) {
-            if entry.name == "." || entry.name == ".." {
-                continue;
-            }
-            names.push(match entry.kind {
-                Kind::Directory => format!("{}/", entry.name),
-                Kind::File => entry.name.to_string(),
-            });
-        }
-        if names.is_empty() {
-            self.note(nexus_i18n::text("term.empty"));
-            return;
-        }
-        names.sort();
-        let text = names.join("    ");
-        self.plain(&text);
-    }
-
     /// `cd`
     fn change(&mut self, name: Option<&str>) {
         if self.root.is_none() {
@@ -978,62 +998,300 @@ impl Terminal {
 
     /// `run`
     ///
-    /// Starts a real program through the spawn service, waits for it, and says
-    /// how it ended. It cannot show what the program printed: there is no
-    /// standard output on this machine, and a program's words go to the log.
-    /// That is said rather than hidden.
+    /// Starts a real program through the spawn service, shows what it writes,
+    /// waits for it, and says how it ended.
+    ///
+    /// Showing what it writes is new, and it is the whole reason this file is
+    /// shrinking rather than growing. The spawn request now carries handles, so
+    /// the terminal makes a channel, hands one end over as the program's
+    /// standard output, and reads the other -- which is all a standard output
+    /// has ever been.
     fn start(&mut self, words: &nexus_shellwords::Words) {
-        let Some(spawner) = self.spawner else {
-            self.trouble(nexus_i18n::text("term.noprograms"));
-            return;
-        };
         let Some(program) = words.argument(0) else {
             self.trouble(nexus_i18n::text("term.needprogram"));
             return;
         };
+        let arguments = words.arguments().join(" ");
+        self.run_program(program, &arguments);
+    }
 
-        if nexus_user::send(spawner, program.as_bytes(), &[]).is_err() {
+    /// Start `program` with the two ends it is to use, and say what came back.
+    ///
+    /// Returns the channel to it and its process, or `None` having already said
+    /// what went wrong. Both `output` and `input` are given away by this call,
+    /// whether it succeeds or not.
+    ///
+    /// Split out from running one so that two can be started before either is
+    /// waited for, which is what a pipe needs: a shell that waited for the left
+    /// program before starting the right one would deadlock the moment the left
+    /// one filled the channel between them.
+    fn spawn_program(
+        &mut self,
+        program: &str,
+        arguments: &str,
+        output: Handle,
+        input: Handle,
+    ) -> Option<(Handle, Handle)> {
+        let Some(spawner) = self.spawner else {
+            nexus_user::close(output).ok();
+            nexus_user::close(input).ok();
             self.trouble(nexus_i18n::text("term.noprograms"));
-            return;
+            return None;
+        };
+
+        // Three things to lend it, in the order every program on this machine
+        // expects: somewhere to write, somewhere to read, and the directory
+        // this shell is looking at.
+        //
+        // The directory is duplicated, not lent: sending a handle gives it up,
+        // and a shell that handed its own working directory to the first
+        // program it ran would have no files afterwards.
+        //
+        // With `TRANSFER` on the copy, and that is not a detail. A handle is
+        // only passable if it carries the right to be passed, so a copy made
+        // with `READ` alone cannot be put in a message -- and the send fails
+        // whole, taking the two channel ends with it, so the program never
+        // starts and nothing says why. Read is what the program gets to *do*
+        // with the directory; transfer is what this shell needs to hand it
+        // over at all.
+        let mut lent = alloc::vec![output, input];
+        if let Some(directory) = self.directory() {
+            if let Ok(copy) = nexus_user::duplicate(
+                directory,
+                nexus_user::rights::READ | nexus_user::rights::TRANSFER,
+            ) {
+                lent.push(copy);
+            }
+        }
+
+        // The path, a zero byte, then the arguments -- which the kernel sends
+        // down the new program's parent channel before handing it over, so they
+        // are waiting when it makes its first read. The zero byte goes in even
+        // when there are no arguments: it is what tells the kernel this caller
+        // uses arguments at all, and without it a program that reads them first
+        // waits for a message that never comes.
+        let mut request = alloc::vec::Vec::new();
+        request.extend_from_slice(program.as_bytes());
+        request.push(0);
+        request.extend_from_slice(arguments.as_bytes());
+
+        if let Err(error) = nexus_user::send(spawner, &request, &lent) {
+            // Named, because the three ways this fails look identical from the
+            // outside: no spawn service, a handle that cannot be passed on, and
+            // a message too large. The first version said only "no programs"
+            // and a missing `TRANSFER` right took an hour to find.
+            let text = nexus_i18n::format("term.cannotrun", &[("name", &program), ("why", &error)]);
+            self.trouble(&text);
+            return None;
         }
         let mut reply = [0u8; 128];
         let mut handles = [Handle(0); 2];
         let Ok(received) = nexus_user::receive(spawner, &mut reply, &mut handles) else {
             self.trouble(nexus_i18n::text("term.noprograms"));
-            return;
+            return None;
         };
         if received.handles != 2 {
             let said = core::str::from_utf8(&reply[..received.bytes]).unwrap_or("");
             let text = nexus_i18n::format("term.cannotrun", &[("name", &program), ("why", &said)]);
             self.trouble(&text);
-            return;
+            return None;
         }
-        let channel = handles[0];
-        let process = handles[1];
+        Some((handles[0], handles[1]))
+    }
 
-        let text = nexus_i18n::format("term.started", &[("name", &program)]);
-        self.note(&text);
+    /// A channel end that is already finished.
+    ///
+    /// For a program with nothing to read. It still gets a handle, so that the
+    /// numbering is the same for every program rather than depending on how it
+    /// was started; this end is dropped at once, which is what makes the
+    /// program's first read report the end of its input.
+    fn nothing_to_read(&mut self) -> Option<Handle> {
+        match nexus_user::channel() {
+            Ok((ours, theirs)) => {
+                nexus_user::close(ours).ok();
+                Some(theirs)
+            }
+            Err(_) => {
+                self.trouble(nexus_i18n::text("term.noprograms"));
+                None
+            }
+        }
+    }
 
-        // Waited for, because a shell that returned to the prompt while the
-        // program was still running would be a shell that cannot tell you how
-        // it went -- and there is nothing else here that would.
+    /// Show everything written to `mine` until the other end goes, and say how
+    /// many bytes that was.
+    ///
+    /// Read *while* the program runs, not after. A channel holds a bounded
+    /// number of messages, so a program that printed more than that into a
+    /// queue nobody was draining would block for ever waiting for room -- and
+    /// the shell would be blocked waiting for the program. This ends when the
+    /// other end closes, which is what the program exiting does to it.
+    fn show_output(&mut self, mine: Handle) -> usize {
+        let mut written = alloc::string::String::new();
+        let mut buffer = [0u8; nexus_user::MAX_MESSAGE];
+        let mut none = [Handle(0); 1];
+        let mut read = 0usize;
+        while let Ok(got) = nexus_user::receive(mine, &mut buffer, &mut none) {
+            read += got.bytes;
+            written.push_str(&alloc::string::String::from_utf8_lossy(&buffer[..got.bytes]));
+            // Shown a line at a time as it arrives, so a slow program is
+            // something you watch rather than something that appears all at
+            // once when it finishes.
+            while let Some(at) = written.find('\n') {
+                let line: alloc::string::String = written.drain(..=at).collect();
+                self.plain(line.trim_end_matches('\n'));
+            }
+        }
+        // Whatever it wrote without a line ending on the end is still output.
+        if !written.is_empty() {
+            let rest = core::mem::take(&mut written);
+            self.plain(&rest);
+        }
+        nexus_user::close(mine).ok();
+        read
+    }
+
+    /// Wait for a program and say how it ended, unless it ended well.
+    fn finished(&mut self, program: &str, channel: Handle, process: Handle) -> Option<u32> {
         let ending = nexus_user::wait(process);
         nexus_user::close(channel).ok();
         nexus_user::close(process).ok();
-
-        let said = match ending {
-            Ok(nexus_user::Ending::Exited(0)) => {
-                nexus_i18n::format("term.finished", &[("name", &program)])
-            }
+        match ending {
+            Ok(nexus_user::Ending::Exited(0)) => Some(0),
             Ok(nexus_user::Ending::Exited(status)) => {
-                nexus_i18n::format("term.failed", &[("name", &program), ("status", &status)])
+                let text =
+                    nexus_i18n::format("term.failed", &[("name", &program), ("status", &status)]);
+                self.note(&text);
+                Some(status)
             }
             Ok(nexus_user::Ending::Stopped) => {
-                nexus_i18n::format("term.stopped", &[("name", &program)])
+                let text = nexus_i18n::format("term.stopped", &[("name", &program)]);
+                self.note(&text);
+                None
             }
-            Err(_) => nexus_i18n::format("term.lost", &[("name", &program)]),
+            Err(_) => {
+                let text = nexus_i18n::format("term.lost", &[("name", &program)]);
+                self.note(&text);
+                None
+            }
+        }
+    }
+
+    /// Start `program`, show what it writes, and say how it ended.
+    ///
+    /// Returns the status it exited with, or `None` if it never started.
+    fn run_program(&mut self, program: &str, arguments: &str) -> Option<u32> {
+        let Ok((mine, theirs)) = nexus_user::channel() else {
+            self.trouble(nexus_i18n::text("term.noprograms"));
+            return None;
         };
-        self.note(&said);
+        let Some(input) = self.nothing_to_read() else {
+            nexus_user::close(mine).ok();
+            nexus_user::close(theirs).ok();
+            return None;
+        };
+        let (channel, process) = self.spawn_program(program, arguments, theirs, input)?;
+
+        let read = self.show_output(mine);
+        // What the program wrote, not what the window now holds. The two are
+        // different numbers and the second one is useless: a shell with a full
+        // scrollback would report the same figure whatever the program did.
+        nexus_user::log(&format!("term: {program} wrote {read} bytes")).ok();
+        self.finished(program, channel, process)
+    }
+
+    /// Take one side of a pipe and say which program it is and what it is given.
+    ///
+    /// The same rule the fallback below uses: a word that is not a built-in
+    /// command is the name of something in `BIN`. `None` when the side is
+    /// empty or names something this shell does itself.
+    fn piped_program(&mut self, side: &str) -> Option<(alloc::string::String, alloc::string::String)> {
+        let words = nexus_shellwords::split(side);
+        let command = words.command()?;
+        if BUILT_IN.contains(&command) {
+            let text = nexus_i18n::format("term.cannotpipe", &[("command", &command)]);
+            self.trouble(&text);
+            return None;
+        }
+        Some((
+            alloc::format!("BIN/{}.ELF", command.to_uppercase()),
+            words.arguments().join(" "),
+        ))
+    }
+
+    /// Run one typed line that has a `|` in it.
+    fn pipe_line(&mut self, left: &str, right: &str) {
+        let Some((left_program, left_arguments)) = self.piped_program(left) else {
+            return;
+        };
+        let Some((right_program, right_arguments)) = self.piped_program(right) else {
+            return;
+        };
+        self.run_pipe(
+            &left_program,
+            &left_arguments,
+            &right_program,
+            &right_arguments,
+        );
+    }
+
+    /// Run `left | right`: the first program's output is the second one's input.
+    ///
+    /// A pipe here is not a new kind of object. It is one ordinary channel,
+    /// handed to one program as its standard output and to the other as its
+    /// standard input, and neither of them knows which end it has. That is the
+    /// whole of it, and it is why this function is short.
+    ///
+    /// Both are started before either is waited for. The other order deadlocks:
+    /// a channel holds a bounded number of messages, so a left-hand program
+    /// that writes more than that stops until somebody reads -- and the reader
+    /// is a program the shell has not started yet.
+    fn run_pipe(&mut self, left: &str, left_arguments: &str, right: &str, right_arguments: &str) {
+        // The pipe itself. `between` is written by the left program; `and` is
+        // read by the right one.
+        let Ok((between, and)) = nexus_user::channel() else {
+            self.trouble(nexus_i18n::text("term.noprograms"));
+            return;
+        };
+        // And the right-hand program's own output, which is what reaches the
+        // window.
+        let Ok((mine, theirs)) = nexus_user::channel() else {
+            nexus_user::close(between).ok();
+            nexus_user::close(and).ok();
+            self.trouble(nexus_i18n::text("term.noprograms"));
+            return;
+        };
+        let Some(nothing) = self.nothing_to_read() else {
+            nexus_user::close(between).ok();
+            nexus_user::close(and).ok();
+            nexus_user::close(mine).ok();
+            nexus_user::close(theirs).ok();
+            return;
+        };
+
+        let Some((left_channel, left_process)) =
+            self.spawn_program(left, left_arguments, between, nothing)
+        else {
+            nexus_user::close(and).ok();
+            nexus_user::close(mine).ok();
+            nexus_user::close(theirs).ok();
+            return;
+        };
+        let Some((right_channel, right_process)) =
+            self.spawn_program(right, right_arguments, theirs, and)
+        else {
+            nexus_user::close(mine).ok();
+            self.finished(left, left_channel, left_process);
+            return;
+        };
+
+        let read = self.show_output(mine);
+        nexus_user::log(&format!("term: {left} | {right} wrote {read} bytes")).ok();
+        // The left one first, because it is the one that has already finished:
+        // the right one cannot have closed its output until its input ended,
+        // and its input ending is the left one exiting.
+        self.finished(left, left_channel, left_process);
+        self.finished(right, right_channel, right_process);
     }
 
     /// Where the machine's own settings live, from the root this shell holds.

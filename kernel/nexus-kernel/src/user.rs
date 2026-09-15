@@ -990,7 +990,7 @@ fn spawn_service(slot: usize) {
             return;
         };
 
-        let (text, handles) = handle_spawn_request(&request.bytes);
+        let (text, handles) = handle_spawn_request(&request.bytes, request.handles);
         if let Err(error) = endpoint.send(text.as_bytes(), handles) {
             kprintln!("[spawn] could not reply: {error}");
         }
@@ -1006,7 +1006,27 @@ fn spawn_service(slot: usize) {
 /// The text is what the asker logs, so it is written for someone reading a boot
 /// log rather than for a program to parse. A program that needs to know whether
 /// it worked has the handle or does not.
-fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::Vec<ipc::Handle>) {
+///
+/// # What `lent` is for
+///
+/// Whatever the asker attached to its request. Those objects become the new
+/// program's, numbered from two in the order they arrived -- handle one is
+/// always the channel back to whoever started it.
+///
+/// This is how a program gets somewhere to write. Until it existed, a program
+/// could only reach the boot log, so anything a person was meant to read had to
+/// be *inside* the terminal: `ls` was a function in the shell rather than a
+/// program, because a program had nowhere to put its output. A caller that
+/// attaches one end of a channel as the first lent handle has given the new
+/// program a standard output, and one that attaches a second has given it a
+/// standard input -- and those two conventions are all a pipe is.
+///
+/// The kernel does not invent either of them. A program started with nothing
+/// attached has nowhere to write, which is the truth and is what `print` says.
+fn handle_spawn_request(
+    request: &[u8],
+    lent: alloc::vec::Vec<ipc::Handle>,
+) -> (alloc::string::String, alloc::vec::Vec<ipc::Handle>) {
     use alloc::format;
     use alloc::vec::Vec;
 
@@ -1018,8 +1038,13 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
     // until after it had started would have started without them.
     let split = request.iter().position(|byte| *byte == 0);
     let (path, arguments) = match split {
-        Some(at) => (&request[..at], &request[at + 1..]),
-        None => (request, &request[request.len()..]),
+        Some(at) => (&request[..at], Some(&request[at + 1..])),
+        // No zero byte at all is a caller that is not using arguments, which is
+        // not the same as a caller passing none. The difference decides whether
+        // a message is sent below, and it matters: a program that reads its
+        // arguments first blocks for ever if nothing is sent, and a program that
+        // expects its first message to be a *reply* is broken by one that is.
+        None => (request, None),
     };
 
     if path.len() > MAX_PATH {
@@ -1028,9 +1053,12 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
             Vec::new(),
         );
     }
-    if arguments.len() > ipc::MAX_MESSAGE {
+    if arguments.is_some_and(|bytes| bytes.len() > ipc::MAX_MESSAGE) {
         return (
-            format!("refused: {} bytes of argument is too much", arguments.len()),
+            format!(
+                "refused: {} bytes of argument is too much",
+                arguments.map_or(0, <[u8]>::len)
+            ),
             Vec::new(),
         );
     }
@@ -1057,16 +1085,20 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
     // process that does not exist yet.
     let (to_child, to_parent) = ipc::Endpoint::pair();
 
+    // That channel first, so handle one means the same thing in every program
+    // on this machine, and then whatever the asker lent -- with the rights it
+    // lent them at, never more. A caller cannot hand on what it does not hold:
+    // the rights on a handle it sends are the rights it had, checked when the
+    // message was sent rather than here.
+    let mut endowments = alloc::vec![(ipc::Object::Channel(to_parent), ipc::Rights::ALL)];
+    let lent_count = lent.len();
+    for handle in lent {
+        endowments.push((handle.object, handle.rights));
+    }
+
     // SAFETY: the heap, the scheduler and the block device are all running;
     // this thread does nothing else while it loads.
-    let result = unsafe {
-        start_from_disk_as(
-            path,
-            "spawned",
-            &[(ipc::Object::Channel(to_parent), ipc::Rights::ALL)],
-            personality,
-        )
-    };
+    let result = unsafe { start_from_disk_as(path, "spawned", &endowments, personality) };
 
     match result {
         Ok(completion) => {
@@ -1077,13 +1109,27 @@ fn handle_spawn_request(request: &[u8]) -> (alloc::string::String, alloc::vec::V
             // first read -- and before the asker can send anything of its own,
             // so a program can rely on its arguments being the first thing it
             // hears and not merely an early one.
-            if !arguments.is_empty() {
+            //
+            // Sent even when they are empty, as long as the caller asked for
+            // arguments at all. A program whose arguments are optional still
+            // reads them first, and if nothing were sent it would block for
+            // ever on a message that was never coming -- which is exactly what
+            // `ls` did the first time it ran with no arguments.
+            if let Some(arguments) = arguments {
                 if let Err(error) = to_child.send(arguments, Vec::new()) {
                     kprintln!("[spawn] could not give {id} its arguments: {error}");
                 }
             }
 
-            kprintln!("[spawn] started {id} from {path} at a process's request");
+            if lent_count == 0 {
+                kprintln!("[spawn] started {id} from {path} at a process's request");
+            } else {
+                kprintln!(
+                    "[spawn] started {id} from {path} at a process's request, \
+                     and lent it {lent_count} thing{}",
+                    if lent_count == 1 { "" } else { "s" }
+                );
+            }
             // Two handles, in a fixed order: the channel to talk to it, and the
             // process to wait for it. Both go back with the one reply, because
             // they are one answer -- an introduction and an undertaking to say

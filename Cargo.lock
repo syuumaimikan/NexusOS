@@ -97,6 +97,13 @@ name = "nexus-config"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-count"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-crypto"
 version = "0.1.0"
 
@@ -232,6 +239,13 @@ version = "0.1.0"
 [[package]]
 name = "nexus-look"
 version = "0.1.0"
+
+[[package]]
+name = "nexus-ls"
+version = "0.1.0"
+dependencies = [
+ "nexus-user",
+]
 
 [[package]]
 name = "nexus-machine"

@@ -241,6 +241,106 @@ pub fn log(text: &str) -> Result<usize, Error> {
     check(result).map(|written| written as usize)
 }
 
+// ---------------------------------------------------------------------------
+// Somewhere to write, and somewhere to read from
+// ---------------------------------------------------------------------------
+
+/// The channel back to whoever started this program.
+///
+/// Every program on this machine has it, at this number, because the spawn
+/// service puts it there before anything else. The program's arguments are the
+/// first message on it.
+pub const PARENT: Handle = Handle(1);
+
+/// Standard output, when the program was given one.
+///
+/// Not a special kind of object and not a kernel concept: it is whatever the
+/// caller attached to the spawn request first, which for a program a person
+/// runs is one end of a channel the terminal holds the other end of. A program
+/// started with nothing attached has no handle here, and [`print`] says so
+/// rather than pretending to have written.
+pub const OUTPUT: Handle = Handle(2);
+
+/// Standard input, when the program was given one.
+///
+/// The second thing the caller attached. A pipe is exactly this and nothing
+/// else: one program's [`OUTPUT`] and the next one's `INPUT` are two ends of
+/// the same channel, and neither program knows which.
+pub const INPUT: Handle = Handle(3);
+
+/// The most one `print` sends in a single message.
+///
+/// A message is [`MAX_MESSAGE`] bytes, and `print` splits anything longer
+/// rather than refusing it or truncating it -- a caller that has to know the
+/// limit to use the function is a caller that will one day not know it.
+const PRINT_CHUNK: usize = MAX_MESSAGE;
+
+/// Write text to standard output.
+///
+/// # Errors
+///
+/// [`Error::NotFound`] when this program was given no output, which is the
+/// ordinary case for something `init` starts rather than a person; and
+/// [`Error::Closed`] when whoever was reading has gone, which is the same fact
+/// a closed pipe reports on any other system. Neither is a reason to stop, and
+/// both are reasons not to claim to have written.
+pub fn print(text: &str) -> Result<(), Error> {
+    for chunk in text.as_bytes().chunks(PRINT_CHUNK) {
+        send(OUTPUT, chunk, &[])?;
+    }
+    Ok(())
+}
+
+/// Write text and a line ending.
+///
+/// # Errors
+///
+/// As [`print`].
+pub fn println(text: &str) -> Result<(), Error> {
+    // One message rather than two, so a line cannot be split across a pipe by
+    // this function's own doing. Anything past the limit is split by `print`,
+    // which is the caller's line being longer than a message and not an
+    // artifact of adding one byte to it.
+    if text.len() < PRINT_CHUNK {
+        let mut line = [0u8; PRINT_CHUNK];
+        line[..text.len()].copy_from_slice(text.as_bytes());
+        line[text.len()] = b'\n';
+        return send(OUTPUT, &line[..text.len() + 1], &[]).map(|_| ());
+    }
+    print(text)?;
+    print("\n")
+}
+
+/// Whether this program was given somewhere to write.
+///
+/// For a program that does something different when nobody is reading -- a
+/// long listing is worth building only if it is going somewhere.
+#[must_use]
+pub fn has_output() -> bool {
+    // Asking what may be done with it, which fails for a number nothing is at.
+    // There is no "does this exist" call and there should not be: every
+    // question about a handle is a question about what it authorises.
+    rights(OUTPUT).is_ok()
+}
+
+/// Read the next thing from standard input, as text.
+///
+/// Blocks until something arrives. Returns `Ok(None)` at the end of the input,
+/// which is when whoever was writing has closed their end -- the same thing a
+/// zero-length read means everywhere else.
+///
+/// # Errors
+///
+/// [`Error::NotFound`] when this program was given no input.
+pub fn read_input(buffer: &mut [u8]) -> Result<Option<usize>, Error> {
+    let mut none = [Handle(0); 1];
+    match receive(INPUT, buffer, &mut none) {
+        Ok(received) => Ok(Some(received.bytes)),
+        Err(Error::Closed) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Milliseconds since the system started.
 #[must_use]
 pub fn uptime() -> u64 {

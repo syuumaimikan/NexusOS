@@ -185,6 +185,12 @@ foreach ($expected in @(
         'term: a terminal, with a shell in it',
         'term: ran help',
         'term: ran ls',
+        # `ls` is a program now, not a method on the shell. The spawn line is
+        # what says so: a terminal that quietly went back to listing the
+        # directory itself would pass every other check in this file.
+        'started p',
+        'from BIN/LS.ELF at a process',
+        'and lent it 3 things',
         'term: ran write',
         'term: ran cat',
         'term: ran uptime',

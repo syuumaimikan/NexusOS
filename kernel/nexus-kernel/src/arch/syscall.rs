@@ -439,11 +439,17 @@ extern "sysv64" fn dispatch(
                     // parent is already waiting is woken as early as possible
                     // rather than after a serial write.
                     process.completion.finish(argument0);
+                    // And everything it was holding goes back now, not when
+                    // its thread is next reaped. A program's standard output is
+                    // a channel somebody else is reading, and that reader
+                    // learns the program has finished by the channel closing --
+                    // so leaving it open until a five-second timer ran meant a
+                    // shell that paused for five seconds after every command.
+                    let released = process.handles.close_all();
                     kprintln!(
-                        "[sys ] process {} \"{}\" exited with status {argument0} through the system-call boundary,                      {} handles open",
+                        "[sys ] process {} \"{}\" exited with status {argument0} through the system-call boundary,                      {released} handles given back",
                         process.id,
-                        process.name.as_str(),
-                        process.handles.len()
+                        process.name.as_str()
                     );
                 }
                 None => kprintln!("[sys ] a kernel thread exited through the boundary"),

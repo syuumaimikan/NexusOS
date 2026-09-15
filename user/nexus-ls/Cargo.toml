@@ -1,0 +1,15 @@
+[package]
+name = "nexus-ls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Lists a directory to standard output. The first program on this machine that is not built into the shell."
+
+[[bin]]
+name = "nexus-ls"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }

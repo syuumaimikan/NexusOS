@@ -782,6 +782,14 @@ Invoke-Step 'the wallpaper' {
         (Join-Path $PSScriptRoot 'test-wallpaper.ps1')) 'wallpaper tests'
 }
 
+Invoke-Step 'standard output' {
+    # Needs a desktop to open a terminal in.
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-stdout.ps1')) 'standard output tests'
+}
+
 Invoke-Step 'the Linux translation' {
     # No desktop needed: the three translated programs are run by `init`, long
     # before anything draws. The last of them writes a file, and the script

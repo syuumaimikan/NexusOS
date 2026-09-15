@@ -763,6 +763,36 @@ impl HandleTable {
             .ok_or(HandleError::NotFound)
     }
 
+    /// Close every handle, and say how many there were.
+    ///
+    /// For a process that has finished. Until this existed, a program's handles
+    /// were released when its thread was *reaped*, which happens on a five
+    /// second timer in the monitor thread -- so the channel a program wrote its
+    /// output to stayed open for up to five seconds after the program had
+    /// exited, and a shell reading that channel waited all of it. Every command
+    /// in the terminal paused after finishing, for no reason a person could
+    /// see. Exiting closes what you hold; that is what it means everywhere
+    /// else, and it is what it means here now.
+    ///
+    /// The entries are taken out under the lock and dropped *outside* it, for
+    /// the reason `sched::reap_finished` gives at greater length: dropping an
+    /// endpoint wakes whoever was waiting on the other end, and doing that
+    /// while holding this lock is a deadlock waiting for a second process.
+    pub fn close_all(&self) -> usize {
+        let taken: Vec<Handle> = {
+            let mut entries = self.entries.lock();
+            // `core::mem::take` rather than `drain`: a `BTreeMap` behind this
+            // lock guard has no `drain`, and swapping an empty map in leaves
+            // the table usable if anything reaches it afterwards.
+            core::mem::take(&mut *entries)
+                .into_values()
+                .collect()
+        };
+        let count = taken.len();
+        drop(taken);
+        count
+    }
+
     /// How many handles are open.
     #[must_use]
     pub fn len(&self) -> usize {
