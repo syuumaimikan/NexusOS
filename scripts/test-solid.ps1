@@ -77,7 +77,13 @@ if (Test-Path $Log) { Remove-Item $Log -Force }
 # rather than reading a half-written image: a copy taken while somebody's run is
 # writing is torn, and a torn filesystem is exactly the confusing failure this
 # exists to avoid.
-$PrivateDir = Join-Path $BuildDir 'solid'
+# One copy, shared by the tests in this file's family rather than one each.
+#
+# It is eight gigabytes. Two of them for two tests that never run at the same
+# time is eight gigabytes spent on nothing. They must not be run concurrently
+# with each other -- which is the same rule that made the copy necessary in the
+# first place, now applying to me as well as to everybody else.
+$PrivateDir = Join-Path $BuildDir 'machine'
 $SharedDisk = Join-Path $BuildDir 'nexus-disk.img'
 $PrivateDisk = Join-Path $PrivateDir 'nexus-disk.img'
 if (-not (Test-Path $PrivateDir)) { New-Item -ItemType Directory $PrivateDir | Out-Null }
