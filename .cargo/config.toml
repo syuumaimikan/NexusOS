@@ -34,7 +34,7 @@ bootloader = ["build", "-p", "nexus-boot", "--target", "x86_64-unknown-uefi"]
 # because they are a separate world: a different target, a different system-call
 # interface, and `core` rebuilt for a target this machine has no `std` for.
 guest = [
-    "build", "-p", "nexus-guest", "--release",
+    "build", "-p", "nexus-guest", "-p", "nexus-probe", "--release",
     "--target", "x86_64-unknown-linux-gnu",
     "-Zbuild-std=core,compiler_builtins",
     "-Zbuild-std-features=compiler-builtins-mem",

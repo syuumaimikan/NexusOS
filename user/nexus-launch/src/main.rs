@@ -151,6 +151,11 @@ const ENTRIES: &[Entry] = &[
         grave: false,
     },
     Entry {
+        key: "shell.probe",
+        tag: b"prob",
+        grave: false,
+    },
+    Entry {
         key: "shell.sleep",
         tag: b"slep",
         grave: true,

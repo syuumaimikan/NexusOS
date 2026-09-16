@@ -325,7 +325,9 @@ $GuestPrograms = @(
     @{ Name = 'execed'; File = 'guest-execed' },
     @{ Name = 'net'; File = 'guest-net' },
     @{ Name = 'wlsrv'; File = 'guest-wlserver' },
-    @{ Name = 'wlcli'; File = 'guest-wlclient' }
+    @{ Name = 'wlcli'; File = 'guest-wlclient' },
+    # And the one that asks the machine which calls it does not have.
+    @{ Name = 'probe'; File = 'nexus-probe' }
 )
 $guestTotal = 0
 foreach ($guest in $GuestPrograms) {
@@ -395,6 +397,7 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 BIN/LD.LX   /lib/ld-nexus-x86-64.so.1
 BIN/DYN.LX  /usr/bin/dyn
 BIN/DRAW.LX /usr/bin/draw
+BIN/GPROBE.LX /usr/bin/probe
 BIN/GPOSIX.LX   /usr/bin/posix
 BIN/GTHREADS.LX /usr/bin/threads
 BIN/GSIGNALS.LX /usr/bin/signals

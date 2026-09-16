@@ -334,6 +334,8 @@ mod desk {
     pub const SOLID: &[u8] = b"sold";
     /// Find out what is on the network.
     pub const NETOOL: &[u8] = b"netw";
+    /// Ask the machine which Linux calls it does not have.
+    pub const PROBE: &[u8] = b"prob";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -545,6 +547,16 @@ const NETOOL: &[u8] = b"BIN/NETOOL.ELF";
 /// is the compatibility layer turning this program's protocol into something a
 /// program that has never heard of it can use.
 const LINUX_WINDOW: &[u8] = b"linux:/usr/bin/draw";
+
+/// A program built for Linux that asks which calls this machine does not have.
+///
+/// No window and nothing lent: it makes a system call, looks at whether the
+/// answer is `ENOSYS`, and writes a line. What it needs is to be started at
+/// all, and what it produces goes to the log like any other program's output.
+///
+/// The point of it is that the gap between this machine and the Linux ABI stops
+/// being a list somebody remembered and becomes a list the machine printed.
+const LINUX_PROBE: &[u8] = b"linux:/usr/bin/probe";
 
 /// A Wayland compositor, and a Wayland client for it.
 ///
@@ -2148,6 +2160,15 @@ fn serve(
                         nexus_user::close(process).ok();
                     }
                 }
+                Launched::Probe => {
+                    if let Some(process) = start_quiet(LINUX_PROBE, &[]) {
+                        nexus_user::log(
+                            "compositor: started the Linux ABI probe, and lent it nothing at all",
+                        )
+                        .ok();
+                        nexus_user::close(process).ok();
+                    }
+                }
                 Launched::Unpack => {
                     // Two folders and nothing else. The downloads folder
                     // **read only** -- an unpacker has no business editing what
@@ -2449,6 +2470,7 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::UNPACK => Launched::Unpack,
         tag if tag == desk::SOLID => Launched::Window(What::Solid),
         tag if tag == desk::NETOOL => Launched::Window(What::Netool),
+        tag if tag == desk::PROBE => Launched::Probe,
         tag if tag == desk::QUIT => Launched::Leave,
         tag if tag == desk::HALT => Launched::Halt,
         tag if tag == desk::RESTART => Launched::Restart,
@@ -2469,6 +2491,9 @@ enum Launched {
     Restart,
     /// Put the screen out.
     Sleep,
+    /// Ask the machine which Linux calls it does not have. Not a window: it
+    /// asks, writes a list, and ends.
+    Probe,
     /// Unpack what was downloaded. Not a window: it runs, says what it did,
     /// and exits.
     Unpack,

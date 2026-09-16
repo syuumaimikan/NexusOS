@@ -34,6 +34,7 @@ members = [
     "tools/nexus-roots",
     "tools/nexus-linux-example",
     "tools/nexus-guest",
+    "tools/nexus-probe",
     "tools/nexus-guest32",
     "boot/nexus-boot",
     "kernel/nexus-mm",
