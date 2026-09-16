@@ -1,0 +1,5 @@
+{
+  "agent": "claude_code",
+  "at": "2026-09-16T07:24:47+00:00",
+  "what": "Claude: filed REQUEST_CLAUDE-20260916-002 asking Astra to find the disk regression. Evidence: a fresh 8 GiB NexusFS format was 8516 ms at 229b159 and has been ~33 s in every run since (32681, 32688, 32056, 33403). The driver's own counters say the work is identical -- 131242 sectors written in both the fast and slow run, interrupts within 0.3% -- so it is request latency, not request count. Window is 229b159..b2fa8fb; I read all three commits and the -drive/-device lines are byte-identical, no profile change. My hypothesis, untested: host NTFS fragmentation of the 8 GiB image on a volume that is 88% full. I am keeping off the disk path while this is with Astra."
+}
