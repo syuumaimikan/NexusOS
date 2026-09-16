@@ -115,19 +115,72 @@ extern "C" fn main() -> ! {
     }
     let downloads = handles[0];
     let destination = handles[1];
-    let Ok(name) = core::str::from_utf8(&buffer[..received.bytes]) else {
+    let Ok(asked) = core::str::from_utf8(&buffer[..received.bytes]) else {
         failed("unpack: FAILED: the file name is not text");
         finish();
     };
 
-    match unpack(downloads, destination, name) {
-        Ok(report) => nexus_user::log(&report).ok(),
-        Err(why) => {
-            failed(&format!("unpack: FAILED: {name}: {why}"));
-            None
+    // One named file, or everything in the folder that looks like an archive.
+    //
+    // The second is the ordinary case and is why there is no name to type: the
+    // launcher asks for a thing by a four-byte tag and carries no arguments, and
+    // rather than invent a way to pass one, the folder *is* the queue. Somebody
+    // downloads an installer and then asks the machine to install what was
+    // downloaded, which is the order the sentence goes in anyway.
+    let names = if asked.is_empty() {
+        match archives_in(downloads) {
+            Ok(found) if found.is_empty() => {
+                nexus_user::log("unpack: there is nothing in the downloads folder to unpack").ok();
+                finish();
+            }
+            Ok(found) => found,
+            Err(why) => {
+                failed(&format!("unpack: FAILED: {why}"));
+                finish();
+            }
         }
+    } else {
+        alloc::vec![String::from(asked)]
     };
+
+    for name in &names {
+        match unpack(downloads, destination, name) {
+            Ok(report) => nexus_user::log(&report).ok(),
+            Err(why) => {
+                // One archive that cannot be read does not stop the others. A
+                // folder holding a good package and a half-finished download is
+                // an ordinary state, and refusing both because of the second
+                // would be the wrong answer to the first.
+                failed(&format!("unpack: {name}: {why}"));
+                None
+            }
+        };
+    }
     finish()
+}
+
+/// Everything in a folder whose name says it might be an archive.
+///
+/// By name here, and by content later: the name is only used to decide what is
+/// worth opening, and what it actually is comes from its bytes. A folder full
+/// of pictures should not produce a page of refusals.
+fn archives_in(downloads: Handle) -> Result<alloc::vec::Vec<String>, String> {
+    let listing = nexus_api::path::list(downloads, "")
+        .map_err(|_| String::from("the downloads folder could not be read"))?;
+    let mut found = alloc::vec::Vec::new();
+    for (name, kind) in listing {
+        if kind != nexus_user::Kind::File {
+            continue;
+        }
+        let lower = name.to_ascii_lowercase();
+        if [".deb", ".tar.gz", ".tgz", ".tar"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+        {
+            found.push(name);
+        }
+    }
+    Ok(found)
 }
 
 /// Read one downloaded file and write out what is inside it.
