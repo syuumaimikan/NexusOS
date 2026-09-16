@@ -104,7 +104,12 @@ extern "C" fn main() -> ! {
     // program that could write into the downloads folder on a machine where
     // the two arrived the other way round.
     let mut buffer = [0u8; 256];
-    let mut handles = [Handle(0); 2];
+    // Three places for handles and two required. The third is the root a
+    // program built for Linux sees, lent read only so that a loader named in a
+    // `PT_INTERP` can be *looked for* rather than assumed absent. A machine
+    // that has never installed the Linux runtime has no such directory, so its
+    // absence is ordinary and not an error.
+    let mut handles = [Handle(0); 3];
     // The reason, not just the fact. "nothing arrived" is true of a channel
     // whose peer has gone, of a buffer too small for what was sent, and of a
     // message carrying more handles than there is room for -- and those are
@@ -116,12 +121,13 @@ extern "C" fn main() -> ! {
             finish();
         }
     };
-    if received.handles != 2 {
+    if received.handles < 2 {
         failed("unpack: FAILED: the downloads and destination folders did not both arrive");
         finish();
     }
     let downloads = handles[0];
     let destination = handles[1];
+    let linux_root = (received.handles > 2).then_some(handles[2]);
     let Ok(asked) = core::str::from_utf8(&buffer[..received.bytes]) else {
         failed("unpack: FAILED: the file name is not text");
         finish();
@@ -155,7 +161,7 @@ extern "C" fn main() -> ! {
     };
 
     for name in &names {
-        match unpack(downloads, destination, name) {
+        match unpack(downloads, destination, name, linux_root) {
             Ok(report) => nexus_user::log(&report).ok(),
             Err(why) => {
                 // One archive that cannot be read does not stop the others. A
@@ -195,7 +201,12 @@ fn archives_in(downloads: Handle) -> Result<alloc::vec::Vec<String>, String> {
 }
 
 /// Read one downloaded file and write out what is inside it.
-fn unpack(downloads: Handle, destination: Handle, name: &str) -> Result<String, String> {
+fn unpack(
+    downloads: Handle,
+    destination: Handle,
+    name: &str,
+    linux_root: Option<Handle>,
+) -> Result<String, String> {
     let archive = read_whole(downloads, name)?;
 
     // Where it goes: a folder named after the file, so two packages cannot
@@ -254,7 +265,8 @@ fn unpack(downloads: Handle, destination: Handle, name: &str) -> Result<String, 
         }
         said.push(loader);
         nexus_user::log(&format!(
-            "unpack: {program} cannot run here: it asks for {loader}, which this machine does not have"
+            "unpack: {program} asks for {loader}: {}",
+            verdict(linux_root, loader)
         ))
         .ok();
     }
@@ -262,16 +274,29 @@ fn unpack(downloads: Handle, destination: Handle, name: &str) -> Result<String, 
         // Once, plainly, rather than implied by the lines above. A folder full
         // of files that will not start is a worse outcome than an error, if
         // nobody says so.
-        nexus_user::log(
-            "unpack: those programs are dynamically linked against a C library this system has \
-             none of; the files are unpacked and are not runnable",
-        )
-        .ok();
+        // No longer asserted for every program: this used to say that anything
+        // with a `PT_INTERP` was not runnable, which was true when nothing on
+        // this machine could load one and stopped being true the day a loader
+        // was installed. A sentence that was right once is the hardest kind of
+        // wrong to notice.
+        let missing = needs
+            .iter()
+            .filter(|(_, loader)| !present(linux_root, loader))
+            .count();
+        if missing != 0 {
+            nexus_user::log(&format!(
+                "unpack: {missing} of them name a loader that is not in the Linux root; those files are unpacked and are not runnable"
+            ))
+            .ok();
+        }
     }
 
     Ok(format!(
         "unpack: {folder}/ holds {written} file(s), {} of which need a loader that is not here",
-        needs.len()
+        needs
+            .iter()
+            .filter(|(_, loader)| !present(linux_root, loader))
+            .count()
     ))
 }
 
@@ -329,6 +354,56 @@ fn contents(archive: &[u8], name: &str) -> Result<(Vec<Unpacked>, String), Strin
 }
 
 /// A reason, in words a person can act on.
+/// Whether a loader named by a `PT_INTERP` is actually in the Linux root.
+///
+/// Answered by looking, not by assuming. Without the root lent -- an ordinary
+/// state on a machine that has never installed the Linux runtime -- the answer
+/// is "no", which is the same conclusion the old code reached and is now
+/// reached for a stated reason rather than by default.
+///
+/// The path is absolute in the *Linux* root, so the leading slash goes and the
+/// rest is walked a component at a time. `.` and `..` are refused outright
+/// rather than resolved: this is a name chosen by whoever built the package,
+/// and it gets the same treatment as the names inside the archive.
+fn present(root: Option<Handle>, loader: &str) -> bool {
+    let Some(root) = root else {
+        return false;
+    };
+    let mut at = root;
+    let mut opened: Option<Handle> = None;
+    let mut found = false;
+    for part in loader.trim_start_matches('/').split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            found = false;
+            break;
+        }
+        let Ok(next) = nexus_user::open(at, part) else {
+            found = false;
+            break;
+        };
+        if let Some(previous) = opened.replace(next) {
+            nexus_user::close(previous).ok();
+        }
+        at = next;
+        found = true;
+    }
+    if let Some(last) = opened {
+        nexus_user::close(last).ok();
+    }
+    found
+}
+
+/// What to say about one loader, in the sentence that names it.
+fn verdict(root: Option<Handle>, loader: &str) -> &'static str {
+    if root.is_none() {
+        "there is no Linux root on this machine to look in"
+    } else if present(root, loader) {
+        "which is here, so it may run"
+    } else {
+        "which is not in the Linux root"
+    }
+}
+
 fn describe(trouble: Trouble) -> String {
     match trouble {
         Trouble::NotThisFormat => String::from("not a format this system reads"),

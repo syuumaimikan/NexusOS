@@ -1342,6 +1342,12 @@ const DOCUMENTS: &str = "DOCS";
 const DOWNLOADS: &str = "DOWNLOAD";
 /// Where software unpacked out of a download goes.
 const SOFTWARE: &str = "SOFTWARE";
+/// Where a program built for Linux believes `/` is.
+///
+/// Lower case, because that is what the compatibility layer creates and looks
+/// in -- see `store::open_child(&top, "linux")` in the kernel's
+/// `compat::linux_files`.
+const LINUX_ROOT: &str = "linux";
 
 /// Open -- making it if it is not there -- the folder an editor may write in.
 ///
@@ -1404,6 +1410,28 @@ fn open_software() -> Result<nexus_user::Handle, nexus_user::Error> {
         directory,
         nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
     );
+    nexus_user::close(directory).ok();
+    lent
+}
+
+/// Open the root that programs built for Linux see, read only.
+///
+/// `None` when there is not one, which is an ordinary state rather than a
+/// failure: a machine that has never installed the Linux runtime has no such
+/// directory, and the unpacker's answer in that case is the same as its answer
+/// for a loader that is missing.
+///
+/// Read and transfer, and deliberately not write. The unpacker is being lent
+/// this so it can *look*, and a program that could write into the root every
+/// translated program resolves its libraries from would be a program that could
+/// replace anybody's loader.
+fn open_linux_root() -> Option<nexus_user::Handle> {
+    let directory = nexus_user::open(FILESYSTEM, LINUX_ROOT).ok()?;
+    let lent = nexus_user::duplicate(
+        directory,
+        nexus_user::rights::READ | nexus_user::rights::TRANSFER,
+    )
+    .ok();
     nexus_user::close(directory).ok();
     lent
 }
@@ -2133,10 +2161,23 @@ fn serve(
                     });
                     match (downloads, open_software().ok()) {
                         (Some(downloads), Some(software)) => {
-                            if let Some(process) = start_quiet(UNPACK, &[downloads, software]) {
-                                nexus_user::log(
-                                    "compositor: started the unpacker, and lent it the downloads folder to read and a folder to write",
-                                )
+                            // And the Linux root, read only, when there is one.
+                            // Without it the unpacker can read a program's
+                            // `PT_INTERP` and cannot check it -- which is how it
+                            // came to assert that a loader "this machine does
+                            // not have" for every loader it saw, including one
+                            // that had since been installed.
+                            let mut lent = alloc::vec![downloads, software];
+                            let linux = open_linux_root();
+                            if let Some(root) = linux {
+                                lent.push(root);
+                            }
+                            if let Some(process) = start_quiet(UNPACK, &lent) {
+                                nexus_user::log(if linux.is_some() {
+                                    "compositor: started the unpacker, and lent it the downloads folder to read, a folder to write, and the Linux root to look in"
+                                } else {
+                                    "compositor: started the unpacker, and lent it the downloads folder to read and a folder to write; there is no Linux root to look in"
+                                })
                                 .ok();
                                 // Reaped straight away. It is a short program and
                                 // nothing here waits on it; leaving the handle

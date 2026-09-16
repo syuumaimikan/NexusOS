@@ -1,20 +1,52 @@
 # Installing software written for somewhere else
 
 ```
+launch: asked for unpk
 compositor: the launcher asked for unpk
-compositor: started the unpacker, and lent it the downloads folder to read
-            and a folder to write
-unpack: DEMO.DEB is the Debian package demo-linux-app 1.2-3; 2 file(s),
-        540 bytes into DEMO.DEB/
-unpack: usr/bin/demo cannot run here: it asks for
-        /lib64/ld-linux-x86-64.so.2, which this machine does not have
-unpack: those programs are dynamically linked against a C library this system
-        has none of; the files are unpacked and are not runnable
+compositor: started the unpacker, and lent it the downloads folder to read, a folder to write, and the Linux root to look in
+unpack: DEMO.DEB is the Debian package demo-linux-app 1.2-3; 2 file(s), 540 bytes into DEMO.DEB/
+unpack: usr/bin/demo asks for /lib64/ld-linux-x86-64.so.2: which is not in the Linux root
+unpack: 1 of them name a loader that is not in the Linux root; those files are unpacked and are not runnable
 unpack: DEMO.DEB/ holds 2 file(s), 1 of which need a loader that is not here
 ```
 
-Driven the way a person would: open the launcher, type enough of "Install
-downloads", press return.
+`build/unpack-test.log`, in the order it was written, with the `[user]` prefix
+taken off each line. Driven the way a person would: open the launcher, type
+"dow", press return. `scripts/test-unpack.ps1` is that, automated.
+
+## The sentence that was true and stopped being true
+
+An earlier version of the fifth line above said the loader was one
+"**which this machine does not have**", and the line after it said those
+programs "are dynamically linked against a C library this system has none of".
+
+The unpacker was not checking. It said that about *every* `PT_INTERP` it saw,
+because when it was written nothing on this machine could load one, so the
+assumption and the fact agreed. Then another agent installed a dynamic loader at
+`/lib/ld-nexus-x86-64.so.1`, and the sentence went on being printed with the
+same confidence and was no longer true.
+
+**A sentence that was right once is the hardest kind of wrong to notice**, and
+nothing would have caught this: the test passed, the output read correctly, and
+the only thing that had changed was the world the sentence described.
+
+So the unpacker is lent the Linux root, read only, and **looks**. Checked in
+all three directions by a temporary probe, because a function that always
+answered "no" would pass the test above perfectly:
+
+```
+unpack: PROBE /lib/ld-nexus-x86-64.so.1: which is here, so it may run
+unpack: PROBE /lib64/ld-linux-x86-64.so.2: which is not in the Linux root
+unpack: PROBE /lib/../lib/x: which is not in the Linux root
+```
+
+The third is the `..` rule, which applies to a loader's path for the same
+reason it applies to a name inside the archive: both were chosen by whoever
+built the package.
+
+Read only, and that is the point of lending a directory rather than an answer.
+A program that could write into the root every translated program resolves its
+libraries from could replace anybody's loader.
 
 ## The ask, and the honest half of it
 
@@ -24,8 +56,10 @@ the point of the whole exercise rather than an apology at the end of it.
 
 **Unpacking is real and it works.** Running what comes out does not, and the
 reason is not a missing feature — it is that a `.deb` full of programs built
-against a C library needs that C library, a dynamic loader, and usually a window
-system and a driver stack besides. Each of those is larger than this operating
+against a C library needs that C library, a dynamic loader it recognises, and
+usually a window system and a driver stack besides. There *is* a loader on this
+machine now, and it is not the one `demo.deb` asks for; being able to load
+something is not the same as being able to load glibc's. Each of those is larger than this operating
 system. See [linux-software.md](linux-software.md) for what the compatibility
 layer does and does not reach.
 
@@ -124,8 +158,8 @@ That choice found two real holes while the tests were being written:
 
 The package on the disk (`assets/demo.deb`, in `DOWNLOAD`) came out of those
 same tools and holds a genuine x86-64 executable whose `PT_INTERP` names the
-loader every program built against glibc asks for. That is what makes the last
-two log lines at the top of this file evidence rather than a message.
+loader every program built against glibc asks for. That is what makes the
+last lines at the top of this file evidence rather than a message.
 
 ## Limits, stated rather than discovered
 
