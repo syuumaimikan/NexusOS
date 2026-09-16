@@ -114,12 +114,7 @@ pub use crate::Hash;
 /// # Errors
 ///
 /// [`Trouble`], every variant of which means the signature must be rejected.
-pub fn verify(
-    point: &[u8],
-    signature: &[u8],
-    message: &[u8],
-    hash: Hash,
-) -> Result<(), Trouble> {
+pub fn verify(point: &[u8], signature: &[u8], message: &[u8], hash: Hash) -> Result<(), Trouble> {
     match hash {
         Hash::Sha256 => {
             // Shorter than the order, so it is used whole. FIPS 186-4 truncates

@@ -46,7 +46,10 @@ extern "C" fn main() -> ! {
     });
 
     if !had {
-        nexus_text::say("grep", "grep: nothing was connected to this program's input");
+        nexus_text::say(
+            "grep",
+            "grep: nothing was connected to this program's input",
+        );
         nexus_user::exit_with(2);
     }
     // One when nothing matched, which is what every other `grep` does and is

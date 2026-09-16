@@ -57,8 +57,11 @@ pub fn open(directory: Handle, path: &str) -> Result<Handle, Error> {
         // The path named the directory itself. Duplicated rather than returned,
         // so that the caller may close what it is given without closing the
         // handle it passed in.
-        nexus_user::duplicate(directory, nexus_user::rights::READ | nexus_user::rights::WRITE)
-            .or_else(|_| nexus_user::duplicate(directory, nexus_user::rights::READ))
+        nexus_user::duplicate(
+            directory,
+            nexus_user::rights::READ | nexus_user::rights::WRITE,
+        )
+        .or_else(|_| nexus_user::duplicate(directory, nexus_user::rights::READ))
     }
 }
 
@@ -98,8 +101,8 @@ pub fn read(directory: Handle, path: &str) -> Result<Vec<u8>, Error> {
 /// on to rely on it.
 pub fn write(directory: Handle, path: &str, bytes: &[u8]) -> Result<(), Error> {
     let (parent, name) = split(directory, path)?;
-    let file = nexus_user::create(parent, name, Kind::File)
-        .or_else(|_| nexus_user::open(parent, name))?;
+    let file =
+        nexus_user::create(parent, name, Kind::File).or_else(|_| nexus_user::open(parent, name))?;
     let written = nexus_user::write(file, bytes);
     nexus_user::close(file).ok();
     if parent != directory {

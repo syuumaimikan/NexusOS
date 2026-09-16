@@ -970,9 +970,10 @@ fn requests(store: &Store, asked: &Asked) -> Answer<bool> {
             // Who is asking, if they said. Not required -- somebody looking at
             // the whole arrangement should not have to claim an identity to see
             // it -- but it turns the listing into an answer about *them*.
-            let me = asked.flag("agent").map(str::to_string).unwrap_or_else(|| {
-                std::env::var("NEXUS_AGENT").unwrap_or_default()
-            });
+            let me = asked
+                .flag("agent")
+                .map(str::to_string)
+                .unwrap_or_else(|| std::env::var("NEXUS_AGENT").unwrap_or_default());
             for box_ in mailbox::all(store)? {
                 let count = store
                     .list(&box_.directory)?

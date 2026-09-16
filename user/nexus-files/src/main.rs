@@ -135,7 +135,11 @@ enum Place {
     /// This machine's own store, through a directory handle.
     Store { root: Handle },
     /// A removable drive, through the kernel's service.
-    Drive { service: Handle, number: u8, size: u64 },
+    Drive {
+        service: Handle,
+        number: u8,
+        size: u64,
+    },
 }
 
 impl Place {
@@ -143,10 +147,9 @@ impl Place {
     fn name(&self) -> String {
         match self {
             Self::Store { .. } => nexus_i18n::text("files.store").to_string(),
-            Self::Drive { number, size, .. } => nexus_i18n::format(
-                "files.drive",
-                &[("n", &number), ("size", &size)],
-            ),
+            Self::Drive { number, size, .. } => {
+                nexus_i18n::format("files.drive", &[("n", &number), ("size", &size)])
+            }
         }
     }
 }
@@ -289,22 +292,22 @@ impl Files {
                     self.status = nexus_i18n::text("files.gone").to_string();
                 }
             }
-            Place::Drive { service, number, .. } => {
-                match drive::list(*service, *number, &self.here()) {
-                    Ok(entries) => {
-                        for entry in entries {
-                            self.items.push(Item {
-                                name: entry.name,
-                                size: entry.size,
-                                is_directory: entry.is_directory,
-                            });
-                        }
-                    }
-                    Err(trouble) => {
-                        self.status = nexus_i18n::text(trouble.key()).to_string();
+            Place::Drive {
+                service, number, ..
+            } => match drive::list(*service, *number, &self.here()) {
+                Ok(entries) => {
+                    for entry in entries {
+                        self.items.push(Item {
+                            name: entry.name,
+                            size: entry.size,
+                            is_directory: entry.is_directory,
+                        });
                     }
                 }
-            }
+                Err(trouble) => {
+                    self.status = nexus_i18n::text(trouble.key()).to_string();
+                }
+            },
         }
 
         self.at = self.at.min(self.items.len().saturating_sub(1));
@@ -339,9 +342,9 @@ impl Files {
                 bytes.truncate(read);
                 Some(bytes)
             }
-            Place::Drive { service, number, .. } => {
-                drive::read(*service, *number, name, MAX_FILE).ok()
-            }
+            Place::Drive {
+                service, number, ..
+            } => drive::read(*service, *number, name, MAX_FILE).ok(),
         }
     }
 
@@ -394,10 +397,10 @@ impl Files {
                     Err(error) => Err(format!("{error}")),
                 }
             }
-            Place::Drive { service, number, .. } => {
-                drive::write(*service, *number, &item.name, &bytes)
-                    .map_err(|trouble| nexus_i18n::text(trouble.key()).to_string())
-            }
+            Place::Drive {
+                service, number, ..
+            } => drive::write(*service, *number, &item.name, &bytes)
+                .map_err(|trouble| nexus_i18n::text(trouble.key()).to_string()),
         };
 
         match result {
@@ -419,10 +422,8 @@ impl Files {
                 .ok();
             }
             Err(why) => {
-                self.status = nexus_i18n::format(
-                    "files.notcopied",
-                    &[("name", &item.name), ("why", &why)],
-                );
+                self.status =
+                    nexus_i18n::format("files.notcopied", &[("name", &item.name), ("why", &why)]);
             }
         }
         true
@@ -470,10 +471,10 @@ impl Files {
                 }
                 removed
             }
-            Place::Drive { service, number, .. } => {
-                drive::remove(*service, *number, &item.name)
-                    .map_err(|trouble| nexus_i18n::text(trouble.key()).to_string())
-            }
+            Place::Drive {
+                service, number, ..
+            } => drive::remove(*service, *number, &item.name)
+                .map_err(|trouble| nexus_i18n::text(trouble.key()).to_string()),
         };
 
         match result {
@@ -542,13 +543,11 @@ impl Files {
                 match core::str::from_utf8(&bytes) {
                     Ok(text) => {
                         self.peeking = Some(text.chars().take(4000).collect());
-                        self.status =
-                            nexus_i18n::format("files.showing", &[("name", &item.name)]);
+                        self.status = nexus_i18n::format("files.showing", &[("name", &item.name)]);
                     }
                     Err(_) => {
                         self.peeking = None;
-                        self.status =
-                            nexus_i18n::format("files.notext", &[("name", &item.name)]);
+                        self.status = nexus_i18n::format("files.notext", &[("name", &item.name)]);
                     }
                 }
             }
@@ -630,12 +629,7 @@ impl App for Files {
         if let Some(text) = &self.peeking {
             // A file, instead of the listing.
             for (row, content) in text.lines().take(self.visible).enumerate() {
-                canvas.text(
-                    bounds.x + PAD,
-                    list_top + row as u32 * line,
-                    content,
-                    ink,
-                );
+                canvas.text(bounds.x + PAD, list_top + row as u32 * line, content, ink);
             }
         } else {
             let path = self.here();

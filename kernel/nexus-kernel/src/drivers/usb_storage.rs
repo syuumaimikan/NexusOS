@@ -164,7 +164,10 @@ pub unsafe fn open(attached: &mut Attached) -> Result<Disk, Trouble> {
         let slot_at = at + size;
         let speed = (unsafe_port_speed(attached.device.port)) << 20;
         core::ptr::write_volatile(slot_at as *mut u32, speed | (u32::from(highest) << 27));
-        core::ptr::write_volatile((slot_at + 4) as *mut u32, (attached.device.port as u32) << 16);
+        core::ptr::write_volatile(
+            (slot_at + 4) as *mut u32,
+            (attached.device.port as u32) << 16,
+        );
 
         // Bulk IN is endpoint type 6, bulk OUT is 2. Three retries, as for the
         // control endpoint and for the same reason.
@@ -371,12 +374,7 @@ unsafe fn command(
     // status read cannot overwrite the command that is still being referred to.
     // SAFETY: as above.
     unsafe {
-        bulk(
-            attached,
-            attached.command_physical() + 64,
-            CSW_LENGTH,
-            true,
-        )?;
+        bulk(attached, attached.command_physical() + 64, CSW_LENGTH, true)?;
     }
 
     // SAFETY: thirteen bytes were just read into that offset.
@@ -439,11 +437,7 @@ unsafe fn bulk(
     // short. A bulk read of a status wrapper is usually exactly its length, but
     // a device that has less to say sends less, and without the short-packet
     // bit that transfer would produce no event at all.
-    ring.push(
-        physical,
-        length,
-        (trb::NORMAL << 10) | (1 << 5) | (1 << 2),
-    );
+    ring.push(physical, length, (trb::NORMAL << 10) | (1 << 5) | (1 << 2));
 
     let slot = attached.device.slot;
     // SAFETY: upheld by the caller.
@@ -632,7 +626,6 @@ pub fn write_block(index: usize, block: u64, from: &[u8]) -> Result<(), Trouble>
     unsafe { write(attached, disk, block, 1) }
 }
 
-
 /// Mount the filesystem on a USB disk, and say what is on it.
 ///
 /// This is the layer above the four: a FAT32 volume whose sectors happen to
@@ -656,7 +649,10 @@ pub fn mount_and_list(index: usize) {
         }
     };
     let Some(partition) = partitions.iter().find(|partition| partition.is_esp()) else {
-        kprintln!("[usb ] drive {index} has {} partitions, none of them a filesystem this reads", partitions.len());
+        kprintln!(
+            "[usb ] drive {index} has {} partitions, none of them a filesystem this reads",
+            partitions.len()
+        );
         return;
     };
 

@@ -58,7 +58,10 @@ extern "C" fn main() -> ! {
     });
 
     if !had {
-        nexus_text::say("head", "head: nothing was connected to this program's input");
+        nexus_text::say(
+            "head",
+            "head: nothing was connected to this program's input",
+        );
         nexus_user::exit_with(1);
     }
     nexus_user::exit_with(0)

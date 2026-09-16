@@ -130,11 +130,7 @@ pub fn at_least<const L: usize>(one: &[u64; L], other: &[u64; L]) -> bool {
 
 /// `one + other mod modulus`.
 #[must_use]
-pub fn add_mod<const L: usize>(
-    one: &[u64; L],
-    other: &[u64; L],
-    modulus: &[u64; L],
-) -> [u64; L] {
+pub fn add_mod<const L: usize>(one: &[u64; L], other: &[u64; L], modulus: &[u64; L]) -> [u64; L] {
     let mut out = [0u64; L];
     let mut carry = 0u128;
     for index in 0..L {

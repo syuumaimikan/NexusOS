@@ -362,7 +362,8 @@ mod tests {
     /// `ご` behind is the wrong answer and the easy one.
     #[test]
     fn it_takes_the_longest_reading_it_can() {
-        let (reading, candidates) = longest_prefix("にほんごです").expect("にほんご is in the table");
+        let (reading, candidates) =
+            longest_prefix("にほんごです").expect("にほんご is in the table");
         assert_eq!(reading, "にほんご");
         assert_eq!(candidates, &["日本語"]);
     }

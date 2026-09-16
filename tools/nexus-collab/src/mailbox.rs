@@ -59,7 +59,10 @@ impl Mailbox {
 
 /// Whether an agent identifier names the party a mailbox calls `word`.
 fn names(agent: &str, word: &str) -> bool {
-    !word.is_empty() && agent.to_ascii_lowercase().contains(&word.to_ascii_lowercase())
+    !word.is_empty()
+        && agent
+            .to_ascii_lowercase()
+            .contains(&word.to_ascii_lowercase())
 }
 
 /// Every mailbox in the collaboration directory.
@@ -187,10 +190,7 @@ mod tests {
     fn between_names_a_directory_both_ways() {
         assert_eq!(between("claude_code", "gpt6_astra"), "claude_to_astra");
         assert_eq!(between("gpt6_astra", "claude_code"), "astra_to_claude");
-        assert_eq!(
-            between("gemini_3_1_pro", "claude_code"),
-            "gemini_to_claude"
-        );
+        assert_eq!(between("gemini_3_1_pro", "claude_code"), "gemini_to_claude");
     }
 
     #[test]

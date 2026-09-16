@@ -247,7 +247,9 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         // bands of known colour are not something that appears by accident.
         drivers::virtio_gpu::self_test();
     } else {
-        kprintln!("[gpu ] no virtio GPU on this machine; the firmware's framebuffer is what there is");
+        kprintln!(
+            "[gpu ] no virtio GPU on this machine; the firmware's framebuffer is what there is"
+        );
     }
 
     // The sound card, on the same terms. A machine with none keeps the speaker,
@@ -663,9 +665,7 @@ fn monitor_thread(_argument: usize) {
         }
         let (served, turned_away) = removable::statistics();
         if served > 0 || turned_away > 0 {
-            kprintln!(
-                "[mon ] removable {served} requests answered, {turned_away} refused"
-            );
+            kprintln!("[mon ] removable {served} requests answered, {turned_away} refused");
         }
         let (gpu_commands, gpu_flushes) = drivers::virtio_gpu::statistics();
         if gpu_commands > 0 {
@@ -713,7 +713,10 @@ fn monitor_thread(_argument: usize) {
                 let _ = write!(sources, " {name} {count},");
             }
         }
-        kprintln!("[mon ] interrupts by line:{}", sources.trim_end_matches(','));
+        kprintln!(
+            "[mon ] interrupts by line:{}",
+            sources.trim_end_matches(',')
+        );
     }
 }
 

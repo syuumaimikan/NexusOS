@@ -294,7 +294,10 @@ impl Editor {
             return;
         };
 
-        let lines: Vec<String> = text.split('\n').map(|line| line.trim_end_matches('\r').to_string()).collect();
+        let lines: Vec<String> = text
+            .split('\n')
+            .map(|line| line.trim_end_matches('\r').to_string())
+            .collect();
         if lines.len() > MAX_LINES {
             self.status = nexus_i18n::format(
                 "edit.toomany",
@@ -391,7 +394,8 @@ impl Editor {
                 .ok();
             }
             Err(error) => {
-                self.status = nexus_i18n::format("edit.cannotsave", &[("why", &format!("{error}"))]);
+                self.status =
+                    nexus_i18n::format("edit.cannotsave", &[("why", &format!("{error}"))]);
             }
         }
         self.touch_all();
@@ -456,10 +460,10 @@ impl Editor {
     /// Split the line at the cursor.
     fn enter(&mut self) -> bool {
         if self.lines.len() >= MAX_LINES {
-            self.status = nexus_i18n::format("edit.toomany", &[
-                ("name", &self.name),
-                ("lines", &self.lines.len()),
-            ]);
+            self.status = nexus_i18n::format(
+                "edit.toomany",
+                &[("name", &self.name), ("lines", &self.lines.len())],
+            );
             self.touch_all();
             return true;
         }
@@ -666,12 +670,7 @@ impl App for Editor {
         let left = if self.typing == Typing::Name {
             nexus_i18n::format("edit.saveas", &[("name", &self.name)])
         } else {
-            format!(
-                "{mark}{}  {}:{}",
-                self.name,
-                self.row + 1,
-                self.column + 1
-            )
+            format!("{mark}{}  {}:{}", self.name, self.row + 1, self.column + 1)
         };
         canvas.text(bounds.x + PAD, status_y + PAD / 2, &left, ink);
 
@@ -730,7 +729,12 @@ impl App for Editor {
         // too. A second rectangle would be more precise and the compositor
         // takes one; two would be a list, and a list is the next piece of work
         // rather than this one.
-        Some((0, y.min(self.height), self.width, self.height.saturating_sub(y)))
+        Some((
+            0,
+            y.min(self.height),
+            self.width,
+            self.height.saturating_sub(y),
+        ))
     }
 
     fn key(&mut self, key: Key) -> bool {

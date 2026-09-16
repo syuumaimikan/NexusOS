@@ -76,7 +76,6 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-
 // ---------------------------------------------------------------------------
 // Just enough assembler to write the third program by hand without going mad
 // ---------------------------------------------------------------------------
@@ -184,11 +183,15 @@ impl Assembler {
     }
     /// Carry on if `rax` is exactly `value`.
     fn expect_exactly(&mut self, value: u32, code: u32) -> &mut Self {
-        self.raw(&[0x48, 0x3D]).raw(&value.to_le_bytes()).unless(0x74, code) // cmp; je
+        self.raw(&[0x48, 0x3D])
+            .raw(&value.to_le_bytes())
+            .unless(0x74, code) // cmp; je
     }
     /// Carry on if `rax` is `value` or more.
     fn expect_at_least(&mut self, value: u32, code: u32) -> &mut Self {
-        self.raw(&[0x48, 0x3D]).raw(&value.to_le_bytes()).unless(0x7D, code) // cmp; jge
+        self.raw(&[0x48, 0x3D])
+            .raw(&value.to_le_bytes())
+            .unless(0x7D, code) // cmp; jge
     }
 }
 
@@ -281,7 +284,10 @@ fn files_machine_code(
         .syscall()
         .expect_exactly(length, 13);
 
-    a.rdi_from_r12().mov_eax(3).syscall().expect_not_negative(14); // close
+    a.rdi_from_r12()
+        .mov_eax(3)
+        .syscall()
+        .expect_not_negative(14); // close
 
     // Open it again. This is the step that distinguishes a layer that wrote the
     // file from one that accepted the bytes and dropped them.
@@ -299,7 +305,8 @@ fn files_machine_code(
         .mov_eax(5) // fstat
         .syscall()
         .expect_not_negative(16);
-    a.rax_from_scratch(STAT + ST_SIZE).expect_exactly(length, 17);
+    a.rax_from_scratch(STAT + ST_SIZE)
+        .expect_exactly(length, 17);
 
     a.rdi_from_r12()
         .rsi_in_scratch(BUFFER)
@@ -329,7 +336,11 @@ fn files_machine_code(
 
     a.rsi_in_scratch(SEED);
     a.raw(&[0x48, 0x89, 0xF7]); // mov rdi, rsi
-    a.mov_esi(16).mov_edx(0).mov_eax(318).syscall().expect_exactly(16, 22); // getrandom
+    a.mov_esi(16)
+        .mov_edx(0)
+        .mov_eax(318)
+        .syscall()
+        .expect_exactly(16, 22); // getrandom
 
     // And a directory, read the way a directory is read.
     a.mov_edi(AT_FDCWD)
@@ -360,7 +371,10 @@ fn files_machine_code(
     a.raw(&[0x48, 0x83, 0xC6, 0x08]); // add rsi, 8
     a.raw(&[0x48, 0x85, 0xC0]); // test rax, rax
     let back = -((a.at() + 2 - environment) as i64);
-    a.raw(&[0x75, i8::try_from(back).expect("the environment loop is short") as u8]); // jnz
+    a.raw(&[
+        0x75,
+        i8::try_from(back).expect("the environment loop is short") as u8,
+    ]); // jnz
 
     // Each pair is a type and a value. Type zero ends the vector.
     let pairs = a.at();
@@ -368,9 +382,9 @@ fn files_machine_code(
     a.raw(&[0x48, 0x85, 0xC0]); // test rax, rax
     a.unless(0x75, 26); // a vector with no AT_RANDOM in it
     a.raw(&[0x48, 0x83, 0xF8, 0x19]); // cmp rax, 25 (AT_RANDOM)
-    // Found: the value is the next word, and it has to be a real pointer. A
-    // null one is exactly as fatal to a program with a stack guard as no entry
-    // at all, so the two are the same failure here.
+                                      // Found: the value is the next word, and it has to be a real pointer. A
+                                      // null one is exactly as fatal to a program with a stack guard as no entry
+                                      // at all, so the two are the same failure here.
     let found = {
         let mut out = Assembler::default();
         out.raw(&[0x48, 0x8B, 0x46, 0x08]); // mov rax, [rsi+8]
@@ -388,7 +402,10 @@ fn files_machine_code(
     a.raw(&[0xEB, 0x06]);
     a.raw(&[0x48, 0x83, 0xC6, 0x10]); // add rsi, 16
     let back = -((a.at() + 2 - pairs) as i64);
-    a.raw(&[0xEB, i8::try_from(back).expect("the auxv loop is short") as u8]); // jmp
+    a.raw(&[
+        0xEB,
+        i8::try_from(back).expect("the auxv loop is short") as u8,
+    ]); // jmp
 
     // Everything held. Say so where the log will show it, and stop with zero.
     a.mov_edi(1)

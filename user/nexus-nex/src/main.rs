@@ -115,7 +115,11 @@ fn read_input() -> Option<String> {
             Err(_) => return None,
         }
     }
-    if anything { Some(text) } else { None }
+    if anything {
+        Some(text)
+    } else {
+        None
+    }
 }
 
 /// Write one line to standard output, or to the log when there is none.

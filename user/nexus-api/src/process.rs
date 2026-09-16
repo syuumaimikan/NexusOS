@@ -214,7 +214,9 @@ pub fn drain(mine: Handle, mut each: impl FnMut(&str)) -> usize {
     let mut read = 0usize;
     while let Ok(got) = nexus_user::receive(mine, &mut buffer, &mut none) {
         read += got.bytes;
-        each(&alloc::string::String::from_utf8_lossy(&buffer[..got.bytes]));
+        each(&alloc::string::String::from_utf8_lossy(
+            &buffer[..got.bytes],
+        ));
     }
     nexus_user::close(mine).ok();
     read

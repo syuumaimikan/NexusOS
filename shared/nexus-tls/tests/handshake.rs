@@ -17,10 +17,10 @@
 //! code. The QEMU stage is where a missing handshake would actually be caught.
 
 use std::io::{Read, Write};
-use std::rc::Rc;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::rc::Rc;
 
 use nexus_tls::chain::Roots;
 use nexus_tls::client::Client;

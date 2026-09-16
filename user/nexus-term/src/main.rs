@@ -35,8 +35,8 @@ use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
-use nexus_ui::{Canvas, Colour, Rect};
 use nexus_api::process::{Child, Spawn};
+use nexus_ui::{Canvas, Colour, Rect};
 use nexus_user::{Handle, Kind};
 
 /// Where this program's allocations come from.
@@ -268,9 +268,9 @@ extern "C" fn main() -> ! {
 /// dropped the right-hand side of `help | count` would be worse than one that
 /// says it cannot do it.
 const BUILT_IN: &[&str] = &[
-    "help", "?", "clear", "cls", "echo", "pwd", "dir", "cd", "type", "write", "append",
-    "mkdir", "rm", "del", "run", "date", "beep", "set", "look", "sys", "top", "net", "usb",
-    "lookup", "dig", "nslookup", "scan", "uptime", "history",
+    "help", "?", "clear", "cls", "echo", "pwd", "dir", "cd", "type", "write", "append", "mkdir",
+    "rm", "del", "run", "date", "beep", "set", "look", "sys", "top", "net", "usb", "lookup", "dig",
+    "nslookup", "scan", "uptime", "history",
 ];
 
 /// Split a typed line at its first `|`, if it has one outside quotes.
@@ -1160,7 +1160,10 @@ impl Terminal {
         // with `READ` alone cannot be put in a message -- and the send fails
         // whole, taking the two channel ends with it, so the program never
         // starts and nothing says why.
-        let mut spawn = Spawn::new(program).arguments(arguments).output(output).input(input);
+        let mut spawn = Spawn::new(program)
+            .arguments(arguments)
+            .output(output)
+            .input(input);
         if let Some(directory) = self.directory() {
             if let Ok(copy) = nexus_user::duplicate(
                 directory,
@@ -1265,7 +1268,10 @@ impl Terminal {
     /// The same rule the fallback below uses: a word that is not a built-in
     /// command is the name of something in `BIN`. `None` when the side is
     /// empty or names something this shell does itself.
-    fn piped_program(&mut self, side: &str) -> Option<(alloc::string::String, alloc::string::String)> {
+    fn piped_program(
+        &mut self,
+        side: &str,
+    ) -> Option<(alloc::string::String, alloc::string::String)> {
         let words = nexus_shellwords::split(side);
         let command = words.command()?;
         if BUILT_IN.contains(&command) {
@@ -1396,11 +1402,7 @@ impl Terminal {
 
         let read = self.show_output(mine);
         let names: Vec<&str> = stages.iter().map(|(program, _)| program.as_str()).collect();
-        nexus_user::log(&format!(
-            "term: {} wrote {read} bytes",
-            names.join(" | ")
-        ))
-        .ok();
+        nexus_user::log(&format!("term: {} wrote {read} bytes", names.join(" | "))).ok();
 
         // In order, because that is the order they finish in: a stage cannot
         // close its output until its input has ended, and its input ending is
@@ -1599,7 +1601,10 @@ impl Terminal {
             return;
         };
         let Ok(number) = drive.parse::<u8>() else {
-            self.trouble(&nexus_i18n::format("term.usb.notanumber", &[("what", &drive)]));
+            self.trouble(&nexus_i18n::format(
+                "term.usb.notanumber",
+                &[("what", &drive)],
+            ));
             return;
         };
 

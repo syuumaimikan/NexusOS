@@ -252,10 +252,7 @@ fn opened(descriptor: u64) -> Result<(Arc<crate::process::Process>, u32, Arc<Nod
 
 /// Read a descriptor's position.
 fn position(process: &crate::process::Process, handle: u32) -> u64 {
-    *POSITIONS
-        .lock()
-        .get(&(process.id.0, handle))
-        .unwrap_or(&0)
+    *POSITIONS.lock().get(&(process.id.0, handle)).unwrap_or(&0)
 }
 
 /// Set one.
@@ -334,7 +331,10 @@ pub fn openat(directory: u64, pointer: u64, flags: u64) -> u64 {
             let (parent, name) = match split(&path) {
                 Ok(split) => split,
                 Err(code) => {
-                    crate::kprintln!("[linux] openat {path:?} refused: split gave {}", code as i64);
+                    crate::kprintln!(
+                        "[linux] openat {path:?} refused: split gave {}",
+                        code as i64
+                    );
                     return code;
                 }
             };

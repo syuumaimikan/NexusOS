@@ -784,9 +784,7 @@ impl HandleTable {
             // `core::mem::take` rather than `drain`: a `BTreeMap` behind this
             // lock guard has no `drain`, and swapping an empty map in leaves
             // the table usable if anything reaches it afterwards.
-            core::mem::take(&mut *entries)
-                .into_values()
-                .collect()
+            core::mem::take(&mut *entries).into_values().collect()
         };
         let count = taken.len();
         drop(taken);

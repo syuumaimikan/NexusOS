@@ -39,7 +39,10 @@ pub fn certificates(text: &str) -> Result<Vec<Vec<u8>>, String> {
         let line = line.trim();
         if line == BEGIN {
             if inside {
-                return Err(format!("line {}: a second BEGIN inside a block", number + 1));
+                return Err(format!(
+                    "line {}: a second BEGIN inside a block",
+                    number + 1
+                ));
             }
             inside = true;
             body.clear();
@@ -140,7 +143,11 @@ mod tests {
             ("Zm9vYmE=", "fooba"),
             ("Zm9vYmFy", "foobar"),
         ] {
-            assert_eq!(decode(encoded).expect(encoded), plain.as_bytes(), "{encoded}");
+            assert_eq!(
+                decode(encoded).expect(encoded),
+                plain.as_bytes(),
+                "{encoded}"
+            );
         }
     }
 

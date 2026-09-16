@@ -114,9 +114,8 @@ impl Source {
             // unbootable, and nothing needs it: the ESP is built by the build
             // and read by the loader.
             Self::Virtio => Err(FatError::ReadOnly),
-            Self::Usb(index) => {
-                crate::drivers::usb_storage::write_block(index, lba, from).map_err(|_| FatError::Usb)
-            }
+            Self::Usb(index) => crate::drivers::usb_storage::write_block(index, lba, from)
+                .map_err(|_| FatError::Usb),
         }
     }
 }
@@ -627,7 +626,11 @@ impl Volume {
         // The new chain first, so a failure part-way leaves the old file exactly
         // as it was. Only when the data is safely on the disk does the directory
         // entry start pointing at it.
-        let first = if needed == 0 { 0 } else { self.allocate(needed)? };
+        let first = if needed == 0 {
+            0
+        } else {
+            self.allocate(needed)?
+        };
         if needed > 0 {
             self.fill(first, data)?;
         }
@@ -664,9 +667,9 @@ impl Volume {
 
                     buffer[at..at + 11].copy_from_slice(&short[..]);
                     buffer[at + 11] = 0x20; // a plain file
-                    // Times are left at zero. A wrong timestamp is worse than an
-                    // obviously absent one, and this machine's clock is not in
-                    // this function's reach.
+                                            // Times are left at zero. A wrong timestamp is worse than an
+                                            // obviously absent one, and this machine's clock is not in
+                                            // this function's reach.
                     buffer[at + 12..at + 20].fill(0);
                     buffer[at + 20..at + 22]
                         .copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());

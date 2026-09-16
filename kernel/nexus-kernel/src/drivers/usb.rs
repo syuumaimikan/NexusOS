@@ -175,7 +175,8 @@ pub unsafe fn attach(port: u64, speed: u32) -> Result<Attached, xhci::Trouble> {
     // slot, and `slot` is one the controller just handed out.
     unsafe {
         core::ptr::write_volatile(
-            (layout::phys_to_virt(crate::drivers::xhci_rings::contexts()) + u64::from(slot) * 8) as *mut u64,
+            (layout::phys_to_virt(crate::drivers::xhci_rings::contexts()) + u64::from(slot) * 8)
+                as *mut u64,
             output,
         );
     }
@@ -278,10 +279,7 @@ pub unsafe fn attach(port: u64, speed: u32) -> Result<Attached, xhci::Trouble> {
     let read = unsafe { control_in(&mut attached, descriptor::CONFIGURATION, 0, total)? };
     // SAFETY: `read` bytes were just written into the buffer, which is a page.
     let tree = unsafe {
-        core::slice::from_raw_parts(
-            attached.buffer_at() as *const u8,
-            (read as usize).min(4096),
-        )
+        core::slice::from_raw_parts(attached.buffer_at() as *const u8, (read as usize).min(4096))
     };
     read_interfaces(&mut attached.device, tree);
 
@@ -520,7 +518,10 @@ pub unsafe fn enumerate() {
         let attached = match unsafe { attach(index + 1, speed) } {
             Ok(attached) => attached,
             Err(trouble) => {
-                kprintln!("[usb ] the device on port {} would not come up: {trouble}", index + 1);
+                kprintln!(
+                    "[usb ] the device on port {} would not come up: {trouble}",
+                    index + 1
+                );
                 continue;
             }
         };
@@ -537,8 +538,7 @@ pub unsafe fn enumerate() {
             device.slot
         );
 
-        if device.class == MASS_STORAGE && device.subclass == SCSI && device.protocol == BULK_ONLY
-        {
+        if device.class == MASS_STORAGE && device.subclass == SCSI && device.protocol == BULK_ONLY {
             let mut attached = attached;
             // SAFETY: the device is addressed and its control ring is live.
             match unsafe { crate::drivers::usb_storage::open(&mut attached) } {
@@ -560,7 +560,9 @@ pub unsafe fn enumerate() {
                     crate::drivers::usb_storage::mount_and_list(disk_index);
                     continue;
                 }
-                Err(trouble) => kprintln!("[usb ] it says it is a disk but would not open: {trouble}"),
+                Err(trouble) => {
+                    kprintln!("[usb ] it says it is a disk but would not open: {trouble}")
+                }
             }
             // Held whether or not it opened: its rings are live either way, and
             // freeing them would hand the controller's memory back while it is

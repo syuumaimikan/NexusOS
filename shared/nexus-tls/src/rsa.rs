@@ -632,7 +632,9 @@ mod tests {
         // accepting a signature over a different digest.
         assert!(verify_pkcs1(&modulus, &exponent, signature, message, Hash::Sha256).is_err());
         let sha256_signature = include_bytes!("../fixtures/signed.pkcs1");
-        assert!(verify_pkcs1(&modulus, &exponent, sha256_signature, message, Hash::Sha384).is_err());
+        assert!(
+            verify_pkcs1(&modulus, &exponent, sha256_signature, message, Hash::Sha384).is_err()
+        );
     }
 
     #[test]

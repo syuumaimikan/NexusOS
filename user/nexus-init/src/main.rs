@@ -656,7 +656,10 @@ fn run_a_linux_program() {
     // The second exits 1 of its own accord if `mmap` is refused, so a machine
     // that answered ENOSYS fails here rather than looking like it passed.
     run_one(b"linux:BIN/HELLO.LX", "a Linux program");
-    run_one(b"linux:BIN/RICH.LX", "a Linux program that asked for memory");
+    run_one(
+        b"linux:BIN/RICH.LX",
+        "a Linux program that asked for memory",
+    );
 
     // And a third, about the filesystem. It creates a file, writes to it,
     // closes it, opens it again, stats it, reads it back and compares the

@@ -437,9 +437,7 @@ pub unsafe fn init(devices: &[Device]) -> Result<u64, BlockError> {
         if flushes {
             kprintln!("[blk ] the disk takes a flush, so the host may cache what is written");
         } else {
-            kprintln!(
-                "[blk ] this disk offers no flush; every write will wait for the medium"
-            );
+            kprintln!("[blk ] this disk offers no flush; every write will wait for the medium");
         }
 
         Ok(capacity)
@@ -563,7 +561,9 @@ pub fn flush() -> Result<(), BlockError> {
 
 /// How many sectors a buffer of `bytes` is, if it is a legal size.
 fn check_length(bytes: usize) -> Result<usize, BlockError> {
-    if bytes == 0 || !bytes.is_multiple_of(SECTOR_SIZE) || bytes > MAX_TRANSFER_SECTORS * SECTOR_SIZE
+    if bytes == 0
+        || !bytes.is_multiple_of(SECTOR_SIZE)
+        || bytes > MAX_TRANSFER_SECTORS * SECTOR_SIZE
     {
         return Err(BlockError::BadLength);
     }

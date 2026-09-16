@@ -144,7 +144,9 @@ impl Interpreter {
                     if !found {
                         return Err(Trouble::at(
                             *line,
-                            alloc::format!("there is no `{name}` to assign to; did you mean `let`?"),
+                            alloc::format!(
+                                "there is no `{name}` to assign to; did you mean `let`?"
+                            ),
                         ));
                     }
                 }
@@ -211,7 +213,10 @@ impl Interpreter {
         value.as_condition().ok_or_else(|| {
             Trouble::at(
                 line,
-                alloc::format!("a condition has to be true or false, this is {}", value.kind()),
+                alloc::format!(
+                    "a condition has to be true or false, this is {}",
+                    value.kind()
+                ),
             )
         })
     }
@@ -231,9 +236,9 @@ impl Interpreter {
             Expression::Str(value) => Ok(Value::string(value.clone())),
             Expression::Bool(value) => Ok(Value::Bool(*value)),
             Expression::Nil => Ok(Value::Nil),
-            Expression::Name(name) => self.look_up(name).ok_or_else(|| {
-                Trouble::at(0, alloc::format!("there is nothing called `{name}`"))
-            }),
+            Expression::Name(name) => self
+                .look_up(name)
+                .ok_or_else(|| Trouble::at(0, alloc::format!("there is nothing called `{name}`"))),
             Expression::Unary { operator, of, line } => {
                 let value = self.expression(of)?;
                 match (operator, &value) {
@@ -305,7 +310,11 @@ impl Interpreter {
                 alloc::format!(
                     "`{name}` takes {} argument{}, given {}",
                     function.parameters.len(),
-                    if function.parameters.len() == 1 { "" } else { "s" },
+                    if function.parameters.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                     arguments.len()
                 ),
             ));
@@ -509,10 +518,7 @@ mod tests {
 
     #[test]
     fn variables_and_assignment() {
-        assert_eq!(
-            printed("let x = 1\nx = x + 1\nprint(x)"),
-            alloc::vec!["2"]
-        );
+        assert_eq!(printed("let x = 1\nx = x + 1\nprint(x)"), alloc::vec!["2"]);
     }
 
     /// A typo must not quietly make a new variable.
@@ -565,7 +571,10 @@ print(fib(10))
     /// bottom-up.
     #[test]
     fn a_function_may_be_called_before_it_is_declared() {
-        assert_eq!(printed("print(two())\nfn two() { return 2 }"), alloc::vec!["2"]);
+        assert_eq!(
+            printed("print(two())\nfn two() { return 2 }"),
+            alloc::vec!["2"]
+        );
     }
 
     /// A function must not see its caller's variables.
@@ -585,7 +594,11 @@ print(fib(10))
     #[test]
     fn wrong_number_of_arguments_is_refused() {
         let trouble = run("fn f(a) { return a }\nprint(f(1, 2))").expect_err("f takes one");
-        assert!(trouble.what.contains("takes 1 argument"), "{}", trouble.what);
+        assert!(
+            trouble.what.contains("takes 1 argument"),
+            "{}",
+            trouble.what
+        );
     }
 
     #[test]
@@ -624,8 +637,14 @@ print(fib(10))
     #[test]
     fn and_stops_early() {
         // `boom` is not a function, so evaluating it would be an error.
-        assert_eq!(printed("if false and boom() { }\nprint(\"fine\")"), alloc::vec!["fine"]);
-        assert_eq!(printed("if true or boom() { print(\"fine\") }"), alloc::vec!["fine"]);
+        assert_eq!(
+            printed("if false and boom() { }\nprint(\"fine\")"),
+            alloc::vec!["fine"]
+        );
+        assert_eq!(
+            printed("if true or boom() { print(\"fine\") }"),
+            alloc::vec!["fine"]
+        );
     }
 
     /// A loop going nowhere ends with a sentence, not with a machine that has

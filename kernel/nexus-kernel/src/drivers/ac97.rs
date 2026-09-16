@@ -178,7 +178,10 @@ pub fn is_present() -> bool {
 /// Tones played, and samples handed over.
 #[must_use]
 pub fn statistics() -> (u64, u64) {
-    (PLAYED.load(Ordering::Relaxed), SAMPLES.load(Ordering::Relaxed))
+    (
+        PLAYED.load(Ordering::Relaxed),
+        SAMPLES.load(Ordering::Relaxed),
+    )
 }
 
 /// Find the card, bring the codec out of reset, and get the engine ready.
@@ -209,7 +212,10 @@ pub unsafe fn init(devices: &[Device]) -> bool {
         match (device.base_address(0), device.base_address(1)) {
             (BaseAddress::Port(mixer), BaseAddress::Port(bus)) => (mixer, bus),
             _ => {
-                kprintln!("[snd ] AC'97 at {} is memory mapped, which this driver does not drive", device.address);
+                kprintln!(
+                    "[snd ] AC'97 at {} is memory mapped, which this driver does not drive",
+                    device.address
+                );
                 return false;
             }
         }
@@ -227,7 +233,9 @@ pub unsafe fn init(devices: &[Device]) -> bool {
     // four gigabytes would be truncated into somebody else's memory and played,
     // which is a great deal worse than not playing.
     if list >= 1 << 32 || buffer + BUFFER_BYTES as u64 >= 1 << 32 {
-        kprintln!("[snd ] the AC'97 buffers landed above four gigabytes, which the card cannot address");
+        kprintln!(
+            "[snd ] the AC'97 buffers landed above four gigabytes, which the card cannot address"
+        );
         return false;
     }
 
@@ -235,11 +243,7 @@ pub unsafe fn init(devices: &[Device]) -> bool {
     // the frames were just allocated to this driver.
     unsafe {
         core::ptr::write_bytes(layout::phys_to_virt(list) as *mut u8, 0, 4096);
-        core::ptr::write_bytes(
-            layout::phys_to_virt(buffer) as *mut u8,
-            0,
-            BUFFER_BYTES,
-        );
+        core::ptr::write_bytes(layout::phys_to_virt(buffer) as *mut u8, 0, BUFFER_BYTES);
 
         // The link out of reset, and then the codec. The order is the protocol:
         // a codec whose link is still in reset does not hear the mixer writes,
@@ -380,10 +384,7 @@ fn play(card: Card, hertz: u32, milliseconds: u64) -> bool {
             status::HALTED | status::REACHED_LAST | status::COMPLETED,
         );
         outl(card.bus + bus::PCM_OUT + bus::DESCRIPTORS, card.list as u32);
-        outb(
-            card.bus + bus::PCM_OUT + bus::LAST_VALID,
-            (index - 1) as u8,
-        );
+        outb(card.bus + bus::PCM_OUT + bus::LAST_VALID, (index - 1) as u8);
         // And go. Everything above had to be in place first: the engine begins
         // reading the moment this bit is set.
         outb(

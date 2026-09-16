@@ -164,7 +164,8 @@ pub mod port {
     /// Named because writing the register back unchanged would clear every
     /// change bit that happened to be set, which is how a driver loses a
     /// connect event it never noticed.
-    pub const CHANGES: u32 = CONNECT_CHANGE | RESET_CHANGE | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 22);
+    pub const CHANGES: u32 =
+        CONNECT_CHANGE | RESET_CHANGE | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 22);
 
     /// Where the speed lives in the register, and how wide it is.
     pub const SPEED_SHIFT: u32 = 10;
@@ -259,7 +260,9 @@ pub fn port_count() -> u64 {
 /// The controller must have been started, so the window is mapped.
 pub unsafe fn read_operational(offset: u64) -> u32 {
     // SAFETY: the window is mapped uncached and the offset is inside it.
-    unsafe { core::ptr::read_volatile((OPERATIONAL.load(Ordering::Relaxed) + offset) as *const u32) }
+    unsafe {
+        core::ptr::read_volatile((OPERATIONAL.load(Ordering::Relaxed) + offset) as *const u32)
+    }
 }
 
 /// Write one.
@@ -400,8 +403,14 @@ pub fn start(devices: &[Device]) -> Result<(), Trouble> {
     let big_contexts = capparams1 & (1 << 2) != 0;
 
     OPERATIONAL.store(registers + length, Ordering::Relaxed);
-    RUNTIME.store(registers + u64::from(runtime_offset & !0x1F), Ordering::Relaxed);
-    DOORBELLS.store(registers + u64::from(doorbell_offset & !0x03), Ordering::Relaxed);
+    RUNTIME.store(
+        registers + u64::from(runtime_offset & !0x1F),
+        Ordering::Relaxed,
+    );
+    DOORBELLS.store(
+        registers + u64::from(doorbell_offset & !0x03),
+        Ordering::Relaxed,
+    );
     PORTS.store(ports, Ordering::Relaxed);
     SLOTS.store(slots, Ordering::Relaxed);
     BIG_CONTEXTS.store(big_contexts, Ordering::Relaxed);
@@ -428,7 +437,8 @@ pub fn start(devices: &[Device]) -> Result<(), Trouble> {
     // across two fields, high bits and low, which is an artefact of the
     // register having grown.
     // SAFETY: the window is mapped and the offset is inside it.
-    let params2 = unsafe { core::ptr::read_volatile((registers + capability::PARAMS2) as *const u32) };
+    let params2 =
+        unsafe { core::ptr::read_volatile((registers + capability::PARAMS2) as *const u32) };
     let scratchpads = u64::from(((params2 >> 21) & 0x1F) << 5 | ((params2 >> 27) & 0x1F));
 
     let Some(rings) = super::xhci_rings::build(slots, scratchpads) else {
@@ -457,10 +467,7 @@ pub fn start(devices: &[Device]) -> Result<(), Trouble> {
         // protocol: the size first, then the dequeue pointer, then the table's
         // address -- writing the address is what makes the controller read it,
         // so everything it will read has to be right before that happens.
-        write_runtime(
-            interrupter::BASE + interrupter::SEGMENT_COUNT,
-            1,
-        );
+        write_runtime(interrupter::BASE + interrupter::SEGMENT_COUNT, 1);
         write_runtime64(
             interrupter::BASE + interrupter::DEQUEUE,
             rings.events.dequeue(),
@@ -484,7 +491,11 @@ pub fn start(devices: &[Device]) -> Result<(), Trouble> {
     kprintln!(
         "[usb ] running: {} scratchpad page{} for the controller's own use",
         rings.scratchpad_count(),
-        if rings.scratchpad_count() == 1 { "" } else { "s" }
+        if rings.scratchpad_count() == 1 {
+            ""
+        } else {
+            "s"
+        }
     );
 
     RINGS.lock().replace(rings);
@@ -516,7 +527,10 @@ unsafe fn write_operational64(offset: u64, value: u64) {
 unsafe fn write_runtime(offset: u64, value: u32) {
     // SAFETY: upheld by the caller.
     unsafe {
-        core::ptr::write_volatile((RUNTIME.load(Ordering::Relaxed) + offset) as *mut u32, value);
+        core::ptr::write_volatile(
+            (RUNTIME.load(Ordering::Relaxed) + offset) as *mut u32,
+            value,
+        );
     }
 }
 
@@ -591,7 +605,9 @@ unsafe fn reset() -> Result<(), Trouble> {
     // SAFETY: as above.
     let after = unsafe { read_operational(operational::STATUS) };
     if after & status::HOST_ERROR != 0 {
-        return Err(Trouble::Stuck("reported a host error rather than resetting"));
+        return Err(Trouble::Stuck(
+            "reported a host error rather than resetting",
+        ));
     }
     Ok(())
 }
@@ -657,10 +673,7 @@ unsafe fn next_event() -> Option<super::xhci_rings::Trb> {
 /// # Safety
 ///
 /// The controller must be running.
-unsafe fn run_command(
-    parameter: u64,
-    control: u32,
-) -> Result<super::xhci_rings::Trb, Trouble> {
+unsafe fn run_command(parameter: u64, control: u32) -> Result<super::xhci_rings::Trb, Trouble> {
     {
         let mut held = RINGS.lock();
         let Some(rings) = held.as_mut() else {
@@ -868,9 +881,7 @@ pub unsafe fn survey_ports() -> u64 {
             unsafe { write_port(index, value | port::RESET) };
             // SAFETY: as above. The reset bit clears itself when the port is
             // through, which is what says the device is ready to be addressed.
-            let done = unsafe {
-                wait_for(|| read_port(index) & port::RESET == 0)
-            };
+            let done = unsafe { wait_for(|| read_port(index) & port::RESET == 0) };
             if !done {
                 kprintln!("[usb ] port {} did not finish resetting", index + 1);
                 continue;

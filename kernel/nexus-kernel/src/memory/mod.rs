@@ -278,11 +278,8 @@ pub unsafe fn map_device_registers(phys: u64, size: u64) -> Option<u64> {
     let first = layout::page_align_down(phys);
     let last = layout::page_align_up(phys.checked_add(size)?);
     let root = crate::memory::address_space::kernel_root();
-    let flags = paging::PRESENT
-        | paging::WRITABLE
-        | paging::NO_CACHE
-        | paging::NO_EXECUTE
-        | paging::GLOBAL;
+    let flags =
+        paging::PRESENT | paging::WRITABLE | paging::NO_CACHE | paging::NO_EXECUTE | paging::GLOBAL;
 
     let mut at = first;
     while at < last {

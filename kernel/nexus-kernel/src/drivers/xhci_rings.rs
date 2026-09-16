@@ -375,7 +375,9 @@ pub fn build(slots: u64, scratchpads: u64) -> Option<Rings> {
         // SAFETY: a fresh frame, this array's alone.
         unsafe { core::ptr::write_bytes(layout::phys_to_virt(array) as *mut u8, 0, 4096) };
         if scratchpads * 8 > 4096 {
-            kprintln!("[usb ] the controller wants {scratchpads} scratchpad pages, which is absurd");
+            kprintln!(
+                "[usb ] the controller wants {scratchpads} scratchpad pages, which is absurd"
+            );
             return None;
         }
         for index in 0..scratchpads {
@@ -405,7 +407,10 @@ pub fn build(slots: u64, scratchpads: u64) -> Option<Rings> {
     // because the frame was zeroed.
     unsafe {
         core::ptr::write_bytes(layout::phys_to_virt(segments) as *mut u8, 0, 4096);
-        core::ptr::write_volatile(layout::phys_to_virt(segments) as *mut u64, events.physical());
+        core::ptr::write_volatile(
+            layout::phys_to_virt(segments) as *mut u64,
+            events.physical(),
+        );
         core::ptr::write_volatile(
             (layout::phys_to_virt(segments) + 8) as *mut u32,
             RING_SIZE as u32,

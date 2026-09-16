@@ -239,10 +239,7 @@ pub extern "C" fn _start() -> ! {
 /// Returns the name it settled on and the open file. `None` when every name it
 /// tried was taken, which is a hundred of them -- at which point the honest
 /// answer is that this is not working rather than to keep counting.
-fn free_name(
-    directory: Handle,
-    wanted: &str,
-) -> Option<(String, Handle)> {
+fn free_name(directory: Handle, wanted: &str) -> Option<(String, Handle)> {
     /// How many numbered names to try before giving up.
     const TRIES: u32 = 100;
 
@@ -501,8 +498,16 @@ extern "C" fn main() -> ! {
     browser.downloads = downloads;
     nexus_user::log(&format!(
         "browse: carrying {carrying:#x}: {} certificates, {} somewhere to save",
-        if roots_file.is_some() { "with" } else { "without" },
-        if downloads.is_some() { "with" } else { "without" }
+        if roots_file.is_some() {
+            "with"
+        } else {
+            "without"
+        },
+        if downloads.is_some() {
+            "with"
+        } else {
+            "without"
+        }
     ))
     .ok();
     browser.resolver = resolver;
@@ -931,14 +936,16 @@ impl Browser {
                     Ok(count) => {
                         self.status = nexus_i18n::format(
                             "browse.savedpart",
-                            &[("name", &name), ("bytes", &count),
-                              ("total", &self.fetched.len())],
+                            &[
+                                ("name", &name),
+                                ("bytes", &count),
+                                ("total", &self.fetched.len()),
+                            ],
                         );
                     }
                     Err(error) => {
                         nexus_user::log(&format!("browse: could not write {name}: {error}")).ok();
-                        self.status =
-                            nexus_i18n::format("browse.notsaved", &[("why", &error)]);
+                        self.status = nexus_i18n::format("browse.notsaved", &[("why", &error)]);
                     }
                 }
             }

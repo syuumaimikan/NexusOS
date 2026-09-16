@@ -180,8 +180,7 @@ static REFUSED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::n
 static MAPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Where the next anonymous mapping goes. See [`MMAP_BASE`].
-static NEXT_MAPPING: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(MMAP_BASE);
+static NEXT_MAPPING: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(MMAP_BASE);
 
 /// How many calls have been translated, how many refused, and how many pages
 /// of memory handed out.
@@ -474,8 +473,7 @@ fn writev(descriptor: u64, vectors: u64, count: u64) -> u64 {
         // actually taken. A short `writev` is something every caller already
         // handles, because Linux does it too.
         let taken = wanted.min(MAX_WRITE as u64);
-        let Some((from, size)) =
-            crate::arch::syscall::user_range(pointer, taken, MAX_WRITE as u64)
+        let Some((from, size)) = crate::arch::syscall::user_range(pointer, taken, MAX_WRITE as u64)
         else {
             // Whatever was gathered before the bad pointer has not been
             // written anywhere, so nothing was written at all.
@@ -599,7 +597,11 @@ fn mmap(address: u64, length: u64, protection: u64, flags: u64) -> u64 {
         // the address is inside the user half -- checked above against
         // `USER_SPACE_END`.
         unsafe {
-            core::ptr::write_bytes(nexus_abi::layout::phys_to_virt(frame) as *mut u8, 0, PAGE as usize);
+            core::ptr::write_bytes(
+                nexus_abi::layout::phys_to_virt(frame) as *mut u8,
+                0,
+                PAGE as usize,
+            );
             if process
                 .address_space
                 .map(at + page * PAGE, frame, flags_for_page)

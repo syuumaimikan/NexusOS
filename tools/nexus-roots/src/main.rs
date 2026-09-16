@@ -265,7 +265,10 @@ fn judge(der: &[u8], now: i64) -> Verdict {
 
     let mut about = format!("{key}, self-signed with {signed}");
     if certificate.not_after - now < SOON {
-        about.push_str(&format!(", expires in {} days", (certificate.not_after - now) / 86_400));
+        about.push_str(&format!(
+            ", expires in {} days",
+            (certificate.not_after - now) / 86_400
+        ));
     }
     Verdict::Kept { name, about }
 }
