@@ -1520,8 +1520,17 @@ asked for a picture of *that* display, which is 1280x800 with red at row 133,
 green at 400 and blue at 667. See [gpu.md](gpu.md).
 
 The GPU sits beside the firmware's display rather than instead of it, so the
-desktop still draws into the framebuffer the bootloader was handed. Moving it
-across is the next step and a real one.
+desktop still draws into the framebuffer the bootloader was handed.
+
+Moving it across was tried and is **not** in the tree. It works -- and this
+firmware has no virtio-GPU driver, so `-vga none` means the kernel's own driver
+is the only thing that can draw, which removes the handover problem entirely --
+but the machine becomes an order of magnitude slower: a fresh NexusFS format
+goes from 33 seconds to not finishing inside five minutes. The GPU's *presence*
+costs nothing measurable (33.4 seconds with it on the bus and the firmware still
+driving the screen), so it is not the driver and not the flush thread, which
+does not start until long afterwards. The cause has not been found, and
+[gpu.md](gpu.md) has the measurement rather than a commit.
 
 The one item that does not need a GPU is frame pacing, and the half of it that
 does not need a vertical blank is done — see Phase 9, where it belongs.

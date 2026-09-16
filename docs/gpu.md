@@ -113,10 +113,48 @@ firmware driving this same device *and* the kernel driving it, which is two
 drivers on one device.
 
 So the compositor still draws into the firmware's framebuffer, and the GPU has a
-scanout of its own. Moving the desktop onto it is the next step and a real one:
-the framebuffer address would come from the driver instead of from the boot
-information, and every composite would end in a flush of the damaged rectangle
-rather than in nothing at all.
+scanout of its own.
+
+## Moving the desktop onto it: tried, measured, not shipped
+
+The obvious next step is for the GPU to *be* the display. It was built and it
+works, and it is not in the tree, because of what it costs.
+
+The shape of it is tidier than expected. This firmware has no driver for a
+virtio GPU, so a machine given one and `-vga none` is handed **no framebuffer at
+all** — `no usable framebuffer` from the bootloader. There is then no handover
+and no moment when the firmware and the kernel are both driving one device: the
+kernel's own driver is simply the only thing that can put anything on screen.
+`display::init` takes the GPU's scanout described as an ordinary
+`FramebufferInfo`, and nothing above it — not the boot display, not the
+compositor — ever learns which it got.
+
+It boots. The desktop appears. And the machine becomes an order of magnitude
+slower:
+
+| | fresh NexusFS format |
+| --- | --- |
+| no GPU | 33.0 s |
+| GPU present, firmware display | 33.4 s |
+| GPU as the display | did not finish in 300 s |
+
+The middle row is what makes the measurement worth keeping. The GPU's
+*presence* costs nothing measurable — the same driver, the same bring-up, the
+same 4 MiB scanout allocated and attached. Only adopting it as the display is
+expensive, and it is expensive during a disk format, which happens long before
+anything flushes a single rectangle.
+
+So it is not the flush thread, and it is not the driver. What it is has not been
+found, and that is the whole reason this is a section in a document rather than
+a commit: shipping it would trade a display that works for one that works and
+makes the machine unusable, in exchange for a picture that looks identical.
+
+The flush thread that went with it was real — twenty times a second, four
+megabytes a frame, `1402 commands answered, 699 rectangles flushed` in a boot.
+It is the wrong design anyway: whoever draws should say what changed, which is
+exactly the damage rectangle the compositor already computes for its clients.
+Routing that down to the driver is what the migration actually needs, and it
+would cut the traffic by whatever fraction of the screen is still.
 
 ## What is not here
 
