@@ -30,6 +30,8 @@
 
 extern crate alloc;
 
+pub mod clip;
+
 #[cfg(test)]
 mod tests;
 
@@ -370,6 +372,13 @@ pub fn project(point: Point, width: usize, height: usize, scale: Fixed) -> Optio
         x: half_width + (x >> FRACTION),
         // Down the screen is up in the world, which is the one place this
         // renderer disagrees with the framebuffer underneath it.
+        //
+        // And it is a *reflection*, so it reverses the sense of a turn: a face
+        // wound counter-clockwise when seen from outside in the world arrives
+        // here wound clockwise, and that is the winding `Canvas::triangle`
+        // calls front-facing. Whoever writes the faces of a solid needs to know
+        // this, and finding it out from a shape that renders inside out is a
+        // bad afternoon.
         y: half_height - (y >> FRACTION),
         depth: point.z,
     })

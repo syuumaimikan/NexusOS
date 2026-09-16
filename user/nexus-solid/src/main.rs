@@ -16,12 +16,15 @@
 //!
 //! # The check it does on itself
 //!
-//! A convex solid seen from outside shows about half its faces. This counts the
-//! ones it drew and the ones it turned away, and says both at the end. Eight
-//! faces with eight drawn would mean the back of the shape was being painted
-//! over the front; eight with none drawn would mean the winding is inside out.
-//! Either is a picture that still looks like *something*, which is why the
-//! numbers are reported rather than trusted to the eye.
+//! For every face of every frame, this works out from the geometry whether the
+//! face *should* be visible -- whether its outward normal leans towards the eye
+//! -- and compares that against whether the rasteriser drew it.
+//!
+//! Counting drawn against turned away was the first version of this check, and
+//! it is too weak to be worth having. A convex solid shows about half its faces
+//! from any direction, so reversing *every* face swaps which half is drawn and
+//! leaves both counts looking healthy -- while what is on screen is the inside
+//! of the shape. The normal is what tells those two apart.
 
 #![no_std]
 #![no_main]
@@ -69,20 +72,23 @@ const POINTS: [Point; 6] = [
     Point::at(0, 0, -1),
 ];
 
-/// The eight faces, each wound so that its front is its outside.
+/// The eight faces, each wound clockwise seen from outside the solid.
 ///
-/// Wound consistently on purpose: the renderer decides which way a triangle
-/// faces from the sign of its area, so a face listed the wrong way round is a
-/// hole in the solid that the inside of the far side shows through.
+/// Clockwise, not counter-clockwise, and that deserves a sentence because it is
+/// the thing a reader will take for a mistake. `project` turns the world the
+/// right way up -- up in the world is up the screen, which is *down* in memory
+/// -- and a reflection reverses the sense of a turn. A face wound
+/// counter-clockwise from outside therefore arrives at the rasteriser wound
+/// clockwise, and clockwise on screen is what it calls front-facing.
 const FACES: [([usize; 3], Colour); 8] = [
-    ([2, 4, 0], 0x00E8_6A5C),
-    ([2, 0, 5], 0x00E8_B45C),
-    ([2, 5, 1], 0x00B4_E85C),
-    ([2, 1, 4], 0x005C_E86A),
-    ([3, 0, 4], 0x005C_E8E8),
-    ([3, 5, 0], 0x005C_8AE8),
-    ([3, 1, 5], 0x008A_5CE8),
-    ([3, 4, 1], 0x00E8_5CB4),
+    ([2, 0, 4], 0x00E8_6A5C),
+    ([2, 5, 0], 0x00E8_B45C),
+    ([2, 1, 5], 0x00B4_E85C),
+    ([2, 4, 1], 0x005C_E86A),
+    ([3, 4, 0], 0x005C_E8E8),
+    ([3, 0, 5], 0x005C_8AE8),
+    ([3, 5, 1], 0x008A_5CE8),
+    ([3, 1, 4], 0x00E8_5CB4),
 ];
 
 /// What is behind the solid.
@@ -180,6 +186,7 @@ extern "C" fn main() -> ! {
     let mut turned_away = 0usize;
     let mut painted = 0usize;
     let mut refused = 0usize;
+    let mut disagreed = 0usize;
 
     for frame in 0..FRAMES {
         // Two turns at once, at different rates, so that every face comes round
@@ -197,12 +204,36 @@ extern "C" fn main() -> ! {
         // of an octahedron is a corner of four faces, so this is four times less
         // arithmetic and -- more to the point -- it cannot produce two slightly
         // different answers for one corner, which is what makes a crack.
+        let mut camera = [Point::new(0, 0, 0); POINTS.len()];
         let mut screen = [None; POINTS.len()];
         for (index, point) in POINTS.iter().enumerate() {
-            screen[index] = project(place.apply(*point), width, height, whole(SCALE));
+            camera[index] = place.apply(*point);
+            screen[index] = project(camera[index], width, height, whole(SCALE));
         }
 
         for (corners, colour) in FACES {
+            // What the geometry says, worked out before the rasteriser is
+            // asked. A face is visible when its outward normal leans towards
+            // the eye, which is the sign of the dot product of that normal with
+            // the line from the eye to any point of the face.
+            let (p, q, r) = (camera[corners[0]], camera[corners[1]], camera[corners[2]]);
+            let ux = i64::from(q.x - p.x);
+            let uy = i64::from(q.y - p.y);
+            let uz = i64::from(q.z - p.z);
+            let vx = i64::from(r.x - p.x);
+            let vy = i64::from(r.y - p.y);
+            let vz = i64::from(r.z - p.z);
+            // Scaled down before the dot product: these are already products of
+            // differences of fixed-point numbers, and the dot is two deeper.
+            let nx = (uy * vz - uz * vy) >> 20;
+            let ny = (uz * vx - ux * vz) >> 20;
+            let nz = (ux * vy - uy * vx) >> 20;
+            let towards =
+                nx * i64::from(p.x >> 10) + ny * i64::from(p.y >> 10) + nz * i64::from(p.z >> 10);
+            // The eye is at the origin looking along +z, so a face leaning
+            // towards it has a normal pointing back against the line to it.
+            let should_show = towards < 0;
+
             let (Some(a), Some(b), Some(c)) =
                 (screen[corners[0]], screen[corners[1]], screen[corners[2]])
             else {
@@ -219,6 +250,22 @@ extern "C" fn main() -> ! {
             } else {
                 drawn += 1;
                 painted += wrote;
+            }
+
+            // And the two have to agree. A face the geometry calls visible and
+            // the rasteriser refused is a face wound the wrong way round; one
+            // the geometry calls hidden and the rasteriser drew is the inside
+            // of the solid painted over the outside. Both look like a shape.
+            //
+            // A face seen nearly edge-on covers no pixels while still, strictly,
+            // facing the eye -- so the first of those is only counted when the
+            // normal leans towards the eye by more than a hair.
+            let edge_on = -64;
+            if should_show && wrote == 0 && towards < edge_on {
+                disagreed += 1;
+            }
+            if !should_show && wrote > 0 {
+                disagreed += 1;
             }
         }
 
@@ -256,13 +303,17 @@ extern "C" fn main() -> ! {
         failed(&format!(
             "solid: FAILED: {drawn} drawn and {turned_away} turned away; a solid shows about half"
         ));
+    } else if disagreed != 0 {
+        failed(&format!(
+            "solid: FAILED: {disagreed} face(s) where the geometry and the rasteriser disagreed about which way they point"
+        ));
     } else if refused != 0 {
         failed(&format!(
             "solid: FAILED: {refused} faces had a corner behind the eye"
         ));
     } else {
         nexus_user::log(
-            "solid: about half of it faced away at every angle, which is what a solid does",
+            "solid: every face the geometry called visible was drawn, and every face it called hidden was refused",
         )
         .ok();
     }
