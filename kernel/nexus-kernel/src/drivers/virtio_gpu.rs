@@ -601,7 +601,19 @@ fn frame_pair() -> Option<(u64, u64)> {
 unsafe fn make_screen(gpu: &mut Gpu) -> bool {
     // What the host says the display is. This number is the first thing in this
     // file that this driver could not have invented.
-    let mut reply = [0u8; 64];
+    //
+    // The buffer has to be the *whole* answer even though only the first
+    // display is read from it. A device is entitled to refuse a response
+    // descriptor shorter than the structure it is answering with, and QEMU says
+    // so out loud -- `response size incorrect 64 vs 408` -- while filling in
+    // what fits. That worked only because the display this reads is the first
+    // one in the array; a driver that wanted the second would have been reading
+    // whatever was in the scratch page.
+    //
+    // 24 bytes of header, then sixteen displays of a rectangle, an enabled flag
+    // and some flags: 24 + 16 * 24.
+    const DISPLAY_INFO: usize = 24 + 16 * 24;
+    let mut reply = [0u8; DISPLAY_INFO];
     // SAFETY: upheld by the caller.
     let Some(kind) = (unsafe { ask(gpu, &header(command::GET_DISPLAY_INFO), &mut reply) }) else {
         return false;
@@ -832,11 +844,7 @@ unsafe fn ask(gpu: &mut Gpu, request: &[u8], reply: &mut [u8]) -> Option<u32> {
     // SAFETY: upheld by the caller. The scratch page is this driver's and the
     // gate means nobody else has started with it.
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            request.as_ptr(),
-            gpu.scratch as *mut u8,
-            request.len(),
-        );
+        core::ptr::copy_nonoverlapping(request.as_ptr(), gpu.scratch as *mut u8, request.len());
         core::ptr::write_bytes((gpu.scratch + ANSWER_AT) as *mut u8, 0, reply.len());
 
         // Two descriptors: what to do, and where to put the answer. Chained,

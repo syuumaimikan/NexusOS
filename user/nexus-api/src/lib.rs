@@ -47,6 +47,17 @@ pub use nexus_user::{print, println, read_input, Error, Handle, Kind};
 pub mod machine;
 pub mod path;
 pub mod process;
+pub mod watch;
+
+/// Making characters out of bytes that arrive a few at a time.
+///
+/// Re-exported rather than written here, because it is the one piece of this
+/// API with logic in it that fails *quietly* -- a replacement mark where a
+/// character should be -- and a thing that can be wrong without saying so has
+/// to be testable on the host. It lives in `shared/nexus-utf8`, where eight
+/// tests take a Japanese sentence apart at every possible byte and put it back
+/// together.
+pub use nexus_utf8 as text;
 
 /// The handles every program is started with, by number.
 ///

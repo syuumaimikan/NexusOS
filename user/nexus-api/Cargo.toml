@@ -13,3 +13,4 @@ path = "src/lib.rs"
 [dependencies]
 nexus-user = { path = "../nexus-user" }
 nexus-machine = { path = "../../shared/nexus-machine" }
+nexus-utf8 = { path = "../../shared/nexus-utf8" }

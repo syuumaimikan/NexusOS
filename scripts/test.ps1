@@ -104,7 +104,7 @@ $HostLibraries = @(
     'nexus-html', 'nexus-http', 'nexus-i18n', 'nexus-image', 'nexus-ime', 'nexus-index',
     'nexus-inflate', 'nexus-json', 'nexus-look', 'nexus-machine', 'nexus-mm', 'nexus-net',
     'nexus-netclient', 'nexus-pkg', 'nexus-shellwords', 'nexus-time', 'nexus-tls', 'nexus-update',
-    'nexus-user', 'nexus-window'
+    'nexus-user', 'nexus-utf8', 'nexus-window', 'nexus-lang'
 )
 
 # Programs that run on the development machine rather than on Nexus: the package
@@ -115,8 +115,9 @@ $HostTools = @('nexus-pack', 'nexus-collab', 'nexus-roots', 'nexus-linux-example
 $Programs = @(
     'nexus-ai', 'nexus-assist', 'nexus-browser', 'nexus-client', 'nexus-compositor',
     'nexus-edit', 'nexus-files', 'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install',
-    'nexus-launch', 'nexus-settings', 'nexus-setup', 'nexus-shell', 'nexus-store',
-    'nexus-term', 'nexus-ui', 'nexus-updater', 'nexus-view', 'nexus-wall'
+    'nexus-api', 'nexus-count', 'nexus-launch', 'nexus-ls', 'nexus-nex', 'nexus-settings',
+    'nexus-setup', 'nexus-shell', 'nexus-store', 'nexus-term', 'nexus-text', 'nexus-ui',
+    'nexus-updater', 'nexus-view', 'nexus-wall'
 )
 
 # The two that stand alone, each with its own target.
@@ -603,8 +604,14 @@ Invoke-Step 'boot test' {
     if (-not ($output -match 'disk (\d+) sectors, (\d+) read, (\d+) written')) {
         throw 'the kernel never reported what it did with the disk'
     }
-    if ([int]$Matches[1] -ne 131072) {
-        throw "the disk reports $($Matches[1]) sectors, expected 131072"
+    # Asked for rather than written down. This said 131072 -- the sixty-four
+    # megabyte disk -- for as long as it took somebody to enlarge the disk to
+    # eight gigabytes and not think to look here, and then it failed a boot that
+    # was perfectly healthy. `Get-NexusDiskSizes` is the one place that knows.
+    . (Join-Path $PSScriptRoot 'qemu.ps1')
+    $wantSectors = [long](Get-NexusDiskSizes).SizeMiB * 1MB / 512
+    if ([long]$Matches[1] -ne $wantSectors) {
+        throw "the disk reports $($Matches[1]) sectors, expected $wantSectors"
     }
     if ([int]$Matches[2] -lt 1 -or [int]$Matches[3] -lt 1) {
         throw 'the disk was found but never read or written'

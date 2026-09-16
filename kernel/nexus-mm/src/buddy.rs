@@ -35,11 +35,22 @@ use core::fmt;
 /// Size of a physical frame.
 pub const PAGE_SIZE: u64 = 4096;
 
-/// Largest allocation order. Order `k` is `2^k` frames, so order 10 is 4 MiB.
+/// Largest allocation order. Order `k` is `2^k` frames, so order 12 is 16 MiB.
 ///
 /// Large enough to back a 2 MiB huge page (order 9) with room above it, and
 /// small enough that the pair bitmap stays a rounding error against RAM.
-pub const MAX_ORDER: usize = 10;
+///
+/// It was 10 -- four megabytes -- until the kernel started driving its own
+/// display. A framebuffer has to be one contiguous run, because the device is
+/// given one address and a length, and 1920x1200 at four bytes a pixel is 8.8
+/// megabytes. With the old limit the driver said `no memory for a 1920x1200
+/// framebuffer` and the machine booted with no screen at all: a display this
+/// kernel could drive, refused by its own allocator.
+///
+/// Two orders rather than one, so that the next size up -- 2560x1600, at 16
+/// megabytes exactly -- also fits. The cost is two more free lists and two more
+/// words of per-order bookkeeping.
+pub const MAX_ORDER: usize = 12;
 
 /// Sentinel for "no block", used in place of a null physical address because
 /// physical address zero is a real frame.

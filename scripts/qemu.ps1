@@ -274,7 +274,17 @@ function Get-NexusQemuArgs {
     # interrupt vector from forty thousand entries in a session to twenty-seven
     # million. See docs/gpu.md; the machinery is all in the kernel and this one
     # line is what turns it on, once that is understood.
-    $arguments += @('-vga', 'none', '-device', 'virtio-gpu-pci,id=nexusgpu')
+    # The size is given, not taken. A virtio GPU's default scanout is 1280x800
+    # and the firmware's VGA was 1920x1200, so adopting the GPU as the display
+    # silently made everybody's screen smaller -- which showed up as a wallpaper
+    # reporting `1280x764` where every test that knew the machine expected
+    # `1920x1164`, and as three input tests clicking where a window no longer
+    # was. The display is part of what this machine *is*, so it is stated here
+    # with the rest of it.
+    $arguments += @(
+        '-vga', 'none',
+        '-device', 'virtio-gpu-pci,id=nexusgpu,xres=1920,yres=1200'
+    )
 
     # A sound card, and nothing to play it through.
     #

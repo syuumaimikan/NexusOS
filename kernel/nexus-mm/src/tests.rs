@@ -151,6 +151,8 @@ fn mixed_order_allocations_never_overlap() {
 #[test]
 fn freeing_everything_restores_the_original_state() {
     let mut allocator = populated(1024);
+    // What the arena looks like untouched, which is what "restores" means.
+    let before = allocator.stats();
     let mut blocks = Vec::new();
 
     // SAFETY: test-only backing store.
@@ -164,18 +166,23 @@ fn freeing_everything_restores_the_original_state() {
     }
 
     assert_eq!(allocator.free_frames(), 1024);
-    // Full coalescing should have put the memory back into whole large blocks.
+    // Full coalescing should have put the memory back exactly as it was.
+    //
+    // Compared against the state this arena started in rather than against
+    // `free_blocks[MAX_ORDER]`, which is what this said and which was a
+    // different claim wearing the same words: a 1024-frame arena makes one
+    // order-10 block, and `MAX_ORDER` is a property of the *allocator*, not of
+    // the arena. They were the same number until the largest allowed block grew
+    // to hold a framebuffer, and then this test failed on an allocator that was
+    // behaving perfectly.
     let stats = allocator.stats();
     assert_eq!(
-        stats.free_blocks[MAX_ORDER], 1,
-        "1024 frames should coalesce back into a single order-10 block"
+        stats.free_blocks, before.free_blocks,
+        "freeing everything should restore the arena exactly"
     );
-    for order in 0..MAX_ORDER {
-        assert_eq!(
-            stats.free_blocks[order], 0,
-            "no fragments should remain at order {order}"
-        );
-    }
+    // No separate "nothing left at a smaller order" loop: comparing the whole
+    // array against the arena's original state says that already, and says it
+    // about the largest order too, which the loop did not.
 }
 
 #[test]
@@ -380,6 +387,8 @@ fn the_bitmap_is_sized_for_the_arena() {
 #[test]
 fn a_long_mixed_workload_keeps_the_allocator_consistent() {
     let mut allocator = populated(2048);
+    // What the arena looks like untouched, which is what "restores" means.
+    let before = allocator.stats();
     let mut live: Vec<(u64, usize)> = Vec::new();
     let mut covered: HashSet<u64> = HashSet::new();
 
@@ -433,8 +442,8 @@ fn a_long_mixed_workload_keeps_the_allocator_consistent() {
 
     assert_eq!(allocator.free_frames(), 2048);
     assert_eq!(
-        allocator.stats().free_blocks[MAX_ORDER],
-        2,
-        "2048 frames should coalesce into two maximum-order blocks"
+        allocator.stats().free_blocks,
+        before.free_blocks,
+        "freeing everything should restore the arena exactly"
     );
 }
