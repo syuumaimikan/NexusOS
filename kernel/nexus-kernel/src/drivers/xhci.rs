@@ -356,6 +356,16 @@ pub fn start(devices: &[Device]) -> Result<(), Trouble> {
     // SAFETY: the device came from this kernel's own PCI scan and nothing else
     // drives it.
     unsafe { device.enable() };
+    // And do not take its interrupt.
+    //
+    // This driver polls the event ring and never enables the controller's
+    // interrupter. Saying so at the bus as well is what makes it true: the
+    // controller asserted its pin regardless, and on a machine with no VGA the
+    // USB controller shares that pin with the disk.
+    //
+    // SAFETY: this is that device's driver, and nothing here waits on its
+    // interrupt.
+    unsafe { device.disable_interrupts() };
 
     // SAFETY: as above.
     let base = match unsafe { device.base_address(0) } {

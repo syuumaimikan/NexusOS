@@ -315,6 +315,9 @@ pub unsafe fn init(devices: &[Device]) -> Result<u64, BlockError> {
     // SAFETY: the device answered enumeration, so its configuration space is
     // readable, and this is the only driver touching it.
     unsafe { device.enable() };
+    // And this one does wait on its interrupt, so it asks for it back.
+    // SAFETY: this is that device's driver and its handler is installed.
+    unsafe { device.take_interrupts() };
 
     // SAFETY: as above.
     let port = match unsafe { device.base_address(0) } {

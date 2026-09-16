@@ -205,6 +205,11 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // SAFETY: called once, before anything drives a device.
     let devices = unsafe { drivers::pci::enumerate() };
     drivers::pci::report(&devices);
+    // Before any driver runs. Taking an interrupt is something a driver asks
+    // for; leaving one raised by a device nobody listens to is what jams the
+    // line everybody else shares.
+    // SAFETY: no driver has started.
+    unsafe { drivers::pci::silence(&devices) };
 
     // The disk. Not fatal if there is none: everything else works without it,
     // and saying so beats refusing to boot a machine that has no storage the

@@ -147,13 +147,28 @@ pub enum Source {
     Mouse = 4,
     Disk = 5,
     Network = 6,
+    /// The disk's handler again, counted where it *returns*.
+    ///
+    /// Two counters on one handler, which is not instrumentation for its own
+    /// sake: a session measured 27226234 entries to this vector against 39613
+    /// increments made on the first line of the function the handler calls,
+    /// and those two numbers cannot both be right. One of them is counting
+    /// something other than what it says. This pins where the entries go.
+    DiskReturned = 7,
 }
 
 impl Source {
-    const COUNT: usize = 7;
+    const COUNT: usize = 8;
     /// What to call it in a log line.
     const NAMES: [&'static str; Self::COUNT] = [
-        "pit", "timer", "shootdown", "keyboard", "mouse", "disk", "network",
+        "pit",
+        "timer",
+        "shootdown",
+        "keyboard",
+        "mouse",
+        "disk",
+        "network",
+        "disk-returned",
     ];
 }
 
@@ -349,6 +364,7 @@ extern "x86-interrupt" fn disk_interrupt(frame: InterruptStackFrame) {
         // is on, because the cost is one register read on a device that is
         // rarely interrupting and the cost of getting the condition wrong is a
         // machine taking a hundred thousand interrupts a second.
+        took(Source::DiskReturned);
         crate::drivers::virtio_gpu::acknowledge();
         // And the card, if it is on the same pin. PCI pins are shared: two
         // devices in adjacent slots routinely land on one line, and the only

@@ -216,6 +216,65 @@ impl Device {
         None
     }
 
+    /// Stop this device asserting its interrupt pin.
+    ///
+    /// For a device this kernel drives by polling. Not politeness: a PCI
+    /// interrupt pin is level-triggered and shared, so a device that raises one
+    /// nobody acknowledges holds the line, and *every other driver on that pin*
+    /// is then called over and over for a device it does not own. The machine
+    /// still runs, which is what makes it hard to see -- it simply spends all
+    /// its time in an interrupt handler.
+    ///
+    /// Done here, at the bus, rather than in each device's own registers. A
+    /// controller has its own way of being told not to interrupt and each way
+    /// has its own conditions; this bit is in the same place on every PCI
+    /// device ever made and means exactly one thing. It is also the only one
+    /// that holds when the device's own logic disagrees -- which is the case
+    /// this was written for: the xHCI driver never enabled the controller's
+    /// interrupter, said so in a comment, and the line was asserted anyway.
+    ///
+    /// Measured: with the firmware's VGA removed, every device moves up a slot,
+    /// the USB controller lands on the disk's interrupt line, and a session
+    /// takes 79,513,944 entries to that vector -- of which the disk answers
+    /// "not mine" to every single one.
+    ///
+    /// # Safety
+    ///
+    /// The caller must be the driver for this device, and must not be waiting
+    /// on its interrupt.
+    pub unsafe fn disable_interrupts(&self) {
+        /// Command register bit 10: do not assert INTx.
+        const INTERRUPT_DISABLE: u32 = 1 << 10;
+
+        // SAFETY: upheld by the caller. The status half is write-one-to-clear,
+        // so it is masked out rather than written back.
+        unsafe {
+            let command = read_config(self.address, 0x04) & 0xFFFF;
+            write_config(self.address, 0x04, command | INTERRUPT_DISABLE);
+        }
+    }
+
+    /// Let this device assert its interrupt pin again.
+    ///
+    /// For the drivers that actually wait on one. The opposite of
+    /// [`Device::disable_interrupts`], and the reason that one can be the
+    /// default: a driver that needs an interrupt says so here, in its own
+    /// bring-up, next to the code that will handle it.
+    ///
+    /// # Safety
+    ///
+    /// The caller must be this device's driver, and a handler for its line must
+    /// be installed.
+    pub unsafe fn take_interrupts(&self) {
+        const INTERRUPT_DISABLE: u32 = 1 << 10;
+
+        // SAFETY: upheld by the caller. The status half is write-one-to-clear.
+        unsafe {
+            let command = read_config(self.address, 0x04) & 0xFFFF;
+            write_config(self.address, 0x04, command & !INTERRUPT_DISABLE);
+        }
+    }
+
     pub unsafe fn enable(&self) {
         const IO_SPACE: u32 = 1 << 0;
         const MEMORY_SPACE: u32 = 1 << 1;
@@ -356,6 +415,43 @@ unsafe fn probe(address: Address) -> Option<Device> {
         subsystem,
         interrupt_line,
     })
+}
+
+/// Stop every device on the bus asserting its interrupt pin.
+///
+/// Called once, on everything, immediately after enumeration and before any
+/// driver runs. The drivers that genuinely wait on an interrupt -- the disk and
+/// the network card -- turn theirs back on, which makes taking an interrupt an
+/// act rather than a default.
+///
+/// The default was the other way round and it cost a day. A PCI interrupt pin
+/// is level-triggered and shared: four slots apart is the same line. A device
+/// nobody is listening to raises its pin, nobody reads its status register to
+/// acknowledge, the pin stays asserted, and the handler belonging to whichever
+/// *other* device shares it is called for ever. The machine keeps working,
+/// which is what hides it -- it simply spends all its time entering an
+/// interrupt and finding nothing to do. Measured at 79,513,944 entries to the
+/// disk's vector in one session, with the disk answering "not mine" to every
+/// one.
+///
+/// Turning them off one driver at a time was tried first and is the wrong
+/// shape: it leaves the default as "interrupt everybody", so the next device
+/// added to this kernel is a storm waiting for the day some other device is
+/// removed and the slots shift. Four separate bisections all pointed at
+/// "whichever device moves onto the disk's line", which is not a device at all.
+///
+/// # Safety
+///
+/// Must be called before any driver has begun waiting on an interrupt.
+pub unsafe fn silence(devices: &[Device]) {
+    for device in devices {
+        // SAFETY: no driver has started; upheld by the caller.
+        unsafe { device.disable_interrupts() };
+    }
+    kprintln!(
+        "[pci ] {} devices told not to raise an interrupt; drivers that want one ask",
+        devices.len()
+    );
 }
 
 /// Print what was found.

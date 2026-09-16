@@ -196,60 +196,103 @@ sat in the first slot, because that pushed the GPU onto a line nothing else
 used. 883 interrupts from ring three without the GPU on the bus, **141204** with
 it, 889 after the fix. Fixed in 2868a9e.
 
-## The migration itself: built, works, and still not shipped
+## The desktop is on it
 
-With that out of the way the desktop was moved onto the GPU, and everything it
-needs is in the kernel now:
-
-- `virtio_gpu::framebuffer()` describes the scanout as an ordinary
-  `FramebufferInfo`, so `display::init` takes it without knowing what it is.
-- `main.rs` adopts it when the firmware gave none. Nothing above that line
-  learns which display it got.
-- The framebuffer **remembers what was written to it**. `put_pixel` and
-  `fill_rect` are the only two places pixels are stored, so a bounding box kept
-  there is complete without any drawing routine having to remember to say so,
-  and `display::with` sends exactly that rectangle when it hands the surface
-  back.
-- A `DisplayFlush` system call, which takes the framebuffer handle -- saying "I
-  have drawn" needs the same authority as drawing.
-- The compositor calls it at the end of `repaint` with the damage it already
-  computed. **59 rectangles in a whole session**, against 699 from the
-  twenty-times-a-second full-screen flush this replaces.
-
-It boots, the desktop appears, and the flushes are real. `-vga none` in
-`qemu.ps1` is the one line that turns it on.
-
-And it is still not on, for a different reason from last time:
+`-vga none` in `qemu.ps1`. The firmware has no driver for a virtio GPU, so it
+hands the bootloader no framebuffer at all, and the kernel's own driver becomes
+the only thing that can put anything on the screen. There is no handover and no
+moment when two drivers own one device.
 
 ```
-firmware display   interrupts by line: timer 116880, keyboard 56, disk 42359
-GPU as the display interrupts by line: timer 199430, keyboard 56, disk 27226234
+[nexus-boot] no usable framebuffer; the kernel will run headless
+[pci ] 9 devices told not to raise an interrupt; drivers that want one ask
+[disp] the firmware gave no framebuffer; taking the GPU's 1280x800
+[disp] 1280x800 display adopted
+[mon ] gpu 92 commands answered, 44 rectangles flushed
+[user] compositor: the session ended
 ```
 
-Twenty-seven million entries to the disk's interrupt vector in a session, against
-forty-two thousand. None of them spurious -- the local APIC's spurious count,
-now printed for the first time, is **zero** -- so every one of them ran a
-handler.
+### Damage, all the way down
 
-And there is a contradiction in those numbers that is the sharpest clue anyone
-has: the handler on that vector ran 27,226,234 times, while the block driver's
-own counter, incremented on the *first line* of the function that handler calls,
-reached 39,613. On the firmware display the two agree exactly (42,359 against
-~42,000). Whatever is happening, it is entering that vector without the block
-driver's handler counting it, and only when the firmware gave no framebuffer.
+Nothing flushes on a timer. Whoever draws says what changed:
 
-That is not understood, and a display that works while making the machine take a
-million interrupts a second is not a display anybody should be given. The
-per-line counters that found it are new and stay; before them the only numbers
-were a grand total and the disk's own, and the difference between them belonged
-to nobody.
+- The **surface remembers**. `put_pixel` and `fill_rect` are the only two places
+  in this kernel that store a pixel, so a bounding box kept there is complete
+  without any drawing routine having to remember to say so -- and none of them
+  can forget. `display::with` sends exactly that rectangle when it hands the
+  surface back, after dropping the lock, because sending means waiting on a
+  device and no other painter should wait for that.
+- The **compositor** already computed a damage region for its own repaint, and
+  now passes it down through a `DisplayFlush` system call. Forty-four rectangles
+  in a session, against the 699 that twenty full screens a second produced.
+- That call takes the **framebuffer handle**. Saying "I have drawn" needs the
+  same authority as drawing, and on this machine drawing is done by having the
+  display.
 
-The flush thread that went with it was real — twenty times a second, four
-megabytes a frame, `1402 commands answered, 699 rectangles flushed` in a boot.
-It is the wrong design anyway: whoever draws should say what changed, which is
-exactly the damage rectangle the compositor already computes for its clients.
-Routing that down to the driver is what the migration actually needs, and it
-would cut the traffic by whatever fraction of the screen is still.
+On a machine whose framebuffer came from the firmware every one of those calls
+does nothing, because those pixels are already the screen. They are still made.
+A compositor that asked first whether it was on a GPU would be one that has to
+know, and that branch would be wrong on the machine nobody tested.
+
+### What actually blocked it for a day
+
+Not the flush thread, not the driver, not the disk, not the PCI slot, not the
+interrupt line, and not the emulator. All six were measured and eliminated;
+[disk-barriers.md](disk-barriers.md) has two of them.
+
+It was that **a PCI interrupt pin is level-triggered and shared, and four slots
+apart is the same line.** Removing the firmware's VGA moves every device up a
+slot. The USB controller then lands on the disk's line, raises its pin, and
+nothing acknowledges it -- the xHCI driver polls, and says so in a comment --
+so the pin stays asserted and the *disk's* handler is called for ever, finding
+each time that the interrupt is not its own:
+
+```
+disk 79513944, disk-returned 79513944   and the disk's own counter: 38124
+```
+
+Those two numbers looked like a contradiction and were the whole clue. The
+handler ran seventy-nine million times and completed every time; the driver's
+counter is incremented only when the device's status register says the interrupt
+*was* the disk's. So the disk was answering "not mine" to every one of them.
+
+Turning it off per driver was tried first and is the wrong shape -- it leaves
+the default as "interrupt everybody", so the next device added here is a storm
+waiting for the day some other device is removed and the slots shift. Four
+separate bisections all pointed at "whichever device moves onto the disk's
+line", which is not a device at all.
+
+So the default is inverted. `pci::silence` tells every device on the bus not to
+assert its pin, once, before any driver runs; the two drivers that genuinely
+wait on an interrupt -- the disk and the network card -- ask for theirs back in
+their own bring-up, next to the handler that will take it. **Taking an interrupt
+is now an act rather than a default.**
+
+```
+before   disk 79513944
+after    disk 42338      -- the same as the machine with a firmware display
+```
+
+### How it is checked
+
+The old test looked for three bands of known colour, because the GPU had a
+scanout nothing else drew into. It is the display now, so the bands are painted
+over within a second, and a test that insisted on them would be insisting the
+machine had no screen.
+
+What it asks instead is harder to pass by accident. Black is what an
+unconfigured display shows and so is any other single colour, so the question is
+how many *different* colours are in the host's picture of this device, and
+whether the top of it differs from the bottom:
+
+```
+ok   the host's picture of the GPU is 1280x800
+ok   75 distinct colours in it, so the screen is on it
+ok   top (11,20,40) and bottom (2,5,12) differ
+```
+
+Fifteen checks. And the desktop above it still works: the launcher starts
+programs by name, and kanji conversion passes its eight.
 
 ## What is not here
 

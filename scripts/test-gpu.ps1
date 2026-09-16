@@ -148,31 +148,60 @@ if (-not (Test-Path $Scanout)) {
     $width = [int]$fields[1]
     $height = [int]$fields[2]
 
-    # One pixel from the middle of each band.
-    $wanted = @(
-        @{ Row = [int]($height / 6); Name = 'red'; R = 255; G = 0; B = 0 },
-        @{ Row = [int]($height / 2); Name = 'green'; R = 0; G = 255; B = 0 },
-        @{ Row = [int]($height * 5 / 6); Name = 'blue'; R = 0; G = 0; B = 255 }
-    )
-    $wrong = 0
-    foreach ($band in $wanted) {
-        $index = $at + (($band.Row * $width) + [int]($width / 2)) * 3
-        $red = $bytes[$index]
-        $green = $bytes[$index + 1]
-        $blue = $bytes[$index + 2]
-        if ($red -eq $band.R -and $green -eq $band.G -and $blue -eq $band.B) {
-            Write-Host "    ok   row $($band.Row) is $($band.Name)" -ForegroundColor DarkGray
-        } else {
-            $wrong++
-            Write-Host "    FAIL row $($band.Row) is ($red,$green,$blue), wanted $($band.Name)" `
-                -ForegroundColor Red
-        }
+    # What the host says this device is showing.
+    #
+    # This used to look for three bands of known colour, because the GPU had a
+    # scanout of its own that nothing else ever drew into. It *is* the display
+    # now -- `display::init` adopts it, the boot screen paints into it and the
+    # compositor after that -- so the bands are drawn and then covered over
+    # within a second, and a test that insisted on them would be insisting the
+    # machine had no screen.
+    #
+    # The replacement is a stronger claim and a harder one to pass by accident.
+    # Black is what an unconfigured display shows, and so is any single colour,
+    # so the question asked of the picture is how many *different* colours are
+    # in it. A gradient with text on it has hundreds. A device that answered
+    # every command and displayed nothing has one.
+    $seen = @{}
+    $step = 997  # a prime, so the sample walks the whole picture rather than a column
+    $pixels = $width * $height
+    for ($i = 0; $i -lt $pixels; $i += $step) {
+        $index = $at + $i * 3
+        if ($index + 2 -ge $bytes.Length) { break }
+        $seen["$($bytes[$index]),$($bytes[$index + 1]),$($bytes[$index + 2])"] = $true
     }
-    if ($wrong -eq 0) {
-        Write-Host "    ok   the host's picture of the GPU is ${width}x${height} and has the bands" `
+    $colours = $seen.Count
+
+    $checks++
+    if ($width -eq 1280 -and $height -eq 800) {
+        Write-Host "    ok   the host's picture of the GPU is ${width}x${height}" -ForegroundColor DarkGray
+    } else {
+        $failures += "the GPU's picture is ${width}x${height}, not 1280x800"
+        Write-Host "    FAIL the picture is ${width}x${height}" -ForegroundColor Red
+    }
+
+    $checks++
+    if ($colours -ge 32) {
+        Write-Host "    ok   $colours distinct colours in it, so the screen is on it" `
             -ForegroundColor DarkGray
     } else {
-        $failures += "$wrong of 3 bands are not the colour the kernel drew"
+        $failures += "only $colours distinct colours in the GPU's picture; a blank display gives one"
+        Write-Host "    FAIL only $colours distinct colours" -ForegroundColor Red
+    }
+
+    # And that it is a *picture* and not noise: the top of the screen and the
+    # bottom are different, which a gradient guarantees and a uniform fill
+    # cannot produce.
+    $topIndex = $at + ([int]($width / 2)) * 3
+    $bottomIndex = $at + ((($height - 2) * $width) + [int]($width / 2)) * 3
+    $top = "$($bytes[$topIndex]),$($bytes[$topIndex + 1]),$($bytes[$topIndex + 2])"
+    $bottom = "$($bytes[$bottomIndex]),$($bytes[$bottomIndex + 1]),$($bytes[$bottomIndex + 2])"
+    $checks++
+    if ($top -ne $bottom) {
+        Write-Host "    ok   top ($top) and bottom ($bottom) differ" -ForegroundColor DarkGray
+    } else {
+        $failures += "the top and bottom of the GPU's picture are both ($top)"
+        Write-Host "    FAIL top and bottom are both ($top)" -ForegroundColor Red
     }
 }
 

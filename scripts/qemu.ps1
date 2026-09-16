@@ -274,7 +274,7 @@ function Get-NexusQemuArgs {
     # interrupt vector from forty thousand entries in a session to twenty-seven
     # million. See docs/gpu.md; the machinery is all in the kernel and this one
     # line is what turns it on, once that is understood.
-    $arguments += @('-device', 'virtio-gpu-pci,id=nexusgpu')
+    $arguments += @('-vga', 'none', '-device', 'virtio-gpu-pci,id=nexusgpu')
 
     # A sound card, and nothing to play it through.
     #

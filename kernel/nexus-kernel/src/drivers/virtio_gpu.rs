@@ -293,6 +293,15 @@ pub unsafe fn init(devices: &[Device]) -> bool {
     // readable, and this is the only driver touching it. `enable` turns on bus
     // mastering, without which the device cannot read the rings.
     unsafe { device.enable() };
+    // And do not take its interrupt.
+    //
+    // This driver polls its control queue. `NO_INTERRUPT` in the available ring
+    // asks the device not to interrupt and the specification lets it decline;
+    // this does not ask.
+    //
+    // SAFETY: this is that device's driver, and nothing here waits on its
+    // interrupt.
+    unsafe { device.disable_interrupts() };
 
     // The four structures, from the capability list. Modern virtio puts nothing
     // at a fixed place, so a device whose capabilities are missing one of these
