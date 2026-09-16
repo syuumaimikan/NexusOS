@@ -120,7 +120,43 @@ if ((-not (Test-Path $PrivateEsp)) -or $Fresh) {
 }
 $EspDir = $PrivateEsp
 
-$MonitorPort = Get-Random -Minimum 33000 -Maximum 33999
+<#
+.SYNOPSIS
+    A host TCP port nothing is listening on, found by trying to listen on it.
+
+.DESCRIPTION
+    Picking at random and hoping is what this script did, and the range it
+    picked from is the range every other test script here picks from. When the
+    pick collides, QEMU cannot bind its monitor and the machine is gone before
+    it boots -- and what is left behind is a serial log holding nothing but the
+    firmware's clear-screen codes, which reads exactly like a machine that
+    failed for no reason.
+
+    Asking the operating system is not much more code than hoping. It is still
+    a race -- something can take the port between the test and QEMU's bind --
+    but it turns a collision from likely into unlikely, and a retry covers the
+    rest.
+#>
+function Get-FreePort {
+    param([int]$From, [int]$To)
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        $candidate = Get-Random -Minimum $From -Maximum $To
+        $listener = $null
+        try {
+            $listener = New-Object System.Net.Sockets.TcpListener(
+                [System.Net.IPAddress]::Loopback, $candidate)
+            $listener.Start()
+            return $candidate
+        } catch {
+            continue
+        } finally {
+            if ($listener) { $listener.Stop() }
+        }
+    }
+    throw "could not find a free port between $From and $To"
+}
+
+$MonitorPort = Get-FreePort -From 33000 -To 33999
 # And a host port of its own for the guest's HTTP forward. `Get-NexusQemuArgs`
 # defaults it to 18080 and its own comment says why it should not be left there;
 # this script left it there anyway, and with somebody else's machine already on
@@ -130,7 +166,7 @@ $MonitorPort = Get-Random -Minimum 33000 -Maximum 33999
 #
 # on standard error, and nothing at all in the serial log. That is why this run
 # kept reporting a desktop that never appeared.
-$HttpPort = Get-Random -Minimum 18100 -Maximum 18999
+$HttpPort = Get-FreePort -From 18100 -To 18999
 $QemuArgs = Get-NexusQemuArgs -BuildDir $PrivateDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $Log `
     -MonitorPort $MonitorPort -HostHttpPort $HttpPort -Headless

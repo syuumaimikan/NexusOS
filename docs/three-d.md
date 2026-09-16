@@ -1,5 +1,20 @@
 # Drawing in three dimensions
 
+```
+launch: asked for sold
+compositor: the launcher asked for sold
+compositor: started the three-dimensional drawing, and gave it a surface in slot 3, 960x582
+solid: all 8 faces are wound so their front is the outside
+solid: 180 frames, 818 faces drawn and 622 turned away, 2278702 pixels by the processor
+solid: geometry and rasteriser agreed on every face but 2 seen edge-on, the worst leaning by 12688 of 2487965
+```
+
+Six lines of `build/solid-test.log`, in the order they were written, with the
+`[user]` prefix taken off each and nothing else changed. Driven the way a person would: F3, type "dra", press
+return. The picture is in `build/solid.png` — an octahedron, eight flat-shaded
+faces, the near ones covering the far ones, every pixel of it worked out by the
+processor.
+
 A transform, a perspective projection, triangles filled a pixel at a time, and a
 depth buffer so that what is behind stays behind. That is the whole of what
 drawing in three dimensions means at the bottom, and the picture it makes is a
@@ -86,8 +101,8 @@ and in the face table of `user/nexus-solid`, where somebody will trip over it.
 
 ## How it is checked
 
-**Thirty tests on the host**, and the ones worth naming are those that catch a
-renderer which looks right by accident:
+**Thirty-four tests on the host**, and the ones worth naming are those that
+catch a renderer which looks right by accident:
 
 - **Two triangles sharing an edge leave no gap.** A seam shows as background
   through a solid; a double write is invisible until the two have different
@@ -102,28 +117,69 @@ renderer which looks right by accident:
 - **Composition is in the order it reads**, checked both ways round, because a
   matrix product that is backwards still produces a plausible picture.
 
-**And on the machine — not yet.** This is the part of this document with nothing
-behind it, and it is said here rather than left to be found.
+**And on the machine**, which is the output at the top of this file. The path
+`scripts/test-solid.ps1` drives is the whole of it: a key, the launcher, a
+compositor that hands out a surface, and a program that fills it.
 
-`user/nexus-solid` is written, it builds, and it turns an octahedron about two
-axes at once. For every face of every frame it works out from the geometry
-whether that face *should* be visible — whether its outward normal leans towards
-the eye — and requires that to agree with whether the rasteriser drew it. **It
-has never been run.** It is a window client, so it needs the compositor to start
-it and hand it a surface, and the compositor is one of three files currently
-holding another agent's uncommitted work.
+`user/nexus-solid` checks itself in two ways, and the difference between them is
+the most useful thing in this document.
 
-So the thirty host tests are measured, and the paragraph above describes code
-that has not yet drawn anything. When it has, its output belongs at the top of
-this file and this paragraph should go.
+### The check that does not work
 
-That check, once it runs, replaces a weaker one, and the weaker one is worth
-recording because
-it looked sufficient. It counted faces drawn against faces turned away and
-passed when both were non-zero. A convex solid shows about half its faces from
-any direction, so **reversing every face swaps which half is drawn and leaves
-both counts looking healthy** — while what is on screen is the inside of the
-shape. Counting cannot tell those apart. The normal can.
+For every face of every frame it works out from the geometry whether the face
+*should* be visible — whether its outward normal leans towards the eye — and
+requires that to agree with whether the rasteriser drew it.
+
+**That check is blind to the winding, and I found out by reversing the table and
+watching it pass.** Both sides of the comparison are computed from the same face
+table: reverse it and the computed normal reverses too, so the two still agree,
+the program reports success, and what is on screen is the inside of the shape.
+The run printed `622 faces drawn and 818 turned away` — the exact mirror of the
+`818 and 622` above, the same 2278702 pixels, and a cheerful verdict.
+
+It is not worthless. It is what would catch a projection that stopped reversing
+handedness, or a rasteriser whose idea of a front face changed sign. It is
+simply not a check on the winding, and it was written as though it were.
+
+This is the *second* time a self-check here has been too weak in exactly this
+way. The first counted faces drawn against faces turned away and passed when
+both were non-zero — and a convex solid shows about half its faces from any
+direction, so reversing every face leaves both counts looking healthy. Both
+versions failed for the same reason: **the quantity being checked was derived
+from the thing under test.**
+
+### The check that does
+
+The outward direction has to come from something the face table cannot move.
+This solid is centred on the origin, so the direction from the centre to a face
+*is* its outward direction, and the centroid of three corners is a point on that
+ray. The winding is right when the normal the corner order produces leans
+against it.
+
+Reversed on purpose, that check says:
+
+```
+solid: FAILED: 8 of 8 faces are wound inside out, so what would be drawn
+       is the inside of the shape
+```
+
+before a single pixel is drawn, because a table wound inside out makes a picture
+and nothing later in the program would notice a picture.
+
+### The two faces that are allowed to disagree
+
+A face seen edge-on projects to a sliver a pixel or two wide, and the sign of a
+sliver's area is decided by where its three corners round to whole pixels rather
+than by which way it faces. The two methods cannot be required to agree there.
+
+So the run reports both numbers and the tolerance is a ratio: the worst
+disagreement leaned by 12688 against 2487965 for a face seen square on — half a
+percent, about a third of a degree off edge-on. A fixed constant would have been
+a number chosen until the test passed.
+
+Two of 1440 face-frames, and the count is in the output so that a version of
+this which started excusing something real would say so before the constant
+did.
 
 ## What it has not
 
