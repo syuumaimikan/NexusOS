@@ -203,6 +203,12 @@ $SolidElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-solid"
 $StagedSolid = Publish-Program -Elf $SolidElf -ProgramDir $ProgramDir -Name 'solid.elf'
 $solidSize = [math]::Round((Get-Item $StagedSolid).Length / 1KB, 1)
 
+# The network tool, which is a window client like any other and is lent the
+# network and nothing else.
+$NetoolElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-netool"
+$StagedNetool = Publish-Program -Elf $NetoolElf -ProgramDir $ProgramDir -Name 'netool.elf'
+$netoolSize = [math]::Round((Get-Item $StagedNetool).Length / 1KB, 1)
+
 $StoreElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-store"
 $StagedStore = Publish-Program -Elf $StoreElf -ProgramDir $ProgramDir -Name 'store.elf'
 $storeSize = [math]::Round((Get-Item $StagedStore).Length / 1KB, 1)
@@ -625,6 +631,7 @@ Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
 Write-Host "  gemini agt : $geminiSize KiB  -> BIN\GEMINI.ELF on the disk"
 Write-Host "  unpack     : $unpackSize KiB  -> BIN\UNPACK.ELF on the disk"
 Write-Host "  solid      : $solidSize KiB  -> BIN\SOLID.ELF on the disk"
+Write-Host "  netool     : $netoolSize KiB  -> BIN\NETOOL.ELF on the disk"
 Write-Host "  download   : $debSize bytes of Debian package -> DOWNLOAD\DEMO.DEB on the disk"
 Write-Host "  picture    : $pictureSize KiB  -> PICTURES\NEXUS.PNG on the disk"
 Write-Host "  recording  : $videoSize KiB  -> PICTURES\NEXUS.AVI on the disk"

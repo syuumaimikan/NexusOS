@@ -104,7 +104,7 @@ $HostLibraries = @(
     'nexus-html', 'nexus-http', 'nexus-i18n', 'nexus-image', 'nexus-ime', 'nexus-index',
     'nexus-inflate', 'nexus-json', 'nexus-look', 'nexus-machine', 'nexus-mm', 'nexus-net',
     'nexus-netclient', 'nexus-pkg', 'nexus-shellwords', 'nexus-time', 'nexus-tls', 'nexus-update',
-    'nexus-user', 'nexus-utf8', 'nexus-window', 'nexus-lang', 'nexus-archive', 'nexus-render3d'
+    'nexus-user', 'nexus-utf8', 'nexus-window', 'nexus-lang', 'nexus-archive', 'nexus-render3d', 'nexus-netscan'
 )
 
 # Programs that run on the development machine rather than on Nexus: the package
@@ -123,7 +123,7 @@ $Guest32Programs = 'nexus-guest32'
 $Programs = @(
     'nexus-ai', 'nexus-assist', 'nexus-browser', 'nexus-client', 'nexus-compositor',
     'nexus-edit', 'nexus-files', 'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install',
-    'nexus-api', 'nexus-count', 'nexus-solid', 'nexus-launch', 'nexus-ls', 'nexus-nex', 'nexus-settings',
+    'nexus-api', 'nexus-count', 'nexus-solid', 'nexus-netool', 'nexus-launch', 'nexus-ls', 'nexus-nex', 'nexus-settings',
     'nexus-setup', 'nexus-shell', 'nexus-store', 'nexus-term', 'nexus-text', 'nexus-ui',
     'nexus-unpack', 'nexus-updater', 'nexus-view', 'nexus-wall'
 )

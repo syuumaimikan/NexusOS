@@ -332,6 +332,8 @@ mod desk {
     pub const UNPACK: &[u8] = b"unpk";
     /// Draw a solid, in three dimensions, with the processor.
     pub const SOLID: &[u8] = b"sold";
+    /// Find out what is on the network.
+    pub const NETOOL: &[u8] = b"netw";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -522,6 +524,13 @@ const ASSISTANT: &[u8] = b"BIN/ASSIST.ELF";
 /// it puts on that surface was worked out by the processor. See
 /// `docs/three-d.md`.
 const SOLID: &[u8] = b"BIN/SOLID.ELF";
+/// The one that says what is on the network.
+///
+/// Lent the network and nothing else -- no disk, no folder, nowhere to write.
+/// A tool that finds out what is listening has no business keeping a record of
+/// it, and one that could would be one bug away from writing that record
+/// somewhere it could be read.
+const NETOOL: &[u8] = b"BIN/NETOOL.ELF";
 /// A program built for Linux, given a window like any other client.
 ///
 /// `linux:` in front of the path is the whole of what makes it different, and
@@ -2351,6 +2360,12 @@ enum What {
     /// so the authority it needs is the authority to *ask*, which every client
     /// already has, and not the authority to start anything.
     Launcher,
+    /// A window that says what is on the network.
+    ///
+    /// Given the network and nothing else. Read, write and transfer on the
+    /// service, and not close: a client that could close the network would be
+    /// a client that can take it away from the program that lent it.
+    Netool,
     /// A solid turning in three dimensions, drawn by the processor.
     ///
     /// A surface and a channel, like every other client. Nothing is lent to it
@@ -2433,6 +2448,7 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::ASSIST => Launched::Window(What::Assistant),
         tag if tag == desk::UNPACK => Launched::Unpack,
         tag if tag == desk::SOLID => Launched::Window(What::Solid),
+        tag if tag == desk::NETOOL => Launched::Window(What::Netool),
         tag if tag == desk::QUIT => Launched::Leave,
         tag if tag == desk::HALT => Launched::Halt,
         tag if tag == desk::RESTART => Launched::Restart,
@@ -2747,6 +2763,27 @@ fn open_window(
             width,
             height,
         )?,
+        What::Netool => {
+            let Ok(theirs) = nexus_user::duplicate(
+                NETWORK,
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+            ) else {
+                failed("compositor: FAILED: could not lend the network to the network tool");
+                return Some(Asked::Nothing);
+            };
+            start_program(
+                NETOOL,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
+                0,
+                &[theirs],
+            )?
+        }
         // The same call as an ordinary client, and that is the point: a
         // renderer that needed anything more from the compositor would be a
         // renderer with a graphics stack underneath it, and there is none.
@@ -3132,6 +3169,9 @@ fn open_window(
             }
             What::Solid => {
                 "compositor: started the three-dimensional drawing, and gave it a surface"
+            }
+            What::Netool => {
+                "compositor: started the network tool, and lent it the network and nothing else"
             }
             What::Linux => {
                 "compositor: started a program built for Linux, and gave it a surface"

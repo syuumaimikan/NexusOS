@@ -1,0 +1,11 @@
+[package]
+name = "nexus-netscan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Working out what is on a network, and what it is running."
+
+[lib]
+name = "nexus_netscan"
+path = "src/lib.rs"

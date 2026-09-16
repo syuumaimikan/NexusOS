@@ -146,6 +146,11 @@ const ENTRIES: &[Entry] = &[
         grave: false,
     },
     Entry {
+        key: "shell.netool",
+        tag: b"netw",
+        grave: false,
+    },
+    Entry {
         key: "shell.sleep",
         tag: b"slep",
         grave: true,

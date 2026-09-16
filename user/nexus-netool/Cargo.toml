@@ -1,0 +1,19 @@
+[package]
+name = "nexus-netool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A window for finding out what is on the network."
+
+[[bin]]
+name = "nexus-netool"
+path = "src/main.rs"
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-window = { path = "../nexus-window" }
+nexus-netclient = { path = "../../shared/nexus-netclient" }
+nexus-netscan = { path = "../../shared/nexus-netscan" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
