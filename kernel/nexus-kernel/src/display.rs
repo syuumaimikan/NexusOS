@@ -112,6 +112,32 @@ const MUTED: Color = Color(0x0084_9AB8);
 /// The bar along the bottom.
 const BAR: Color = Color(0x0008_0E18);
 
+/// Whether the adopted framebuffer belongs to the GPU driver rather than the
+/// firmware.
+static ON_THE_GPU: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Send a rectangle of the framebuffer to the screen.
+///
+/// Nothing at all when the firmware gave the framebuffer, and that is not an
+/// oversight to be tidied away later: those pixels *are* the screen, already,
+/// and there is nowhere to send them to. The call is still made, by the same
+/// code, on both kinds of machine -- because the alternative is every drawing
+/// path asking which kind it is on, and one of them eventually getting it
+/// wrong on the machine nobody tested.
+///
+/// A rectangle with no area is ignored rather than refused. "I drew nothing"
+/// is a thing a compositor legitimately has to say, and making it an error
+/// would put a branch at every call site to avoid saying it.
+pub fn flush(x: u32, y: u32, width: u32, height: u32) {
+    if !ON_THE_GPU.load(core::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    if width == 0 || height == 0 {
+        return;
+    }
+    crate::drivers::virtio_gpu::flush(x, y, width, height);
+}
+
 /// Adopt the framebuffer and paint the initial screen.
 ///
 /// # Safety
@@ -129,6 +155,13 @@ pub unsafe fn init(info: &FramebufferInfo) -> bool {
         "[disp] {}x{} display adopted",
         framebuffer.width(),
         framebuffer.height()
+    );
+    // Whether what is drawn has to be sent anywhere afterwards. A firmware
+    // framebuffer *is* the screen; a GPU's scanout is the guest's copy of it.
+    ON_THE_GPU.store(
+        crate::drivers::virtio_gpu::framebuffer()
+            .is_some_and(|gpu| gpu.phys_addr == info.phys_addr),
+        core::sync::atomic::Ordering::Release,
     );
     if font::has_generated_face() {
         kprintln!(
@@ -336,8 +369,26 @@ fn clear_rows(fb: &mut Framebuffer, start_y: u32, end_y: u32) {
 
 /// Run `f` with the framebuffer, if there is one.
 fn with<R>(f: impl FnOnce(&mut Framebuffer) -> R) -> Option<R> {
-    let mut guard = DISPLAY.lock();
-    guard.as_mut().map(f)
+    let (answer, damage) = {
+        let mut guard = DISPLAY.lock();
+        let framebuffer = guard.as_mut()?;
+        let answer = f(framebuffer);
+        (answer, framebuffer.take_damage())
+    };
+
+    // Sent after the lock is dropped, because sending means talking to a device
+    // and waiting for it to answer, and holding the display's lock across that
+    // would make every other painter wait for the screen rather than for the
+    // paint.
+    //
+    // This is the whole of the kernel's side of putting pixels on a GPU: the
+    // surface remembers what was written to it, and the one place that hands
+    // the surface out sends exactly that much. No drawing routine above here
+    // knows about it, and none of them can forget to say so.
+    if let Some((left, top, right, bottom)) = damage {
+        flush(left, top, right - left, bottom - top);
+    }
+    Some(answer)
 }
 
 /// Paint the title block and the bar along the bottom.

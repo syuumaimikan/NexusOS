@@ -68,6 +68,14 @@ pub struct Framebuffer {
     stride: u32,
     bytes_per_pixel: u32,
     format: PixelFormat,
+    /// The smallest rectangle covering everything written since it was last
+    /// taken, as left, top, right, bottom -- the right and bottom exclusive.
+    ///
+    /// A bounding box and not a list. Two windows at opposite corners make it
+    /// the whole screen, which sends more than changed; a list of rectangles
+    /// would send less and is a great deal more arithmetic to get right. The
+    /// compositor above this made the same choice for the same reason.
+    damage: Option<(u32, u32, u32, u32)>,
 }
 
 // SAFETY: the framebuffer is plain MMIO with no internal invariants; access is
@@ -112,6 +120,10 @@ impl Framebuffer {
             stride: info.stride,
             bytes_per_pixel: info.bytes_per_pixel,
             format: info.format,
+            // Nothing written yet, which is not the same as an empty rectangle:
+            // the first paint has to be sent, and a zero-area rectangle would
+            // be skipped.
+            damage: None,
         })
     }
 
@@ -155,12 +167,36 @@ impl Framebuffer {
             return;
         }
         let encoded = self.encode(color);
+        self.touched(x, y, x + 1, y + 1);
         // SAFETY: the bounds check above keeps the offset inside the mapped
         // framebuffer, and `bytes_per_pixel` is 4 for every format `new`
         // accepts, so a 32-bit store stays within one pixel.
         unsafe {
             core::ptr::write_volatile(self.base.add(self.offset(x, y)) as *mut u32, encoded);
         }
+    }
+
+    /// Note that a rectangle has been written to.
+    ///
+    /// Called from the two places that write pixels, and only those two:
+    /// everything else on this type -- glyphs, text, gradients, `clear` --
+    /// reaches the surface through one of them, so the damage is complete
+    /// without any of them having to remember to say so. That is the reason it
+    /// lives here rather than at the call sites.
+    fn touched(&mut self, left: u32, top: u32, right: u32, bottom: u32) {
+        self.damage = Some(match self.damage {
+            None => (left, top, right, bottom),
+            Some((l, t, r, b)) => (l.min(left), t.min(top), r.max(right), b.max(bottom)),
+        });
+    }
+
+    /// What has been written to since this was last called, and forget it.
+    ///
+    /// Taken rather than read, so that a caller which sends the rectangle on
+    /// cannot send the same pixels twice, and a caller which drops it has
+    /// visibly dropped it.
+    pub fn take_damage(&mut self) -> Option<(u32, u32, u32, u32)> {
+        self.damage.take()
     }
 
     /// Fill an axis-aligned rectangle, clipped to the surface.
@@ -172,6 +208,7 @@ impl Framebuffer {
         }
 
         let encoded = self.encode(color);
+        self.touched(x, y, x_end, y_end);
         for row in y..y_end {
             // Compute the row base once rather than per pixel; a full-screen
             // clear does millions of these.

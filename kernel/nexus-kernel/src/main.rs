@@ -293,9 +293,38 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         i18n::locale_count()
     );
 
-    // SAFETY: the bootloader mapped the framebuffer through the direct map, and
-    // this is the only place the kernel adopts it.
-    unsafe { display::init(&boot_info.framebuffer) };
+    // The screen: the firmware's framebuffer where there is one, and the GPU's
+    // scanout where there is not.
+    //
+    // Which it gets is a property of the machine and not a preference. This
+    // firmware has no driver for a virtio GPU, so a machine given one and no
+    // other display is handed no framebuffer at all -- `no usable framebuffer`
+    // from the bootloader, and every pixel after that would have gone nowhere.
+    // The kernel's own driver is then the only thing that can put anything on
+    // the screen, which is also the tidiest arrangement of the two: there is no
+    // handover, and no moment when the firmware and the kernel are both driving
+    // one device.
+    //
+    // Nothing above this line learns which it got. `display::flush` is called
+    // either way and does nothing on the firmware's, because a firmware
+    // framebuffer *is* the screen.
+    let screen = if boot_info.framebuffer.phys_addr == 0 {
+        drivers::virtio_gpu::framebuffer().unwrap_or(boot_info.framebuffer)
+    } else {
+        boot_info.framebuffer
+    };
+    if screen.phys_addr != boot_info.framebuffer.phys_addr {
+        kprintln!(
+            "[disp] the firmware gave no framebuffer; taking the GPU's {}x{}",
+            screen.width,
+            screen.height
+        );
+    }
+
+    // SAFETY: the bootloader mapped the framebuffer through the direct map, or
+    // the GPU driver allocated it out of the same physical memory; this is the
+    // only place the kernel adopts one.
+    unsafe { display::init(&screen) };
 
     // The scheduler. The context that got us here becomes thread #0 and keeps
     // running; from this point on it is preemptible like any other thread.
@@ -657,9 +686,29 @@ fn monitor_thread(_argument: usize) {
             kprintln!("[mon ] {entered} yields begun, {returned} returned");
         }
         let from_user = arch::idt::entries_from_user();
+        // And how many of them nobody owned. A spurious interrupt is the local
+        // APIC saying a line was raised by a device whose handler it could not
+        // find, and a count that climbs is a device holding a pin that nothing
+        // releases. It has been counted since the APIC was written and printed
+        // nowhere, which is the same blind spot the disk's wait counters were
+        // in -- a number that exists and is never looked at is a number that
+        // does not exist.
+        let spurious = arch::apic::spurious_count();
         kprintln!(
-            "[mon ] {calls} system calls ({unknown} unimplemented),              {from_user} interrupts taken from ring 3"
+            "[mon ] {calls} system calls ({unknown} unimplemented),              {from_user} interrupts taken from ring 3, {spurious} spurious"
         );
+        // And which line they arrived on. Without this the only numbers are a
+        // total and the disk's own, and the difference between those two
+        // belongs to nobody -- which is exactly where a million and a half
+        // interrupts were hiding.
+        let mut sources = alloc::string::String::new();
+        for (name, count) in arch::interrupts::counts() {
+            if count > 0 {
+                use core::fmt::Write as _;
+                let _ = write!(sources, " {name} {count},");
+            }
+        }
+        kprintln!("[mon ] interrupts by line:{}", sources.trim_end_matches(','));
     }
 }
 

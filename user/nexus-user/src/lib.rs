@@ -173,6 +173,7 @@ enum Call {
     NodeWriteAt = 30,
     Now = 31,
     Random = 32,
+    DisplayFlush = 33,
 }
 
 /// Make a system call.
@@ -402,6 +403,55 @@ pub fn now() -> Result<u64, Error> {
 ///
 /// # Errors
 ///
+/// Send part of the display to the screen.
+///
+/// On a machine whose framebuffer came from the firmware this does nothing, and
+/// there is nothing for it to do: those pixels *are* the screen. On a machine
+/// whose display is a device the kernel drives, the memory a program draws into
+/// is the guest's copy and this is what makes the host's match it.
+///
+/// So it has to be called either way. A compositor that called it only when it
+/// believed it was on a GPU would be a compositor that has to know, and that
+/// gets it wrong on the machine nobody tested.
+///
+/// `framebuffer` is the memory handle the display was lent as -- the same
+/// object [`memory_map`] takes. Saying "I have finished drawing" needs the same
+/// authority as drawing, which is having the display.
+///
+/// A rectangle with no area is accepted and does nothing; "I drew nothing" is a
+/// thing a compositor legitimately has to say.
+///
+/// # Errors
+///
+/// [`Error::BadHandle`] if the handle is not a memory object this process may
+/// write.
+pub fn display_flush(
+    framebuffer: Handle,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), Error> {
+    // Two coordinates to a word, low half first: a system call takes four
+    // arguments and a rectangle is five things counting the handle.
+    let origin = u64::from(x) | (u64::from(y) << 32);
+    let size = u64::from(width) | (u64::from(height) << 32);
+    // SAFETY: no pointers cross this boundary; every argument is a number.
+    let result = unsafe {
+        syscall(
+            Call::DisplayFlush,
+            u64::from(framebuffer.0),
+            origin,
+            size,
+            0,
+            0,
+            0,
+        )
+    };
+    check(result)?;
+    Ok(())
+}
+
 /// [`Error::NoDevice`] when the processor has no hardware generator, or its
 /// generator failed. [`Error::Invalid`] for an empty buffer, or one longer than
 /// 256 bytes -- ask again for more.

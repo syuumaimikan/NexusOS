@@ -121,7 +121,63 @@ where
 /// already in flight lands on a vector with no handler; falling silent means a
 /// straggler is acknowledged and ignored, and the clock is never advanced twice
 /// for the same instant.
+/// How many times each handler has run.
+///
+/// Added because a boot was taking seventy-five thousand interrupts a second
+/// against a timer that ticks a thousand, and nothing in this kernel could say
+/// which line they arrived on. The total was counted, and the disk's own were
+/// counted, and the difference between those two numbers was a million and a
+/// half interrupts belonging to nobody in particular.
+///
+/// Indexed by [`Source`], not by vector, because a vector is a number the
+/// interrupt controller chose and these are the things a person asks about.
+static COUNTS: [core::sync::atomic::AtomicU64; Source::COUNT] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; Source::COUNT];
+
+/// The things that interrupt this machine.
+#[derive(Clone, Copy)]
+pub enum Source {
+    /// The programmable interval timer, before the local APIC takes over.
+    Pit = 0,
+    /// The local APIC's timer, which is what schedules.
+    ApicTimer = 1,
+    /// Another processor asking for a translation buffer to be flushed.
+    Shootdown = 2,
+    Keyboard = 3,
+    Mouse = 4,
+    Disk = 5,
+    Network = 6,
+}
+
+impl Source {
+    const COUNT: usize = 7;
+    /// What to call it in a log line.
+    const NAMES: [&'static str; Self::COUNT] = [
+        "pit", "timer", "shootdown", "keyboard", "mouse", "disk", "network",
+    ];
+}
+
+/// Count one, at the top of the handler it belongs to.
+#[inline]
+fn took(source: Source) {
+    COUNTS[source as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Every source and how often it has fired, for the monitor to print.
+#[must_use]
+pub fn counts() -> [(&'static str, u64); Source::COUNT] {
+    let mut out = [("", 0u64); Source::COUNT];
+    for (index, slot) in out.iter_mut().enumerate() {
+        *slot = (
+            Source::NAMES[index],
+            COUNTS[index].load(core::sync::atomic::Ordering::Relaxed),
+        );
+    }
+    out
+}
+
 extern "x86-interrupt" fn pit_interrupt(frame: InterruptStackFrame) {
+    took(Source::Pit);
     // Entered from ring 3 as readily as from the kernel, and a device
     // interrupt is the likeliest of all of them to land on user code.
     let _gs = super::idt::KernelGs::enter(&frame);
@@ -156,6 +212,7 @@ extern "x86-interrupt" fn pit_interrupt(frame: InterruptStackFrame) {
 /// while charging the tick to a thread and deciding to preempt it are per
 /// processor, because the thread being charged is.
 extern "x86-interrupt" fn apic_timer_interrupt(frame: InterruptStackFrame) {
+    took(Source::ApicTimer);
     // Entered from ring 3 as readily as from the kernel, and a device
     // interrupt is the likeliest of all of them to land on user code.
     let _gs = super::idt::KernelGs::enter(&frame);
@@ -209,6 +266,7 @@ extern "x86-interrupt" fn apic_timer_interrupt(frame: InterruptStackFrame) {
 /// a lock has interrupts masked and would never take this, so the same mailbox
 /// is polled from every spin loop. See [`super::tlb`].
 extern "x86-interrupt" fn tlb_shootdown_interrupt(frame: InterruptStackFrame) {
+    took(Source::Shootdown);
     // Entered from ring 3 as readily as from the kernel, and a device
     // interrupt is the likeliest of all of them to land on user code.
     let _gs = super::idt::KernelGs::enter(&frame);
@@ -239,6 +297,7 @@ fn preempt() {
 /// thread: an interrupt handler runs with interrupts masked on this processor,
 /// and decoding needs modifier state that a handler has no business locking.
 extern "x86-interrupt" fn keyboard_interrupt(frame: InterruptStackFrame) {
+    took(Source::Keyboard);
     // Entered from ring 3 as readily as from the kernel, and a device
     // interrupt is the likeliest of all of them to land on user code.
     let _gs = super::idt::KernelGs::enter(&frame);
@@ -257,6 +316,7 @@ extern "x86-interrupt" fn keyboard_interrupt(frame: InterruptStackFrame) {
 /// is before taking it -- reading the other device's would take it away from
 /// the driver whose it is.
 extern "x86-interrupt" fn mouse_interrupt(frame: InterruptStackFrame) {
+    took(Source::Mouse);
     // Entered from ring 3 as readily as from the kernel, and a device
     // interrupt is the likeliest of all of them to land on user code.
     let _gs = super::idt::KernelGs::enter(&frame);
@@ -275,12 +335,21 @@ extern "x86-interrupt" fn mouse_interrupt(frame: InterruptStackFrame) {
 /// rest: an interrupt handler runs with interrupts masked on this processor,
 /// and copying half a kilobyte out of a scratch page is not its work.
 extern "x86-interrupt" fn disk_interrupt(frame: InterruptStackFrame) {
+    took(Source::Disk);
     // Entered from ring 3 as readily as from the kernel, and a device
     // interrupt is the likeliest of all of them to land on user code.
     let _gs = super::idt::KernelGs::enter(&frame);
     // SAFETY: called only as the handler for this vector.
     unsafe {
         crate::drivers::virtio_blk::on_interrupt();
+        // And the GPU, always. It never wants an interrupt -- it polls -- but a
+        // device that has raised one on a level-triggered pin holds that pin
+        // until its own status register is read, and no other driver's read
+        // will do it. Unconditional rather than behind a check of which line it
+        // is on, because the cost is one register read on a device that is
+        // rarely interrupting and the cost of getting the condition wrong is a
+        // machine taking a hundred thousand interrupts a second.
+        crate::drivers::virtio_gpu::acknowledge();
         // And the card, if it is on the same pin. PCI pins are shared: two
         // devices in adjacent slots routinely land on one line, and the only
         // thing that says which of them raised it is each device's own status
@@ -312,10 +381,12 @@ pub fn share_line_with_disk() {
 /// whoever was waiting; reading a frame means parsing it, which means locks and
 /// allocation and possibly a reply, none of which belongs in an interrupt.
 extern "x86-interrupt" fn network_interrupt(frame: InterruptStackFrame) {
+    took(Source::Network);
     let _gs = super::idt::KernelGs::enter(&frame);
     // SAFETY: called only as the handler for this vector.
     unsafe {
         crate::drivers::virtio_net::on_interrupt();
+        crate::drivers::virtio_gpu::acknowledge();
         // The other way round, for the same reason.
         if SHARED_LINE.load(core::sync::atomic::Ordering::Relaxed) {
             crate::drivers::virtio_blk::on_interrupt();

@@ -298,11 +298,32 @@ pub enum Call {
     /// on a machine whose processor has no hardware generator; see
     /// [`crate::random`] for why that refusal is the whole point.
     Random = 32,
+    /// Send part of the display to the screen.
+    /// `(framebuffer, x | y << 32, width | height << 32)`.
+    ///
+    /// Nothing on a machine whose framebuffer the firmware handed over: those
+    /// pixels are the screen, and there is nowhere to send them. It matters on
+    /// a machine whose display is a device the kernel drives, where the memory
+    /// a program draws into is the guest's copy and the screen is the host's,
+    /// and the two are the same only when somebody says so.
+    ///
+    /// The handle is not decoration. Drawing on this machine is done by having
+    /// the framebuffer, and so is saying that the drawing is finished -- a
+    /// program that cannot map the display has no business telling the display
+    /// to show anything. It is checked for the same right that mapping needs,
+    /// so the authority arrives the same way and can be taken away the same
+    /// way.
+    ///
+    /// Two coordinates to a word because a system call takes four arguments and
+    /// a rectangle is five things counting the handle. Packed rather than
+    /// passed through memory, which would be a pointer to validate for four
+    /// numbers.
+    DisplayFlush = 33,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 33;
+    pub const COUNT: usize = 34;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -340,6 +361,7 @@ impl Call {
             30 => Some(Self::NodeWriteAt),
             31 => Some(Self::Now),
             32 => Some(Self::Random),
+            33 => Some(Self::DisplayFlush),
             _ => None,
         }
     }
@@ -507,6 +529,7 @@ extern "sysv64" fn dispatch(
             None => ENODEV,
         },
         Some(Call::Random) => random(argument0, argument1),
+        Some(Call::DisplayFlush) => display_flush(argument0, argument1, argument2),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -1255,6 +1278,44 @@ const MAX_RANDOM: u64 = 256;
 /// hardware generator. That refusal is the point of the call rather than a
 /// shortcoming of it: the alternative is handing back something derived from
 /// the clock, which would let every TLS connection this machine makes be
+/// Send a rectangle of the display to the screen.
+///
+/// The handle has to be a memory object this process may write, which is the
+/// same right mapping the framebuffer needs. That is the whole permission
+/// check and it is the right one: on this machine the authority to draw *is*
+/// having the framebuffer, so the authority to say "I have drawn" is the same
+/// object. A process that was never lent the display cannot make the display
+/// do anything.
+///
+/// It is not checked that the handle is *the* framebuffer. It does not need to
+/// be: `display::flush` sends the display's own memory whatever it is handed,
+/// so the worst a process with some other memory object can do is ask for a
+/// rectangle of the screen to be shown again, which is what the screen is
+/// already showing.
+fn display_flush(handle: u64, origin: u64, size: u64) -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let Ok(handle) = u32::try_from(handle) else {
+        return EBADF;
+    };
+    if let Err(error) = process
+        .handles
+        .memory(handle, crate::ipc::Rights::READ | crate::ipc::Rights::WRITE)
+    {
+        return handle_error(error);
+    }
+
+    // Two per word, low half first.
+    let x = origin as u32;
+    let y = (origin >> 32) as u32;
+    let width = size as u32;
+    let height = (size >> 32) as u32;
+    crate::display::flush(x, y, width, height);
+    0
+}
+
 /// broken by somebody who knows roughly when it booted.
 ///
 /// Nothing is written unless everything was produced. [`crate::random::bytes`]

@@ -184,6 +184,8 @@ struct Gpu {
     height: u32,
     /// The last used-ring index this driver saw.
     seen: u16,
+    /// The interrupt status register, read only to acknowledge.
+    isr: Option<u64>,
 }
 
 // SAFETY: every field is a plain number, and all access goes through the lock
@@ -335,7 +337,31 @@ pub unsafe fn init(devices: &[Device]) -> bool {
         kprintln!("[gpu ] the virtio GPU has no common or notify capability; not driving it");
         return false;
     };
-    let _ = (isr, config);
+    let _ = config;
+
+    // The interrupt status register, which this driver needs for one reason
+    // only: to acknowledge.
+    //
+    // Nothing here waits on an interrupt -- the control queue is polled. But a
+    // device that raises one on a level-triggered pin holds that pin until
+    // somebody reads this register, and the driver sharing the pin reads its
+    // *own* device's register, not this one's, so the line is never released.
+    // Telling the device not to interrupt (`NO_INTERRUPT`, at the queue) stops
+    // new causes; it cannot clear a cause that is already there, and a
+    // configuration change at bring-up is one.
+    //
+    // Optional, because a device without this capability cannot raise an
+    // interrupt through it either.
+    let isr = isr.and_then(|window| {
+        // SAFETY: the window named belongs to this device.
+        unsafe { map_window(device, window) }
+    });
+    if isr.is_none() {
+        // Worth saying out loud rather than carrying on quietly. Without this
+        // register the driver cannot release the interrupt line, and if the
+        // device ever raises one the machine will take it for ever.
+        kprintln!("[gpu ] no interrupt status register; the GPU cannot release its line");
+    }
 
     // SAFETY: as above; the windows named belong to this device.
     let Some(common) = (unsafe { map_window(device, common_window) }) else {
@@ -349,7 +375,7 @@ pub unsafe fn init(devices: &[Device]) -> bool {
 
     // SAFETY: the structures are mapped and this driver is the only thing
     // touching the device.
-    let started = unsafe { bring_up(common, notify, notify_window.multiplier) };
+    let started = unsafe { bring_up(common, notify, notify_window.multiplier, isr) };
     let Some(mut gpu) = started else {
         // SAFETY: as above. Telling the device the driver gave up is the last
         // thing the protocol asks for, and a device left half-configured is one
@@ -403,7 +429,7 @@ unsafe fn map_window(device: &Device, window: Window) -> Option<u64> {
 ///
 /// `common` and `notify` must be mapped structures of a virtio device nothing
 /// else is driving.
-unsafe fn bring_up(common: u64, notify: u64, multiplier: u32) -> Option<Gpu> {
+unsafe fn bring_up(common: u64, notify: u64, multiplier: u32, isr: Option<u64>) -> Option<Gpu> {
     // SAFETY: upheld by the caller. The order below is the protocol: a driver
     // may not read features before saying DRIVER, may not touch a queue before
     // FEATURES_OK, and may not expect the device to work before DRIVER_OK.
@@ -537,6 +563,7 @@ unsafe fn bring_up(common: u64, notify: u64, multiplier: u32) -> Option<Gpu> {
             used,
             scratch,
             scratch_physical,
+            isr,
             frame: 0,
             frame_physical: 0,
             width: 0,
@@ -639,6 +666,60 @@ unsafe fn make_screen(gpu: &mut Gpu) -> bool {
 /// looks at; one that sent only the second shows the previous frame again.
 ///
 /// Returns whether the device took both.
+/// Let go of the interrupt line.
+///
+/// Reading the interrupt status register is what acknowledges at the device.
+/// This driver never wants the interrupt -- it polls -- but a level-triggered
+/// pin that nobody reads stays asserted, and then whichever driver shares that
+/// pin takes the same interrupt for ever. Measured before this existed: a
+/// hundred and sixteen thousand interrupts a second on a machine whose timer
+/// ticks a thousand times a second.
+///
+/// The value is discarded. There is no question to ask it: nothing here is
+/// waiting for anything, and the read is the entire point.
+///
+/// # Safety
+///
+/// Call only from an interrupt handler for a vector this device's line is
+/// routed to.
+pub unsafe fn acknowledge() {
+    let Some(isr) = GPU.lock().as_ref().and_then(|gpu| gpu.isr) else {
+        return;
+    };
+    // SAFETY: the window belongs to this device and was mapped at bring-up;
+    // reading this register is how the protocol says to acknowledge.
+    unsafe {
+        core::ptr::read_volatile(isr as *const u8);
+    }
+}
+
+/// The GPU's scanout, described the way the firmware describes its own.
+///
+/// So that nothing above this has to know which it got. `display::init` takes a
+/// [`FramebufferInfo`](nexus_abi::boot::FramebufferInfo) and paints into it;
+/// the compositor is handed the same description and maps the same memory.
+/// Neither of them has ever heard of virtio.
+///
+/// The stride is the width, because this driver allocated the memory and chose
+/// not to pad it. A firmware framebuffer often is padded, which is why the
+/// field exists at all.
+#[must_use]
+pub fn framebuffer() -> Option<nexus_abi::boot::FramebufferInfo> {
+    let gpu = (*GPU.lock())?;
+    Some(nexus_abi::boot::FramebufferInfo {
+        phys_addr: gpu.frame_physical,
+        size: u64::from(gpu.width) * u64::from(gpu.height) * 4,
+        width: gpu.width,
+        height: gpu.height,
+        stride: gpu.width,
+        bytes_per_pixel: 4,
+        // What the resource was created with, and what everything on this
+        // machine already draws in, so nothing is swizzled on the way.
+        format: nexus_abi::boot::PixelFormat::Bgrx8888,
+        _reserved: 0,
+    })
+}
+
 pub fn flush(x: u32, y: u32, width: u32, height: u32) -> bool {
     let Some(mut gpu) = *GPU.lock() else {
         return false;

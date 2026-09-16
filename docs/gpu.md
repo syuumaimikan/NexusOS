@@ -182,8 +182,67 @@ GPU, no network card, no sound and no USB, on a disk that was already formatted,
 seconds per twenty -- an ordinary idle, not a spin. So it is not headlessness by
 itself; it needs the full device set, or the fresh format, or both.
 
-That is where it stands. `scripts/test-disk-speed.ps1 -NoVga` reproduces it, and
-the next step is to bisect the devices.
+### Found: a driver that polls and never said so
+
+Bisecting the devices off the bus found it. Headless formats in 3034 ms with the
+GPU absent and would not finish in 400 seconds with it; nothing else on the bus
+mattered.
+
+The GPU driver polls its control queue and never wrote the flag that tells the
+device not to interrupt. The line stayed asserted -- nothing read the GPU's
+status register to acknowledge it -- and whichever driver shared that pin took
+the interrupt over and over for a device it does not own. Invisible while a VGA
+sat in the first slot, because that pushed the GPU onto a line nothing else
+used. 883 interrupts from ring three without the GPU on the bus, **141204** with
+it, 889 after the fix. Fixed in 2868a9e.
+
+## The migration itself: built, works, and still not shipped
+
+With that out of the way the desktop was moved onto the GPU, and everything it
+needs is in the kernel now:
+
+- `virtio_gpu::framebuffer()` describes the scanout as an ordinary
+  `FramebufferInfo`, so `display::init` takes it without knowing what it is.
+- `main.rs` adopts it when the firmware gave none. Nothing above that line
+  learns which display it got.
+- The framebuffer **remembers what was written to it**. `put_pixel` and
+  `fill_rect` are the only two places pixels are stored, so a bounding box kept
+  there is complete without any drawing routine having to remember to say so,
+  and `display::with` sends exactly that rectangle when it hands the surface
+  back.
+- A `DisplayFlush` system call, which takes the framebuffer handle -- saying "I
+  have drawn" needs the same authority as drawing.
+- The compositor calls it at the end of `repaint` with the damage it already
+  computed. **59 rectangles in a whole session**, against 699 from the
+  twenty-times-a-second full-screen flush this replaces.
+
+It boots, the desktop appears, and the flushes are real. `-vga none` in
+`qemu.ps1` is the one line that turns it on.
+
+And it is still not on, for a different reason from last time:
+
+```
+firmware display   interrupts by line: timer 116880, keyboard 56, disk 42359
+GPU as the display interrupts by line: timer 199430, keyboard 56, disk 27226234
+```
+
+Twenty-seven million entries to the disk's interrupt vector in a session, against
+forty-two thousand. None of them spurious -- the local APIC's spurious count,
+now printed for the first time, is **zero** -- so every one of them ran a
+handler.
+
+And there is a contradiction in those numbers that is the sharpest clue anyone
+has: the handler on that vector ran 27,226,234 times, while the block driver's
+own counter, incremented on the *first line* of the function that handler calls,
+reached 39,613. On the firmware display the two agree exactly (42,359 against
+~42,000). Whatever is happening, it is entering that vector without the block
+driver's handler counting it, and only when the firmware gave no framebuffer.
+
+That is not understood, and a display that works while making the machine take a
+million interrupts a second is not a display anybody should be given. The
+per-line counters that found it are new and stay; before them the only numbers
+were a grand total and the disk's own, and the difference between them belonged
+to nobody.
 
 The flush thread that went with it was real — twenty times a second, four
 megabytes a frame, `1402 commands answered, 699 rectangles flushed` in a boot.

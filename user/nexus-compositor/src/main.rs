@@ -398,6 +398,17 @@ const MAX_SURFACE: usize = SURFACE_STRIDE / 2;
 /// sake of avoiding a word.
 static ACCENT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x0038_8BE8);
 
+/// The handle the framebuffer was lent as.
+///
+/// Kept because finishing a repaint means telling the display that the pixels
+/// are ready, and on this system saying so needs the same authority as drawing
+/// -- which is this handle. A static for the same reason as [`ACCENT`]: the
+/// repaint path is free functions taking a rectangle, and threading one number
+/// through all of them would be threading it for the sake of avoiding a word.
+///
+/// Zero until the framebuffer arrives, which is not a handle any process holds.
+static SCREEN_HANDLE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// What that colour is, and shades of it.
 ///
 /// Every piece of chrome is the same hue at a different weight, so a machine
@@ -1212,6 +1223,7 @@ fn take_the_display() -> Option<Screen> {
     }
 
     let framebuffer = handles[0];
+    SCREEN_HANDLE.store(framebuffer.0, core::sync::atomic::Ordering::Release);
     let Ok(size) = nexus_user::memory_size(framebuffer) else {
         failed("compositor: FAILED: could not ask how large the framebuffer is");
         return None;
@@ -3328,6 +3340,28 @@ fn repaint(
     if pointing {
         draw_cursor(screen, cursor);
     }
+
+    // And say that it is drawn.
+    //
+    // On a machine whose framebuffer came from the firmware this costs a system
+    // call that returns immediately, because those pixels are already the
+    // screen. On a machine whose display is a device the kernel drives, this is
+    // what makes the screen match what was just composited -- and it sends the
+    // damage rectangle, not the screen, which is the whole reason the damage
+    // was computed.
+    //
+    // Unconditional on purpose. A compositor that asked first whether it was on
+    // a GPU would be a compositor that has to know, and the branch would be
+    // wrong on whichever machine nobody tested.
+    let handle = nexus_user::Handle(SCREEN_HANDLE.load(core::sync::atomic::Ordering::Acquire));
+    nexus_user::display_flush(
+        handle,
+        damage.left,
+        damage.top,
+        damage.right - damage.left,
+        damage.bottom - damage.top,
+    )
+    .ok();
 }
 
 /// Draw the corner that resizes a window.

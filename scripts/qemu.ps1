@@ -254,16 +254,26 @@ function Get-NexusQemuArgs {
         '-device', 'virtio-net-pci,netdev=nexusnet,disable-modern=on'
     )
 
-    # A GPU, beside the firmware's own display rather than instead of it.
+    # The GPU, and it is the display.
     #
-    # The bootloader is handed a framebuffer by the firmware's graphics
-    # protocol, and everything drawn on this machine has gone into it since the
-    # first boot. Replacing that with `-vga none` would mean the firmware
-    # driving *this* device and the kernel driving it as well, which is two
-    # drivers on one device; adding a second display leaves the existing path
-    # exactly as it was and gives the new driver a device of its own.
-    # Named, so that a screenshot can be asked for of *this* display rather
+    # `-vga none` removes the firmware's. That sounds like it would leave two
+    # drivers on one device -- the firmware's and the kernel's -- and it is the
+    # opposite: this firmware has no driver for a virtio GPU at all, so a
+    # machine given one and nothing else is handed *no framebuffer*, the
+    # bootloader says so, and the kernel's own driver becomes the only thing
+    # that can put anything on the screen. There is no handover and no moment
+    # when both are driving it.
+    #
+    # Named, so a screenshot can be asked for of this display by name rather
     # than of whichever one QEMU counts as first.
+    #
+    # Still beside the firmware's display and not instead of it. `-vga none`
+    # works -- the desktop comes up on the GPU, the compositor's damage
+    # rectangles reach it, 59 of them in a session instead of a full screen
+    # twenty times a second -- and it is not here, because it takes the disk's
+    # interrupt vector from forty thousand entries in a session to twenty-seven
+    # million. See docs/gpu.md; the machinery is all in the kernel and this one
+    # line is what turns it on, once that is understood.
     $arguments += @('-device', 'virtio-gpu-pci,id=nexusgpu')
 
     # A sound card, and nothing to play it through.
