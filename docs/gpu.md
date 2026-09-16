@@ -144,10 +144,46 @@ same 4 MiB scanout allocated and attached. Only adopting it as the display is
 expensive, and it is expensive during a disk format, which happens long before
 anything flushes a single rectangle.
 
-So it is not the flush thread, and it is not the driver. What it is has not been
-found, and that is the whole reason this is a section in a document rather than
-a commit: shipping it would trade a display that works for one that works and
-makes the machine unusable, in exchange for a picture that looks identical.
+So it is not the flush thread, and it is not the driver.
+
+### What it is not, established since
+
+Those two rows were measured when every write on this machine waited for the
+host's disk, because the block driver refused `VIRTIO_BLK_F_FLUSH` --
+[disk-barriers.md](disk-barriers.md) has that story. The obvious thought was
+that the display migration had simply been measured on a machine that was
+already thirty times slower than it should be, and that fixing the disk would
+fix this too.
+
+It did not. With the barrier in and a fresh format down to three seconds, a
+machine given no firmware framebuffer **still does not finish one in four
+hundred seconds**, twice running.
+
+Nor is it the change in PCI layout. Removing the VGA moves every device up a
+slot, so the disk lands at `00:01.0` on interrupt line 10 instead of `00:02.0`
+on 11 -- two variables moving together, which is why the one fast headless log
+could never settle anything. They can be separated: `-vga none -device VGA`
+puts a display at the *end* of the bus, so the disk keeps slot one and line ten
+and the firmware still gets a framebuffer.
+
+| | fresh format |
+| --- | --- |
+| disk at `00:02.0`, line 11, framebuffer | 3039, 3264, 3076 ms |
+| disk at `00:01.0`, line 10, framebuffer | **2210, 2384 ms** |
+| disk at `00:01.0`, line 10, **no framebuffer** | did not finish in 400 s |
+
+The middle row is the fastest configuration measured on this machine. So the
+slot is innocent, the interrupt line is innocent, and what is left is the
+framebuffer's absence itself -- which has no business touching a disk at all.
+
+One more thing is known: a *minimal* headless machine is fine. Booted with no
+GPU, no network card, no sound and no USB, on a disk that was already formatted,
+`-vga none -display none` reaches the monitor thread and idles at 2.9 CPU
+seconds per twenty -- an ordinary idle, not a spin. So it is not headlessness by
+itself; it needs the full device set, or the fresh format, or both.
+
+That is where it stands. `scripts/test-disk-speed.ps1 -NoVga` reproduces it, and
+the next step is to bisect the devices.
 
 The flush thread that went with it was real — twenty times a second, four
 megabytes a frame, `1402 commands answered, 699 rectangles flushed` in a boot.

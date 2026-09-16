@@ -49,7 +49,7 @@
     because a format can only be measured on a disk that has not been formatted.
 #>
 [CmdletBinding()]
-param([int]$Timeout = 400, [int]$Repeat = 0, [switch]$NoVga, [switch]$Whpx, [string]$Cache = '', [switch]$Mount)
+param([int]$Timeout = 400, [int]$Repeat = 0, [switch]$NoVga, [switch]$Whpx, [string]$Cache = '', [switch]$Mount, [switch]$LateDisplay)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -101,7 +101,7 @@ function Measure-Mount {
 }
 
 function Measure-Format {
-    param([string]$Name, [switch]$WithoutNetwork, [switch]$WithoutDisplay, [switch]$Accelerated, [string]$CacheMode = '', [switch]$KeepDisk)
+    param([string]$Name, [switch]$WithoutNetwork, [switch]$WithoutDisplay, [switch]$Accelerated, [string]$CacheMode = '', [switch]$KeepDisk, [switch]$DisplayLast)
 
     if (-not $KeepDisk) { New-FreshDisk }
     $log = Join-Path $BuildDir "irq-$Name.log"
@@ -150,6 +150,20 @@ function Measure-Format {
         $args = @('-accel', 'whpx,kernel-irqchip=off') + $args
     }
 
+    if ($DisplayLast) {
+        # A display, but not at the front of the bus. `-vga none` stops QEMU
+        # putting its own VGA in the first slot, and a `-device VGA` at the end
+        # of the line lands after everything else -- so the disk keeps 00:01.0
+        # and interrupt line 10, exactly as it has when the firmware gives no
+        # framebuffer, while the firmware still gets one.
+        #
+        # That separates the two things `-vga none` changes at once. Without it
+        # the slow headless runs and the one fast headless log differ in the
+        # display *and* in where every PCI device sits, and no comparison
+        # between them can say which mattered.
+        $args += @('-vga', 'none', '-device', 'VGA')
+    }
+
     if ($WithoutDisplay) {
         # The one thing left that the 709 ms run differed by. The firmware has
         # no driver for the virtio GPU, so a machine with no VGA is handed no
@@ -194,7 +208,9 @@ if ($Repeat -gt 0) {
     # 32681 ms. A spread that wide between identical runs is the measurement
     # talking, not the machine.
     for ($n = 1; $n -le $Repeat; $n++) {
-        if ($Mount) {
+        if ($LateDisplay) {
+            $results += Measure-Format -Name "irq10-with-display-$n" -DisplayLast
+        } elseif ($Mount) {
             $results += Measure-Mount -Name "run$n"
         } elseif ($Cache) {
             $results += Measure-Format -Name "cache-$Cache-$n" -CacheMode $Cache
