@@ -210,9 +210,43 @@ pub struct Vertex {
 /// belongs to this, because nothing outside has any use for it.
 pub struct Canvas<'a> {
     pixels: &'a mut [Colour],
-    depth: Vec<Fixed>,
+    depth: Depth<'a>,
     width: usize,
     height: usize,
+}
+
+/// Where the depths live.
+///
+/// Two, and the second is not a convenience. A depth buffer is exactly as large
+/// as the colour buffer -- a window's worth of memory -- and a window client
+/// does not get its colour buffer from an allocator: the compositor lends it
+/// mapped memory. A client that had to find the same amount again on its heap
+/// would need a heap the size of a window to draw in one, which is how the
+/// first version of `nexus-solid` failed: two hundred and fifty-six kilobytes
+/// of heap and two megabytes of depths.
+///
+/// So a program that got its pixels from somewhere can get its depths from the
+/// same place. A test, which has an allocator and small canvases, still says
+/// `Canvas::new` and thinks about none of this.
+enum Depth<'a> {
+    Owned(Vec<Fixed>),
+    Lent(&'a mut [Fixed]),
+}
+
+impl Depth<'_> {
+    fn values(&mut self) -> &mut [Fixed] {
+        match self {
+            Depth::Owned(owned) => owned,
+            Depth::Lent(lent) => lent,
+        }
+    }
+
+    fn at(&self, index: usize) -> Fixed {
+        match self {
+            Depth::Owned(owned) => owned[index],
+            Depth::Lent(lent) => lent[index],
+        }
+    }
 }
 
 impl<'a> Canvas<'a> {
@@ -230,7 +264,41 @@ impl<'a> Canvas<'a> {
         }
         Some(Self {
             pixels,
-            depth: vec![Fixed::MAX; width * height],
+            depth: Depth::Owned(vec![Fixed::MAX; width * height]),
+            width,
+            height,
+        })
+    }
+
+    /// The same, with the depths supplied rather than allocated.
+    ///
+    /// For a program whose pixels are memory lent to it and whose heap is
+    /// therefore nothing like the size of its window. Both buffers must be
+    /// exactly `width * height`, and the depths are set to the far distance
+    /// here so that the first frame does not have to remember to clear them.
+    ///
+    /// # Errors
+    ///
+    /// `None` when either buffer is the wrong size, for the same reason as
+    /// `new`.
+    #[must_use]
+    pub fn with_depth(
+        pixels: &'a mut [Colour],
+        depth: &'a mut [Fixed],
+        width: usize,
+        height: usize,
+    ) -> Option<Self> {
+        if width == 0
+            || height == 0
+            || pixels.len() != width * height
+            || depth.len() != width * height
+        {
+            return None;
+        }
+        depth.fill(Fixed::MAX);
+        Some(Self {
+            pixels,
+            depth: Depth::Lent(depth),
             width,
             height,
         })
@@ -255,7 +323,7 @@ impl<'a> Canvas<'a> {
         for pixel in self.pixels.iter_mut() {
             *pixel = colour;
         }
-        self.depth.fill(Fixed::MAX);
+        self.depth.values().fill(Fixed::MAX);
     }
 
     /// What is at a pixel, for a test to ask.
@@ -267,7 +335,7 @@ impl<'a> Canvas<'a> {
     /// How far away the thing at a pixel is.
     #[must_use]
     pub fn depth_at(&self, x: usize, y: usize) -> Option<Fixed> {
-        (x < self.width && y < self.height).then(|| self.depth[y * self.width + x])
+        (x < self.width && y < self.height).then(|| self.depth.at(y * self.width + x))
     }
 
     /// Fill one triangle, keeping whatever is nearer.
@@ -324,10 +392,10 @@ impl<'a> Canvas<'a> {
                     / area;
 
                 let at = y as usize * self.width + x as usize;
-                if depth >= i64::from(self.depth[at]) {
+                if depth >= i64::from(self.depth.at(at)) {
                     continue;
                 }
-                self.depth[at] = depth as i32;
+                self.depth.values()[at] = depth as i32;
                 self.pixels[at] = colour;
                 written += 1;
             }

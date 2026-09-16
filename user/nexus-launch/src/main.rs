@@ -141,6 +141,11 @@ const ENTRIES: &[Entry] = &[
         grave: false,
     },
     Entry {
+        key: "shell.solid",
+        tag: b"sold",
+        grave: false,
+    },
+    Entry {
         key: "shell.sleep",
         tag: b"slep",
         grave: true,

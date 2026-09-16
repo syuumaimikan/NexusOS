@@ -311,3 +311,73 @@ fn a_canvas_of_the_wrong_size_is_refused() {
     assert!(Canvas::new(&mut pixels, 0, 0).is_none());
     assert!(Canvas::new(&mut pixels, 10, 1).is_some());
 }
+
+/// Depths supplied by the caller behave exactly as depths it allocated.
+///
+/// The same scene twice, once each way, compared pixel for pixel and depth for
+/// depth. Two code paths that are supposed to be the same thing are worth
+/// checking against each other rather than each against a hand-written answer,
+/// because a mistake in the hand-written answer passes both.
+#[test]
+fn lent_depths_draw_the_same_picture_as_owned_ones() {
+    let near = [vertex(1, 1, 3), vertex(14, 2, 3), vertex(2, 14, 3)];
+    let far = [vertex(0, 0, 8), vertex(15, 0, 8), vertex(0, 15, 8)];
+
+    let (mut owned_pixels, w, h) = canvas(16, 16);
+    let mut owned = Canvas::new(&mut owned_pixels, w, h).unwrap();
+    owned.clear(BLACK);
+    owned.triangle(far, RED);
+    owned.triangle(near, GREEN);
+
+    let (mut lent_pixels, _, _) = canvas(16, 16);
+    let mut depths = vec![0 as Fixed; w * h];
+    let mut lent = Canvas::with_depth(&mut lent_pixels, &mut depths, w, h).unwrap();
+    lent.clear(BLACK);
+    lent.triangle(far, RED);
+    lent.triangle(near, GREEN);
+
+    for y in 0..h {
+        for x in 0..w {
+            assert_eq!(owned.pixel(x, y), lent.pixel(x, y), "colour at {x},{y}");
+            assert_eq!(
+                owned.depth_at(x, y),
+                lent.depth_at(x, y),
+                "depth at {x},{y}"
+            );
+        }
+    }
+}
+
+/// Lent depths are set to the far distance before the caller sees the canvas.
+///
+/// Memory from the kernel arrives zeroed, and zero is the *nearest* depth there
+/// is. A canvas that trusted what it was handed would refuse every triangle of
+/// the first frame and draw nothing, which looks like a renderer that does not
+/// work rather than one that was given a buffer it did not clear.
+#[test]
+fn lent_depths_start_far_away() {
+    let (mut pixels, w, h) = canvas(8, 8);
+    let mut depths = vec![0 as Fixed; w * h];
+    let mut target = Canvas::with_depth(&mut pixels, &mut depths, w, h).unwrap();
+
+    let triangle = [vertex(0, 0, 4), vertex(7, 0, 4), vertex(0, 7, 4)];
+    assert!(
+        target.triangle(triangle, RED) > 0,
+        "the first frame was hidden behind depths nobody had set"
+    );
+}
+
+/// And a depth buffer of the wrong size is refused, like a surface of the wrong
+/// size. Separately checked from the pixels, because the two are different
+/// mistakes: one is a caller that miscounted, the other is a caller that asked
+/// the kernel for the wrong amount and would otherwise read past the end.
+#[test]
+fn lent_depths_of_the_wrong_size_are_refused() {
+    let mut pixels = vec![BLACK; 16];
+    let mut too_few = vec![0 as Fixed; 15];
+    assert!(Canvas::with_depth(&mut pixels, &mut too_few, 4, 4).is_none());
+    let mut too_many = vec![0 as Fixed; 17];
+    assert!(Canvas::with_depth(&mut pixels, &mut too_many, 4, 4).is_none());
+    let mut exactly = vec![0 as Fixed; 16];
+    assert!(Canvas::with_depth(&mut pixels, &mut exactly, 4, 4).is_some());
+}

@@ -180,6 +180,7 @@ shell.packages = パッケージ
 shell.pictures = 画像
 shell.assist = アシスタント
 shell.unpack = ダウンロードを展開
+shell.solid = 立体を描く
 shell.leave = ログアウト
 launch.hint = 文字を入力してください
 launch.nothing = その名前のものはありません
