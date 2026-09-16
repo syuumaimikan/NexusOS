@@ -61,6 +61,37 @@ $QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $Log `
     -MonitorPort $MonitorPort -Headless
 
+# Say out loud that this run has the machine.
+#
+# There is one disk image and three agents working in this checkout, and two
+# QEMUs on one image do not fail loudly: the second boots and hangs at
+# `begin NexusFS` with no error. A lock in the place the protocol already keeps
+# them turns an unexplained timeout into a name and a task.
+#
+# A warning and not a refusal, deliberately. This convention is proposed in
+# REQUEST_CLAUDE-20260917-002 and not yet agreed, and a script that blocked on a
+# convention nobody had signed up to would only be a new way to fail. A stale
+# lock is a reason to ask, never a reason to kill anything.
+$LockDir = Join-Path $RepoRoot '.ai_collaboration\locks'
+$LockFile = Join-Path $LockDir 'CLAUDE-MACHINE-001.json'
+if (Test-Path $LockDir) {
+    foreach ($other in (Get-ChildItem $LockDir -Filter '*.json')) {
+        $held = Get-Content $other.FullName -Raw | ConvertFrom-Json
+        if ($held.paths -contains 'build/nexus-disk.img' -and $other.FullName -ne $LockFile) {
+            Write-Host "    note: $($held.agent) holds the machine for $($held.task), since $($held.created_at)" -ForegroundColor DarkYellow
+        }
+    }
+    $now = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($LockFile, (@{
+                agent        = 'claude_code'
+                task         = 'CLAUDE-SOLID-001'
+                paths        = @('build/nexus-disk.img')
+                created_at   = $now
+                heartbeat_at = $now
+            } | ConvertTo-Json), $utf8NoBom)
+}
+
 Write-Host "==> Booting NexusOS with a monitor on port $MonitorPort" -ForegroundColor Cyan
 $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
 
@@ -176,6 +207,10 @@ try {
         try { $process.Kill() } catch { }
     }
     $process.WaitForExit(5000) | Out-Null
+    # Mine, so removing it is not the thing the protocol forbids. Left behind by
+    # a run that is killed outright, which is why a stale one means ask rather
+    # than act.
+    if (Test-Path $LockFile) { Remove-Item $LockFile -Force }
 }
 
 $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''

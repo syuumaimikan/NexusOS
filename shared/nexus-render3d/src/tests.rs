@@ -252,6 +252,62 @@ fn two_triangles_sharing_an_edge_leave_no_gap() {
     }
 }
 
+/// And painted exactly once, which is the other half and the half this file
+/// described without checking.
+///
+/// A gap is visible immediately; a double write is not, until the two triangles
+/// have different colours and the shared edge flickers between them. The
+/// comment above has said so since the day it was written, while the test below
+/// it only counted gaps.
+///
+/// **This renderer has no fill rule, and it is worth being exact about why it
+/// does not need one.** Coverage here is `w >= 0` on all three edges, so a pixel
+/// exactly on a shared edge is inside *both* triangles -- the usual answer is a
+/// top-left rule that gives each edge to one of them. What makes that
+/// unnecessary is the depth test: it is strictly nearer-wins, so two coplanar
+/// triangles at equal depth cannot both write, and the first one drawn keeps the
+/// edge. Deterministic, and no flicker.
+///
+/// It would stop being enough the moment anything blends, because two
+/// half-transparent writes to one pixel do not cancel the way two opaque ones
+/// do. There is no blending here (see "What it has not" in `docs/three-d.md`),
+/// and if there ever is, this test is where it will fail.
+///
+/// Counted rather than looked at: `triangle` returns how many pixels it wrote,
+/// so two triangles covering a square between them must write exactly the
+/// square's worth of pixels. Anything more is an overlap and anything less is a
+/// gap, and one number catches both.
+#[test]
+fn two_triangles_sharing_an_edge_do_not_paint_it_twice() {
+    let (mut pixels, w, h) = canvas(8, 8);
+    let mut target = Canvas::new(&mut pixels, w, h).unwrap();
+
+    let a = [vertex(0, 0, 1), vertex(7, 0, 1), vertex(0, 7, 1)];
+    let b = [vertex(7, 0, 1), vertex(7, 7, 1), vertex(0, 7, 1)];
+    let first = target.triangle(a, RED);
+    let second = target.triangle(b, GREEN);
+
+    // The two together cover the 8x8 square bounded by the corners they share,
+    // and no pixel of it belongs to both.
+    assert_eq!(
+        first + second,
+        8 * 8,
+        "{first} + {second} pixels for a square of {}",
+        8 * 8
+    );
+
+    // And the edge belongs to the one that got there first, rather than to
+    // whichever was drawn last.
+    for step in 1..7 {
+        assert_eq!(
+            target.pixel(7 - step, step),
+            Some(RED),
+            "the shared edge changed hands at ({}, {step})",
+            7 - step
+        );
+    }
+}
+
 #[test]
 fn a_triangle_off_the_edge_is_clipped_not_refused() {
     let (mut pixels, w, h) = canvas(16, 16);

@@ -152,8 +152,19 @@ try {
         }
         # And let the filesystem finish with all of it before the machine stops.
         Start-Sleep -Seconds 5
-        $writer.WriteLine('quit')
-        Start-Sleep -Milliseconds 500
+        # Asking politely, and it does not matter if the monitor has already
+        # gone: this connection drops from time to time on this host, and by
+        # here the wizard has written its settings and the updater has finished.
+        # Throwing at this point discarded a setup that had *worked*, and the
+        # next thing to run then found a machine that had never been set up --
+        # which is a confusing way to be told about a socket. The machine is
+        # stopped in the `finally` below either way.
+        try {
+            $writer.WriteLine('quit')
+            Start-Sleep -Milliseconds 500
+        } catch {
+            Write-Host '    the monitor went away before it could be asked to stop' -ForegroundColor DarkYellow
+        }
     } finally {
         $client.Close()
     }

@@ -1483,10 +1483,27 @@ checks the bytes, and whose every step exits with its own number when it is
 wrong — and then the file being found in the host's copy of the disk, which a
 layer that kept none of the bytes would fail.
 
+**Software from elsewhere can be installed, and is told what it cannot do.**
+`shared/nexus-archive` reads `tar`, `ar`, `deb` and (with `shared/nexus-inflate`)
+`gzip`, and `user/nexus-unpack` is started from the launcher with two folders and
+nothing else: the downloads folder read-only, a `SOFTWARE` folder to write. It
+unpacks a real Debian package built by the reference tools, and then reads each
+unpacked ELF's `PT_INTERP` and says, by name, which loader is missing:
+
+```
+unpack: usr/bin/demo cannot run here: it asks for
+        /lib64/ld-linux-x86-64.so.2, which this machine does not have
+```
+
+That last line is the point of the exercise rather than an apology at the end of
+it. See [installing.md](installing.md). Only `gzip` is read; `xz` and `zstd` are
+refused by name, which is something a person can act on.
+
 Still to do: `clone` and futexes, `PT_INTERP` and a dynamic loader, sockets,
 and then a libc — at which point ordinary Linux software becomes the test.
-`docs/linux-software.md` has the whole list, including what Steam would need
-and why none of it is close. Windows is untouched.
+(The first two of those are being worked on by another agent as this is written;
+their state is theirs to report, not mine.) `docs/linux-software.md` has the whole list, including what
+Steam would need and why none of it is close. Windows is untouched.
 
 ## Phase 16 — Gaming 🚧
 
@@ -1519,18 +1536,33 @@ outside the guest: the kernel draws three bands of known colour and the host is
 asked for a picture of *that* display, which is 1280x800 with red at row 133,
 green at 400 and blue at 667. See [gpu.md](gpu.md).
 
-The GPU sits beside the firmware's display rather than instead of it, so the
-desktop still draws into the framebuffer the bootloader was handed.
+**The GPU is the display now**, and the reason it could not be has been found
+and fixed. The machine runs `-vga none` with a virtio-GPU at 1920x1200 and the
+desktop draws through the driver.
 
-Moving it across was tried and is **not** in the tree. It works -- and this
-firmware has no virtio-GPU driver, so `-vga none` means the kernel's own driver
-is the only thing that can draw, which removes the handover problem entirely --
-but the machine becomes an order of magnitude slower: a fresh NexusFS format
-goes from 33 seconds to not finishing inside five minutes. The GPU's *presence*
-costs nothing measurable (33.4 seconds with it on the bus and the firmware still
-driving the screen), so it is not the driver and not the flush thread, which
-does not start until long afterwards. The cause has not been found, and
-[gpu.md](gpu.md) has the measurement rather than a commit.
+What was in the way was never graphics. PCI INTx is level-triggered and shared,
+and four slots apart is the same line {d} so the GPU raised an interrupt nobody
+acknowledged and the disk's handler was called for ever, 79,513,944 times
+against 38,124 real completions. The fix is at enumeration rather than per
+driver: `pci::silence()` sets the interrupt-disable bit on every device as it is
+found, and the two drivers that wait on a line take theirs back. A fresh NexusFS
+format went from 33 seconds to 3, measured against a `cache=unsafe` floor of 2.3
+to be sure it was not measuring the host. [gpu.md](gpu.md) and
+[disk-barriers.md](disk-barriers.md) have the numbers.
+
+**And there is 3D, in software, which is not Vulkan and does not pretend to be.**
+`shared/nexus-render3d` is a fixed-point rasteriser {d} transform, near-plane
+clip, perspective projection, edge functions, depth buffer {d} and
+`user/nexus-solid` turns an octahedron in a window, 2,278,702 pixels of it
+worked out by the processor. Thirty-three host tests and a self-check on the
+machine. It is a *display* driver underneath, so nothing accelerates any of it,
+and [three-d.md](three-d.md) says so in its first paragraph.
+
+That document is also where the most useful failure in this phase is written
+down: the program's first two self-checks both passed while drawing the solid
+inside out, because the quantity being checked was derived from the thing under
+test. The third compares the winding against the solid's own centre, which the
+face table cannot move.
 
 The one item that does not need a GPU is frame pacing, and the half of it that
 does not need a vertical blank is done — see Phase 9, where it belongs.
