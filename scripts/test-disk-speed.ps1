@@ -49,7 +49,7 @@
     because a format can only be measured on a disk that has not been formatted.
 #>
 [CmdletBinding()]
-param([int]$Timeout = 400, [int]$Repeat = 0, [switch]$NoVga, [switch]$Whpx, [string]$Cache = '', [switch]$Mount, [switch]$LateDisplay)
+param([int]$Timeout = 400, [int]$Repeat = 0, [switch]$NoVga, [switch]$Whpx, [string]$Cache = '', [switch]$Mount, [switch]$LateDisplay, [string[]]$Drop = @())
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -101,7 +101,7 @@ function Measure-Mount {
 }
 
 function Measure-Format {
-    param([string]$Name, [switch]$WithoutNetwork, [switch]$WithoutDisplay, [switch]$Accelerated, [string]$CacheMode = '', [switch]$KeepDisk, [switch]$DisplayLast)
+    param([string]$Name, [switch]$WithoutNetwork, [switch]$WithoutDisplay, [switch]$Accelerated, [string]$CacheMode = '', [switch]$KeepDisk, [switch]$DisplayLast, [string[]]$DropDevices = @())
 
     if (-not $KeepDisk) { New-FreshDisk }
     $log = Join-Path $BuildDir "irq-$Name.log"
@@ -148,6 +148,34 @@ function Measure-Format {
         # whole-machine slowdown, not a disk one, which is why it survived a
         # day of looking at the disk.
         $args = @('-accel', 'whpx,kernel-irqchip=off') + $args
+    }
+
+    foreach ($what in $DropDevices) {
+        # Take one device off the bus and leave everything else where it is.
+        # The headless machine that will not finish a format has the full set on
+        # it; the minimal one that boots fine has none of them. Removing them one
+        # at a time is the only thing that says which, and `-vga` is deliberately
+        # not in this list -- that is `-NoVga`, and it is the variable under test
+        # rather than one of the candidates.
+        $pattern = switch ($what) {
+            'gpu'   { 'virtio-gpu-pci*' }
+            'net'   { 'virtio-net-pci*' }
+            'sound' { 'AC97*' }
+            'usb'   { 'qemu-xhci*' }
+            default { throw "unknown device '$what'; expected gpu, net, sound or usb" }
+        }
+        $kept = @()
+        for ($i = 0; $i -lt $args.Count; $i++) {
+            if ($args[$i] -eq '-device' -and $args[$i + 1] -like $pattern) { $i++; continue }
+            # The sound card's backend and the network's, which are useless
+            # without the device and which QEMU complains about.
+            if ($what -eq 'net' -and $args[$i] -eq '-netdev') { $i++; continue }
+            if ($what -eq 'sound' -and $args[$i] -eq '-audiodev') { $i++; continue }
+            # And anything plugged into a controller that is going away.
+            if ($what -eq 'usb' -and $args[$i] -eq '-device' -and $args[$i + 1] -like 'usb-storage*') { $i++; continue }
+            $kept += $args[$i]
+        }
+        $args = $kept
     }
 
     if ($DisplayLast) {
@@ -208,7 +236,14 @@ if ($Repeat -gt 0) {
     # 32681 ms. A spread that wide between identical runs is the measurement
     # talking, not the machine.
     for ($n = 1; $n -le $Repeat; $n++) {
-        if ($LateDisplay) {
+        if ($Drop.Count -gt 0) {
+            $tag = ($Drop -join '-')
+            if ($NoVga) {
+                $results += Measure-Format -Name "novga-no$tag-$n" -WithoutDisplay -DropDevices $Drop
+            } else {
+                $results += Measure-Format -Name "no$tag-$n" -DropDevices $Drop
+            }
+        } elseif ($LateDisplay) {
             $results += Measure-Format -Name "irq10-with-display-$n" -DisplayLast
         } elseif ($Mount) {
             $results += Measure-Mount -Name "run$n"

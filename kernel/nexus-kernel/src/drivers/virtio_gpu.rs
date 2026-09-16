@@ -123,6 +123,16 @@ mod answer {
 /// on this machine is already in, so nothing has to be swizzled on the way.
 const FORMAT_BGRX: u32 = 2;
 
+/// Flags in the first field of an available ring.
+mod available_flag {
+    /// The driver does not want an interrupt when this queue is used.
+    ///
+    /// Advice rather than a command -- the specification lets a device ignore
+    /// it -- but QEMU honours it, and a device that ignores it leaves a driver
+    /// no worse off than not setting it at all.
+    pub const NO_INTERRUPT: u16 = 1;
+}
+
 /// Bytes in a control header: type, flags, fence, context, padding.
 const HEADER: usize = 24;
 /// The one resource this driver makes.
@@ -476,6 +486,35 @@ unsafe fn bring_up(common: u64, notify: u64, multiplier: u32) -> Option<Gpu> {
         put64(common + common::QUEUE_AVAILABLE, available_physical);
         put64(common + common::QUEUE_USED, used_physical);
         put16(common + common::QUEUE_SIZE, size);
+
+        // Tell the device not to interrupt on this queue, before enabling it.
+        //
+        // This driver polls: a control command is answered in microseconds and
+        // waiting for an interrupt to say so would cost more than the command.
+        // Polling is the right choice here and it is not the whole choice --
+        // **a driver that does not take a device's interrupt has to say so**,
+        // and this one did not.
+        //
+        // What that cost: the line stays asserted, because nothing reads the
+        // device's status register to acknowledge it, and a level-triggered pin
+        // that is never acknowledged raises again immediately. Whichever
+        // *other* driver shares that pin then takes the interrupt over and over
+        // for a device it does not own.
+        //
+        // It was invisible while a VGA device sat in the first PCI slot, which
+        // pushed the GPU onto a line nothing else used. Take the VGA away --
+        // which is exactly what moving the desktop onto this GPU requires --
+        // and every device moves up a slot, the GPU lands on the disk's line,
+        // and a machine that was formatting a filesystem in three seconds does
+        // not finish in four hundred. Measured: 883 interrupts from ring three
+        // without the GPU on the bus, 141204 with it.
+        //
+        // SAFETY: the available ring was allocated above and this is its first
+        // field. Written before `QUEUE_ENABLE`, so the device cannot have
+        // looked at the ring yet. (The enclosing block is already unsafe.)
+        (available as *mut u16).write_volatile(available_flag::NO_INTERRUPT);
+        fence(Ordering::SeqCst);
+
         put16(common + common::QUEUE_ENABLE, 1);
 
         // Where to poke for this queue. The offset is in units the device
