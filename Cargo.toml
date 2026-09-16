@@ -62,6 +62,7 @@ members = [
     "shared/nexus-lang",
     "user/nexus-nex",
     "user/nexus-unpack",
+    "user/nexus-solid",
     "user/nexus-assist",
     "user/nexus-setup",
     "user/nexus-idle",

@@ -115,7 +115,7 @@ $HostTools = @('nexus-pack', 'nexus-collab', 'nexus-roots', 'nexus-linux-example
 $Programs = @(
     'nexus-ai', 'nexus-assist', 'nexus-browser', 'nexus-client', 'nexus-compositor',
     'nexus-edit', 'nexus-files', 'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install',
-    'nexus-api', 'nexus-count', 'nexus-launch', 'nexus-ls', 'nexus-nex', 'nexus-settings',
+    'nexus-api', 'nexus-count', 'nexus-solid', 'nexus-launch', 'nexus-ls', 'nexus-nex', 'nexus-settings',
     'nexus-setup', 'nexus-shell', 'nexus-store', 'nexus-term', 'nexus-text', 'nexus-ui',
     'nexus-unpack', 'nexus-updater', 'nexus-view', 'nexus-wall'
 )

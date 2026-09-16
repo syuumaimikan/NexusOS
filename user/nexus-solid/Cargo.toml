@@ -1,0 +1,15 @@
+[package]
+name = "nexus-solid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A solid, turning, drawn by the processor one pixel at a time."
+
+[[bin]]
+name = "nexus-solid"
+path = "src/main.rs"
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-render3d = { path = "../../shared/nexus-render3d" }
