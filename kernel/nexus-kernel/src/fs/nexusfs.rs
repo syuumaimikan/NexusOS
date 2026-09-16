@@ -1488,6 +1488,25 @@ impl Volume {
             .map_err(FsError::Disk)
     }
 
+    /// Everything written so far is on the medium before anything after it is.
+    ///
+    /// The journal below is a sequence of writes whose *order* is the entire
+    /// protection. A disk that is allowed to reorder them can put the commit
+    /// record on the medium before the blocks it describes, and a machine that
+    /// stops there comes back and replays a descriptor pointing at journal
+    /// blocks that were never written -- which is worse than no journal at all,
+    /// because it will confidently write rubbish over good data.
+    ///
+    /// Nothing enforced that until now. It appeared to work because the device
+    /// was never given a write-back cache to reorder within: this driver
+    /// claimed no features, so the host ran the disk write-through and every
+    /// write was already durable when it returned. That is a guarantee nobody
+    /// asked for, that cost thirty seconds of every format, and that would have
+    /// vanished silently the moment the driver claimed anything.
+    fn barrier(&self) -> Result<(), FsError> {
+        super::cache::barrier().map_err(FsError::Disk)
+    }
+
     // -- The journal --------------------------------------------------------
 
     /// Start collecting an operation's changes.
@@ -1551,6 +1570,10 @@ impl Volume {
             self.write_block_now(journal + 1 + index as u64, data)?;
         }
 
+        // And they must all be there before the descriptor is. A descriptor
+        // that arrives first describes blocks that do not exist yet.
+        self.barrier()?;
+
         // Then the descriptor, and *that write is the commit*: before it the
         // operation did not happen, after it the operation will happen even if
         // the machine stops here.
@@ -1563,7 +1586,13 @@ impl Volume {
         }
         let checksum = crc32(&descriptor[..BLOCK_SIZE - 4]);
         write_u32(&mut descriptor, BLOCK_SIZE - 4, checksum);
-        self.write_block_now(journal, &descriptor)
+        self.write_block_now(journal, &descriptor)?;
+
+        // And the commit has to be durable before the operation it commits to
+        // starts happening, or a machine that stops half way through `apply`
+        // has some blocks overwritten and no record saying what they should
+        // have become.
+        self.barrier()
     }
 
     /// Carry the operation out, and erase the record of it.
@@ -1572,8 +1601,13 @@ impl Volume {
             self.write_block_now(*block, data)?;
         }
 
-        // Erased last. A failure before this leaves a descriptor that will be
-        // replayed, which writes the same blocks again and changes nothing.
+        // Erased last, and not before every block above is on the medium. The
+        // erase says "this operation is finished"; a disk that put it there
+        // first would be saying so about an operation still in progress.
+        self.barrier()?;
+
+        // A failure before this leaves a descriptor that will be replayed,
+        // which writes the same blocks again and changes nothing.
         self.write_block_now(self.superblock.journal_start, &[0u8; BLOCK_SIZE])
     }
 

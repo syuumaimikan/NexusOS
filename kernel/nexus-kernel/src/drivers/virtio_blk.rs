@@ -105,6 +105,22 @@ mod request {
     pub const READ: u32 = 0;
     /// Write from memory to the disk.
     pub const WRITE: u32 = 1;
+    /// Everything already written is on the medium before this answers.
+    pub const FLUSH: u32 = 4;
+}
+
+/// Features this driver understands.
+mod feature {
+    /// The device takes a flush request, and says when it has finished one.
+    ///
+    /// The only optional feature claimed here, and the reason is not speed for
+    /// its own sake. A device that is not asked for this is a device its host
+    /// dare not give a write-back cache to -- there would be no way for the
+    /// guest to say "this much must survive", so every write has to be treated
+    /// as if it were that point. QEMU does exactly that: it runs the drive
+    /// write-through, and a fresh eight-gigabyte NexusFS takes half a minute
+    /// because every four-kilobyte write waits for a real disk.
+    pub const FLUSH: u32 = 1 << 9;
 }
 
 /// What the device writes into the status byte.
@@ -217,6 +233,8 @@ struct Disk {
     /// Where each part of the queue starts, as an offset from its base.
     available_offset: usize,
     used_offset: usize,
+    /// Whether the device agreed to take flush requests.
+    flushes: bool,
 }
 
 // SAFETY: every field is a plain number, and all access goes through the lock
@@ -254,6 +272,30 @@ static INTERRUPT_LINE: AtomicU64 = AtomicU64::new(u64::MAX);
 /// Sectors read and written, for diagnostics.
 static SECTORS_READ: AtomicU64 = AtomicU64::new(0);
 static SECTORS_WRITTEN: AtomicU64 = AtomicU64::new(0);
+/// Flushes asked for since boot.
+static FLUSHES: AtomicU64 = AtomicU64::new(0);
+static REQUESTS: AtomicU64 = AtomicU64::new(0);
+static POLL_COMPLETIONS: AtomicU64 = AtomicU64::new(0);
+static WAIT_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+
+/// Aggregate request paths; a wait attempt can return without sleeping when
+/// an interrupt has already advanced the wait queue's generation.
+#[derive(Clone, Copy, Debug)]
+pub struct WaitStatistics {
+    pub requests: u64,
+    pub poll_completions: u64,
+    pub wait_attempts: u64,
+}
+
+/// A diagnostic snapshot, without logging in the request path.
+#[must_use]
+pub fn wait_statistics() -> WaitStatistics {
+    WaitStatistics {
+        requests: REQUESTS.load(Ordering::Relaxed),
+        poll_completions: POLL_COMPLETIONS.load(Ordering::Relaxed),
+        wait_attempts: WAIT_ATTEMPTS.load(Ordering::Relaxed),
+    }
+}
 
 /// Bring up the first virtio block device on the bus.
 ///
@@ -294,12 +336,27 @@ pub unsafe fn init(devices: &[Device]) -> Result<u64, BlockError> {
             status::ACKNOWLEDGE | status::DRIVER,
         );
 
-        // No optional feature is claimed. Every one of them changes the layout
-        // or the semantics of something, and a driver that accepted a feature
-        // it did not implement would be agreeing to a protocol it does not
-        // speak. The bare device does what this needs.
+        // One optional feature is claimed, and only one. Every other one
+        // changes the layout or the semantics of something, and a driver that
+        // accepted a feature it did not implement would be agreeing to a
+        // protocol it does not speak.
+        //
+        // `FLUSH` is claimed because refusing it is not free. A host cannot
+        // give a write-back cache to a guest with no way to ask for a barrier,
+        // so it stops caching instead and every single write goes to the
+        // medium. That is not a theory: this driver claimed nothing for months
+        // and a fresh eight-gigabyte format took thirty-three seconds, which
+        // `cache=unsafe` -- a host told to ignore flushes -- did in two.
+        //
+        // And it is claimed only if offered. A driver that assumed a feature
+        // and sent a request the device does not know is a driver waiting for
+        // an answer that is not coming.
         let offered = inl(port + register::DEVICE_FEATURES);
-        outl(port + register::DRIVER_FEATURES, 0);
+        let flushes = offered & feature::FLUSH != 0;
+        outl(
+            port + register::DRIVER_FEATURES,
+            if flushes { feature::FLUSH } else { 0 },
+        );
 
         // Queue zero is the only one a block device has.
         outw(port + register::QUEUE_SELECT, 0);
@@ -362,6 +419,7 @@ pub unsafe fn init(devices: &[Device]) -> Result<u64, BlockError> {
             capacity,
             available_offset,
             used_offset,
+            flushes,
         });
 
         INTERRUPT_LINE.store(u64::from(device.interrupt_line), Ordering::Release);
@@ -373,6 +431,13 @@ pub unsafe fn init(devices: &[Device]) -> Result<u64, BlockError> {
             capacity * SECTOR_SIZE as u64 / (1024 * 1024),
             queue_size
         );
+        if flushes {
+            kprintln!("[blk ] the disk takes a flush, so the host may cache what is written");
+        } else {
+            kprintln!(
+                "[blk ] this disk offers no flush; every write will wait for the medium"
+            );
+        }
 
         Ok(capacity)
     }
@@ -458,6 +523,41 @@ pub fn write_sectors(sector: u64, buffer: &[u8]) -> Result<(), BlockError> {
     Ok(())
 }
 
+/// Everything written before this call is on the medium when it returns.
+///
+/// The barrier the journal is built on. Without it a filesystem that writes its
+/// intention, then the change, then the record that the change is done has no
+/// way to stop a host from reordering those three -- and a journal whose
+/// entries can arrive out of order is a journal that describes a disk that
+/// never existed.
+///
+/// Returns `Ok(())` and does nothing on a device that did not offer the
+/// feature, which is not a lie by omission: such a device was never given a
+/// write-back cache in the first place, so everything already written is
+/// already where a flush would have put it.
+///
+/// # Errors
+///
+/// [`BlockError::NoDevice`] if there is no disk, [`BlockError::Failed`] if the
+/// device refused, [`BlockError::Timeout`] if it never answered.
+pub fn flush() -> Result<(), BlockError> {
+    let flushes = {
+        let guard = DISK.lock();
+        guard.as_ref().ok_or(BlockError::NoDevice)?.flushes
+    };
+    if !flushes {
+        return Ok(());
+    }
+
+    acquire();
+    let result = one_flush();
+    release();
+    if result.is_ok() {
+        FLUSHES.fetch_add(1, Ordering::Relaxed);
+    }
+    result
+}
+
 /// How many sectors a buffer of `bytes` is, if it is a legal size.
 fn check_length(bytes: usize) -> Result<usize, BlockError> {
     if bytes == 0 || !bytes.is_multiple_of(SECTOR_SIZE) || bytes > MAX_TRANSFER_SECTORS * SECTOR_SIZE
@@ -480,6 +580,13 @@ pub fn statistics() -> (u64, u64) {
         SECTORS_READ.load(Ordering::Relaxed),
         SECTORS_WRITTEN.load(Ordering::Relaxed),
     )
+}
+
+/// Flushes asked for since boot, and whether the device takes them at all.
+#[must_use]
+pub fn flush_statistics() -> (u64, bool) {
+    let flushes = DISK.lock().as_ref().is_some_and(|disk| disk.flushes);
+    (FLUSHES.load(Ordering::Relaxed), flushes)
 }
 
 /// Spins waiting for the device before giving up.
@@ -628,18 +735,17 @@ fn one_transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockEr
             .add(2 + (index % disk.queue_size) as usize)
             .write_volatile(0);
 
+        // Sample completion state before publishing the request. The device
+        // can consume an available entry before the notify port is written.
+        let before = used.add(1).read_volatile();
+        let generation = DONE.generation();
+        REQUESTS.fetch_add(1, Ordering::Relaxed);
+
         // The device must see the descriptors and the ring entry before it sees
         // the new index, or it will follow a chain that is not there yet.
         fence(Ordering::SeqCst);
         available.add(1).write_volatile(index.wrapping_add(1));
         fence(Ordering::SeqCst);
-
-        let before = used.add(1).read_volatile();
-
-        // Read *before* the notify. The device may complete and its interrupt
-        // may run before this line returns, and a waiter that read the counter
-        // afterwards would miss the wake-up that had already happened.
-        let generation = DONE.generation();
 
         outw(disk.port + register::QUEUE_NOTIFY, 0);
         (before, generation)
@@ -670,12 +776,97 @@ fn one_transfer(kind: u32, sector: u64, buffer: &mut [u8]) -> Result<(), BlockEr
     Ok(())
 }
 
+/// A flush, with the gate already held.
+///
+/// Two descriptors rather than three, and that is the whole difference from a
+/// transfer. A flush carries nothing: the header says what to do and the status
+/// byte says how it went, and a data descriptor of length zero is not the same
+/// thing as no data descriptor -- the specification describes this request as
+/// header and status, and a device is within its rights to refuse the other
+/// shape.
+fn one_flush() -> Result<(), BlockError> {
+    let disk = {
+        let guard = DISK.lock();
+        *guard.as_ref().ok_or(BlockError::NoDevice)?
+    };
+
+    let queue = layout::phys_to_virt(disk.queue_physical);
+    let scratch = layout::phys_to_virt(disk.scratch_physical);
+    let header_physical = disk.scratch_physical;
+    let status_physical = disk.scratch_physical + 1024;
+
+    // SAFETY: the scratch page is mapped through the direct map and the gate
+    // makes this caller the only one touching it. The sector field is unused by
+    // a flush and is written zero rather than left as whatever the last request
+    // put there, because a device is allowed to look.
+    unsafe {
+        (scratch as *mut RequestHeader).write_volatile(RequestHeader {
+            kind: request::FLUSH,
+            reserved: 0,
+            sector: 0,
+        });
+        status_slot(scratch).write_volatile(0xFF);
+    }
+
+    let used = (queue + disk.used_offset as u64) as *const u16;
+
+    // SAFETY: as in `one_transfer` -- the queue is mapped through the direct
+    // map and is large enough for two descriptors.
+    let (before, generation) = unsafe {
+        let descriptors = queue as *mut Descriptor;
+        descriptors.write_volatile(Descriptor {
+            address: header_physical,
+            length: 16,
+            flags: descriptor::NEXT,
+            next: 1,
+        });
+        descriptors.add(1).write_volatile(Descriptor {
+            address: status_physical,
+            length: 1,
+            flags: descriptor::WRITE,
+            next: 0,
+        });
+
+        let available = (queue + disk.available_offset as u64) as *mut u16;
+        let index = available.add(1).read_volatile();
+        available
+            .add(2 + (index % disk.queue_size) as usize)
+            .write_volatile(0);
+
+        let before = used.add(1).read_volatile();
+        let generation = DONE.generation();
+        REQUESTS.fetch_add(1, Ordering::Relaxed);
+
+        fence(Ordering::SeqCst);
+        available.add(1).write_volatile(index.wrapping_add(1));
+        fence(Ordering::SeqCst);
+
+        outw(disk.port + register::QUEUE_NOTIFY, 0);
+        (before, generation)
+    };
+
+    wait_for_completion(used, before, generation)?;
+
+    // SAFETY: the device has published a used entry, so it has finished with
+    // the status byte.
+    unsafe {
+        fence(Ordering::SeqCst);
+        let status = status_slot(scratch).read_volatile();
+        if status != STATUS_OK {
+            return Err(BlockError::Failed(status));
+        }
+    }
+
+    Ok(())
+}
+
 /// Wait for the device to publish a used entry past `before`.
 ///
 /// Blocking where the interrupt has proved itself, spinning where it has not.
-/// The spin is bounded and reports rather than hanging; the block cannot be
-/// bounded the same way and does not need to be, because it is only ever
-/// entered once an interrupt has been seen to arrive.
+/// The spin is bounded; the blocking path currently has no deadline. A past
+/// interrupt proves routing, not future device health. Returning a timeout
+/// safely requires quiescing the device before another request can reuse its
+/// descriptor chain and DMA scratch memory.
 fn wait_for_completion(used: *const u16, before: u16, generation: u64) -> Result<(), BlockError> {
     // A short spin first, however this is going to wait.
     //
@@ -690,6 +881,7 @@ fn wait_for_completion(used: *const u16, before: u16, generation: u64) -> Result
         // SAFETY: the used ring is mapped through the direct map and this is
         // its index field, written by the device and read here.
         if unsafe { used.add(1).read_volatile() } != before {
+            POLL_COMPLETIONS.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         core::hint::spin_loop();
@@ -697,12 +889,18 @@ fn wait_for_completion(used: *const u16, before: u16, generation: u64) -> Result
 
     if BLOCKING.load(Ordering::Relaxed) && crate::sched::current_id().is_some() {
         let mut generation = generation;
+        let mut attempted_wait = false;
         loop {
             // SAFETY: the used ring is mapped through the direct map and this
             // is its index field, written by the device and read here.
             if unsafe { used.add(1).read_volatile() } != before {
+                if !attempted_wait {
+                    POLL_COMPLETIONS.fetch_add(1, Ordering::Relaxed);
+                }
                 return Ok(());
             }
+            attempted_wait = true;
+            WAIT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
             DONE.wait_if_unchanged(generation);
             generation = DONE.generation();
         }
@@ -712,6 +910,7 @@ fn wait_for_completion(used: *const u16, before: u16, generation: u64) -> Result
     loop {
         // SAFETY: as above.
         if unsafe { used.add(1).read_volatile() } != before {
+            POLL_COMPLETIONS.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         spins += 1;
@@ -732,8 +931,6 @@ fn wait_for_completion(used: *const u16, before: u16, generation: u64) -> Result
 ///
 /// Call only as the handler for this device's vector.
 pub unsafe fn on_interrupt() {
-    INTERRUPTS.fetch_add(1, Ordering::Relaxed);
-
     let port = {
         let guard = DISK.lock();
         match guard.as_ref() {
@@ -744,7 +941,13 @@ pub unsafe fn on_interrupt() {
 
     // SAFETY: the window belongs to this device, and reading this register is
     // how the protocol says to acknowledge.
-    let _reason = unsafe { crate::arch::io::inb(port + register::ISR) };
+    let reason = unsafe { crate::arch::io::inb(port + register::ISR) };
+    if reason == 0 {
+        // Another device raised this shared line. It cannot prove that our
+        // completion interrupt works or wake a disk request.
+        return;
+    }
+    INTERRUPTS.fetch_add(1, Ordering::Relaxed);
 
     // Everyone, not one. There is a single request in flight, so there is at
     // most one thread to wake -- but a spurious wake costs a re-read of a

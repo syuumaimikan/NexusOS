@@ -494,6 +494,24 @@ fn monitor_thread(_argument: usize) {
                     drivers::virtio_blk::capacity(),
                     if blocking { "block" } else { "spin" }
                 );
+                // How the requests actually waited, and whether the device is
+                // being asked for barriers. Both were counted and neither was
+                // printed, which cost a day: "requests block" says blocking is
+                // *enabled*, not that any request blocked, and a driver that
+                // sends no flush is a driver whose host quietly stops caching.
+                let waits = drivers::virtio_blk::wait_statistics();
+                let (flushes, takes_flushes) = drivers::virtio_blk::flush_statistics();
+                kprintln!(
+                    "[mon ] disk {} requests, {} finished on the poll, {} slept,              {flushes} flushes{}",
+                    waits.requests,
+                    waits.poll_completions,
+                    waits.wait_attempts,
+                    if takes_flushes {
+                        ""
+                    } else {
+                        " (this disk takes none, so every write waits for the medium)"
+                    }
+                );
                 let pending = fs::store::pending_removals();
                 if pending > 0 {
                     // Names taken away from files somebody still holds. A number that

@@ -49,7 +49,7 @@
     because a format can only be measured on a disk that has not been formatted.
 #>
 [CmdletBinding()]
-param([int]$Timeout = 400, [int]$Repeat = 0, [switch]$NoVga, [switch]$Whpx, [string]$Cache = '')
+param([int]$Timeout = 400, [int]$Repeat = 0, [switch]$NoVga, [switch]$Whpx, [string]$Cache = '', [switch]$Mount)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -84,10 +84,26 @@ function New-FreshDisk {
 }
 
 # One boot, to the point where the filesystem has been made, and no further.
-function Measure-Format {
-    param([string]$Name, [switch]$WithoutNetwork, [switch]$WithoutDisplay, [switch]$Accelerated, [string]$CacheMode = '')
+# The second boot, on the disk the first one made.
+#
+# `Measure-Format` makes a fresh image every time, which is right for measuring
+# a format and useless for measuring a mount -- a mount reads a filesystem that
+# has to already be there. Without this the only mount figures available came
+# from whichever test happened to run last, on a disk carrying whatever the
+# tests before it had put on it, and comparing two of those says nothing. It
+# was compared anyway, once, and read as a four-fold regression.
+function Measure-Mount {
+    param([string]$Name)
+    $first = Measure-Format -Name "$Name-format"
+    if (-not $first.Formatted) { throw "$Name never made a filesystem to mount" }
+    # And again, on the same image, with no `New-FreshDisk` in between.
+    Measure-Format -Name "$Name-mount" -KeepDisk
+}
 
-    New-FreshDisk
+function Measure-Format {
+    param([string]$Name, [switch]$WithoutNetwork, [switch]$WithoutDisplay, [switch]$Accelerated, [string]$CacheMode = '', [switch]$KeepDisk)
+
+    if (-not $KeepDisk) { New-FreshDisk }
     $log = Join-Path $BuildDir "irq-$Name.log"
     if (Test-Path $log) { Remove-Item $log -Force }
     $vars = Join-Path $BuildDir "vars-irq-$Name.fd"
@@ -178,7 +194,9 @@ if ($Repeat -gt 0) {
     # 32681 ms. A spread that wide between identical runs is the measurement
     # talking, not the machine.
     for ($n = 1; $n -le $Repeat; $n++) {
-        if ($Cache) {
+        if ($Mount) {
+            $results += Measure-Mount -Name "run$n"
+        } elseif ($Cache) {
             $results += Measure-Format -Name "cache-$Cache-$n" -CacheMode $Cache
         } elseif ($Whpx) {
             $results += Measure-Format -Name "whpx-$n" -Accelerated

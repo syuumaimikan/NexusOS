@@ -191,6 +191,21 @@ pub fn read(lba: u64, buffer: &mut [u8; BLOCK_SIZE]) -> Result<(), BlockError> {
 /// serve the new contents from memory while the disk still held the old ones,
 /// which is the one way a cache can turn a reported error into silent
 /// corruption.
+/// Everything written through this cache is on the medium when this returns.
+///
+/// The cache holds no writes -- `write` goes to the device and to the cached
+/// copy together -- so there is nothing here to push out first. What this does
+/// is ask the *device* to stop holding them, which is a different question and
+/// the one a journal needs answered.
+///
+/// # Errors
+///
+/// Whatever the device says, unchanged. A failed barrier is not something to
+/// paper over: the caller was about to rely on an ordering that did not happen.
+pub fn barrier() -> Result<(), BlockError> {
+    virtio_blk::flush()
+}
+
 pub fn write(lba: u64, buffer: &[u8; BLOCK_SIZE]) -> Result<(), BlockError> {
     let mut cache = CACHE.lock();
 
