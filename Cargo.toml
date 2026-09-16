@@ -60,6 +60,7 @@ members = [
     "user/nexus-api",
     "shared/nexus-lang",
     "user/nexus-nex",
+    "user/nexus-unpack",
     "user/nexus-assist",
     "user/nexus-setup",
     "user/nexus-idle",

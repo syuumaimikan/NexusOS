@@ -104,7 +104,7 @@ $HostLibraries = @(
     'nexus-html', 'nexus-http', 'nexus-i18n', 'nexus-image', 'nexus-ime', 'nexus-index',
     'nexus-inflate', 'nexus-json', 'nexus-look', 'nexus-machine', 'nexus-mm', 'nexus-net',
     'nexus-netclient', 'nexus-pkg', 'nexus-shellwords', 'nexus-time', 'nexus-tls', 'nexus-update',
-    'nexus-user', 'nexus-utf8', 'nexus-window', 'nexus-lang'
+    'nexus-user', 'nexus-utf8', 'nexus-window', 'nexus-lang', 'nexus-archive'
 )
 
 # Programs that run on the development machine rather than on Nexus: the package
@@ -117,7 +117,7 @@ $Programs = @(
     'nexus-edit', 'nexus-files', 'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install',
     'nexus-api', 'nexus-count', 'nexus-launch', 'nexus-ls', 'nexus-nex', 'nexus-settings',
     'nexus-setup', 'nexus-shell', 'nexus-store', 'nexus-term', 'nexus-text', 'nexus-ui',
-    'nexus-updater', 'nexus-view', 'nexus-wall'
+    'nexus-unpack', 'nexus-updater', 'nexus-view', 'nexus-wall'
 )
 
 # The two that stand alone, each with its own target.

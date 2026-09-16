@@ -36,6 +36,8 @@ const ET_EXEC: u16 = 2;
 const EM_X86_64: u16 = 0x3E;
 /// `PT_LOAD`.
 const PT_LOAD: u32 = 1;
+/// The path of the program that has to load this one before it can run.
+const PT_INTERP: u32 = 3;
 
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
@@ -694,5 +696,138 @@ mod tests {
         // SAFETY: rejected during the first pass, before allocation.
         let result = unsafe { load(&image, |_pages| Some(dest_base), |physical| physical) };
         assert_eq!(result.err(), Some(ElfError::InconsistentSegment));
+    }
+}
+
+/// The dynamic loader this image needs, if it needs one.
+///
+/// `None` for a static binary, which is one that can simply be mapped and
+/// entered -- and is the only kind this system runs today.
+///
+/// This exists so that the answer to "why will this program not start" can be a
+/// sentence instead of a crash. A program written for Linux and downloaded here
+/// almost always names `/lib64/ld-linux-x86-64.so.2`, which is not on this
+/// machine and cannot be built here: it is part of a C library that is itself
+/// larger than this operating system. Saying *that*, by name, is worth a great
+/// deal more than mapping the segments and jumping to an entry point that
+/// immediately reaches for a symbol table nothing filled in.
+///
+/// The path is returned as it is written in the file, including its leading
+/// slash, because it is a fact about the program rather than a path to open.
+///
+/// # Errors
+///
+/// [`ElfError`] if the header or the program headers do not parse. A file with
+/// no `PT_INTERP` is `Ok(None)`, not an error: that is what a static binary
+/// looks like.
+pub fn interpreter(image: &[u8]) -> Result<Option<&str>, ElfError> {
+    let (_entry, phoff, phentsize, phnum) = parse_header(image)?;
+    let stride = core::cmp::max(phentsize as usize, PHDR_SIZE);
+
+    for index in 0..phnum as usize {
+        let base = (phoff as usize)
+            .checked_add(index * stride)
+            .ok_or(ElfError::PhdrOutOfBounds)?;
+        if base + PHDR_SIZE > image.len() {
+            return Err(ElfError::PhdrOutOfBounds);
+        }
+        if read_u32(image, base).ok_or(ElfError::PhdrOutOfBounds)? != PT_INTERP {
+            continue;
+        }
+
+        let offset = read_u64(image, base + 8).ok_or(ElfError::PhdrOutOfBounds)? as usize;
+        let length = read_u64(image, base + 32).ok_or(ElfError::PhdrOutOfBounds)? as usize;
+        let Some(field) = image.get(offset..offset.saturating_add(length)) else {
+            return Err(ElfError::PhdrOutOfBounds);
+        };
+        // The field is NUL-terminated inside its own length, which is not the
+        // same as being the length: a linker is free to pad it.
+        let end = field
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(field.len());
+        return match core::str::from_utf8(&field[..end]) {
+            Ok(path) => Ok(Some(path)),
+            Err(_) => Err(ElfError::PhdrOutOfBounds),
+        };
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod interpreter_tests {
+    use super::{interpreter, ElfError};
+
+    /// A 64-bit x86 executable whose only program header is a PT_INTERP naming
+    /// the loader every Linux program built against glibc asks for.
+    const NEEDS_A_LOADER: &[u8] = &[
+        0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x3E, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x10, 0x40, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x38, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x78, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1C,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x2F, 0x6C, 0x69, 0x62, 0x36, 0x34, 0x2F, 0x6C, 0x64, 0x2D, 0x6C, 0x69, 0x6E, 0x75, 0x78,
+        0x2D, 0x78, 0x38, 0x36, 0x2D, 0x36, 0x34, 0x2E, 0x73, 0x6F, 0x2E, 0x32, 0x00,
+    ];
+
+    /// The same shape with a PT_LOAD instead, which is what a static binary --
+    /// the only kind this system runs -- looks like.
+    const STATIC: &[u8] = &[
+        0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x3E, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x10, 0x40, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x38, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x78, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
+    ];
+
+    #[test]
+    fn a_program_that_needs_a_loader_says_which_one() {
+        assert_eq!(
+            interpreter(NEEDS_A_LOADER).unwrap(),
+            Some("/lib64/ld-linux-x86-64.so.2")
+        );
+    }
+
+    /// Not an error. A static binary is the normal case here, and reporting one
+    /// as broken would make the only kind of program that *does* run look like
+    /// the failure.
+    #[test]
+    fn a_static_program_needs_nothing() {
+        assert_eq!(interpreter(STATIC).unwrap(), None);
+    }
+
+    #[test]
+    fn a_file_that_is_not_an_elf_is_refused() {
+        assert!(interpreter(
+            b"#!/bin/sh
+echo hi
+"
+        )
+        .is_err());
+        assert!(interpreter(&[]).is_err());
+    }
+
+    /// A header pointing past the end of the file is the shape a truncated
+    /// download has, and it must be a refusal rather than a read past the end.
+    #[test]
+    fn a_truncated_image_is_refused() {
+        for keep in [64, 80, NEEDS_A_LOADER.len() - 1] {
+            let answer = interpreter(&NEEDS_A_LOADER[..keep]);
+            assert!(
+                matches!(
+                    answer,
+                    Err(ElfError::PhdrOutOfBounds) | Err(ElfError::TooSmall)
+                ),
+                "accepted {keep} bytes: {answer:?}"
+            );
+        }
     }
 }

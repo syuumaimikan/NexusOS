@@ -1,0 +1,18 @@
+[package]
+name = "nexus-unpack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Unpacking software that was downloaded, and saying what it would still need to run."
+
+[[bin]]
+name = "nexus-unpack"
+path = "src/main.rs"
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-api = { path = "../nexus-api" }
+nexus-archive = { path = "../../shared/nexus-archive" }
+nexus-abi = { path = "../../shared/nexus-abi" }
+nexus-inflate = { path = "../../shared/nexus-inflate" }
