@@ -27,7 +27,11 @@
 [CmdletBinding()]
 param(
     [int]$Timeout = 240,
-    [string]$Shot
+    [string]$Shot,
+    # Take a new copy of the disk image even if one is already here. Wanted
+    # after a build, and not wanted otherwise: the copy is eight gigabytes and
+    # taking it means waiting for the shared image to be free.
+    [switch]$Fresh
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,10 +60,80 @@ Copy-Item (Join-Path $QemuDir 'share\edk2-i386-vars.fd') $FirmwareVars -Force
 
 if (Test-Path $Log) { Remove-Item $Log -Force }
 
+# This run gets its own copy of the disk, and that is not tidiness.
+#
+# There is one `build/nexus-disk.img` and three agents working in this checkout.
+# Two QEMUs on one image do not fail loudly -- the second boots and hangs at
+# `begin NexusFS` with no error at all -- and waiting for a gap between somebody
+# else's test stages only means colliding with their next one. A copy costs
+# eight gigabytes of disk and removes the whole problem.
+#
+# `Get-NexusQemuArgs` finds the disk under whatever `-BuildDir` it is given, so
+# pointing that at a directory holding nothing but the copy is enough. The USB
+# images are `Test-Path`-guarded there, so this machine simply has no USB
+# sticks, which is no loss to a program that draws a triangle.
+#
+# Taken through `Open-ImageForReading`, which waits out the sharing violation
+# rather than reading a half-written image: a copy taken while somebody's run is
+# writing is torn, and a torn filesystem is exactly the confusing failure this
+# exists to avoid.
+$PrivateDir = Join-Path $BuildDir 'solid'
+$SharedDisk = Join-Path $BuildDir 'nexus-disk.img'
+$PrivateDisk = Join-Path $PrivateDir 'nexus-disk.img'
+if (-not (Test-Path $PrivateDir)) { New-Item -ItemType Directory $PrivateDir | Out-Null }
+
+# Copied when it is missing, or when `-Fresh` asks, and on no other condition.
+#
+# Comparing timestamps against the shared image was the obvious rule and it was
+# wrong: that file is rewritten by every run anybody makes, so "newer than my
+# copy" was true every single time and the copy was never reused. `-Fresh` after
+# a rebuild is the honest way to say what is actually meant.
+if ((-not (Test-Path $PrivateDisk)) -or $Fresh) {
+    if (-not (Test-Path $SharedDisk)) { throw 'no disk image; run build.ps1 first' }
+    Write-Host '==> Taking this run its own copy of the disk' -ForegroundColor Cyan
+    $source = Open-ImageForReading -Image $SharedDisk
+    try {
+        $destination = [System.IO.File]::Create($PrivateDisk)
+        try { $source.CopyTo($destination) } finally { $destination.Dispose() }
+    } finally { $source.Dispose() }
+    Write-Host "    $([math]::Round((Get-Item $PrivateDisk).Length / 1GB, 1)) GiB -> $PrivateDisk" -ForegroundColor DarkGray
+}
+
+# And its own copy of the EFI partition tree, for the same reason as the disk.
+#
+# `build/esp` is handed to QEMU as `fat:rw:` -- a live view of a host directory,
+# written as well as read. Another agent's `build.ps1` rewrites that directory
+# between their test stages, and a machine whose filesystem is being replaced
+# underneath it is not a machine anything can be concluded from.
+#
+# Whether that is what kept stopping this run is **not established**: the serial
+# log ends mid-sentence in the middle of a monitor report with no guest fault,
+# which says the host process went away rather than the guest failing, and I
+# have not identified what took it. Copying the tree removes one shared thing
+# rather than proving it was the one. Cheap, and it makes this run independent
+# of everybody else's, which is worth having either way.
+$PrivateEsp = Join-Path $PrivateDir 'esp'
+if ((-not (Test-Path $PrivateEsp)) -or $Fresh) {
+    if (Test-Path $PrivateEsp) { Remove-Item $PrivateEsp -Recurse -Force }
+    Write-Host '==> Taking this run its own copy of the EFI partition tree' -ForegroundColor Cyan
+    Copy-Item $EspDir $PrivateEsp -Recurse -Force
+}
+$EspDir = $PrivateEsp
+
 $MonitorPort = Get-Random -Minimum 33000 -Maximum 33999
-$QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
+# And a host port of its own for the guest's HTTP forward. `Get-NexusQemuArgs`
+# defaults it to 18080 and its own comment says why it should not be left there;
+# this script left it there anyway, and with somebody else's machine already on
+# 18080 QEMU refuses the forwarding rule and exits before it boots:
+#
+#   Could not set up host forwarding rule 'tcp:127.0.0.1:18080-:80'
+#
+# on standard error, and nothing at all in the serial log. That is why this run
+# kept reporting a desktop that never appeared.
+$HttpPort = Get-Random -Minimum 18100 -Maximum 18999
+$QemuArgs = Get-NexusQemuArgs -BuildDir $PrivateDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $Log `
-    -MonitorPort $MonitorPort -Headless
+    -MonitorPort $MonitorPort -HostHttpPort $HttpPort -Headless
 
 # Say out loud that this run has the machine.
 #
@@ -74,6 +148,9 @@ $QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
 # lock is a reason to ask, never a reason to kill anything.
 $LockDir = Join-Path $RepoRoot '.ai_collaboration\locks'
 $LockFile = Join-Path $LockDir 'CLAUDE-MACHINE-001.json'
+# Still taken, and still only a warning, although this run no longer touches the
+# shared image: it says who is on the host, and the copy above is read from the
+# shared image, which is the one moment this does contend.
 if (Test-Path $LockDir) {
     foreach ($other in (Get-ChildItem $LockDir -Filter '*.json')) {
         $held = Get-Content $other.FullName -Raw | ConvertFrom-Json
@@ -93,16 +170,33 @@ if (Test-Path $LockDir) {
 }
 
 Write-Host "==> Booting NexusOS with a monitor on port $MonitorPort" -ForegroundColor Cyan
-$process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
+# QEMU's own complaints go to a file rather than to a console nobody is reading.
+# Its refusals -- a host port already taken, an image it cannot open -- are on
+# standard error and *not* in the serial log, so a run that dies for one of them
+# looks from the log exactly like a guest that stopped for no reason. That cost
+# several runs before the port clash showed itself by luck.
+$QemuErrors = Join-Path $BuildDir 'solid-qemu.err'
+if (Test-Path $QemuErrors) { Remove-Item $QemuErrors -Force }
+$process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow `
+    -RedirectStandardError $QemuErrors
 
 function Wait-For {
     param([string]$Text, [int]$Seconds)
     for ($waited = 0; $waited -lt $Seconds; $waited++) {
         Start-Sleep -Seconds 1
-        if ($process.HasExited) { return $false }
+        # Read the log first and ask whether the machine is still there second.
+        # A machine that has just stopped may have written the thing being
+        # waited for on its way out, and answering "no" to a question the log
+        # already answers sends the reader to look at the wrong thing --
+        # `configure-disk.ps1` carries the same note for the same reason.
+        $gone = $process.HasExited
         if (Test-Path $Log) {
             $sofar = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
             if ($sofar.Contains($Text)) { return $true }
+        }
+        if ($gone) {
+            Write-Host "    the machine stopped while waiting for: $Text" -ForegroundColor DarkYellow
+            return $false
         }
     }
     return $false
@@ -211,6 +305,17 @@ try {
     # a run that is killed outright, which is why a stale one means ask rather
     # than act.
     if (Test-Path $LockFile) { Remove-Item $LockFile -Force }
+}
+
+# Whatever QEMU said on its way out, said here, because the serial log will not
+# contain it.
+if ((Test-Path $QemuErrors) -and (Get-Item $QemuErrors).Length -gt 0) {
+    Write-Host ''
+    Write-Host '    qemu said:' -ForegroundColor DarkYellow
+    foreach ($line in (Get-Content $QemuErrors)) {
+        if ($line.Trim()) { Write-Host "      $line" -ForegroundColor DarkYellow }
+    }
+    $failures += 'qemu wrote to standard error'
 }
 
 $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
