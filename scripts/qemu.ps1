@@ -33,13 +33,30 @@ function Get-NexusDiskImage {
 # 16777216 -- and as two tests that could not find a desktop, because the
 # configuration had been on the image that got replaced.
 function Get-NexusDiskSizes {
-    # Thirty-two gigabytes, because the machine can now unpack software that
-    # arrived over the network and the old eight left little room for any. The
-    # cost is on the host and not at boot: the image is written once per build
-    # at about a gigabyte a second, and a fresh NexusFS format across it is a
-    # few seconds now that the driver asks the device for a barrier instead of
-    # waiting for the medium on every write.
-    return @{ SizeMiB = 32768; FatMiB = 1024 }
+    # Eight gigabytes, and the binding constraint is the host rather than
+    # anything here.
+    #
+    # It was raised to thirty-two, because the machine can now unpack software
+    # that arrived over the network. That does not fit: **six** scripts build a
+    # disk of this size for themselves, and several of their images coexist, so
+    # the number here is multiplied by about six on a volume with seventy-two
+    # gigabytes free. `make-disk.ps1` ran out of room part-way, `build.ps1`
+    # stopped with an error, and what was left behind was a *truncated* image --
+    # a 1.1 GB file whose partition table promises sixty-seven million sectors.
+    #
+    # A machine given that boots, reads its GPT, starts making a filesystem and
+    # stops for ever at `begin NexusFS`, which looks exactly like a kernel that
+    # hangs.
+    #
+    # `make-disk.ps1` did say so -- it compares what it wrote against what it
+    # meant to write and throws. The error was filtered out of view by the
+    # person reading the build's output, who had piped it through a match for
+    # the success line. Three investigations followed, of a machine that was
+    # behaving exactly as a machine with a truncated disk should.
+    #
+    # Eight gigabytes leaves 7.9 for NexusFS, which is a great deal of room for
+    # anything a browser is going to download.
+    return @{ SizeMiB = 8192; FatMiB = 256 }
 }
 
 # The image behind the USB stick.
@@ -78,6 +95,44 @@ function Get-NexusUsbFsImage {
 # not a guess -- a directory entry can only be inside the FAT32 partition, which
 # begins one megabyte in and is a quarter-gigabyte long, so half a gigabyte
 # covers all of it and the table in front of it.
+# Open an image for reading, waiting out whoever else has it.
+#
+# A file this size is held by things that are not bugs. A QEMU that has been
+# told to quit keeps its handle for a moment while it exits, and a virus scanner
+# works through thirty-two freshly written gigabytes on its own schedule. Both
+# produce a sharing violation that is over within seconds -- and treating one as
+# fatal made a healthy machine look broken three separate times in one session:
+# once as "no serial output at all", once as a boot that stopped at
+# `begin NexusFS`, and once as a desktop that never appeared.
+#
+# So it waits, and it says so if it is still waiting after a while, and it only
+# gives up when it is clear the holder is not letting go.
+function Open-ImageForReading {
+    param(
+        [Parameter(Mandatory = $true)][string]$Image,
+        [int]$Seconds = 90
+    )
+
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    $said = $false
+    while ($true) {
+        try {
+            return [System.IO.File]::OpenRead($Image)
+        } catch [System.IO.IOException] {
+            if ((Get-Date) -ge $deadline) {
+                throw ("$(Split-Path -Leaf $Image) is still held by another process after " +
+                    "$Seconds seconds. A QEMU that did not exit, or something on the host " +
+                    'reading it. Nothing can be checked while it is open elsewhere.')
+            }
+            if (-not $said) {
+                Write-Host "    waiting for $(Split-Path -Leaf $Image) to be free" -ForegroundColor DarkGray
+                $said = $true
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+
 function Assert-NotBootable {
     param([Parameter(Mandatory = $true)][string]$Image)
 
@@ -85,7 +140,7 @@ function Assert-NotBootable {
     $Scan = 512MB
     $ChunkSize = 8MB
 
-    $stream = [System.IO.File]::OpenRead($Image)
+    $stream = Open-ImageForReading -Image $Image
     try {
         # One chunk plus the needle's length less one, so that a name lying
         # across a chunk boundary is still whole in the buffer. Without the

@@ -105,9 +105,16 @@ extern "C" fn main() -> ! {
     // the two arrived the other way round.
     let mut buffer = [0u8; 256];
     let mut handles = [Handle(0); 2];
-    let Ok(received) = nexus_user::receive(PARENT, &mut buffer, &mut handles) else {
-        failed("unpack: FAILED: nothing arrived to unpack");
-        finish();
+    // The reason, not just the fact. "nothing arrived" is true of a channel
+    // whose peer has gone, of a buffer too small for what was sent, and of a
+    // message carrying more handles than there is room for -- and those are
+    // three different bugs in three different programs.
+    let received = match nexus_user::receive(PARENT, &mut buffer, &mut handles) {
+        Ok(received) => received,
+        Err(why) => {
+            failed(&format!("unpack: FAILED: nothing arrived to unpack: {why}"));
+            finish();
+        }
     };
     if received.handles != 2 {
         failed("unpack: FAILED: the downloads and destination folders did not both arrive");
@@ -127,7 +134,11 @@ extern "C" fn main() -> ! {
     // rather than invent a way to pass one, the folder *is* the queue. Somebody
     // downloads an installer and then asks the machine to install what was
     // downloaded, which is the order the sentence goes in anyway.
-    let names = if asked.is_empty() {
+    // `all` is what the compositor sends when it means the whole folder. An
+    // empty message would say the same thing more plainly and cannot be sent:
+    // the kernel refuses a zero-length buffer. Both are accepted here, so that
+    // if that rule ever changes nothing has to be rewritten.
+    let names = if asked.is_empty() || asked == "all" {
         match archives_in(downloads) {
             Ok(found) if found.is_empty() => {
                 nexus_user::log("unpack: there is nothing in the downloads folder to unpack").ok();

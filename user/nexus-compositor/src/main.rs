@@ -1422,10 +1422,21 @@ fn start_quiet(program: &[u8], also: &[Handle]) -> Option<Handle> {
     let channel = handles[0];
     let process = handles[1];
 
-    // An empty message, which is this program's way of being told "everything".
-    // The handles are the whole of what it is given.
-    if nexus_user::send(channel, &[], also).is_err() {
-        failed("compositor: FAILED: could not give a program what it needs");
+    // A word, not an empty message. "Everything in the folder" would read most
+    // naturally as sending no words at all -- the handles are the whole of what
+    // this program is given -- and the kernel will not carry that: `user_range`
+    // refuses a zero-length buffer, for every buffer, because a read of nothing
+    // is meaningless. A message of nothing is *not* meaningless, but that is a
+    // kernel-wide rule and this is not the place to argue with it, so the word
+    // is sent and it says what it means in a log.
+    if let Err(why) = nexus_user::send(channel, b"all", also) {
+        // The reason, not the fact. A send carrying handles fails whole, and it
+        // fails for several different reasons that look identical from here: a
+        // handle without the right to be passed, a message too large, a peer
+        // that has already gone. Saying which turns a guess into a fix.
+        failed(&alloc::format!(
+            "compositor: FAILED: could not give a program what it needs: {why}"
+        ));
         nexus_user::close(channel).ok();
         nexus_user::close(process).ok();
         return None;
@@ -1937,6 +1948,17 @@ fn serve(
                         // second desktop.
                         let asked = &message[..received.bytes.min(message.len())];
                         if let Some(what) = launched(asked) {
+                            // Said out loud. "compositor: somebody asked for the
+                            // launcher" is already logged when it opens, and
+                            // what it then asked *for* was the one step in the
+                            // chain that produced no line at all -- so a request
+                            // that arrived and was not acted on looked exactly
+                            // like one that never arrived.
+                            nexus_user::log(&alloc::format!(
+                                "compositor: the launcher asked for {}",
+                                core::str::from_utf8(&asked[..4]).unwrap_or("<not text>")
+                            ))
+                            .ok();
                             wanted = Some(what);
                         } else {
                             // Anything else is a frame, which it does draw.
@@ -2033,7 +2055,7 @@ fn serve(
                         (Some(downloads), Some(software)) => {
                             if let Some(process) = start_quiet(UNPACK, &[downloads, software]) {
                                 nexus_user::log(
-                                    "compositor: started the unpacker, and lent it the downloads                                      folder to read and a folder to write",
+                                    "compositor: started the unpacker, and lent it the downloads folder to read and a folder to write",
                                 )
                                 .ok();
                                 // Reaped straight away. It is a short program and
@@ -2047,7 +2069,7 @@ fn serve(
                         // not there.
                         _ => {
                             nexus_user::log(
-                                "compositor: cannot unpack; there is no downloads folder or                                  nowhere to put what comes out",
+                                "compositor: cannot unpack; there is no downloads folder or nowhere to put what comes out",
                             )
                             .ok();
                         }
