@@ -1,0 +1,14 @@
+[package]
+name = "nexus-archive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Reading the archive formats software written for Linux arrives in."
+
+[lib]
+name = "nexus_archive"
+path = "src/lib.rs"
+
+[dependencies]
+nexus-inflate = { path = "../nexus-inflate" }

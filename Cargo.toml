@@ -18,6 +18,7 @@ members = [
     "shared/nexus-netclient",
     "shared/nexus-shellwords",
     "shared/nexus-utf8",
+    "shared/nexus-archive",
     "shared/nexus-look",
     "shared/nexus-ime",
     "shared/nexus-dns",

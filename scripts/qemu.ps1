@@ -33,7 +33,13 @@ function Get-NexusDiskImage {
 # 16777216 -- and as two tests that could not find a desktop, because the
 # configuration had been on the image that got replaced.
 function Get-NexusDiskSizes {
-    return @{ SizeMiB = 8192; FatMiB = 256 }
+    # Thirty-two gigabytes, because the machine can now unpack software that
+    # arrived over the network and the old eight left little room for any. The
+    # cost is on the host and not at boot: the image is written once per build
+    # at about a gigabyte a second, and a fresh NexusFS format across it is a
+    # few seconds now that the driver asks the device for a barrier instead of
+    # waiting for the medium on every write.
+    return @{ SizeMiB = 32768; FatMiB = 1024 }
 }
 
 # The image behind the USB stick.

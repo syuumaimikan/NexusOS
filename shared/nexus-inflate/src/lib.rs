@@ -296,6 +296,120 @@ pub fn zlib(input: &[u8], most: usize) -> Result<Vec<u8>, Trouble> {
     Ok(out)
 }
 
+/// Decompress a gzip stream: a header with optional fields, DEFLATE, a CRC-32
+/// and a length.
+///
+/// What a `.tar.gz` carries, and therefore what arrives when somebody downloads
+/// software written for Linux. The same DEFLATE underneath as zlib -- the two
+/// formats differ only in what is wrapped around it.
+///
+/// Both trailing fields are checked. The checksum is the only thing in the
+/// format that would notice a decompressor bug, and the length is the only
+/// thing that would notice a *truncated* download, which is the ordinary way a
+/// file off a network goes wrong.
+///
+/// # Errors
+///
+/// [`Trouble::BadHeader`] if it is not a gzip stream or uses a compression
+/// method that has never existed; [`Trouble::Truncated`] if the trailer is not
+/// there or the length disagrees; [`Trouble::BadChecksum`] if the CRC does not
+/// match what came out.
+pub fn gzip(input: &[u8], most: usize) -> Result<Vec<u8>, Trouble> {
+    /// Bit 2: an extra field, with its own two-byte length.
+    const EXTRA: u8 = 1 << 2;
+    /// Bit 3: the original file name, NUL-terminated.
+    const NAME: u8 = 1 << 3;
+    /// Bit 4: a comment, NUL-terminated.
+    const COMMENT: u8 = 1 << 4;
+    /// Bit 1: a checksum over the header itself.
+    const HEADER_CRC: u8 = 1 << 1;
+
+    let Some(header) = input.get(..10) else {
+        return Err(Trouble::BadHeader);
+    };
+    if header[0] != 0x1F || header[1] != 0x8B || header[2] != 8 {
+        return Err(Trouble::BadHeader);
+    }
+    let flags = header[3];
+
+    // The header is a fixed ten bytes and then whatever the flags say. Each
+    // optional field has to be walked past rather than skipped by a constant,
+    // because their lengths are in the data.
+    let mut at = 10usize;
+    if flags & EXTRA != 0 {
+        let Some(pair) = input.get(at..at + 2) else {
+            return Err(Trouble::Truncated);
+        };
+        let length = usize::from(u16::from_le_bytes([pair[0], pair[1]]));
+        at = at.saturating_add(2).saturating_add(length);
+    }
+    for present in [flags & NAME != 0, flags & COMMENT != 0] {
+        if !present {
+            continue;
+        }
+        // To the NUL, and there has to be one: a name that runs off the end of
+        // the file is a file that was cut short.
+        match input[at.min(input.len())..].iter().position(|&b| b == 0) {
+            Some(end) => at = at.saturating_add(end).saturating_add(1),
+            None => return Err(Trouble::Truncated),
+        }
+    }
+    if flags & HEADER_CRC != 0 {
+        at = at.saturating_add(2);
+    }
+
+    // Eight bytes of trailer, which are not part of the compressed data.
+    let Some(end) = input.len().checked_sub(8) else {
+        return Err(Trouble::Truncated);
+    };
+    if at >= end {
+        return Err(Trouble::Truncated);
+    }
+
+    let out = inflate(&input[at..end], most)?;
+
+    let trailer = &input[end..];
+    let stated = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+    if stated != crc32(&out) {
+        return Err(Trouble::BadChecksum);
+    }
+    // The length is modulo 2^32 by definition of the format, so it is compared
+    // that way rather than against the whole length -- which matters for a file
+    // above four gigabytes and is wrong in a way nothing would catch until one
+    // arrived.
+    let size = u32::from_le_bytes([trailer[4], trailer[5], trailer[6], trailer[7]]);
+    if size != (out.len() as u64 % (1u64 << 32)) as u32 {
+        return Err(Trouble::Truncated);
+    }
+
+    Ok(out)
+}
+
+/// CRC-32, as gzip computes it.
+///
+/// The reflected polynomial, computed a bit at a time rather than from a table:
+/// this runs once per downloaded file, and a 1 KiB table that exists to save
+/// microseconds on something that already waited for a network is the wrong
+/// trade on a machine this size.
+#[must_use]
+pub fn crc32(bytes: &[u8]) -> u32 {
+    /// The reflected form of the standard polynomial.
+    const POLYNOMIAL: u32 = 0xEDB8_8320;
+
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let carry = crc & 1;
+            crc >>= 1;
+            if carry != 0 {
+                crc ^= POLYNOMIAL;
+            }
+        }
+    }
+    !crc
+}
+
 /// Adler-32, as zlib computes it.
 #[must_use]
 pub fn adler32(bytes: &[u8]) -> u32 {
@@ -578,5 +692,94 @@ mod tests {
         let last = broken.len() - 1;
         broken[last] ^= 0xFF;
         assert_eq!(zlib(&broken, 1024), Err(Trouble::BadChecksum));
+    }
+}
+
+#[cfg(test)]
+mod gzip_tests {
+    use super::{crc32, gzip, Trouble};
+    use alloc::vec::Vec;
+
+    /// A gzip stream made by the reference implementation, not by this one.
+    ///
+    /// The point of testing a decompressor against bytes it did not produce is
+    /// that a decompressor and a compressor written from the same wrong reading
+    /// of a specification agree with each other perfectly.
+    const PLAIN: &[u8] = &[
+        0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xFF, 0xF3, 0x4B, 0xAD, 0x28, 0x2D,
+        0xF6, 0x0F, 0x56, 0x28, 0x4A, 0x4D, 0x4C, 0x29, 0x56, 0x48, 0xAF, 0xCA, 0x2C, 0x50, 0xC8,
+        0xCB, 0x2F, 0xD7, 0xE3, 0x02, 0x00, 0xC2, 0x68, 0x03, 0x1C, 0x18, 0x00, 0x00, 0x00,
+    ];
+    const PLAIN_TEXT: &[u8] = b"NexusOS reads gzip now.
+";
+
+    /// And one carrying a stored filename, which is what a real download has --
+    /// the optional header fields are the part a reader gets wrong, because a
+    /// stream without them decompresses fine while the code to skip them is
+    /// never run.
+    const NAMED: &[u8] = &[
+        0x1F, 0x8B, 0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0x02, 0xFF, 0x73, 0x74, 0x65, 0x61, 0x6D,
+        0x2E, 0x74, 0x61, 0x72, 0x00, 0xAB, 0xA8, 0x18, 0x05, 0xC4, 0x02, 0x00, 0x13, 0x2D, 0x43,
+        0x1B, 0x2C, 0x01, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn a_plain_stream() {
+        assert_eq!(gzip(PLAIN, 4096).unwrap(), PLAIN_TEXT);
+    }
+
+    #[test]
+    fn a_stream_with_a_filename_in_its_header() {
+        let out = gzip(NAMED, 4096).unwrap();
+        assert_eq!(out.len(), 300);
+        assert!(out.iter().all(|&b| b == b'x'));
+    }
+
+    #[test]
+    fn a_corrupted_body_is_refused() {
+        let mut broken: Vec<u8> = PLAIN.to_vec();
+        // A byte in the middle of the compressed data, not in the header and
+        // not in the trailer.
+        let middle = broken.len() / 2;
+        broken[middle] ^= 0xFF;
+        // Either the stream no longer decodes or it decodes to something else;
+        // both are refusals, and neither is silent success.
+        match gzip(&broken, 4096) {
+            Err(_) => {}
+            Ok(out) => assert_ne!(
+                out, PLAIN_TEXT,
+                "a corrupted stream decoded to the original"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_wrong_checksum_is_refused() {
+        let mut broken: Vec<u8> = PLAIN.to_vec();
+        let at = broken.len() - 8;
+        broken[at] ^= 0x01;
+        assert!(matches!(gzip(&broken, 4096), Err(Trouble::BadChecksum)));
+    }
+
+    /// The failure a download actually has.
+    #[test]
+    fn a_truncated_file_is_refused() {
+        for keep in [0, 1, 5, 9, 12, PLAIN.len() - 1] {
+            assert!(gzip(&PLAIN[..keep], 4096).is_err(), "accepted {keep} bytes");
+        }
+    }
+
+    #[test]
+    fn not_gzip_at_all() {
+        assert!(matches!(
+            gzip(b"PKand so on", 4096),
+            Err(Trouble::BadHeader)
+        ));
+    }
+
+    /// The standard check value for this polynomial.
+    #[test]
+    fn crc32_matches_the_published_value() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
     }
 }
