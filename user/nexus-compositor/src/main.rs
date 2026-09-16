@@ -328,6 +328,8 @@ mod desk {
     pub const FILES: &[u8] = b"file";
     /// Start the agent.
     pub const ASSIST: &[u8] = b"asst";
+    /// Unpack whatever was downloaded.
+    pub const UNPACK: &[u8] = b"unpk";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -484,6 +486,8 @@ const SETTINGS_WINDOW: &[u8] = b"BIN/SET.ELF";
 const LAUNCHER: &[u8] = b"BIN/LAUNCH.ELF";
 /// And the one that shows what is installed and installs more.
 const STORE: &[u8] = b"BIN/STORE.ELF";
+/// And the one that unpacks what was downloaded, which has no window at all.
+const UNPACK: &[u8] = b"BIN/UNPACK.ELF";
 /// And the one that shows pictures.
 const VIEWER: &[u8] = b"BIN/VIEW.ELF";
 /// The editor.
@@ -953,11 +957,13 @@ extern "C" fn main() -> ! {
     };
     let shell = start_program(
         SHELL,
-        CLIENTS,
-        screen.x,
-        screen.taskbar_y(),
-        screen.width,
-        TASKBAR,
+        Placement {
+            index: CLIENTS,
+            x: screen.x,
+            y: screen.taskbar_y(),
+            width: screen.width,
+            height: TASKBAR,
+        },
         CLIENTS as u32,
         &for_shell,
     );
@@ -1013,13 +1019,15 @@ fn start_wallpaper(screen: &Screen) -> Option<Tile> {
 
     let tile = start_program(
         WALLPAPER,
-        // Past every window and past the desktop, so its surface does not sit
-        // where one of theirs will go.
-        CLIENTS + 2,
-        screen.x,
-        screen.y,
-        screen.width,
-        screen.usable_height(),
+        Placement {
+            // Past every window and past the desktop, so its surface does not
+            // sit where one of theirs will go.
+            index: CLIENTS + 2,
+            x: screen.x,
+            y: screen.y,
+            width: screen.width,
+            height: screen.usable_height(),
+        },
         0,
         &lent,
     );
@@ -1047,14 +1055,16 @@ fn run_setup(screen: &Screen) {
 
     let Some(tile) = start_program(
         SETUP,
-        // The slot after every window, so its surface does not sit where a
-        // client's will go: the wizard finishes and the windows start, and two
-        // mappings at one address would be one of them writing over the other.
-        CLIENTS + 1,
-        screen.x + GAP,
-        screen.y + GAP,
-        screen.width - GAP * 2,
-        screen.usable_height() - GAP * 2,
+        Placement {
+            // The slot after every window, so its surface does not sit where a
+            // client's will go: the wizard finishes and the windows start, and
+            // two mappings at one address would be one writing over the other.
+            index: CLIENTS + 1,
+            x: screen.x + GAP,
+            y: screen.y + GAP,
+            width: screen.width - GAP * 2,
+            height: screen.usable_height() - GAP * 2,
+        },
         0,
         &[theirs],
     ) else {
@@ -1247,11 +1257,13 @@ fn start_client(index: usize, x: u32, y: u32, width: u32, height: u32) -> Option
     // one buffer reached both and not that compositing worked.
     start_program(
         CLIENT,
-        index,
-        x,
-        y,
-        width,
-        height,
+        Placement {
+            index,
+            x,
+            y,
+            width,
+            height,
+        },
         0x40u32 + index as u32 * 0x70,
         &[],
     )
@@ -1270,6 +1282,8 @@ const DOCUMENTS: &str = "DOCS";
 /// of the names on this disk, because a FAT32 volume is one of the places it
 /// can end up.
 const DOWNLOADS: &str = "DOWNLOAD";
+/// Where software unpacked out of a download goes.
+const SOFTWARE: &str = "SOFTWARE";
 
 /// Open -- making it if it is not there -- the folder an editor may write in.
 ///
@@ -1305,6 +1319,28 @@ fn open_downloads() -> Result<nexus_user::Handle, nexus_user::Error> {
     let directory = match nexus_user::open(FILESYSTEM, DOWNLOADS) {
         Ok(directory) => directory,
         Err(_) => nexus_user::create(FILESYSTEM, DOWNLOADS, nexus_user::Kind::Directory)?,
+    };
+    let lent = nexus_user::duplicate(
+        directory,
+        nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+    );
+    nexus_user::close(directory).ok();
+    lent
+}
+
+/// Open the folder unpacked software goes into, making it if it is not there.
+///
+/// A second folder rather than the same one, because what a browser wrote and
+/// what came out of it are different things: a downloads folder is a place
+/// where an unexpected file is not alarming, and a folder of installed software
+/// is one where it is.
+///
+/// Read, write and transfer. Not close, so an unpacker cannot take the folder
+/// away from the program that lent it.
+fn open_software() -> Result<nexus_user::Handle, nexus_user::Error> {
+    let directory = match nexus_user::open(FILESYSTEM, SOFTWARE) {
+        Ok(directory) => directory,
+        Err(_) => nexus_user::create(FILESYSTEM, SOFTWARE, nexus_user::Kind::Directory)?,
     };
     let lent = nexus_user::duplicate(
         directory,
@@ -1353,13 +1389,68 @@ fn start_service(program: &[u8]) -> Option<nexus_user::Handle> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_program(
-    program: &[u8],
+/// Start a program that has no window, and give it what it needs.
+///
+/// Everything else this compositor starts is a client: it is made a surface,
+/// handed it, and draws. This is for the one kind that is not -- a program that
+/// runs, says what it did, and exits. Making it a surface it would never draw
+/// into would be making a window nobody can see and then compositing it.
+///
+/// Returns the process, so the caller can wait for it. The channel is closed
+/// here: nothing is going to be said back down it, and a channel nobody reads
+/// is a handle that keeps a dead process from being reaped.
+fn start_quiet(program: &[u8], also: &[Handle]) -> Option<Handle> {
+    if nexus_user::send(SPAWNER, program, &[]).is_err() {
+        failed("compositor: FAILED: could not reach the spawn service");
+        return None;
+    }
+    let mut reply = [0u8; 64];
+    let mut handles = [Handle(0); 2];
+    let received = match nexus_user::receive(SPAWNER, &mut reply, &mut handles) {
+        Ok(received) => received,
+        Err(_) => {
+            failed("compositor: FAILED: the spawn service did not answer");
+            return None;
+        }
+    };
+    if received.handles != 2 {
+        let text = core::str::from_utf8(&reply[..received.bytes]).unwrap_or("<not text>");
+        nexus_user::log(text).ok();
+        failed("compositor: FAILED: no program came back");
+        return None;
+    }
+    let channel = handles[0];
+    let process = handles[1];
+
+    // An empty message, which is this program's way of being told "everything".
+    // The handles are the whole of what it is given.
+    if nexus_user::send(channel, &[], also).is_err() {
+        failed("compositor: FAILED: could not give a program what it needs");
+        nexus_user::close(channel).ok();
+        nexus_user::close(process).ok();
+        return None;
+    }
+    nexus_user::close(channel).ok();
+    Some(process)
+}
+
+/// Where a window goes, how big it is, and which slot it is.
+///
+/// Five numbers that always travel together and mean nothing apart. Grouped
+/// because this function took eight arguments, four of them a bare `u32`, and a
+/// call that swapped two of those would compile and put the window somewhere
+/// else.
+struct Placement {
     index: usize,
     x: u32,
     y: u32,
     width: u32,
     height: u32,
+}
+
+fn start_program(
+    program: &[u8],
+    at: Placement,
     third: u32,
     // Anything else the program is to be given, sent with its surface rather
     // than after it. In the same message on purpose: a program that had to read
@@ -1368,6 +1459,17 @@ fn start_program(
     // send.
     also: &[nexus_user::Handle],
 ) -> Option<Tile> {
+    // Taken apart once, here, so that the rest of this function reads as it did
+    // when the five were five parameters. The grouping exists to stop a *caller*
+    // transposing two numbers; inside, they are still five numbers.
+    let Placement {
+        index,
+        x,
+        y,
+        width,
+        height,
+    } = at;
+
     let bytes = width as usize * height as usize * 4;
     if bytes > MAX_SURFACE {
         failed("compositor: FAILED: a tile is larger than the space set aside for it");
@@ -1907,6 +2009,50 @@ fn serve(
                         None => return,
                     }
                 }
+                Launched::Unpack => {
+                    // Two folders and nothing else. The downloads folder
+                    // **read only** -- an unpacker has no business editing what
+                    // it was asked to read, and a program that could would be
+                    // one bug away from rewriting the installer it is about to
+                    // open. The destination read and write, because that is the
+                    // whole of its job.
+                    //
+                    // Narrowed here rather than asked for there: `open_downloads`
+                    // hands out write because the browser needs it, and the
+                    // right place to take a right away is the program giving it.
+                    let downloads = open_downloads().ok().and_then(|full| {
+                        let narrowed = nexus_user::duplicate(
+                            full,
+                            nexus_user::rights::READ | nexus_user::rights::TRANSFER,
+                        )
+                        .ok();
+                        nexus_user::close(full).ok();
+                        narrowed
+                    });
+                    match (downloads, open_software().ok()) {
+                        (Some(downloads), Some(software)) => {
+                            if let Some(process) = start_quiet(UNPACK, &[downloads, software]) {
+                                nexus_user::log(
+                                    "compositor: started the unpacker, and lent it the downloads                                      folder to read and a folder to write",
+                                )
+                                .ok();
+                                // Reaped straight away. It is a short program and
+                                // nothing here waits on it; leaving the handle
+                                // would leave a process nobody ever collects.
+                                nexus_user::close(process).ok();
+                            }
+                        }
+                        // Said rather than silent. A launcher entry that does
+                        // nothing and reports nothing is worse than one that is
+                        // not there.
+                        _ => {
+                            nexus_user::log(
+                                "compositor: cannot unpack; there is no downloads folder or                                  nowhere to put what comes out",
+                            )
+                            .ok();
+                        }
+                    }
+                }
                 Launched::Leave => leaving = true,
                 Launched::Halt => {
                     if ask_power(true) {
@@ -2119,6 +2265,7 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::EDITOR => Launched::Window(What::Editor),
         tag if tag == desk::FILES => Launched::Window(What::Files),
         tag if tag == desk::ASSIST => Launched::Window(What::Assistant),
+        tag if tag == desk::UNPACK => Launched::Unpack,
         tag if tag == desk::QUIT => Launched::Leave,
         tag if tag == desk::HALT => Launched::Halt,
         tag if tag == desk::RESTART => Launched::Restart,
@@ -2139,6 +2286,9 @@ enum Launched {
     Restart,
     /// Put the screen out.
     Sleep,
+    /// Unpack what was downloaded. Not a window: it runs, says what it did,
+    /// and exits.
+    Unpack,
 }
 
 /// Ask the kernel to stop the machine. Says whether it was accepted.
@@ -2485,11 +2635,13 @@ fn open_window(
 
             start_program(
                 BROWSER,
-                slot,
-                screen.x + GAP + step,
-                screen.y + GAP + step,
-                width,
-                height,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
                 carrying,
                 &lent,
             )?
@@ -2523,11 +2675,13 @@ fn open_window(
             };
             start_program(
                 TERMINAL,
-                slot,
-                screen.x + GAP + step,
-                screen.y + GAP + step,
-                width,
-                height,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
                 0,
                 &[files, spawner, sound, machine, network, removable],
             )?
@@ -2547,11 +2701,13 @@ fn open_window(
             };
             start_program(
                 SETTINGS_WINDOW,
-                slot,
-                screen.x + GAP + step,
-                screen.y + GAP + step,
-                width,
-                height,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
                 0,
                 &[theirs],
             )?
@@ -2573,11 +2729,13 @@ fn open_window(
             };
             start_program(
                 STORE,
-                slot,
-                screen.x + GAP + step,
-                screen.y + GAP + step,
-                width,
-                height,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
                 0,
                 &[files, record],
             )?
@@ -2594,11 +2752,13 @@ fn open_window(
             };
             start_program(
                 FILES,
-                slot,
-                screen.x + GAP + step,
-                screen.y + GAP + step,
-                width,
-                height,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
                 0,
                 &[files, drives],
             )?
@@ -2615,11 +2775,13 @@ fn open_window(
             };
             start_program(
                 EDITOR,
-                slot,
-                screen.x + GAP + step,
-                screen.y + GAP + step,
-                width,
-                height,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
                 0,
                 &[documents],
             )?
@@ -2638,11 +2800,13 @@ fn open_window(
             };
             start_program(
                 VIEWER,
-                slot,
-                screen.x + GAP + step,
-                screen.y + GAP + step,
-                width,
-                height,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
                 0,
                 &[files],
             )?
@@ -2691,11 +2855,13 @@ fn open_window(
             let lent_slice = lent.leak();
             start_program(
                 ASSISTANT,
-                slot,
-                screen.x + GAP + step,
-                screen.y + GAP + step,
-                width,
-                height,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
                 0,
                 lent_slice,
             )?
@@ -2712,11 +2878,13 @@ fn open_window(
                 .clamp(MIN_SIZE, screen.usable_height().saturating_sub(GAP * 2));
             start_program(
                 LAUNCHER,
-                slot,
-                screen.x + (screen.width.saturating_sub(wide)) / 2,
-                screen.y + (screen.usable_height().saturating_sub(tall)) / 3,
-                wide,
-                tall,
+                Placement {
+                    index: slot,
+                    x: screen.x + (screen.width.saturating_sub(wide)) / 2,
+                    y: screen.y + (screen.usable_height().saturating_sub(tall)) / 3,
+                    width: wide,
+                    height: tall,
+                },
                 0,
                 &[],
             )?

@@ -136,6 +136,11 @@ const ENTRIES: &[Entry] = &[
         grave: false,
     },
     Entry {
+        key: "shell.unpack",
+        tag: b"unpk",
+        grave: false,
+    },
+    Entry {
         key: "shell.sleep",
         tag: b"slep",
         grave: true,

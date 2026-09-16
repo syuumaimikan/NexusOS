@@ -179,6 +179,7 @@ shell.settings = Settings
 shell.packages = Packages
 shell.pictures = Pictures
 shell.assist = Assistant
+shell.unpack = Install downloads
 shell.leave = Log out
 launch.hint = Type a few letters
 launch.nothing = Nothing here is called that
