@@ -874,8 +874,24 @@ fn log(pointer: u64, length: u64) -> u64 {
 /// can never name kernel memory. What is *not* checked is whether the range is
 /// mapped -- that is the caller's own page fault, and treating it as one is
 /// deliberate until there is a fixup table to turn it into an error return.
+///
+/// # The first page
+///
+/// Refused, and that had been missing. A null pointer is how a program says
+/// "no buffer" to half the calls in the Linux interface -- `gettimeofday(0)`,
+/// `getrlimit(r, 0)`, `time(0)` -- and this said yes to it, because it checked
+/// the top of the range and not the bottom. The kernel then wrote through it on
+/// the program's behalf and panicked in ring 0 for a mistake made in ring 3,
+/// which is the one thing a checked range exists to prevent.
+///
+/// The whole first page rather than the single address zero, because a null
+/// pointer with a field offset added is still a null pointer as far as anything
+/// useful is concerned, and `0x18` is no better an address than `0`.
 pub fn user_range(pointer: u64, length: u64, limit: u64) -> Option<(u64, usize)> {
     if length == 0 || length > limit {
+        return None;
+    }
+    if pointer < nexus_mm::PAGE_SIZE {
         return None;
     }
     let end = pointer.checked_add(length)?;

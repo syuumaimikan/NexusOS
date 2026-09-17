@@ -675,14 +675,24 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             exit(argument0)
         }
-        _ => {
-            REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            // Named in the log, because the useful thing about running a
-            // foreign program is finding out what it asks for. A translation
-            // layer grows by reading these.
-            kprintln!("[linux] call {number} is not translated yet; answering ENOSYS");
-            error::ENOSYS
-        }
+        // Before giving up: `linux_more` holds the calls a C library asks for
+        // before it will start. They are in a file of their own rather than in
+        // this table because there are two dozen of them and this file is
+        // worked on by more than one person.
+        _ => match super::linux_more::translate(number, frame) {
+            Some(answer) => {
+                TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                answer
+            }
+            None => {
+                REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                // Named in the log, because the useful thing about running a
+                // foreign program is finding out what it asks for. A
+                // translation layer grows by reading these.
+                kprintln!("[linux] call {number} is not translated yet; answering ENOSYS");
+                error::ENOSYS
+            }
+        },
     }
 }
 

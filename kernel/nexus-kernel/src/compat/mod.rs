@@ -16,6 +16,7 @@ pub mod linux_display;
 pub mod linux_exec;
 pub mod linux_files;
 pub mod linux_memory;
+pub mod linux_more;
 pub mod linux_poll;
 pub mod linux_signal;
 pub mod linux_socket;
