@@ -698,6 +698,34 @@ pub fn create_child(parent: &Node, name: &str, directory: bool) -> Result<Arc<No
 /// the filesystem is free to give the next file, and reading through it would
 /// read that file. It cannot happen here because freeing is what the last close
 /// does, not what the remove does.
+/// Move a name from one directory to another.
+///
+/// The inode is not touched: the same file is simply named from somewhere else,
+/// which is what makes this cheap for a large file and safe for any file.
+///
+/// # Open handles
+///
+/// Deliberately not consulted. Renaming something another program has open is
+/// allowed everywhere else and is the whole basis of "write a new file, rename
+/// it over the old one" -- the reader goes on reading the bytes it opened,
+/// because it holds the inode and not the name. `remove_child` has to care
+/// about open handles; this does not, and the difference is worth stating
+/// beside it.
+pub fn rename_child(
+    from: &Node,
+    from_name: &str,
+    to: &Node,
+    to_name: &str,
+) -> Result<(), StoreError> {
+    if !from.directory || !to.directory {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let mut volume = VOLUME.lock();
+    let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+    volume.rename(from.inode, from_name, to.inode, to_name)?;
+    Ok(())
+}
+
 pub fn remove_child(parent: &Node, name: &str) -> Result<(), StoreError> {
     if !parent.directory {
         return Err(StoreError::Fs(FsError::WrongKind));

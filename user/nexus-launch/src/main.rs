@@ -156,6 +156,11 @@ const ENTRIES: &[Entry] = &[
         grave: false,
     },
     Entry {
+        key: "shell.fileprobe",
+        tag: b"fchk",
+        grave: false,
+    },
+    Entry {
         key: "shell.sleep",
         tag: b"slep",
         grave: true,

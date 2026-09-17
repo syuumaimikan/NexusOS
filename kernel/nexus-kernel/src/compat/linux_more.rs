@@ -56,6 +56,8 @@ mod also {
     pub const EIO: u64 = (-5i64) as u64;
     /// Nothing is wrong; ask again.
     pub const EAGAIN: u64 = (-11i64) as u64;
+    /// No such file or directory.
+    pub const ENOENT: u64 = (-2i64) as u64;
 }
 
 /// Try to answer a call `linux::dispatch` did not recognise.
@@ -90,6 +92,9 @@ pub fn translate(number: u64, frame: &crate::arch::syscall::Frame) -> Option<u64
         call::FSTATFS => statfs_into(b),
         call::SELECT => select(a, b, c, d, frame.r8, Timeout::Microseconds),
         call::PSELECT6 => select(a, b, c, d, frame.r8, Timeout::Nanoseconds),
+        call::RENAME => rename(a, b),
+        call::RENAMEAT => rename(b, d),
+        call::RENAMEAT2 => renameat2(b, d, frame.r8),
         _ => return None,
     })
 }
@@ -122,6 +127,9 @@ mod call {
     pub const FSTATFS: u64 = 138;
     pub const SELECT: u64 = 23;
     pub const PSELECT6: u64 = 270;
+    pub const RENAME: u64 = 82;
+    pub const RENAMEAT: u64 = 264;
+    pub const RENAMEAT2: u64 = 316;
 }
 
 /// Which of the two shapes a `select` timeout arrives in.
@@ -1004,4 +1012,114 @@ fn select(
         }
     }
     ready
+}
+
+/// `rename(from, to)`, and the directory-relative spellings of it.
+///
+/// Both paths are read out and handed to the filesystem, which does the move in
+/// one transaction. The directory descriptors of `renameat` are ignored, and
+/// that is a real limitation rather than an oversight: every path on this
+/// machine is resolved from the root, because there is no working directory for
+/// a relative one to be relative to. A caller passing anything but `AT_FDCWD`
+/// gets a move it did not ask for, so it is refused instead.
+fn rename(from: u64, to: u64) -> u64 {
+    let Some(from) = path_at(from) else {
+        return error::EFAULT;
+    };
+    let Some(to) = path_at(to) else {
+        return error::EFAULT;
+    };
+
+    let (from_parent, from_name) = match split(&from) {
+        Some(split) => split,
+        None => return error::EINVAL,
+    };
+    let (to_parent, to_name) = match split(&to) {
+        Some(split) => split,
+        None => return error::EINVAL,
+    };
+
+    let Some(from_directory) = walk(from_parent) else {
+        return also::ENOENT;
+    };
+    let Some(to_directory) = walk(to_parent) else {
+        return also::ENOENT;
+    };
+    match crate::fs::store::rename_child(&from_directory, from_name, &to_directory, to_name) {
+        Ok(()) => 0,
+        Err(_) => error::EINVAL,
+    }
+}
+
+/// `renameat2(olddir, old, newdir, new, flags)`.
+///
+/// The flags are the reason it exists and none of them can be honoured here:
+/// `RENAME_NOREPLACE` is what this already does, `RENAME_EXCHANGE` swaps two
+/// names atomically, and `RENAME_WHITEOUT` is for overlay filesystems. Anything
+/// but zero and `NOREPLACE` is refused rather than silently downgraded -- a
+/// program asking for an atomic exchange and getting an ordinary move would
+/// lose one of the two files.
+fn renameat2(from: u64, to: u64, flags: u64) -> u64 {
+    const RENAME_NOREPLACE: u64 = 1;
+    if flags & !RENAME_NOREPLACE != 0 {
+        return error::EINVAL;
+    }
+    rename(from, to)
+}
+
+/// A path a program handed over, as text.
+fn path_at(pointer: u64) -> Option<alloc::string::String> {
+    /// The longest path this will read. A name longer than this is a program
+    /// that has lost track of its own buffer.
+    const LONGEST: u64 = 4096;
+    let (at, length) = user_range(pointer, 1, LONGEST)?;
+    // SAFETY: at least one byte at this address belongs to the caller. The loop
+    // stops at the first zero and at `length`, so nothing past the checked
+    // range is read.
+    let bytes = unsafe { core::slice::from_raw_parts(at as *const u8, length) };
+    let end = bytes.iter().position(|byte| *byte == 0)?;
+    core::str::from_utf8(&bytes[..end])
+        .ok()
+        .map(alloc::string::ToString::to_string)
+}
+
+/// A path split into the directory holding it and the name inside.
+fn split(path: &str) -> Option<(&str, &str)> {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(0) => Some(("/", &trimmed[1..])),
+        Some(at) => Some((&trimmed[..at], &trimmed[at + 1..])),
+        // A bare name, which is relative to the root here because there is
+        // nowhere else for it to be relative to.
+        None if !trimmed.is_empty() => Some(("/", trimmed)),
+        None => None,
+    }
+}
+
+/// The directory a path names, walked from the root a Linux program sees.
+///
+/// **The Linux root, not the store's.** A translated program's `/` is the
+/// `linux` directory inside this machine's own store, and a rename that walked
+/// from the store root would look for the file somewhere it was never put --
+/// which is exactly what happened: the file was created, the rename refused,
+/// and nothing about the message said which of the two roots was meant.
+///
+/// From the root every time, because that is where every path here starts:
+/// there is no working directory for a relative one to be relative to.
+fn walk(path: &str) -> Option<alloc::sync::Arc<crate::fs::store::Node>> {
+    let mut at = linux_files::root().ok()?;
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        // `..` is refused rather than resolved, the same rule the archive
+        // reader follows: a path containing one sometimes works, which is a
+        // rule nobody can hold in their head while reading the code that uses
+        // it.
+        if part == ".." {
+            return None;
+        }
+        at = crate::fs::store::open_child(&at, part).ok()?;
+    }
+    Some(at)
 }

@@ -9,3 +9,7 @@ description = "A Linux program that asks the machine which system calls it does 
 [[bin]]
 name = "nexus-probe"
 path = "src/main.rs"
+
+[[bin]]
+name = "nexus-fileprobe"
+path = "src/bin/files.rs"

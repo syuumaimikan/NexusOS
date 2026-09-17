@@ -183,6 +183,7 @@ shell.unpack = ダウンロードを展開
 shell.solid = 立体を描く
 shell.netool = ネットワークツール
 shell.probe = Linux呼び出しを調べる
+shell.fileprobe = ファイル移動を検査する
 shell.leave = ログアウト
 launch.hint = 文字を入力してください
 launch.nothing = その名前のものはありません

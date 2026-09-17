@@ -172,7 +172,7 @@ const EACCES: u64 = (-13i64) as u64;
 /// reason to carry the directory, and making it on demand means the first
 /// program to ask is the thing that creates it rather than a step in the build
 /// that everyone has to remember.
-fn root() -> Result<Arc<Node>, u64> {
+pub(super) fn root() -> Result<Arc<Node>, u64> {
     let top = store::root().map_err(errno)?;
     match store::open_child(&top, "linux") {
         Ok(node) if node.is_directory() => Ok(node),

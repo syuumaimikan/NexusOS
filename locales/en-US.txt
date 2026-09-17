@@ -183,6 +183,7 @@ shell.unpack = Install downloads
 shell.solid = Draw a solid
 shell.netool = Network tool
 shell.probe = Probe the Linux calls
+shell.fileprobe = Check moving a file
 shell.leave = Log out
 launch.hint = Type a few letters
 launch.nothing = Nothing here is called that

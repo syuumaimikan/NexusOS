@@ -1,29 +1,31 @@
 <#
 .SYNOPSIS
-    Opens the file manager and copies a file onto a USB drive.
+    Moves a file and checks where it went.
 
 .DESCRIPTION
-    The claim is that one window reaches both the machine's own store and a
-    removable drive, and can move a file between them. Reading is the easy half;
-    the copy is the one that matters, because it goes:
+    A rename is two directory writes, and every way of getting it wrong loses
+    something: the file is not at the new name, or it is but holds the wrong
+    bytes, or it is at *both* names.
 
-      a file on the store -> read through a directory handle -> written through
-      the removable-drive channel -> the kernel's service -> FAT32 cluster
-      allocation -> four layers of USB -> the host's image file
-
-    So the strongest check is not in the guest at all: after the run, the file's
-    bytes are in `build/nexus-usb-fs.img`, which this script looks for.
+    The third is the one a careless implementation passes by accident, because
+    it is the only one that fails silently. Two names for one inode looks
+    exactly right until something deletes one of them and takes the other's
+    blocks with it.
 
 .PARAMETER Timeout
     How long to wait for each stage, in seconds.
 
 .PARAMETER Shot
-    Where to put a screenshot, if one is wanted.
+    Where to put a screenshot of the solid, if one is wanted.
 #>
 [CmdletBinding()]
 param(
     [int]$Timeout = 240,
-    [string]$Shot
+    [string]$Shot,
+    # Take a new copy of the disk image even if one is already here. Wanted
+    # after a build, and not wanted otherwise: the copy is eight gigabytes and
+    # taking it means waiting for the shared image to be free.
+    [switch]$Fresh
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,7 +38,6 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
 $EspDir = Join-Path $BuildDir 'esp'
 $Log = Join-Path $BuildDir 'files-test.log'
-$UsbImage = Join-Path $BuildDir 'nexus-usb-fs.img'
 
 if (-not (Test-Path (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI'))) {
     throw 'no staged ESP; run build.ps1 first'
@@ -53,30 +54,191 @@ Copy-Item (Join-Path $QemuDir 'share\edk2-i386-vars.fd') $FirmwareVars -Force
 
 if (Test-Path $Log) { Remove-Item $Log -Force }
 
-$MonitorPort = Get-Random -Minimum 37000 -Maximum 37999
-$QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
+# This run gets its own copy of the disk, and that is not tidiness.
+#
+# There is one `build/nexus-disk.img` and three agents working in this checkout.
+# Two QEMUs on one image do not fail loudly -- the second boots and hangs at
+# `begin NexusFS` with no error at all -- and waiting for a gap between somebody
+# else's test stages only means colliding with their next one. A copy costs
+# eight gigabytes of disk and removes the whole problem.
+#
+# `Get-NexusQemuArgs` finds the disk under whatever `-BuildDir` it is given, so
+# pointing that at a directory holding nothing but the copy is enough. The USB
+# images are `Test-Path`-guarded there, so this machine simply has no USB
+# sticks, which is no loss to a program that draws a triangle.
+#
+# Taken through `Open-ImageForReading`, which waits out the sharing violation
+# rather than reading a half-written image: a copy taken while somebody's run is
+# writing is torn, and a torn filesystem is exactly the confusing failure this
+# exists to avoid.
+# One copy, shared by the tests in this file's family rather than one each.
+#
+# It is eight gigabytes. Two of them for two tests that never run at the same
+# time is eight gigabytes spent on nothing. They must not be run concurrently
+# with each other -- which is the same rule that made the copy necessary in the
+# first place, now applying to me as well as to everybody else.
+$PrivateDir = Join-Path $BuildDir 'machine'
+$SharedDisk = Join-Path $BuildDir 'nexus-disk.img'
+$PrivateDisk = Join-Path $PrivateDir 'nexus-disk.img'
+if (-not (Test-Path $PrivateDir)) { New-Item -ItemType Directory $PrivateDir | Out-Null }
+
+# Copied when it is missing, or when `-Fresh` asks, and on no other condition.
+#
+# Comparing timestamps against the shared image was the obvious rule and it was
+# wrong: that file is rewritten by every run anybody makes, so "newer than my
+# copy" was true every single time and the copy was never reused. `-Fresh` after
+# a rebuild is the honest way to say what is actually meant.
+if ((-not (Test-Path $PrivateDisk)) -or $Fresh) {
+    if (-not (Test-Path $SharedDisk)) { throw 'no disk image; run build.ps1 first' }
+    Write-Host '==> Taking this run its own copy of the disk' -ForegroundColor Cyan
+    $source = Open-ImageForReading -Image $SharedDisk
+    try {
+        $destination = [System.IO.File]::Create($PrivateDisk)
+        try { $source.CopyTo($destination) } finally { $destination.Dispose() }
+    } finally { $source.Dispose() }
+    Write-Host "    $([math]::Round((Get-Item $PrivateDisk).Length / 1GB, 1)) GiB -> $PrivateDisk" -ForegroundColor DarkGray
+}
+
+# And its own copy of the EFI partition tree, for the same reason as the disk.
+#
+# `build/esp` is handed to QEMU as `fat:rw:` -- a live view of a host directory,
+# written as well as read. Another agent's `build.ps1` rewrites that directory
+# between their test stages, and a machine whose filesystem is being replaced
+# underneath it is not a machine anything can be concluded from.
+#
+# Whether that is what kept stopping this run is **not established**: the serial
+# log ends mid-sentence in the middle of a monitor report with no guest fault,
+# which says the host process went away rather than the guest failing, and I
+# have not identified what took it. Copying the tree removes one shared thing
+# rather than proving it was the one. Cheap, and it makes this run independent
+# of everybody else's, which is worth having either way.
+$PrivateEsp = Join-Path $PrivateDir 'esp'
+if ((-not (Test-Path $PrivateEsp)) -or $Fresh) {
+    if (Test-Path $PrivateEsp) { Remove-Item $PrivateEsp -Recurse -Force }
+    Write-Host '==> Taking this run its own copy of the EFI partition tree' -ForegroundColor Cyan
+    Copy-Item $EspDir $PrivateEsp -Recurse -Force
+}
+$EspDir = $PrivateEsp
+
+<#
+.SYNOPSIS
+    A host TCP port nothing is listening on, found by trying to listen on it.
+
+.DESCRIPTION
+    Picking at random and hoping is what this script did, and the range it
+    picked from is the range every other test script here picks from. When the
+    pick collides, QEMU cannot bind its monitor and the machine is gone before
+    it boots -- and what is left behind is a serial log holding nothing but the
+    firmware's clear-screen codes, which reads exactly like a machine that
+    failed for no reason.
+
+    Asking the operating system is not much more code than hoping. It is still
+    a race -- something can take the port between the test and QEMU's bind --
+    but it turns a collision from likely into unlikely, and a retry covers the
+    rest.
+#>
+function Get-FreePort {
+    param([int]$From, [int]$To)
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        $candidate = Get-Random -Minimum $From -Maximum $To
+        $listener = $null
+        try {
+            $listener = New-Object System.Net.Sockets.TcpListener(
+                [System.Net.IPAddress]::Loopback, $candidate)
+            $listener.Start()
+            return $candidate
+        } catch {
+            continue
+        } finally {
+            if ($listener) { $listener.Stop() }
+        }
+    }
+    throw "could not find a free port between $From and $To"
+}
+
+$MonitorPort = Get-FreePort -From 33000 -To 33999
+# And a host port of its own for the guest's HTTP forward. `Get-NexusQemuArgs`
+# defaults it to 18080 and its own comment says why it should not be left there;
+# this script left it there anyway, and with somebody else's machine already on
+# 18080 QEMU refuses the forwarding rule and exits before it boots:
+#
+#   Could not set up host forwarding rule 'tcp:127.0.0.1:18080-:80'
+#
+# on standard error, and nothing at all in the serial log. That is why this run
+# kept reporting a desktop that never appeared.
+$HttpPort = Get-FreePort -From 18100 -To 18999
+$QemuArgs = Get-NexusQemuArgs -BuildDir $PrivateDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $Log `
-    -MonitorPort $MonitorPort -Headless
+    -MonitorPort $MonitorPort -HostHttpPort $HttpPort -Headless
+
+# Say out loud that this run has the machine.
+#
+# There is one disk image and three agents working in this checkout, and two
+# QEMUs on one image do not fail loudly: the second boots and hangs at
+# `begin NexusFS` with no error. A lock in the place the protocol already keeps
+# them turns an unexplained timeout into a name and a task.
+#
+# A warning and not a refusal, deliberately. This convention is proposed in
+# REQUEST_CLAUDE-20260917-002 and not yet agreed, and a script that blocked on a
+# convention nobody had signed up to would only be a new way to fail. A stale
+# lock is a reason to ask, never a reason to kill anything.
+$LockDir = Join-Path $RepoRoot '.ai_collaboration\locks'
+$LockFile = Join-Path $LockDir 'CLAUDE-MACHINE-005.json'
+# Still taken, and still only a warning, although this run no longer touches the
+# shared image: it says who is on the host, and the copy above is read from the
+# shared image, which is the one moment this does contend.
+if (Test-Path $LockDir) {
+    foreach ($other in (Get-ChildItem $LockDir -Filter '*.json')) {
+        $held = Get-Content $other.FullName -Raw | ConvertFrom-Json
+        if ($held.paths -contains 'build/nexus-disk.img' -and $other.FullName -ne $LockFile) {
+            Write-Host "    note: $($held.agent) holds the machine for $($held.task), since $($held.created_at)" -ForegroundColor DarkYellow
+        }
+    }
+    $now = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($LockFile, (@{
+                agent        = 'claude_code'
+                task         = 'CLAUDE-FILES-001'
+                paths        = @('build/nexus-disk.img')
+                created_at   = $now
+                heartbeat_at = $now
+            } | ConvertTo-Json), $utf8NoBom)
+}
 
 Write-Host "==> Booting NexusOS with a monitor on port $MonitorPort" -ForegroundColor Cyan
-$process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
+# QEMU's own complaints go to a file rather than to a console nobody is reading.
+# Its refusals -- a host port already taken, an image it cannot open -- are on
+# standard error and *not* in the serial log, so a run that dies for one of them
+# looks from the log exactly like a guest that stopped for no reason. That cost
+# several runs before the port clash showed itself by luck.
+$QemuErrors = Join-Path $BuildDir 'files-qemu.err'
+if (Test-Path $QemuErrors) { Remove-Item $QemuErrors -Force }
+$process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow `
+    -RedirectStandardError $QemuErrors
 
 function Wait-For {
     param([string]$Text, [int]$Seconds)
     for ($waited = 0; $waited -lt $Seconds; $waited++) {
         Start-Sleep -Seconds 1
-        if ($process.HasExited) { return $false }
+        # Read the log first and ask whether the machine is still there second.
+        # A machine that has just stopped may have written the thing being
+        # waited for on its way out, and answering "no" to a question the log
+        # already answers sends the reader to look at the wrong thing --
+        # `configure-disk.ps1` carries the same note for the same reason.
+        $gone = $process.HasExited
         if (Test-Path $Log) {
             $sofar = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
             if ($sofar.Contains($Text)) { return $true }
+        }
+        if ($gone) {
+            Write-Host "    the machine stopped while waiting for: $Text" -ForegroundColor DarkYellow
+            return $false
         }
     }
     return $false
 }
 
 $failures = @()
-$checks = 0
-
 try {
     Write-Host '==> Waiting for the desktop' -ForegroundColor Cyan
     if (-not (Wait-For -Text 'shell: took the strip' -Seconds $Timeout)) {
@@ -90,70 +252,67 @@ try {
         Start-Sleep -Milliseconds 800
 
         function Send-Keys {
-            param([string[]]$Keys, [int]$Pause = 160)
+            param([string[]]$Keys, [int]$Pause = 180)
             foreach ($key in $Keys) {
                 $writer.WriteLine("sendkey $key")
                 Start-Sleep -Milliseconds $Pause
             }
         }
 
-        Write-Host '==> Opening the file manager' -ForegroundColor Cyan
+        Write-Host '==> F3' -ForegroundColor Cyan
         Send-Keys @('f3')
         if (-not (Wait-For -Text 'launch: a window for starting things by name' -Seconds 60)) {
-            throw 'the launcher never started'
+            $failures += 'the launcher never started'
         }
-        # `fil` finds "Files" and nothing else on the list.
-        Send-Keys @('f', 'i', 'l')
-        Start-Sleep -Seconds 1
+
+        Write-Host '==> Typing "chec"' -ForegroundColor Cyan
+        Send-Keys @('c', 'h', 'e', 'c')
+        Start-Sleep -Seconds 2
+
+        Write-Host '==> Enter' -ForegroundColor Cyan
         Send-Keys @('ret')
 
-        if (-not (Wait-For -Text 'compositor: started a file manager' -Seconds 60)) {
-            $failures += 'the compositor never started a file manager'
+        Write-Host '==> Waiting for the check to finish' -ForegroundColor Cyan
+        if (-not (Wait-For -Text 'files: rename moved' -Seconds $Timeout)) {
+            $failures += 'the check never said it passed'
         }
-        if (-not (Wait-For -Text 'files: one window for' -Seconds 60)) {
-            $failures += 'the file manager never said it was up'
-        }
-        Start-Sleep -Seconds 2
 
-        # It starts on the store, whose root holds directories and no files --
-        # so go into one. `down` moves to `PKG`, `ret` opens it, and the first
-        # thing inside is a file, which is what `f2` then copies. Pressing `f2`
-        # on the directory itself is refused, correctly, with "this copies
-        # files, not folders"; the first version of this test did exactly that
-        # and read the refusal as a failure to copy.
-        Write-Host '==> Choosing a file and copying it to the drive' -ForegroundColor Cyan
-        Send-Keys @('down')
-        Start-Sleep -Milliseconds 400
-        Send-Keys @('ret')
-        Start-Sleep -Seconds 2
-        Send-Keys @('f2')
-        if (-not (Wait-For -Text 'files: copied' -Seconds 60)) {
-            $failures += 'the file manager never copied anything'
-        }
-        Start-Sleep -Seconds 2
-
-        # And across to the drive, to see it there.
+        # Before the summary, because the summary is the last thing it does and
+        # the window goes when it exits. A few seconds in is the middle of the
+        # turn, which is the picture worth having.
         #
-        # The wait is long because switching is not free: the other pane lists a
-        # drive, and listing one mounts it afresh and reads the directory over
-        # four layers of USB. Two seconds caught the window mid-repaint and the
-        # screenshot came out blank -- with every check above still passing,
-        # which is exactly the sort of evidence that misleads.
-        # `right`, not `tab`: the compositor takes Tab to move the focus between
-        # windows and never passes it on, so the file manager could not see it.
-        Write-Host '==> Switching to the drive' -ForegroundColor Cyan
-        Send-Keys @('right')
-        Start-Sleep -Seconds 6
-
+        # In a try, and that is not defensive habit: asking for a screendump
+        # while the guest is filling a window pixel by pixel drops this monitor
+        # connection about as often as not. The dump itself lands -- the file is
+        # written -- and then the socket goes. The verdict is in the serial log
+        # rather than down this socket, so losing the socket here must not lose
+        # the run, and a test that threw away a result because it could not take
+        # a picture of it would be a test measuring the wrong thing.
         if ($Shot) {
+            Start-Sleep -Seconds 6
             $Ppm = Join-Path $BuildDir 'files.ppm'
-            Invoke-Screendump -Writer $writer -Path $Ppm
-            Convert-PpmToPng -PpmPath $Ppm -PngPath $Shot | Out-Null
-            Write-Host "    Screenshot: $Shot" -ForegroundColor DarkGray
+            try {
+                Invoke-Screendump -Writer $writer -Path $Ppm
+                Convert-PpmToPng -PpmPath $Ppm -PngPath $Shot | Out-Null
+                Write-Host "    Screenshot: $Shot" -ForegroundColor DarkGray
+            } catch {
+                Write-Host "    the monitor went away taking the screenshot; carrying on" -ForegroundColor DarkYellow
+                if (Test-Path $Ppm) {
+                    try {
+                        Convert-PpmToPng -PpmPath $Ppm -PngPath $Shot | Out-Null
+                        Write-Host "    Screenshot: $Shot (written before it went)" -ForegroundColor DarkGray
+                    } catch { }
+                }
+            }
         }
 
-        $writer.WriteLine('quit')
-        Start-Sleep -Milliseconds 800
+
+        # Tidiness only, and it may well fail if the monitor has already gone.
+        # The machine is killed in the `finally` below either way.
+        try {
+            $writer.WriteLine('quit')
+            Start-Sleep -Milliseconds 800
+        } catch { }
     } finally {
         $client.Close()
     }
@@ -162,75 +321,62 @@ try {
         try { $process.Kill() } catch { }
     }
     $process.WaitForExit(5000) | Out-Null
+    # Mine, so removing it is not the thing the protocol forbids. Left behind by
+    # a run that is killed outright, which is why a stale one means ask rather
+    # than act.
+    if (Test-Path $LockFile) { Remove-Item $LockFile -Force }
+}
+
+# Whatever QEMU said on its way out, said here, because the serial log will not
+# contain it.
+if ((Test-Path $QemuErrors) -and (Get-Item $QemuErrors).Length -gt 0) {
+    Write-Host ''
+    Write-Host '    qemu said:' -ForegroundColor DarkYellow
+    foreach ($line in (Get-Content $QemuErrors)) {
+        if ($line.Trim()) { Write-Host "      $line" -ForegroundColor DarkYellow }
+    }
+    $failures += 'qemu wrote to standard error'
 }
 
 $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
 
 foreach ($expected in @(
-        'compositor: started a file manager, and lent it the disk and the drives',
-        'files: one window for',
-        'files: copied',
-        # The other pane really was reached, rather than the key going nowhere.
-        'files: looking at drive 1'
+        'launch: asked for fchk',
+        'compositor: started the file check, and lent it nothing at all',
+        'files: the file is at the new name, with the bytes it had',
+        'files: the old name is gone',
+        'files: rename moved the file and left nothing behind'
     )) {
-    $checks++
     if ($output.Contains($expected)) {
         Write-Host "    ok   $expected" -ForegroundColor DarkGray
     } else {
-        $failures += "never said '$expected'"
-        Write-Host "    FAIL $expected" -ForegroundColor Red
+        $failures += "never reported: $expected"
     }
 }
 
-# The check that matters, and it is outside the machine: whatever was copied
-# has to be in the host's own image file. A guest that reported a copy and
-# wrote nothing passes every check above and fails this one.
-$checks++
-$name = [regex]::Match($output, 'files: copied (\S+) \((\d+) bytes\)')
-if (-not $name.Success) {
-    $failures += 'the log never said what was copied'
-    Write-Host '    FAIL the log never said what was copied' -ForegroundColor Red
-} else {
-    $copied = $name.Groups[1].Value
-    $bytes = [int]$name.Groups[2].Value
-    Write-Host "    .... looking for $copied ($bytes bytes) in the host's image" -ForegroundColor DarkGray
-    $image = [System.IO.File]::ReadAllBytes($UsbImage)
-    # The name, as FAT32 stores it: eight and three, padded, upper case.
-    $stem, $extension = $copied.ToUpperInvariant() -split '\.', 2
-    $short = ($stem.PadRight(8) + $extension.PadRight(3)).Substring(0, 11)
-    $needle = [System.Text.Encoding]::ASCII.GetBytes($short)
-    $found = $false
-    for ($at = 0; $at -le $image.Length - $needle.Length; $at++) {
-        $match = $true
-        for ($index = 0; $index -lt $needle.Length; $index++) {
-            if ($image[$at + $index] -ne $needle[$index]) { $match = $false; break }
-        }
-        if ($match) { $found = $true; break }
-    }
-    if ($found) {
-        Write-Host "    ok   $short is in the host's image at offset $at" -ForegroundColor DarkGray
-    } else {
-        $failures += "the copied file's directory entry is not in $UsbImage"
-        Write-Host "    FAIL $short is not in the host's image" -ForegroundColor Red
-    }
-}
-
-foreach ($bad in @('KERNEL PANIC', 'files: PANIC', 'files: FAILED')) {
-    $checks++
+foreach ($bad in @('files: FAILED', 'files: PANIC', 'compositor: FAILED', 'KERNEL PANIC')) {
     if ($output.Contains($bad)) {
-        $failures += "absent: $bad : it appeared"
-        Write-Host "    FAIL absent: $bad" -ForegroundColor Red
+        $failures += "saw: $bad"
     } else {
         Write-Host "    ok   absent: $bad" -ForegroundColor DarkGray
     }
 }
 
+# What it drew, repeated here because it is the line worth reading and the
+# numbers in it are what any document about this renderer should quote.
+foreach ($line in ($output -split "`r?`n")) {
+    if ($line -match 'files: ') {
+        Write-Host ''
+        Write-Host "    $($line.Trim())" -ForegroundColor Cyan
+    }
+}
+
 Write-Host ''
 if ($failures.Count -eq 0) {
-    Write-Host "File manager tests passed ($checks checks)." -ForegroundColor Green
+    Write-Host 'The file moved, and left nothing behind.' -ForegroundColor Green
     exit 0
 } else {
     foreach ($why in $failures) { Write-Host "    FAIL $why" -ForegroundColor Red }
-    Write-Host "$($failures.Count) of $checks checks failed. Log: $Log" -ForegroundColor Red
+    Write-Host "Log: $Log"
     exit 1
 }

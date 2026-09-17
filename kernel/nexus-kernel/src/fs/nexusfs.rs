@@ -896,6 +896,177 @@ impl Volume {
         }
     }
 
+    /// Move a name, and whatever it names, somewhere else.
+    ///
+    /// # One transaction, and why that is the whole point
+    ///
+    /// A rename is two directory writes: the name goes from one and appears in
+    /// the other. Doing them as two operations means a power failure between
+    /// them leaves the file named **nowhere** -- still on the disk, still
+    /// holding its blocks, and reachable by nothing. That is the one failure a
+    /// rename must not have, because the reason people use rename is that it is
+    /// the safe way to replace a file.
+    ///
+    /// So both writes are inside one `begin`/`commit`, and the inode itself is
+    /// never touched: the same number is simply named from somewhere else.
+    ///
+    /// # What it refuses
+    ///
+    /// Renaming a directory *into itself* -- `mv a a/b` -- is refused. It would
+    /// detach the subtree from the root and leave it pointing at itself, which
+    /// is a loop the filesystem check would find and nobody could fix from
+    /// inside. Checked by walking up from the destination, which is the only
+    /// way to know.
+    ///
+    /// An existing destination is refused rather than replaced. Linux replaces
+    /// it, and doing that safely means unlinking the victim in the same
+    /// transaction and discarding its inode afterwards; until that is written,
+    /// refusing is the answer that cannot lose anybody's data.
+    pub fn rename(
+        &mut self,
+        from_directory: u32,
+        from_name: &str,
+        to_directory: u32,
+        to_name: &str,
+    ) -> Result<(), FsError> {
+        check_name(from_name)?;
+        check_name(to_name)?;
+
+        let source_parent = self.read_inode(from_directory)?;
+        let target_parent = self.read_inode(to_directory)?;
+        if source_parent.kind != Kind::Directory || target_parent.kind != Kind::Directory {
+            return Err(FsError::WrongKind);
+        }
+
+        let source_contents = self.read_inode_data(&source_parent)?;
+        let source_entries = parse_directory(&source_contents)?;
+        let (number, _, kind) = *source_entries
+            .iter()
+            .find(|(_, existing, _)| existing == from_name)
+            .ok_or(FsError::NotFound)?;
+
+        // Nothing to do, and doing it anyway would take the name away and put
+        // it back -- with a window in between where the file is named nowhere.
+        if from_directory == to_directory && from_name == to_name {
+            return Ok(());
+        }
+
+        // Moving a directory inside itself. Walked from the destination
+        // upwards, because the loop is only visible from that end.
+        if kind == Kind::Directory && self.contains(number, to_directory)? {
+            return Err(FsError::WrongKind);
+        }
+
+        let target_contents = if from_directory == to_directory {
+            // The same directory, so the removal and the addition are one
+            // rewrite. Reading it twice would mean the second write undid the
+            // first.
+            let mut rebuilt = Vec::with_capacity(source_contents.len());
+            for (inode, existing, entry_kind) in &source_entries {
+                if existing != from_name {
+                    rebuilt.extend_from_slice(&encode_entry(*inode, existing, *entry_kind));
+                }
+            }
+            if parse_directory(&rebuilt)?
+                .iter()
+                .any(|(_, existing, _)| existing == to_name)
+            {
+                return Err(FsError::Exists);
+            }
+            rebuilt.extend_from_slice(&encode_entry(number, to_name, kind));
+            Some(rebuilt)
+        } else {
+            let mut destination = self.read_inode_data(&target_parent)?;
+            if parse_directory(&destination)?
+                .iter()
+                .any(|(_, existing, _)| existing == to_name)
+            {
+                return Err(FsError::Exists);
+            }
+            destination.extend_from_slice(&encode_entry(number, to_name, kind));
+            Some(destination)
+        };
+        let Some(target_contents) = target_contents else {
+            return Err(FsError::NotFound);
+        };
+
+        let source_rebuilt = if from_directory == to_directory {
+            None
+        } else {
+            let mut rebuilt = Vec::with_capacity(source_contents.len());
+            for (inode, existing, entry_kind) in &source_entries {
+                if existing != from_name {
+                    rebuilt.extend_from_slice(&encode_entry(*inode, existing, *entry_kind));
+                }
+            }
+            Some(rebuilt)
+        };
+
+        self.begin();
+        let done = (|volume: &mut Self| -> Result<(), FsError> {
+            if let Some(rebuilt) = &source_rebuilt {
+                volume.write_inode_data(from_directory, rebuilt, true)?;
+            }
+            volume.write_inode_data(to_directory, &target_contents, true)?;
+            Ok(())
+        })(self);
+        match done {
+            Ok(()) => {
+                self.commit()?;
+                Ok(())
+            }
+            Err(error) => {
+                self.abandon();
+                Err(error)
+            }
+        }
+    }
+
+    /// Whether `candidate` is `ancestor`, or anywhere beneath it.
+    ///
+    /// Walked **downwards** from `ancestor`, and that is forced rather than
+    /// chosen: directories here carry no `..` entry, so there is no way to walk
+    /// up from the candidate. Descending is the same question asked from the
+    /// other end.
+    ///
+    /// Two bounds, and both are about a filesystem that is already wrong. The
+    /// visited list stops a loop from being walked for ever, and the count
+    /// stops a tree large enough to exhaust memory from doing it more slowly.
+    /// A rename that refuses because the tree is enormous is a rename somebody
+    /// can retry; a machine that stopped is not.
+    fn contains(&self, ancestor: u32, candidate: u32) -> Result<bool, FsError> {
+        /// More directories than any tree this machine will hold, and few
+        /// enough that the list below stays small.
+        const MOST: usize = 4096;
+
+        let mut seen: Vec<u32> = Vec::new();
+        let mut to_look_at: Vec<u32> = alloc::vec![ancestor];
+        while let Some(at) = to_look_at.pop() {
+            if at == candidate {
+                return Ok(true);
+            }
+            if seen.contains(&at) {
+                continue;
+            }
+            if seen.len() >= MOST {
+                return Err(FsError::NotEmpty);
+            }
+            seen.push(at);
+
+            let node = self.read_inode(at)?;
+            if node.kind != Kind::Directory {
+                continue;
+            }
+            let contents = self.read_inode_data(&node)?;
+            for (inode, _, kind) in parse_directory(&contents)? {
+                if kind == Kind::Directory {
+                    to_look_at.push(inode);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Free an inode nothing names any more.
     ///
     /// The other half. Only ever called on an inode whose name has already

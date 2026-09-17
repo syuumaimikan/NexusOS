@@ -336,6 +336,8 @@ mod desk {
     pub const NETOOL: &[u8] = b"netw";
     /// Ask the machine which Linux calls it does not have.
     pub const PROBE: &[u8] = b"prob";
+    /// Move a file and look at where it went.
+    pub const FILEPROBE: &[u8] = b"fchk";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -493,6 +495,14 @@ const LINUX_KEY: u32 = 4;
 const WAYLAND_SERVER_KEY: u32 = 5;
 const WAYLAND_CLIENT_KEY: u32 = 6;
 
+/// Which function key runs a SPIR-V shader.
+///
+/// F7. The program is built for Linux and is given a window like any other
+/// client; what is different about it is what it puts in the window, which is
+/// the output of a shader of the kind a graphics driver is handed. See
+/// `docs/shaders.md`.
+const SHADER_KEY: u32 = 7;
+
 /// The program this one gives surfaces to.
 const CLIENT: &[u8] = b"BIN/CLIENT.ELF";
 /// The one it runs instead, once, on a machine nobody has set up.
@@ -558,6 +568,12 @@ const LINUX_WINDOW: &[u8] = b"linux:/usr/bin/draw";
 /// being a list somebody remembered and becomes a list the machine printed.
 const LINUX_PROBE: &[u8] = b"linux:/usr/bin/probe";
 
+/// A program built for Linux that moves a file and checks where it went.
+///
+/// Separate from the probe because the probe promises to change nothing, and
+/// this one creates a file, writes to it, moves it and deletes it.
+const LINUX_FILEPROBE: &[u8] = b"linux:/usr/bin/fileprobe";
+
 /// A Wayland compositor, and a Wayland client for it.
 ///
 /// Both are programs built for Linux. The first is given a window like any
@@ -574,6 +590,13 @@ const LINUX_PROBE: &[u8] = b"linux:/usr/bin/probe";
 /// that has to forward the keys.
 const WAYLAND_SERVER: &[u8] = b"linux:/usr/bin/wayland-server";
 const WAYLAND_CLIENT: &[u8] = b"linux:/usr/bin/wayland-client";
+
+/// A program built for Linux that fills its window by running a SPIR-V module.
+///
+/// Given a surface and a channel, like every other client. There is no graphics
+/// interface to lend it and none is asked for: every pixel in that window came
+/// out of an interpreter running the shader once per fragment.
+const SHADER_WINDOW: &[u8] = b"linux:/usr/bin/shader";
 
 /// The program that draws the strip along the bottom and says what a click in
 /// it means.
@@ -1891,6 +1914,7 @@ fn serve(
                         wanted = Some(Launched::Window(What::WaylandServer));
                     }
                     Some(Typed::WaylandClient) => wanted = Some(Launched::WaylandClient),
+                    Some(Typed::Shader) => wanted = Some(Launched::Window(What::Shader)),
                     Some(typed) => {
                         if matches!(typed, Typed::Forwarded) {
                             forwarded += 1;
@@ -2160,6 +2184,15 @@ fn serve(
                         nexus_user::close(process).ok();
                     }
                 }
+                Launched::FileProbe => {
+                    if let Some(process) = start_quiet(LINUX_FILEPROBE, &[]) {
+                        nexus_user::log(
+                            "compositor: started the file check, and lent it nothing at all",
+                        )
+                        .ok();
+                        nexus_user::close(process).ok();
+                    }
+                }
                 Launched::Probe => {
                     if let Some(process) = start_quiet(LINUX_PROBE, &[]) {
                         nexus_user::log(
@@ -2405,6 +2438,8 @@ enum What {
     /// it is started with no window, because its window is a surface inside
     /// this one.
     WaylandServer,
+    /// A window whose every pixel is the output of a SPIR-V shader.
+    Shader,
 }
 
 /// What reading from the keyboard turned out to be.
@@ -2423,6 +2458,8 @@ enum Typed {
     /// The keys that start a Wayland compositor and a client for it.
     WaylandServer,
     WaylandClient,
+    /// The key that runs a SPIR-V shader into a window.
+    Shader,
 }
 
 /// What reading from the desktop turned out to be.
@@ -2471,6 +2508,7 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::SOLID => Launched::Window(What::Solid),
         tag if tag == desk::NETOOL => Launched::Window(What::Netool),
         tag if tag == desk::PROBE => Launched::Probe,
+        tag if tag == desk::FILEPROBE => Launched::FileProbe,
         tag if tag == desk::QUIT => Launched::Leave,
         tag if tag == desk::HALT => Launched::Halt,
         tag if tag == desk::RESTART => Launched::Restart,
@@ -2494,6 +2532,8 @@ enum Launched {
     /// Ask the machine which Linux calls it does not have. Not a window: it
     /// asks, writes a list, and ends.
     Probe,
+    /// Move a file and check where it went. Not a window either.
+    FileProbe,
     /// Unpack what was downloaded. Not a window: it runs, says what it did,
     /// and exits.
     Unpack,
@@ -2831,6 +2871,18 @@ fn open_window(
         // second kind of client rather than a translation.
         What::Linux => start_program(
             LINUX_WINDOW,
+            Placement {
+                index: slot,
+                x: screen.x + GAP + step,
+                y: screen.y + GAP + step,
+                width,
+                height,
+            },
+            0,
+            &[],
+        )?,
+        What::Shader => start_program(
+            SHADER_WINDOW,
             Placement {
                 index: slot,
                 x: screen.x + GAP + step,
@@ -3204,6 +3256,9 @@ fn open_window(
             What::WaylandServer => {
                 "compositor: started a Wayland compositor for Linux programs"
             }
+            What::Shader => {
+                "compositor: started a program that fills its window with a SPIR-V shader"
+            }
             What::Assistant => {
                 "compositor: started the agent, and lent it the disk to read and nothing to write"
             }
@@ -3294,6 +3349,10 @@ fn read_key(
     if message[0] == key::FUNCTION && read_u32(&message, 1) == WAYLAND_CLIENT_KEY {
         nexus_user::log("compositor: somebody asked for a Wayland client").ok();
         return Some(Typed::WaylandClient);
+    }
+    if message[0] == key::FUNCTION && read_u32(&message, 1) == SHADER_KEY {
+        nexus_user::log("compositor: somebody asked for a window drawn by a shader").ok();
+        return Some(Typed::Shader);
     }
 
     if message[0] == key::TAB {

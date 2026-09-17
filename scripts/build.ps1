@@ -326,8 +326,11 @@ $GuestPrograms = @(
     @{ Name = 'net'; File = 'guest-net' },
     @{ Name = 'wlsrv'; File = 'guest-wlserver' },
     @{ Name = 'wlcli'; File = 'guest-wlclient' },
+    @{ Name = 'shader'; File = 'guest-shader' },
     # And the one that asks the machine which calls it does not have.
-    @{ Name = 'probe'; File = 'nexus-probe' }
+    @{ Name = 'probe'; File = 'nexus-probe' },
+    # And the one that moves a file and looks at where it went.
+    @{ Name = 'files'; File = 'nexus-fileprobe' }
 )
 $guestTotal = 0
 foreach ($guest in $GuestPrograms) {
@@ -398,6 +401,7 @@ BIN/LD.LX   /lib/ld-nexus-x86-64.so.1
 BIN/DYN.LX  /usr/bin/dyn
 BIN/DRAW.LX /usr/bin/draw
 BIN/GPROBE.LX /usr/bin/probe
+BIN/GFILES.LX /usr/bin/fileprobe
 BIN/GPOSIX.LX   /usr/bin/posix
 BIN/GTHREADS.LX /usr/bin/threads
 BIN/GSIGNALS.LX /usr/bin/signals
@@ -406,6 +410,7 @@ BIN/GEXECED.LX  /usr/bin/execed
 BIN/GNET.LX     /usr/bin/net
 BIN/GWLSRV.LX   /usr/bin/wayland-server
 BIN/GWLCLI.LX   /usr/bin/wayland-client
+BIN/GSHADER.LX  /usr/bin/shader
 BIN/G32.LX      /usr/bin/thirty-two
 '@, $utf8NoBom)
 
