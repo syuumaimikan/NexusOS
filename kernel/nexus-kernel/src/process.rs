@@ -311,6 +311,7 @@ impl Drop for Process {
             crate::compat::linux_memory::forget(self.id.0);
             crate::compat::linux_threads::forget(self.id.0);
             crate::compat::linux_display::forget(self.id.0);
+            crate::compat::linux_more::forget(self.id.0);
             crate::compat::linux_poll::forget(self.id.0);
             crate::compat::linux_socket::forget(self.id.0);
             crate::compat::linux_signal::forget(self.id.0);

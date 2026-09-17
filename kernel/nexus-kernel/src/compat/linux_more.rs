@@ -77,6 +77,9 @@ pub fn translate(number: u64, frame: &crate::arch::syscall::Frame) -> Option<u64
         call::LSTAT => lstat(a, b),
         call::READLINK => readlink(a),
         call::READLINKAT => readlinkat(a, b),
+        call::FCNTL => fcntl(a, b, c),
+        call::PWRITE64 => pwrite64(a, b, c, d),
+        call::STATX => statx(a, b, c, frame.r8),
         _ => return None,
     })
 }
@@ -98,6 +101,45 @@ mod call {
     pub const READLINKAT: u64 = 267;
     pub const PRLIMIT64: u64 = 302;
     pub const MEMBARRIER: u64 = 324;
+    pub const FCNTL: u64 = 72;
+    pub const PWRITE64: u64 = 18;
+    pub const STATX: u64 = 332;
+}
+
+/// The descriptor flags this layer keeps for a program.
+///
+/// # Why there is a table at all
+///
+/// `F_SETFD` and `F_SETFL` are not questions, they are *settings*, and a
+/// program that sets one expects to read it back. Answering `F_GETFL` with a
+/// plausible constant would be the exact failure this file's header warns
+/// about: a wrong answer a C library cannot detect. So the flags are kept.
+///
+/// Keyed by process as well as descriptor, because descriptor three means a
+/// different thing in every program, and forgotten when a process ends -- the
+/// same discipline `linux_files` already follows, and for the same reason: a
+/// map that only grows is a leak with a slow fuse.
+static FLAGS: crate::sync::IrqSpinLock<alloc::collections::BTreeMap<(u64, u64), Descriptor>> =
+    crate::sync::IrqSpinLock::new(alloc::collections::BTreeMap::new());
+
+/// What is remembered about one open descriptor.
+#[derive(Debug, Clone, Copy, Default)]
+struct Descriptor {
+    /// `FD_CLOEXEC`, which is a property of the descriptor.
+    close_on_exec: bool,
+    /// `O_NONBLOCK`, which is a property of the open file.
+    non_blocking: bool,
+}
+
+/// Let a process's flags go when it ends.
+///
+/// Called from `Process::drop` beside the other `forget`s.
+pub fn forget(process: u64) {
+    FLAGS.lock().retain(|(owner, _), _| *owner != process);
+}
+
+fn whose() -> Option<u64> {
+    crate::sched::current_process().map(|process| process.id.0)
 }
 
 /// Seconds since the epoch, and the fraction, as this machine knows them.
@@ -441,4 +483,172 @@ fn readlink(path: u64) -> u64 {
 /// it.
 fn readlinkat(_directory: u64, path: u64) -> u64 {
     readlink(path)
+}
+
+/// `fcntl(fd, command, argument)`.
+///
+/// Only the commands a C library actually uses on the way to opening a file.
+/// Everything else is `EINVAL`, which is what Linux answers for a command it
+/// does not know, and which is a real answer rather than a shrug.
+fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
+    const F_DUPFD: u64 = 0;
+    const F_GETFD: u64 = 1;
+    const F_SETFD: u64 = 2;
+    const F_GETFL: u64 = 3;
+    const F_SETFL: u64 = 4;
+    const F_DUPFD_CLOEXEC: u64 = 1030;
+    const FD_CLOEXEC: u64 = 1;
+    const O_NONBLOCK: u64 = 0o4000;
+    /// `O_RDWR`. Everything this filesystem opens is readable and writable, so
+    /// this is the truth rather than a placeholder.
+    const O_RDWR: u64 = 2;
+
+    // The descriptor has to exist whatever is being asked about it, and asking
+    // first means `fcntl` on a closed one is `EBADF` rather than a cheerful
+    // answer about flags nobody owns.
+    if linux_files::describe(descriptor).is_err() {
+        return error::EBADF;
+    }
+    let Some(process) = whose() else {
+        return error::EINVAL;
+    };
+
+    match command {
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            // `argument` is the lowest number to use, which this cannot honour:
+            // `dup` gives out the next free one. Refused rather than quietly
+            // returning a lower descriptor, because a program that asked for
+            // "at least ten" and got four would install its handle over
+            // something it is still using.
+            if argument > 3 {
+                return error::EINVAL;
+            }
+            let new = linux_files::dup(descriptor);
+            if (new as i64) >= 0 && command == F_DUPFD_CLOEXEC {
+                FLAGS.lock().entry((process, new)).or_default().close_on_exec = true;
+            }
+            new
+        }
+        F_GETFD => u64::from(
+            FLAGS
+                .lock()
+                .get(&(process, descriptor))
+                .is_some_and(|flags| flags.close_on_exec),
+        ),
+        F_SETFD => {
+            FLAGS
+                .lock()
+                .entry((process, descriptor))
+                .or_default()
+                .close_on_exec = argument & FD_CLOEXEC != 0;
+            0
+        }
+        F_GETFL => {
+            let non_blocking = FLAGS
+                .lock()
+                .get(&(process, descriptor))
+                .is_some_and(|flags| flags.non_blocking);
+            O_RDWR | if non_blocking { O_NONBLOCK } else { 0 }
+        }
+        F_SETFL => {
+            // Only the bit `F_SETFL` is allowed to change. The access mode and
+            // the creation flags are fixed once a file is open, and Linux
+            // ignores them here rather than refusing.
+            FLAGS
+                .lock()
+                .entry((process, descriptor))
+                .or_default()
+                .non_blocking = argument & O_NONBLOCK != 0;
+            0
+        }
+        _ => error::EINVAL,
+    }
+}
+
+/// `pwrite64(fd, buffer, count, offset)`.
+///
+/// Seek, write, seek back. **Not atomic**, and that is said rather than hidden:
+/// two threads calling this on one descriptor can interleave and land in each
+/// other's place, which the real call guarantees against.
+///
+/// It is here anyway, because the alternative is `ENOSYS` and a C library that
+/// gets `ENOSYS` from `pwrite` does not fall back to seek-and-write. It fails
+/// the write. Every program on this machine so far has one thread.
+fn pwrite64(descriptor: u64, buffer: u64, count: u64, offset: u64) -> u64 {
+    const SEEK_SET: u64 = 0;
+    const SEEK_CUR: u64 = 1;
+
+    let was = linux_files::lseek(descriptor, 0, SEEK_CUR);
+    if (was as i64) < 0 {
+        return was;
+    }
+    let moved = linux_files::lseek(descriptor, offset, SEEK_SET);
+    if (moved as i64) < 0 {
+        return moved;
+    }
+    let written = linux_files::write(descriptor, buffer, count);
+    // Put the position back whatever happened to the write: a failed `pwrite`
+    // that moved the file position would break the next ordinary `write` too.
+    linux_files::lseek(descriptor, was, SEEK_SET);
+    written
+}
+
+/// `statx(dirfd, path, flags, mask, out)`.
+///
+/// What a C library built in the last few years stats with. A wider structure
+/// than `stat` and a different shape, so it is filled here rather than
+/// translated from one.
+///
+/// **The mask is answered honestly.** `stx_mask` says which fields were
+/// actually filled, and a program asking about a field this machine knows
+/// nothing about -- times, owner, device numbers -- can see from the mask that
+/// it is not there. That is what the mask is for, and reporting everything as
+/// present would throw it away.
+fn statx(directory: u64, path: u64, flags: u64, out: u64) -> u64 {
+    /// `struct statx` is 256 bytes.
+    const SIZE: u64 = 256;
+    /// `STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_SIZE | STATX_BLOCKS`.
+    const FILLED: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004 | 0x0000_0200 | 0x0000_0400;
+    /// `S_IFDIR | 0755` and `S_IFREG | 0644`, as `linux_files` reports them.
+    const DIRECTORY: u16 = 0o040_755;
+    const FILE: u16 = 0o100_644;
+    /// `AT_EMPTY_PATH`: stat the descriptor itself rather than a path under it.
+    const AT_EMPTY_PATH: u64 = 0x1000;
+
+    let Some((at, _)) = user_range(out, SIZE, SIZE) else {
+        return error::EFAULT;
+    };
+
+    // Which node is being asked about. An empty path means the descriptor
+    // itself, which is how `fstat` is spelled in `statx`.
+    let empty = match user_range(path, 1, 1) {
+        // SAFETY: one byte the caller owns, checked by `user_range`.
+        Some((pointer, _)) => unsafe { core::ptr::read(pointer as *const u8) == 0 },
+        None => true,
+    };
+    if !empty && flags & AT_EMPTY_PATH == 0 {
+        // A path relative to a directory descriptor, and resolving one is
+        // `linux_files`'s business rather than this file's.
+        return error::ENOSYS;
+    }
+    let Ok(node) = linux_files::node_of(directory) else {
+        return error::EBADF;
+    };
+
+    let size = crate::fs::store::size(&node).unwrap_or(0);
+    let is_directory = node.is_directory();
+    let mut fields = [0u8; SIZE as usize];
+    fields[0..4].copy_from_slice(&FILLED.to_le_bytes());
+    fields[4..8].copy_from_slice(&4096u32.to_le_bytes());
+    fields[16..20].copy_from_slice(&(if is_directory { 2u32 } else { 1 }).to_le_bytes());
+    let mode: u16 = if is_directory { DIRECTORY } else { FILE };
+    fields[28..30].copy_from_slice(&mode.to_le_bytes());
+    fields[40..48].copy_from_slice(&size.to_le_bytes());
+    fields[48..56].copy_from_slice(&size.div_ceil(512).to_le_bytes());
+
+    // SAFETY: the range was checked above and is exactly this many bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(fields.as_ptr(), at as *mut u8, fields.len());
+    }
+    0
 }

@@ -172,6 +172,25 @@ const ASKS: &[Ask] = &[
 
     // Waiting on several things, which a windowing client does constantly.
     Ask { number: 23, name: "select", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "the oldest way to wait on many" },
+    Ask { number: 270, name: "pselect6", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "how a C library spells select" },
+    Ask { number: 7, name: "poll", args: [0, 0, 0, 0, 0], wanted_for: "what a windowing client waits with" },
+    Ask { number: 290, name: "eventfd2", args: [0, 0, 0, 0, 0], wanted_for: "waking a thread from another" },
+
+    // Threads, the modern way. A C library built in the last few years uses
+    // `clone3` and falls back to `clone`, so a machine with only the old one
+    // works and is one refusal slower at every thread.
+    Ask { number: 435, name: "clone3", args: [0, 0, 0, 0, 0], wanted_for: "threads, as a new C library makes them" },
+
+    // The rest of what a program does with a file.
+    Ask { number: 79, name: "getcwd", args: [0, 0, 0, 0, 0], wanted_for: "where a program thinks it is" },
+    Ask { number: 16, name: "ioctl", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "asking a device anything at all" },
+    Ask { number: 293, name: "pipe2", args: [0, 0, 0, 0, 0], wanted_for: "a pipe with flags" },
+    Ask { number: 292, name: "dup3", args: [BAD_FD, BAD_FD, 0, 0, 0], wanted_for: "putting a descriptor somewhere exact" },
+    Ask { number: 76, name: "truncate", args: [0, 0, 0, 0, 0], wanted_for: "shortening a file by name" },
+    Ask { number: 82, name: "rename", args: [0, 0, 0, 0, 0], wanted_for: "moving a file" },
+    Ask { number: 316, name: "renameat2", args: [BAD_FD, 0, BAD_FD, 0, 0], wanted_for: "the same, as a C library asks it" },
+    Ask { number: 85, name: "creat", args: [0, 0, 0, 0, 0], wanted_for: "making a file the old way" },
+    Ask { number: 133, name: "mknod", args: [0, 0, 0, 0, 0], wanted_for: "device nodes under /dev" },
 ];
 
 /// The entry point, which cannot be an ordinary function.
