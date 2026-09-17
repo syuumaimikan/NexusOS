@@ -54,6 +54,8 @@ mod also {
     pub const EPERM: u64 = (-1i64) as u64;
     /// The device said no.
     pub const EIO: u64 = (-5i64) as u64;
+    /// Nothing is wrong; ask again.
+    pub const EAGAIN: u64 = (-11i64) as u64;
 }
 
 /// Try to answer a call `linux::dispatch` did not recognise.
@@ -84,6 +86,10 @@ pub fn translate(number: u64, frame: &crate::arch::syscall::Frame) -> Option<u64
         call::CREAT => creat(a),
         call::TRUNCATE => truncate(a, b),
         call::PRCTL => prctl(a, b),
+        call::STATFS => statfs(a, b),
+        call::FSTATFS => statfs_into(b),
+        call::SELECT => select(a, b, c, d, frame.r8, Timeout::Microseconds),
+        call::PSELECT6 => select(a, b, c, d, frame.r8, Timeout::Nanoseconds),
         _ => return None,
     })
 }
@@ -112,6 +118,23 @@ mod call {
     pub const CREAT: u64 = 85;
     pub const TRUNCATE: u64 = 76;
     pub const PRCTL: u64 = 157;
+    pub const STATFS: u64 = 137;
+    pub const FSTATFS: u64 = 138;
+    pub const SELECT: u64 = 23;
+    pub const PSELECT6: u64 = 270;
+}
+
+/// Which of the two shapes a `select` timeout arrives in.
+///
+/// `select` takes a `struct timeval` -- seconds and *micro*seconds -- and
+/// `pselect6` takes a `struct timespec` -- seconds and *nano*seconds. The two
+/// are the same size and differ only in the meaning of the second field, which
+/// is exactly the sort of difference that produces a timeout a thousand times
+/// too short and a bug nobody can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Timeout {
+    Microseconds,
+    Nanoseconds,
 }
 
 /// The descriptor flags this layer keeps for a program.
@@ -772,4 +795,213 @@ fn prctl(option: u64, _argument: u64) -> u64 {
         PR_GET_NO_NEW_PRIVS => 1,
         _ => error::EINVAL,
     }
+}
+
+/// `statfs(path, out)` and `fstatfs(fd, out)`.
+///
+/// One filesystem, so the path and the descriptor name the same volume and both
+/// arrive here. The path is checked for readability and then ignored, which is
+/// worth saying rather than leaving to be discovered: a machine with two
+/// filesystems would have to resolve it.
+fn statfs(path: u64, out: u64) -> u64 {
+    if user_range(path, 1, 1).is_none() {
+        return error::EFAULT;
+    }
+    statfs_into(out)
+}
+
+/// Fill a `struct statfs` from the volume this machine has.
+fn statfs_into(out: u64) -> u64 {
+    /// `struct statfs` on x86-64 is 120 bytes.
+    const SIZE: u64 = 120;
+    /// The block size reported, and the unit the counts below are in.
+    const BLOCK: u64 = 4096;
+
+    let Some((at, _)) = user_range(out, SIZE, SIZE) else {
+        return error::EFAULT;
+    };
+    // `None` while the volume lock is held by something else, which is a real
+    // state rather than an error: the answer is "ask again", and `EAGAIN` says
+    // that where a fabricated figure would not.
+    let Some((total, free)) = crate::fs::store::space() else {
+        return also::EAGAIN;
+    };
+
+    let mut fields = [0u8; SIZE as usize];
+    // f_type. `NEXUSFS` rather than a borrowed magic number: a program that
+    // recognised this as ext4 would make decisions on that basis.
+    fields[0..8].copy_from_slice(&0x4E58_5553u64.to_le_bytes());
+    fields[8..16].copy_from_slice(&BLOCK.to_le_bytes()); // f_bsize
+    fields[16..24].copy_from_slice(&(total / BLOCK).to_le_bytes()); // f_blocks
+    fields[24..32].copy_from_slice(&(free / BLOCK).to_le_bytes()); // f_bfree
+    // f_bavail: what an unprivileged program may use. The same as free, because
+    // this filesystem keeps no reserve and there is no privilege here to be
+    // outside of.
+    fields[32..40].copy_from_slice(&(free / BLOCK).to_le_bytes());
+    // f_files and f_ffree are left zero rather than guessed. The volume knows
+    // its inode counts, but reaching them from here would mean holding the
+    // volume lock a second time for a figure almost nothing reads.
+    fields[72..80].copy_from_slice(&255u64.to_le_bytes()); // f_namelen
+
+    // SAFETY: the range was checked above and is exactly this many bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(fields.as_ptr(), at as *mut u8, fields.len());
+    }
+    0
+}
+
+/// `select(n, read, write, except, timeout)` and `pselect6`, which is the same
+/// with a nanosecond timeout and a signal mask.
+///
+/// # Why this is here rather than left to `poll`
+///
+/// A C library does not always have the choice. `select` is what a great deal
+/// of older software calls directly, and `pselect6` is what musl's own
+/// `select` becomes -- so a machine with `poll` and without these runs `poll`
+/// for the programs that were written this decade and refuses the rest.
+///
+/// The readiness itself is `linux_poll`'s, called rather than copied. Two
+/// answers to "is this descriptor ready" would drift, and the one that drifted
+/// would be this one.
+///
+/// # The signal mask
+///
+/// `pselect6` takes one and this ignores it. That is a real limitation and not
+/// a rounding: the whole point of `pselect6` over `select` is to change the
+/// mask atomically around the wait, and a program relying on that to avoid a
+/// race will still have the race. It is ignored rather than refused because the
+/// overwhelming majority of callers pass null, and refusing all of them to be
+/// strict with a few would be the worse trade.
+fn select(
+    count: u64,
+    readable: u64,
+    writable: u64,
+    failing: u64,
+    timeout: u64,
+    shape: Timeout,
+) -> u64 {
+    use super::linux_poll::event;
+
+    /// `FD_SETSIZE`. A set is a bitmap of exactly this many bits, and a `count`
+    /// above it describes memory the caller did not pass.
+    const SETSIZE: u64 = 1024;
+    /// How long to wait between looks, in milliseconds.
+    const STEP: u64 = 10;
+
+    if count > SETSIZE {
+        return error::EINVAL;
+    }
+    let bytes = count.div_ceil(8).max(1);
+
+    // How long to wait. A null pointer means for ever, which is what the
+    // interface says and not an oversight.
+    let patience = if timeout == 0 {
+        None
+    } else {
+        let Some((at, _)) = user_range(timeout, 16, 16) else {
+            return error::EFAULT;
+        };
+        // SAFETY: sixteen bytes the caller owns, checked above.
+        let (whole, fraction) = unsafe {
+            (
+                core::ptr::read_unaligned(at as *const i64),
+                core::ptr::read_unaligned((at as *const i64).add(1)),
+            )
+        };
+        if whole < 0 || fraction < 0 {
+            return error::EINVAL;
+        }
+        let milliseconds = match shape {
+            Timeout::Microseconds => (fraction as u64) / 1000,
+            Timeout::Nanoseconds => (fraction as u64) / 1_000_000,
+        };
+        Some((whole as u64).saturating_mul(1000).saturating_add(milliseconds))
+    };
+
+    // Read the three sets once. They are the question; the answer is written
+    // back over them at the end, which is what makes `select` awkward to use
+    // and is nevertheless what it does.
+    let mut asked = [[0u8; (SETSIZE / 8) as usize]; 3];
+    for (which, set) in [readable, writable, failing].iter().enumerate() {
+        if *set == 0 {
+            continue;
+        }
+        let Some((at, _)) = user_range(*set, bytes, bytes) else {
+            return error::EFAULT;
+        };
+        // SAFETY: `bytes` bytes the caller owns, checked above, copied into a
+        // buffer of at least that size.
+        unsafe {
+            core::ptr::copy_nonoverlapping(at as *const u8, asked[which].as_mut_ptr(), bytes as usize);
+        }
+    }
+
+    let began = crate::arch::time::uptime_ms();
+    // Declared without a value, because every path through the loop below
+    // assigns one before it is read and an initialiser here would be a value
+    // the compiler can see is never used.
+    let found: [[u8; (SETSIZE / 8) as usize]; 3];
+    let ready = loop {
+        let mut ready = 0u64;
+        let mut round = [[0u8; (SETSIZE / 8) as usize]; 3];
+        for descriptor in 0..count {
+            let byte = (descriptor / 8) as usize;
+            let bit = 1u8 << (descriptor % 8);
+            let wanted = [
+                asked[0][byte] & bit != 0,
+                asked[1][byte] & bit != 0,
+                asked[2][byte] & bit != 0,
+            ];
+            if !wanted[0] && !wanted[1] && !wanted[2] {
+                continue;
+            }
+            let now = super::linux_poll::ready_now(descriptor);
+            // `POLLHUP` and `POLLERR` make a descriptor readable as far as
+            // `select` is concerned: a program waiting to read from something
+            // that has hung up has to be woken, or it waits for ever.
+            let is_readable = now & (event::IN | event::HUP | event::ERR) != 0;
+            let is_writable = now & (event::OUT | event::ERR) != 0;
+            let is_failing = now & event::ERR != 0;
+            for (which, (want, got)) in [
+                (wanted[0], is_readable),
+                (wanted[1], is_writable),
+                (wanted[2], is_failing),
+            ]
+            .iter()
+            .enumerate()
+            {
+                if *want && *got {
+                    round[which][byte] |= bit;
+                    ready += 1;
+                }
+            }
+        }
+        if ready > 0 {
+            found = round;
+            break ready;
+        }
+        if let Some(patience) = patience {
+            if crate::arch::time::uptime_ms().saturating_sub(began) >= patience {
+                found = round;
+                break 0;
+            }
+        }
+        crate::sched::sleep_ms(STEP);
+    };
+
+    // Write the answer back over the question, which is what `select` does.
+    // Done even when nothing was ready, because the caller is entitled to find
+    // its sets cleared rather than left as it wrote them.
+    for (which, set) in [readable, writable, failing].iter().enumerate() {
+        if *set == 0 {
+            continue;
+        }
+        if let Some((at, _)) = user_range(*set, bytes, bytes) {
+            // SAFETY: the same `bytes` bytes checked when they were read.
+            unsafe {
+                core::ptr::copy_nonoverlapping(found[which].as_ptr(), at as *mut u8, bytes as usize);
+            }
+        }
+    }
+    ready
 }

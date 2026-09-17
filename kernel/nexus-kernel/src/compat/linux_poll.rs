@@ -149,7 +149,7 @@ pub fn forget_descriptor(process: u64, descriptor: u32) {
 /// `POLLHUP` and `POLLERR` are reported whether or not the caller asked for
 /// them, because a program that did not ask about a hangup still has to stop
 /// waiting for data that is not coming.
-fn ready_now(descriptor: u64) -> i16 {
+pub(super) fn ready_now(descriptor: u64) -> i16 {
     match describe(descriptor) {
         // Never not ready. Standard input is "readable" in the sense that
         // matters: a read of it returns immediately, with zero.
