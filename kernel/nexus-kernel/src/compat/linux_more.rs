@@ -80,6 +80,10 @@ pub fn translate(number: u64, frame: &crate::arch::syscall::Frame) -> Option<u64
         call::FCNTL => fcntl(a, b, c),
         call::PWRITE64 => pwrite64(a, b, c, d),
         call::STATX => statx(a, b, c, frame.r8),
+        call::CLONE3 => clone3(a, b, frame),
+        call::CREAT => creat(a),
+        call::TRUNCATE => truncate(a, b),
+        call::PRCTL => prctl(a, b),
         _ => return None,
     })
 }
@@ -104,6 +108,10 @@ mod call {
     pub const FCNTL: u64 = 72;
     pub const PWRITE64: u64 = 18;
     pub const STATX: u64 = 332;
+    pub const CLONE3: u64 = 435;
+    pub const CREAT: u64 = 85;
+    pub const TRUNCATE: u64 = 76;
+    pub const PRCTL: u64 = 157;
 }
 
 /// The descriptor flags this layer keeps for a program.
@@ -651,4 +659,117 @@ fn statx(directory: u64, path: u64, flags: u64, out: u64) -> u64 {
         core::ptr::copy_nonoverlapping(fields.as_ptr(), at as *mut u8, fields.len());
     }
     0
+}
+
+/// `clone3(args, size)`.
+///
+/// The way a C library built in the last few years makes a thread. It is not a
+/// different operation from `clone` -- it is the same one with its arguments in
+/// a structure instead of in registers, because `clone` had run out of room.
+///
+/// So this reads the structure and calls the `clone` that already exists.
+/// Translating rather than reimplementing matters here: the two would otherwise
+/// drift, and a thread made one way behaving differently from a thread made the
+/// other is the kind of bug that takes a week.
+///
+/// # Why it is worth having when `clone` works
+///
+/// A C library tries `clone3` first and falls back on `ENOSYS`. Without this
+/// every thread costs a refused call -- which works, and is a small lie about
+/// what this machine is: it reports itself as a kernel too old for an interface
+/// it could perfectly well answer.
+fn clone3(args: u64, size: u64, frame: &crate::arch::syscall::Frame) -> u64 {
+    /// `struct clone_args` as the kernel first defined it. Later kernels added
+    /// fields on the end; a caller may pass a larger structure and this reads
+    /// only the part it understands, which is what the size is for.
+    const SMALLEST: u64 = 64;
+    if size < SMALLEST {
+        return error::EINVAL;
+    }
+    let Some((at, _)) = user_range(args, SMALLEST, SMALLEST) else {
+        return error::EFAULT;
+    };
+    // SAFETY: `user_range` has checked that these bytes belong to the caller
+    // and are readable. Each field is read where the structure defines it.
+    let field = |offset: usize| unsafe {
+        core::ptr::read_unaligned((at as *const u8).add(offset) as *const u64)
+    };
+    let flags = field(0);
+    let child_tid = field(16);
+    let parent_tid = field(24);
+    let stack = field(40);
+    let stack_size = field(48);
+    let tls = field(56);
+
+    // `clone3` is given the *bottom* of the stack and its size; `clone` is
+    // given the top, because the old call had nowhere to put a size and the
+    // stack grows down. Getting this backwards gives the new thread a stack
+    // pointer below its own memory, which faults on its first push.
+    let top = if stack == 0 {
+        0
+    } else {
+        match stack.checked_add(stack_size) {
+            Some(top) => top,
+            None => return error::EINVAL,
+        }
+    };
+
+    super::linux_threads::clone(flags, top, parent_tid, child_tid, tls, frame)
+}
+
+/// `creat(path, mode)`.
+///
+/// `open` with three flags fixed, which is all it has ever been:
+/// `O_CREAT | O_WRONLY | O_TRUNC`. The mode is dropped because this filesystem
+/// has no permissions to set, and saying so here is better than a caller
+/// wondering why `creat(path, 0600)` produced something anyone can read --
+/// everything here is readable by the one person using the machine.
+fn creat(path: u64) -> u64 {
+    const AT_FDCWD: u64 = (-100i64) as u64;
+    const O_WRONLY: u64 = 1;
+    const O_CREAT: u64 = 0o100;
+    const O_TRUNC: u64 = 0o1000;
+    linux_files::openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC)
+}
+
+/// `truncate(path, length)`.
+///
+/// Open, shorten, close. The descriptor is closed whatever happened, because a
+/// `truncate` that failed *and* leaked a descriptor would cost a program one
+/// of its thousand and twenty-four every time it tried.
+fn truncate(path: u64, length: u64) -> u64 {
+    const AT_FDCWD: u64 = (-100i64) as u64;
+    const O_WRONLY: u64 = 1;
+
+    let descriptor = linux_files::openat(AT_FDCWD, path, O_WRONLY);
+    if (descriptor as i64) < 0 {
+        return descriptor;
+    }
+    let answer = linux_files::ftruncate(descriptor, length);
+    linux_files::close(descriptor);
+    answer
+}
+
+/// `prctl(option, argument, ...)`.
+///
+/// Two options, and both are answered truthfully rather than accepted.
+///
+/// `PR_SET_NO_NEW_PRIVS` asks that no later `execve` may gain privileges. This
+/// system has no privilege to gain -- there is no setuid, no capability set,
+/// and one person using the machine -- so the guarantee holds and saying yes is
+/// correct rather than convenient. `PR_GET_NO_NEW_PRIVS` therefore answers one,
+/// and it would be incoherent to answer anything else.
+///
+/// Everything else is `EINVAL`, which is what Linux says for an option it does
+/// not know. In particular **`PR_SET_NAME` is not accepted**: there is nowhere
+/// to keep a thread name, and a program that set one and read back something
+/// else would be worse served than one told plainly that it cannot.
+fn prctl(option: u64, _argument: u64) -> u64 {
+    const PR_SET_NO_NEW_PRIVS: u64 = 38;
+    const PR_GET_NO_NEW_PRIVS: u64 = 39;
+    match option {
+        PR_SET_NO_NEW_PRIVS => 0,
+        PR_GET_NO_NEW_PRIVS => 1,
+        _ => error::EINVAL,
+    }
 }
