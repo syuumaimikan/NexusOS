@@ -218,6 +218,13 @@ pub enum Personality {
     Nexus,
     /// Linux's, translated above it by `compat::linux`.
     Linux,
+    /// Linux's *thirty-two bit* interface, which is a different one.
+    ///
+    /// Not a narrower version of the same thing. `write` is call number 1 at
+    /// sixty-four bits and 4 at thirty-two; the arguments are in different
+    /// registers; and the call arrives through `int 0x80` rather than through
+    /// the `syscall` instruction. See `compat::linux32`.
+    Linux32,
 }
 
 pub struct Process {
@@ -266,7 +273,7 @@ impl Process {
             // See `compat::linux_files`.
             handles: match personality {
                 Personality::Nexus => HandleTable::new(),
-                Personality::Linux => {
+                Personality::Linux | Personality::Linux32 => {
                     HandleTable::starting_at(crate::compat::linux_files::FIRST_HANDLE)
                 }
             },
@@ -298,8 +305,15 @@ impl Drop for Process {
         // dropped is a handful of file positions; leaving them would be a map
         // that grows by one entry for every file every translated program has
         // ever opened, for as long as the machine is up.
-        if self.personality == Personality::Linux {
+        if matches!(self.personality, Personality::Linux | Personality::Linux32) {
             crate::compat::linux_files::forget(self.id.0);
+            crate::compat::linux_files::forget_memfds(self.id.0);
+            crate::compat::linux_memory::forget(self.id.0);
+            crate::compat::linux_threads::forget(self.id.0);
+            crate::compat::linux_display::forget(self.id.0);
+            crate::compat::linux_poll::forget(self.id.0);
+            crate::compat::linux_socket::forget(self.id.0);
+            crate::compat::linux_signal::forget(self.id.0);
         }
     }
 }

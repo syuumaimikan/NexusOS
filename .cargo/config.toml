@@ -30,14 +30,90 @@ kernel = [
 ]
 # Build the UEFI bootloader against the prebuilt `x86_64-unknown-uefi` core.
 bootloader = ["build", "-p", "nexus-boot", "--target", "x86_64-unknown-uefi"]
+# Programs built for Linux, run by the compatibility layer. A separate alias
+# because they are a separate world: a different target, a different system-call
+# interface, and `core` rebuilt for a target this machine has no `std` for.
+guest = [
+    "build", "-p", "nexus-guest", "--release",
+    "--target", "x86_64-unknown-linux-gnu",
+    "-Zbuild-std=core,compiler_builtins",
+    "-Zbuild-std-features=compiler-builtins-mem",
+]
+# The same, for i386. A separate crate because a `#![no_std]` crate is built for
+# one target at a time and these two are different targets -- and because the
+# system-call numbers differ, so the wrappers cannot be shared either.
+guest32 = [
+    "build", "-p", "nexus-guest32", "--release",
+    "--target", "i686-unknown-linux-gnu",
+    "-Zbuild-std=core,compiler_builtins",
+    "-Zbuild-std-features=compiler-builtins-mem",
+]
 # User programs. Named `user` and not `init`, because cargo has a built-in
 # command by that name and an alias that shadows one is ignored with a warning.
 # The same custom-target machinery as the kernel, with the small
 # code model, because they live in the low half of the address space.
 user = ["build", "-p", "nexus-init", "-p", "nexus-hello",
-        "-p", "nexus-compositor", "-p", "nexus-client", "-p", "nexus-shell", "-p", "nexus-install", "-p", "nexus-find", "-p", "nexus-setup", "-p", "nexus-updater", "-p", "nexus-browser", "-p", "nexus-term", "-p", "nexus-wall", "-p", "nexus-settings", "-p", "nexus-store", "-p", "nexus-view", "-p", "nexus-launch", "-p", "nexus-edit", "-p", "nexus-files", "-p", "nexus-ls", "-p", "nexus-count", "-p", "nexus-text", "-p", "nexus-nex", "-p", "nexus-unpack", "-p", "nexus-assist", "-p", "nexus-ai", "-p", "nexus-idle", "--target", "targets/x86_64-nexus-user.json",
+        "-p", "nexus-compositor", "-p", "nexus-client", "-p", "nexus-shell", "-p", "nexus-install", "-p", "nexus-find", "-p", "nexus-setup", "-p", "nexus-updater", "-p", "nexus-browser", "-p", "nexus-term", "-p", "nexus-wall", "-p", "nexus-settings", "-p", "nexus-store", "-p", "nexus-view", "-p", "nexus-launch", "-p", "nexus-edit", "-p", "nexus-files", "-p", "nexus-ls", "-p", "nexus-count", "-p", "nexus-text", "-p", "nexus-nex", "-p", "nexus-unpack", "-p", "nexus-solid", "-p", "nexus-assist", "-p", "nexus-ai", "-p", "nexus-idle", "--target", "targets/x86_64-nexus-user.json",
         "-Zbuild-std=core,compiler_builtins,alloc",
         "-Zbuild-std-features=compiler-builtins-mem"]
 
 [target.x86_64-nexus-user]
 rustflags = ["-C", "link-arg=--script=user/nexus-init/link.ld"]
+
+# Programs built for *Linux*, to be run by the compatibility layer.
+#
+# This target is Linux's own and is not installed: there is no `std` for it on
+# this machine and `rustup target add` would need the network. It does not need
+# one. `-Zbuild-std=core` rebuilds `core` from the source `rust-src` already
+# provides, and the programs in `tools/nexus-guest` are `#![no_std]` with their
+# own `_start`, so nothing below `core` is ever reached for.
+#
+# Every flag below is here for a reason:
+#
+# * `linker = "rust-lld"` with `linker-flavor=gnu-lld` -- the toolchain's own
+#   linker, told to emit ELF rather than the PE it emits by default on this
+#   host. Without it there is no linker on this machine that produces a Linux
+#   executable, and that was the whole reason the older fixtures are
+#   hand-assembled byte by byte.
+# * `relocation-model=static` and `--no-pie` -- an `ET_EXEC` at a fixed address.
+#   The default is a static position-independent executable, which carries
+#   `DT_RELA` relocations that something has to apply before `_start` runs. On
+#   Linux that something is inside libc; here there is no libc, so a PIE would
+#   enter with every absolute address still unrelocated.
+# * `-nostdlib`, `-static` -- no C runtime and no interpreter. A `PT_INTERP`
+#   would name a loader that is not on this machine.
+# * `-e _start` -- the entry point, because there is no `_start` in a C runtime
+#   to find.
+# * `--image-base` -- the traditional address for a static x86-64 executable,
+#   and one the loader on the other side has no special knowledge of.
+# And the same for i386, which is a different world again: a different
+# system-call table, a different way in, and a different image format. The flags
+# are the sixty-four bit ones with one change -- the traditional load address for
+# an i386 executable rather than an x86-64 one.
+[target.i686-unknown-linux-gnu]
+linker = "rust-lld"
+rustflags = [
+    "-Zunstable-options",
+    "-Clinker-flavor=gnu-lld",
+    "-Crelocation-model=static",
+    "-Clink-arg=-nostdlib",
+    "-Clink-arg=-static",
+    "-Clink-arg=--no-pie",
+    "-Clink-arg=-e",
+    "-Clink-arg=_start",
+    "-Clink-arg=--image-base=0x8048000",
+]
+
+[target.x86_64-unknown-linux-gnu]
+linker = "rust-lld"
+rustflags = [
+    "-Zunstable-options",
+    "-Clinker-flavor=gnu-lld",
+    "-Crelocation-model=static",
+    "-Clink-arg=-nostdlib",
+    "-Clink-arg=-static",
+    "-Clink-arg=--no-pie",
+    "-Clink-arg=-e",
+    "-Clink-arg=_start",
+    "-Clink-arg=--image-base=0x400000",
+]

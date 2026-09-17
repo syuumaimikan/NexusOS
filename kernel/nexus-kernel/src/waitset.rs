@@ -28,14 +28,16 @@
 //!
 //! # What can be waited on
 //!
-//! Channels and processes: the two things in this system that a thread can
-//! block on. A channel is ready when it holds a message *or* its peer has gone,
-//! because both are things the holder must act on and a set that reported only
-//! the first would hang on a client that died. A process is ready when it has
-//! ended.
+//! Channels, processes and pipe ends: the three things in this system that a
+//! thread can block on. A channel is ready when it holds a message *or* its
+//! peer has gone, because both are things the holder must act on and a set that
+//! reported only the first would hang on a client that died. A process is ready
+//! when it has ended. A pipe end is ready when it can be used without waiting,
+//! which at the end of a stream means "there is nothing more coming" as much as
+//! it means "there is something here".
 //!
-//! Memory objects and directories are absent because they are never not ready:
-//! there is nothing to wait for.
+//! Memory objects, directories and the console are absent because they are
+//! never not ready: there is nothing to wait for.
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -59,6 +61,17 @@ pub enum Watched {
     Channel(Arc<Endpoint>),
     /// Ready when the process has ended.
     Process(Arc<Completion>),
+    /// Ready when the end can be used without waiting.
+    ///
+    /// For a reading end that is bytes waiting *or* every writer gone; for a
+    /// writing end, room *or* every reader gone. Both halves of each: the
+    /// second is an answer a caller has to act on, and a set that reported only
+    /// the first would leave a reader of a finished pipe asleep for ever.
+    Pipe(Arc<crate::pipe::PipeEnd>),
+    /// Ready when a connection can be used, or when its peer has gone.
+    Stream(Arc<crate::socket::Stream>),
+    /// Ready when somebody has connected and nobody has accepted them yet.
+    Listener(Arc<crate::socket::Listener>),
 }
 
 impl Watched {
@@ -67,6 +80,9 @@ impl Watched {
         match self {
             Self::Channel(endpoint) => endpoint.queued() > 0 || !endpoint.peer_open(),
             Self::Process(completion) => completion.status().is_some(),
+            Self::Pipe(end) => end.readable() || end.writable(),
+            Self::Stream(stream) => stream.readable() || !stream.connected(),
+            Self::Listener(listener) => listener.ready(),
         }
     }
 
@@ -76,6 +92,9 @@ impl Watched {
         match self {
             Self::Channel(endpoint) => endpoint.watch(weak),
             Self::Process(completion) => completion.watch(weak),
+            Self::Pipe(end) => end.pipe().watch(weak),
+            Self::Stream(stream) => stream.watch(weak),
+            Self::Listener(listener) => listener.watch(weak),
         }
     }
 }

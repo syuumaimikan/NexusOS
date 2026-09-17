@@ -26,6 +26,14 @@ pub const IRQ_BASE: u8 = 32;
 /// Interrupt gates clear `IF` on entry, so a handler does not have to defend
 /// against being re-entered by another device interrupt.
 const INTERRUPT_GATE: u8 = 0x8E;
+/// The same, at privilege level 3: a gate ring 3 may take with `int`.
+///
+/// Every other vector here is either raised by the processor or by a device,
+/// and a program that could invoke one of those with `int` could fabricate a
+/// page fault or a timer tick. This one is different on purpose: `int 0x80` is
+/// how a thirty-two bit Linux program makes a system call, so it has to be
+/// reachable from ring 3 and nothing else does.
+const USER_INTERRUPT_GATE: u8 = 0xEE;
 
 /// One 16-byte IDT entry.
 #[repr(C)]
@@ -58,12 +66,17 @@ impl Entry {
 
     /// Point this entry at `handler`, optionally on IST slot `ist`.
     fn set_handler(&mut self, handler: u64, ist: u16) {
+        self.set_handler_at(handler, ist, INTERRUPT_GATE);
+    }
+
+    /// The same, with the privilege level spelled out.
+    fn set_handler_at(&mut self, handler: u64, ist: u16, flags: u8) {
         self.offset_low = handler as u16;
         self.offset_mid = (handler >> 16) as u16;
         self.offset_high = (handler >> 32) as u32;
         self.selector = KERNEL_CODE_SELECTOR;
         self.ist = (ist & 0x7) as u8;
-        self.flags = INTERRUPT_GATE;
+        self.flags = flags;
         self.reserved = 0;
     }
 }
@@ -91,6 +104,21 @@ impl InterruptDescriptorTable {
     /// push an error code need a handler that takes one.
     pub unsafe fn set_handler(&mut self, vector: u8, handler: *const ()) {
         self.entries[vector as usize].set_handler(handler as u64, 0);
+    }
+
+    /// Install `handler` on `vector`, reachable from ring 3.
+    ///
+    /// For `int 0x80` and nothing else. A vector a program may invoke is a
+    /// vector a program may *fake*, so the only one that should carry this is
+    /// one whose whole purpose is to be invoked deliberately.
+    ///
+    /// # Safety
+    ///
+    /// See [`InterruptDescriptorTable::set_handler`]. The handler must be
+    /// prepared to be entered from ring 3 at any moment, with any register
+    /// state, by a program that is not to be trusted.
+    pub unsafe fn set_user_handler(&mut self, vector: u8, handler: *const ()) {
+        self.entries[vector as usize].set_handler_at(handler as u64, 0, USER_INTERRUPT_GATE);
     }
 
     /// Install `handler` on `vector`, switching to Interrupt Stack Table slot

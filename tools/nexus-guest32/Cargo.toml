@@ -1,0 +1,11 @@
+[package]
+name = "nexus-guest32"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A program built for i386 Linux, to be run by the compatibility layer."
+
+[[bin]]
+name = "guest32"
+path = "src/main.rs"

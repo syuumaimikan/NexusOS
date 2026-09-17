@@ -58,6 +58,12 @@ pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFE;
 /// per-CPU live in the TSS rather than here.
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 
+/// Where a thirty-two bit Linux program's system calls arrive.
+///
+/// `0x80`, which is not this system's choice: it is the number every i386
+/// Linux binary ever built has compiled into it.
+const LINUX32_VECTOR: u8 = 0x80;
+
 /// Count of interrupts delivered on each vector, for diagnostics.
 static SPURIOUS_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -492,6 +498,13 @@ pub unsafe fn init(timer_hz: u32) {
         idt.set_handler(NETWORK_VECTOR, network_interrupt as *const ());
         idt.set_handler(SPURIOUS_VECTOR, apic_spurious_interrupt as *const ());
         idt.set_handler(TLB_SHOOTDOWN_VECTOR, tlb_shootdown_interrupt as *const ());
+
+        // The one vector a *program* may invoke. `int 0x80` is how a
+        // thirty-two bit Linux program makes a system call, so its gate is at
+        // privilege level three -- and it is the only one that is, because a
+        // vector ring 3 can take is a vector ring 3 can fake. See
+        // `arch::syscall::int80_entry` and `compat::linux32`.
+        idt.set_user_handler(LINUX32_VECTOR, super::syscall::int80_entry as *const ());
 
         // `load` needs a `&'static` table; `IDT` is a static, and it is never
         // mutated again after this point.

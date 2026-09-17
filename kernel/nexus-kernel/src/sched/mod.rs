@@ -288,7 +288,58 @@ pub fn spawn_user(
         let mut scheduler = SCHEDULER.lock();
         let id = scheduler.create(name, Priority::Normal, user_trampoline, 0)?;
         if let Some(thread) = scheduler.threads.get_mut(&id) {
-            thread.user_start = Some(UserStart { entry, stack_top });
+            thread.user_start = Some(UserStart {
+                entry,
+                stack_top,
+                registers: None,
+            });
+            thread.process = Some(process);
+        }
+        scheduler.enqueue(id);
+        id
+    };
+
+    percpu::request_reschedule_everywhere();
+    Ok(id)
+}
+
+/// Add a thread to a process that already has one.
+///
+/// The difference from [`spawn_user`] is the whole of what a thread is: the
+/// address space is not new, the handle table is not new, and the process is not
+/// new -- only the register state and the kernel stack are. Two threads of one
+/// process see the same memory because they are given the same `Arc`, not
+/// because anything copies anything.
+///
+/// `registers` is the state the thread begins in, which for a `clone` is its
+/// parent's with a zero in `rax` and a stack of its own. `thread_pointer` is
+/// what `fs` is to point at while it runs, which a C library sets for every
+/// thread it makes and which is per-thread state the switch now carries.
+///
+/// The name is the process's, so that the log says which program a thread
+/// belongs to rather than giving every thread of every program the same word.
+pub fn spawn_user_thread(
+    process: Arc<crate::process::Process>,
+    registers: crate::arch::syscall::Frame,
+    thread_pointer: Option<u64>,
+) -> Result<ThreadId, SpawnError> {
+    let name = crate::alloc::string::String::from(process.name.as_str());
+    let id = {
+        let mut scheduler = SCHEDULER.lock();
+        let id = scheduler.create(&name, Priority::Normal, user_trampoline, 0)?;
+        if let Some(thread) = scheduler.threads.get_mut(&id) {
+            thread.user_start = Some(UserStart {
+                entry: registers.rip,
+                stack_top: registers.rsp,
+                registers: Some(registers),
+            });
+            // Taken from the caller if it named one, and otherwise the same one
+            // the calling thread is using -- which is what a `clone` without
+            // `CLONE_SETTLS` means, and is not the same as none.
+            thread.thread_pointer = thread_pointer.unwrap_or_else(||
+                // SAFETY: reading this processor's `IA32_FS_BASE`, which is the
+                // calling thread's because it is the one running.
+                unsafe { arch::syscall::read_msr(FS_BASE) });
             thread.process = Some(process);
         }
         scheduler.enqueue(id);
@@ -316,12 +367,36 @@ fn user_trampoline(_argument: usize) {
 
     // `schedule` has already pointed this processor's `rsp0` and syscall stack
     // at this thread's kernel stack, which is what the first interrupt or
-    // system call out of ring 3 will land on.
-    //
-    // SAFETY: the caller of `spawn_user` mapped both addresses into the user
-    // half. This never returns, so nothing after it can observe a half-left
-    // kernel.
-    unsafe { crate::user::enter(start.entry, start.stack_top) }
+    // system call out of ring 3 will land on. It has also installed this
+    // thread's thread pointer, so a cloned thread's `fs` is already its own
+    // before its first instruction runs.
+    match start.registers {
+        // A thread that begins in the middle of its parent's system call rather
+        // than at an entry point. See `spawn_user_thread`.
+        //
+        // SAFETY: every address in the frame came from a thread that was
+        // running in ring 3 in this address space, and the stack pointer was
+        // checked to be a user address before the thread was created. This
+        // never returns.
+        Some(registers) => unsafe { crate::user::resume(&registers) },
+        // A thirty-two bit program goes through a different door: a code
+        // segment that makes the processor decode thirty-two bit instructions.
+        // Which door is a property of the *process*, decided when it was
+        // started, and is the same comparison the system-call boundary makes.
+        //
+        // SAFETY: the caller of `spawn_user` mapped both addresses into the user
+        // half. This never returns, so nothing after it can observe a half-left
+        // kernel.
+        None => {
+            let thirty_two_bit = current_process()
+                .is_some_and(|process| process.personality == crate::process::Personality::Linux32);
+            if thirty_two_bit {
+                unsafe { crate::user::enter32(start.entry, start.stack_top) }
+            } else {
+                unsafe { crate::user::enter(start.entry, start.stack_top) }
+            }
+        }
+    }
 }
 
 /// The process the calling thread belongs to, if it is a user thread.
@@ -379,6 +454,36 @@ pub fn stop_if_asked() {
 
     crate::arch::interrupts::disable();
     exit()
+}
+
+/// Every thread of `process` that is still going.
+///
+/// Identifiers rather than references, because what a caller does with the
+/// answer is stop them or count them, and both of those take the scheduler's
+/// lock again -- so holding anything that borrows the table across it is how a
+/// deadlock gets written.
+///
+/// A thread that has decided to exit is *not* included, and that is the whole
+/// difference between this and a list of rows in the table. A finished thread
+/// stays in the table until the reaper takes it, which is some time later, and
+/// a caller asking "is anyone else left" so that the last thread out can end
+/// the program would be told yes by a thread that ended a millisecond ago --
+/// and the program would never finish.
+#[must_use]
+pub fn live_threads_of_process(process: u64) -> alloc::vec::Vec<u64> {
+    let scheduler = SCHEDULER.lock();
+    scheduler
+        .threads
+        .iter()
+        .filter(|(_, thread)| {
+            !matches!(thread.state, ThreadState::Exiting | ThreadState::Finished)
+                && thread
+                    .process
+                    .as_ref()
+                    .is_some_and(|owner| owner.id.0 == process)
+        })
+        .map(|(id, _)| id.0)
+        .collect()
 }
 
 /// Wake every thread of `process`, so each can notice it has been asked to stop.
@@ -736,10 +841,24 @@ pub fn schedule() {
                     .threads
                     .get_mut(&current)
                     .expect("the running thread must exist");
+                // Thread-local storage, saved here rather than written back by
+                // whoever set it: a thread may change its own `fs` at any point
+                // between two switches, and the register is the only place that
+                // knows. See `Thread::thread_pointer`.
+                //
+                // SAFETY: reading this processor's `IA32_FS_BASE`.
+                thread.thread_pointer = unsafe { arch::syscall::read_msr(FS_BASE) };
+                // And the vector registers, for the same reason and with the
+                // same consequence if it is skipped: the outgoing thread's are
+                // in the processor, and nothing else knows them.
+                //
+                // SAFETY: the unit is enabled on every processor before
+                // anything is scheduled on it -- see `arch::fpu::enable`.
+                unsafe { thread.floating_point.save() };
                 &mut thread.stack_pointer as *mut u64
             };
 
-            let (incoming_stack, incoming_kernel_stack, incoming_root) = {
+            let (incoming_stack, incoming_kernel_stack, incoming_root, incoming_fs) = {
                 let thread = scheduler
                     .threads
                     .get_mut(&next)
@@ -747,10 +866,19 @@ pub fn schedule() {
                 thread.state = ThreadState::Running;
                 thread.slice_remaining = TIME_SLICE_TICKS;
                 thread.switches += 1;
+                // Restored here, under the scheduler's lock and before the
+                // stack switch, because after the switch this is the *other*
+                // thread's code and the entry it would have to reach for is
+                // gone.
+                //
+                // SAFETY: as in the save above; the image is one `fxsave` wrote
+                // or `State::new` built.
+                unsafe { thread.floating_point.restore() };
                 (
                     thread.stack_pointer,
                     thread.kernel_stack_top(),
                     thread.page_table_root(),
+                    thread.thread_pointer,
                 )
             };
 
@@ -785,6 +913,16 @@ pub fn schedule() {
             // where this code and its stack live.
             unsafe { crate::memory::address_space::activate_root(root) };
 
+            // And the incoming thread's thread pointer. Always written, never
+            // skipped when it is zero: a thread that has never set one must not
+            // be handed the last thread's, which is the whole reason this is
+            // part of the switch.
+            //
+            // SAFETY: writing this processor's `IA32_FS_BASE`, which is only
+            // ever a user address -- `arch_prctl` checks that before it accepts
+            // one, and a thread that has not set one has zero here.
+            unsafe { arch::syscall::write_msr(FS_BASE, incoming_fs) };
+
             percpu::set_current_thread(next.0);
             scheduler.context_switches += 1;
 
@@ -806,6 +944,14 @@ pub fn schedule() {
         }
     });
 }
+
+/// `IA32_FS_BASE`: what `fs`-relative addressing is relative to.
+///
+/// Named here as well as in the compatibility layer because the two use it for
+/// different halves of the same job -- that one sets it when a program asks,
+/// and this one moves it from thread to thread so that what a program asked for
+/// stays true.
+const FS_BASE: u32 = 0xC000_0100;
 
 /// Reclaim finished threads.
 ///

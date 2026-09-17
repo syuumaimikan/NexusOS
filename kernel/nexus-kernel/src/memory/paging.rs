@@ -347,6 +347,54 @@ pub unsafe fn unmap_page_in(root: u64, virt: u64) -> Result<u64, MapError> {
     Ok(entry & ADDRESS_MASK)
 }
 
+/// Change what a mapped page permits, leaving it pointing at the same frame.
+///
+/// The difference between this and unmapping and mapping again is the same one
+/// [`remap_page`] exists for -- there is no window in which the address is
+/// absent -- and one more besides: the frame never changes hands, so a caller
+/// that only wanted to take away write permission cannot accidentally leak or
+/// double-free it.
+///
+/// A dynamic linker needs this and cannot be lied to about it. It maps a
+/// library writable to apply relocations and then takes the write permission
+/// away again, and it maps the text of a library without execute permission and
+/// then grants it. A kernel that accepted both and did neither would be running
+/// a program whose code pages are writable for its whole life and whose
+/// read-only relocations never became read-only.
+///
+/// Returns the frame the page holds, unchanged, so a caller can check it.
+///
+/// # Safety
+///
+/// `root` must be a live root page table, and `flags` must describe a page this
+/// space may have -- in particular `USER` for anything in the user half, since
+/// clearing it silently makes the page unreachable from ring 3 instead of
+/// making it less permissive.
+pub unsafe fn protect_page_in(root: u64, virt: u64, flags: u64) -> Result<u64, MapError> {
+    // SAFETY: `root` is a live root table; the direct map covers it. Nothing is
+    // created: a page that is not mapped cannot have its permissions changed.
+    let table = unsafe { walk_to_page_table(root, virt, false, flags & USER != 0)? };
+    let index = index_for(virt, 3);
+
+    // SAFETY: `table` is a live page table.
+    let entry = unsafe { read_entry(table, index) };
+    if entry & PRESENT == 0 {
+        return Err(MapError::NotMapped);
+    }
+    let frame = entry & ADDRESS_MASK;
+    // SAFETY: as above. The frame is kept and only the flags are replaced.
+    unsafe { write_entry(table, index, frame | flags | PRESENT) };
+
+    // Every processor. A core still holding the old translation would keep
+    // writing through a page this call just made read-only, which is precisely
+    // the guarantee the caller asked for.
+    //
+    // SAFETY: the entry already holds the new permissions.
+    unsafe { crate::arch::tlb::shoot_down(virt, 1) };
+
+    Ok(frame)
+}
+
 /// Point an already-mapped page at a different frame.
 ///
 /// Distinct from unmapping and mapping again, and not merely as a convenience:
@@ -450,6 +498,40 @@ pub fn translate_in(root: u64, virt: u64) -> Option<u64> {
         table = entry & ADDRESS_MASK;
     }
 
+    None
+}
+
+/// What the last-level entry for `virt` permits, in the space rooted at `root`.
+///
+/// `None` when nothing is mapped there, or when a large page covers it -- this
+/// answers about 4 KiB entries, because that is what every mapping made in the
+/// user half is, and reporting a huge page's flags as though they belonged to
+/// one page would be an answer about the wrong thing.
+///
+/// Separate from [`translate_in`], which answers where a page is, because the
+/// two questions have different callers: something deciding whether a frame is
+/// this space's to free needs the `SHARED` bit, and the frame number does not
+/// carry it.
+#[must_use]
+pub fn flags_in(root: u64, virt: u64) -> Option<u64> {
+    let mut table = root;
+
+    for level in 0..LEVEL_SHIFTS.len() {
+        let index = index_for(virt, level);
+        // SAFETY: the walk only follows present, non-huge entries, each of
+        // which points at a live table reachable through the direct map.
+        let entry = unsafe { read_entry(table, index) };
+        if entry & PRESENT == 0 {
+            return None;
+        }
+        if level == 3 {
+            return Some(entry & !ADDRESS_MASK);
+        }
+        if entry & HUGE != 0 {
+            return None;
+        }
+        table = entry & ADDRESS_MASK;
+    }
     None
 }
 

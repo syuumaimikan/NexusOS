@@ -183,11 +183,56 @@ pub struct UserStart {
     pub entry: u64,
     /// Initial user stack pointer, one past the top of its stack.
     pub stack_top: u64,
+    /// The whole register state to begin with, when there is one.
+    ///
+    /// A thread started by `clone` does not begin at an entry point: it begins
+    /// *in the middle of its parent's system call*, with a copy of its parent's
+    /// registers and a stack of its own, and the only thing that tells it apart
+    /// from the parent is a zero in `rax`. Every C library's thread entry reads
+    /// the function it is to call out of a register set before the call, so
+    /// starting such a thread from an entry point and a stack pointer alone is
+    /// not a smaller version of the same thing -- it is a jump to whatever
+    /// happened to be in `r9`.
+    ///
+    /// `None` for the first thread of a process, which really does begin at an
+    /// entry point with nothing behind it.
+    pub registers: Option<crate::arch::syscall::Frame>,
 }
 
 /// A kernel thread.
 pub struct Thread {
     pub id: ThreadId,
+    /// This thread's floating-point and vector registers.
+    ///
+    /// Half a kilobyte per thread, and it buys the thing that makes enabling
+    /// SSE safe: two threads do not share sixteen vector registers. Without it,
+    /// a program's `double` would change value because something else was
+    /// scheduled — which is a failure with no error and no pattern, and is
+    /// worse than the invalid opcode that enabling the unit was meant to fix.
+    ///
+    /// Boxed rather than inline, because a `Thread` lives in a map the
+    /// scheduler moves entries around in and five hundred and twelve bytes of
+    /// alignment-sensitive image is not something to move.
+    pub floating_point: alloc::boxed::Box<crate::arch::fpu::State>,
+    /// What `FS` points at while this thread runs.
+    ///
+    /// Thread-local storage. A C library puts one of these behind `fs` for
+    /// every thread it makes and reaches `errno`, the stack guard and its own
+    /// per-thread bookkeeping through it -- which is why this has to be *per
+    /// thread* and part of the switch rather than a register somebody sets
+    /// once.
+    ///
+    /// It used to be neither. `arch_prctl(ARCH_SET_FS)` wrote the register and
+    /// the value stayed on whichever processor it was written on, which was
+    /// invisible for exactly as long as one process had one thread. The moment
+    /// a second thread existed it would have been two threads sharing one
+    /// `errno` -- and worse, a Nexus thread scheduled in between would have run
+    /// with a foreign program's thread pointer still installed.
+    ///
+    /// Zero means the thread has never set one, and zero is also what the
+    /// register is reset to, so a thread that never asked cannot read the last
+    /// thread's.
+    pub thread_pointer: u64,
     pub name: String,
     pub state: ThreadState,
     pub priority: Priority,
@@ -265,6 +310,8 @@ impl Thread {
             stack: None,
             entry: None,
             user_start: None,
+            thread_pointer: 0,
+            floating_point: alloc::boxed::Box::new(crate::arch::fpu::State::new()),
             process: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,
@@ -297,6 +344,8 @@ impl Thread {
             stack: Some(stack),
             entry: Some((entry, argument)),
             user_start: None,
+            thread_pointer: 0,
+            floating_point: alloc::boxed::Box::new(crate::arch::fpu::State::new()),
             process: None,
             slice_remaining: TIME_SLICE_TICKS,
             ticks_run: 0,

@@ -111,6 +111,14 @@ $HostLibraries = @(
 # signer, and the example guest binary.
 $HostTools = @('nexus-pack', 'nexus-collab', 'nexus-roots', 'nexus-linux-example')
 
+# Programs built for *Linux*, run by the compatibility layer. Their own target
+# and their own `core`, so they are linted separately from everything else --
+# and they have to be, because `cargo clippy` for one target cannot also check
+# a crate built for another.
+$GuestPrograms = 'nexus-guest'
+# And the i386 one, which is a third target again.
+$Guest32Programs = 'nexus-guest32'
+
 # Programs that run on Nexus, built for the user target.
 $Programs = @(
     'nexus-ai', 'nexus-assist', 'nexus-browser', 'nexus-client', 'nexus-compositor',
@@ -129,7 +137,8 @@ $Kernel = 'nexus-kernel'
     Fail if any workspace crate is on none of the lists above, or on two.
 #>
 function Assert-EveryCrateLinted {
-    $covered = @($HostLibraries) + @($HostTools) + @($Programs) + @($Bootloader) + @($Kernel)
+    $covered = @($HostLibraries) + @($HostTools) + @($Programs) + @($Bootloader) + @($Kernel) +
+    @($GuestPrograms) + @($Guest32Programs)
 
     $twice = $covered | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name }
     if ($twice) {
@@ -178,6 +187,22 @@ Invoke-Step 'clippy' {
         # `main.rs` -- five findings, in the file that runs first.
         Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', $Bootloader, '--',
             '-D', 'warnings') 'clippy (boot)'
+
+        # The programs built for Linux, which need Linux's target and `core`
+        # rebuilt for it. Linted here rather than with the host tools because a
+        # `#![no_std]` crate for another target cannot be checked in the same
+        # invocation as one for this machine.
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', $GuestPrograms,
+            '--target', 'x86_64-unknown-linux-gnu',
+            '-Zbuild-std=core,compiler_builtins',
+            '-Zbuild-std-features=compiler-builtins-mem',
+            '--', '-D', 'warnings') 'clippy (linux guests)'
+
+        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', $Guest32Programs,
+            '--target', 'i686-unknown-linux-gnu',
+            '-Zbuild-std=core,compiler_builtins',
+            '-Zbuild-std-features=compiler-builtins-mem',
+            '--', '-D', 'warnings') 'clippy (i386 guest)'
 
         # The kernel, which needs its own target and core rebuilt for it, and so
         # was left out until it had accumulated a dozen findings nobody had seen.

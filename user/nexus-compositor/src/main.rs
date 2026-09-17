@@ -330,6 +330,8 @@ mod desk {
     pub const ASSIST: &[u8] = b"asst";
     /// Unpack whatever was downloaded.
     pub const UNPACK: &[u8] = b"unpk";
+    /// Draw a solid, in three dimensions, with the processor.
+    pub const SOLID: &[u8] = b"sold";
     /// End the session.
     ///
     /// The desktop asks; this program does it. Which is the right way round: a
@@ -470,6 +472,23 @@ const LEAVE_KEY: u32 = 10;
 /// not the shift state, so a chord is not available to bind.
 const LAUNCH_KEY: u32 = 3;
 
+/// Which function key opens a window for a program built for Linux.
+///
+/// F4, the next one free after the launcher. A key rather than an entry in the
+/// launcher, deliberately: this is not something to offer somebody using the
+/// machine, it is a way to start the one translated program on this disk so
+/// that the compatibility layer can be exercised with a window on screen.
+const LINUX_KEY: u32 = 4;
+
+/// Which function key starts a Wayland compositor for Linux programs.
+///
+/// F5, and F6 starts a client for it. Two keys rather than one because the two
+/// are separate programs that find each other through a socket, and starting
+/// them together would hide the thing worth seeing: the client connects to a
+/// name, and would connect to any program that had bound it.
+const WAYLAND_SERVER_KEY: u32 = 5;
+const WAYLAND_CLIENT_KEY: u32 = 6;
+
 /// The program this one gives surfaces to.
 const CLIENT: &[u8] = b"BIN/CLIENT.ELF";
 /// The one it runs instead, once, on a machine nobody has set up.
@@ -496,6 +515,45 @@ const EDITOR: &[u8] = b"BIN/EDIT.ELF";
 const FILES: &[u8] = b"BIN/FILES.ELF";
 /// And the agent, which is given less than any of them.
 const ASSISTANT: &[u8] = b"BIN/ASSIST.ELF";
+/// The one that draws in three dimensions, a pixel at a time.
+///
+/// Given a surface and a channel and nothing else, which is the whole of what
+/// drawing needs. There is no graphics interface here to lend it: every pixel
+/// it puts on that surface was worked out by the processor. See
+/// `docs/three-d.md`.
+const SOLID: &[u8] = b"BIN/SOLID.ELF";
+/// A program built for Linux, given a window like any other client.
+///
+/// `linux:` in front of the path is the whole of what makes it different, and
+/// it is the same prefix `init` uses: it tells the spawn service which
+/// system-call interface the program speaks, because nothing in the file says.
+/// The path is an absolute one because the program is in the *Linux* root --
+/// `linux/` in the store -- rather than staged on the EFI partition with this
+/// system's own programs.
+///
+/// What it is given is a surface and a channel, which is exactly what every
+/// other client here gets. It reaches them through `/dev/nexus/display`, which
+/// is the compatibility layer turning this program's protocol into something a
+/// program that has never heard of it can use.
+const LINUX_WINDOW: &[u8] = b"linux:/usr/bin/draw";
+
+/// A Wayland compositor, and a Wayland client for it.
+///
+/// Both are programs built for Linux. The first is given a window like any
+/// other client here and puts a Wayland socket at `/tmp/wayland-0`; the second
+/// connects to that name, hands the first a buffer in shared memory, and asks
+/// for it to be shown. What ends up on this machine's screen is a picture that
+/// went client -> Wayland compositor -> this compositor -> the display.
+///
+/// The second is started with **no window at all**, which is not a saving but
+/// the truth about it: a Wayland client's window is its `wl_surface`, and that
+/// lives in the Wayland compositor. Giving it a surface here would be a second
+/// window, blank, on top of the one worth looking at -- and, because starting a
+/// window moves the focus, it would take the keyboard away from the program
+/// that has to forward the keys.
+const WAYLAND_SERVER: &[u8] = b"linux:/usr/bin/wayland-server";
+const WAYLAND_CLIENT: &[u8] = b"linux:/usr/bin/wayland-client";
+
 /// The program that draws the strip along the bottom and says what a click in
 /// it means.
 const SHELL: &[u8] = b"BIN/SHELL.ELF";
@@ -1779,6 +1837,11 @@ fn serve(
                         }
                         wanted = Some(Launched::Window(What::Launcher));
                     }
+                    Some(Typed::Linux) => wanted = Some(Launched::Window(What::Linux)),
+                    Some(Typed::WaylandServer) => {
+                        wanted = Some(Launched::Window(What::WaylandServer));
+                    }
+                    Some(Typed::WaylandClient) => wanted = Some(Launched::WaylandClient),
                     Some(typed) => {
                         if matches!(typed, Typed::Forwarded) {
                             forwarded += 1;
@@ -2031,6 +2094,23 @@ fn serve(
                         None => return,
                     }
                 }
+                Launched::WaylandClient => {
+                    // Nothing lent to it: not the disk, not the network, not a
+                    // surface. Everything it needs it gets by connecting to a
+                    // name, which is the whole point of the exercise -- and the
+                    // name is in the kernel's socket table, not the filesystem,
+                    // so a program with no filesystem can still reach it.
+                    if let Some(process) = start_quiet(WAYLAND_CLIENT, &[]) {
+                        nexus_user::log(
+                            "compositor: started a Wayland client, with no window of its own",
+                        )
+                        .ok();
+                        // Reaped straight away: nothing here waits on it, and a
+                        // handle nobody reads keeps a finished process from
+                        // being collected.
+                        nexus_user::close(process).ok();
+                    }
+                }
                 Launched::Unpack => {
                     // Two folders and nothing else. The downloads folder
                     // **read only** -- an unpacker has no business editing what
@@ -2230,6 +2310,24 @@ enum What {
     /// so the authority it needs is the authority to *ask*, which every client
     /// already has, and not the authority to start anything.
     Launcher,
+    /// A solid turning in three dimensions, drawn by the processor.
+    ///
+    /// A surface and a channel, like every other client. Nothing is lent to it
+    /// because there is nothing to lend: this system has no graphics interface
+    /// to hand out, and the program's whole claim is that it does not need one.
+    Solid,
+    /// A program built for Linux, given a surface and a channel like any other
+    /// client and nothing else.
+    ///
+    /// Worth saying what it is *not* given, because the answer is the point: no
+    /// filesystem, no network, no spawner. A translated program is a client
+    /// here, not a guest with its own rules, and what it can reach is what this
+    /// program handed it.
+    Linux,
+    /// A Wayland compositor for Linux programs. The client for it is not here:
+    /// it is started with no window, because its window is a surface inside
+    /// this one.
+    WaylandServer,
 }
 
 /// What reading from the keyboard turned out to be.
@@ -2243,6 +2341,11 @@ enum Typed {
     Leave,
     /// The key that opens the launcher.
     Launch,
+    /// The key that opens a window for a program built for Linux.
+    Linux,
+    /// The keys that start a Wayland compositor and a client for it.
+    WaylandServer,
+    WaylandClient,
 }
 
 /// What reading from the desktop turned out to be.
@@ -2288,6 +2391,7 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::FILES => Launched::Window(What::Files),
         tag if tag == desk::ASSIST => Launched::Window(What::Assistant),
         tag if tag == desk::UNPACK => Launched::Unpack,
+        tag if tag == desk::SOLID => Launched::Window(What::Solid),
         tag if tag == desk::QUIT => Launched::Leave,
         tag if tag == desk::HALT => Launched::Halt,
         tag if tag == desk::RESTART => Launched::Restart,
@@ -2311,6 +2415,11 @@ enum Launched {
     /// Unpack what was downloaded. Not a window: it runs, says what it did,
     /// and exits.
     Unpack,
+    /// Start a Wayland client. Not a window either, and for a better reason
+    /// than the unpacker's: it *has* a window, and the window is not this
+    /// program's to give. It is a `wl_surface` in the Wayland compositor next
+    /// door, which is itself a window here.
+    WaylandClient,
 }
 
 /// Ask the kernel to stop the machine. Says whether it was accepted.
@@ -2596,6 +2705,50 @@ fn open_window(
             screen.y + GAP + step,
             width,
             height,
+        )?,
+        // The same call as an ordinary client, and that is the point: a
+        // renderer that needed anything more from the compositor would be a
+        // renderer with a graphics stack underneath it, and there is none.
+        What::Solid => start_program(
+            SOLID,
+            Placement {
+                index: slot,
+                x: screen.x + GAP + step,
+                y: screen.y + GAP + step,
+                width,
+                height,
+            },
+            0,
+            &[],
+        )?,
+        // A window for a program built for Linux. The same call as every other
+        // client and the same endowments -- one surface, one channel -- which
+        // is what makes the claim worth anything: if this needed a different
+        // path through the compositor, the compatibility layer would be a
+        // second kind of client rather than a translation.
+        What::Linux => start_program(
+            LINUX_WINDOW,
+            Placement {
+                index: slot,
+                x: screen.x + GAP + step,
+                y: screen.y + GAP + step,
+                width,
+                height,
+            },
+            0,
+            &[],
+        )?,
+        What::WaylandServer => start_program(
+            WAYLAND_SERVER,
+            Placement {
+                index: slot,
+                x: screen.x + GAP + step,
+                y: screen.y + GAP + step,
+                width,
+                height,
+            },
+            0,
+            &[],
         )?,
         What::Browser => {
             // The network goes with the surface, in the same message. Read and
@@ -2936,6 +3089,15 @@ fn open_window(
             What::Files => {
                 "compositor: started a file manager, and lent it the disk and the drives"
             }
+            What::Solid => {
+                "compositor: started the three-dimensional drawing, and gave it a surface"
+            }
+            What::Linux => {
+                "compositor: started a program built for Linux, and gave it a surface"
+            }
+            What::WaylandServer => {
+                "compositor: started a Wayland compositor for Linux programs"
+            }
             What::Assistant => {
                 "compositor: started the agent, and lent it the disk to read and nothing to write"
             }
@@ -3010,6 +3172,22 @@ fn read_key(
     if message[0] == key::FUNCTION && read_u32(&message, 1) == LAUNCH_KEY {
         nexus_user::log("compositor: somebody asked for the launcher").ok();
         return Some(Typed::Launch);
+    }
+
+    // And the same for the Linux window, for the same reason: it is addressed
+    // to the session rather than to whatever has focus.
+    if message[0] == key::FUNCTION && read_u32(&message, 1) == LINUX_KEY {
+        nexus_user::log("compositor: somebody asked for a window for a Linux program").ok();
+        return Some(Typed::Linux);
+    }
+
+    if message[0] == key::FUNCTION && read_u32(&message, 1) == WAYLAND_SERVER_KEY {
+        nexus_user::log("compositor: somebody asked for a Wayland compositor").ok();
+        return Some(Typed::WaylandServer);
+    }
+    if message[0] == key::FUNCTION && read_u32(&message, 1) == WAYLAND_CLIENT_KEY {
+        nexus_user::log("compositor: somebody asked for a Wayland client").ok();
+        return Some(Typed::WaylandClient);
     }
 
     if message[0] == key::TAB {

@@ -580,7 +580,7 @@ extern "C" {
 }
 
 /// Why user mode could not be brought up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserError {
     /// No frame for a program, its stack or its data.
     OutOfMemory,
@@ -600,6 +600,15 @@ pub enum UserError {
     Filesystem(fs::fat32::FatError),
     /// The file is not a program this kernel can load.
     Image(nexus_abi::elf::ElfError),
+    /// The program names an interpreter, and it is not on this machine.
+    ///
+    /// Carries the path, because that is the whole of the useful answer: a
+    /// program built for Linux almost always names
+    /// `/lib64/ld-linux-x86-64.so.2`, and "put that file in the Linux root"
+    /// is an instruction somebody can act on where "could not load" is not.
+    NoInterpreter(alloc::string::String, u64),
+    /// The interpreter is there and is not a loadable image.
+    BadInterpreter(nexus_abi::elf::ElfError),
 }
 
 impl core::fmt::Display for UserError {
@@ -614,6 +623,14 @@ impl core::fmt::Display for UserError {
             Self::NoFilesystem => f.write_str("the disk has no EFI system partition"),
             Self::Filesystem(error) => write!(f, "could not read the filesystem: {error}"),
             Self::Image(error) => write!(f, "not a program this kernel can load: {error}"),
+            Self::NoInterpreter(path, reason) => write!(
+                f,
+                "the program needs the interpreter {path}, which is not in the Linux root                  (error {})",
+                *reason as i64
+            ),
+            Self::BadInterpreter(error) => {
+                write!(f, "the interpreter is not a loadable image: {error}")
+            }
         }
     }
 }
@@ -846,6 +863,12 @@ pub unsafe fn start() -> Result<(), UserError> {
     //
     // SAFETY: the heap, the scheduler and the block device are all running.
     if drivers::virtio_blk::is_present() {
+        // Whatever Linux runtime this disk carries, put where a Linux program
+        // will look for it. Before anything is started, because a dynamically
+        // linked program that runs before its interpreter is installed does not
+        // start.
+        install_linux_runtime();
+
         // SAFETY: the scheduler is running.
         let spawner = unsafe { start_spawn_service() }?;
         // SAFETY: as above, and the block device is up.
@@ -1075,9 +1098,19 @@ fn handle_spawn_request(
     // asker says which, and a caller that says nothing gets this system's own
     // interface. Guessing would mean occasionally reading a program's first
     // system call as a completely different request.
-    let (personality, path) = match path.strip_prefix("linux:") {
-        Some(rest) => (crate::process::Personality::Linux, rest),
-        None => (crate::process::Personality::Nexus, path),
+    //
+    // `linux32:` is a third answer and not a variant of the second: a
+    // thirty-two bit program is a different image format, a different
+    // system-call table and a different code segment. Nothing in the file says
+    // which interface it speaks -- the *class* byte says how wide it is, and
+    // the loader checks that against what was asked for, so a mismatch is
+    // refused rather than loaded the wrong way.
+    let (personality, path) = match path.strip_prefix("linux32:") {
+        Some(rest) => (crate::process::Personality::Linux32, rest),
+        None => match path.strip_prefix("linux:") {
+            Some(rest) => (crate::process::Personality::Linux, rest),
+            None => (crate::process::Personality::Nexus, path),
+        },
     };
 
     // A channel between the asker and whatever is about to run. Both ends are
@@ -1428,6 +1461,134 @@ const DISK_STACK_TOP: u64 = 0x0000_0000_0100_0000;
 /// quietly writing over something else.
 const DISK_STACK_PAGES: usize = 4;
 
+/// And how many for a program built for Linux.
+///
+/// Thirty-two, which is a hundred and twenty-eight kilobytes. A dynamic linker
+/// resolves symbols recursively across every library a program names, and does
+/// it before the program has had a chance to ask for anything, so its stack use
+/// is not something the program can be blamed for or can control. Four pages is
+/// what a Nexus program that draws needs; it is not what `ld.so` needs, and the
+/// difference is a fault at an address just below the stack with nothing to say
+/// which of the two worlds it came from.
+const LINUX_STACK_PAGES: usize = 32;
+
+/// Where a thirty-two bit program's stack goes.
+///
+/// Just under three gigabytes, which is where Linux puts one on i386 and is as
+/// high as a thirty-two bit stack pointer can usefully be. It cannot share
+/// [`DISK_STACK_TOP`]: that is sixteen megabytes up, and an i386 executable is
+/// linked at `0x08048000` -- a hundred and thirty-four megabytes up -- so a
+/// stack there would be *below* the program rather than above it, and the first
+/// thing to grow would run into nothing.
+const LINUX32_STACK_TOP: u64 = 0xBFFF_F000;
+
+/// Where a position-independent Linux executable is put.
+///
+/// An `ET_DYN` executable names no addresses of its own, so something has to
+/// choose, and the choice is only constrained by not colliding with the stack
+/// below it, the interpreter above it, or the region `mmap` hands out. This is
+/// the address Linux itself uses when address-space randomisation is off, which
+/// makes a program's own reports of where it is comparable with a report from a
+/// Linux machine.
+const LINUX_EXECUTABLE_BASE: u64 = 0x0000_5555_5555_4000;
+
+/// And where its interpreter is put.
+///
+/// Above the executable and above everything `mmap` hands out, because the
+/// interpreter is the one image whose address the program is *told* -- it
+/// arrives as `AT_BASE` -- and a number a program is told should not be one
+/// that moves for reasons the program cannot see.
+const LINUX_INTERPRETER_BASE: u64 = 0x0000_7F00_0000_0000;
+
+/// Put whatever Linux runtime is staged on the EFI partition into the Linux
+/// root, where a translated program will look for it.
+///
+/// # Why there has to be a step like this at all
+///
+/// A dynamically linked Linux program names its interpreter by an absolute
+/// path -- `/lib64/ld-linux-x86-64.so.2`, almost always -- and that path is
+/// resolved in the Linux root, which is `linux/` in this machine's own store.
+/// Nothing puts anything there. The build stages programs on the EFI partition,
+/// which is a different filesystem that a translated program cannot see and
+/// should not be able to: it holds this system's own kernel and programs.
+///
+/// So the two have to be connected somewhere, and this is the somewhere. It is
+/// the smallest form of what a package installer will eventually do, and it is
+/// deliberately not a special case for one file: the list is on the disk.
+///
+/// # The list
+///
+/// `BIN/LINUX.LST` on the EFI partition, one line per file, each line a source
+/// path on that partition and a destination path in the Linux root separated by
+/// whitespace. Blank lines and lines beginning `#` are ignored. A file that is
+/// already installed is left alone, so this costs one directory lookup per line
+/// on every boot after the first rather than rewriting the runtime each time.
+///
+/// `BIN` rather than the root of the partition because that is the one
+/// directory the build stages into, and a list that lived somewhere else would
+/// be a second place to remember.
+///
+/// Nothing here is fatal. A machine with no list has no Linux runtime, which is
+/// a machine on which a dynamically linked program will not start and says so
+/// by name when one is asked for.
+fn install_linux_runtime() {
+    const LIST: &str = "BIN/LINUX.LST";
+
+    let Ok(partitions) = fs::gpt::read() else {
+        return;
+    };
+    let Some(esp) = partitions.iter().find(|partition| partition.is_esp()) else {
+        return;
+    };
+    let Ok(volume) = fs::fat32::Volume::mount(esp.first_lba) else {
+        return;
+    };
+    let Ok(list) = volume.read_file(LIST) else {
+        // No list is the ordinary case for a machine that ships no Linux
+        // runtime, so it is not worth a line in the log.
+        return;
+    };
+    let Ok(list) = alloc::string::String::from_utf8(list) else {
+        kprintln!("[linux] {LIST} is not text; no runtime installed");
+        return;
+    };
+
+    let mut installed = 0usize;
+    for line in list.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((from, to)) = line.split_once(char::is_whitespace) else {
+            kprintln!("[linux] {LIST}: {line:?} does not name a source and a destination");
+            continue;
+        };
+        let to = to.trim();
+        if crate::compat::linux_files::exists(to) {
+            continue;
+        }
+        let bytes = match volume.read_file(from.trim()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                kprintln!("[linux] {LIST}: cannot read {from}: {error}");
+                continue;
+            }
+        };
+        match crate::compat::linux_files::install(to, &bytes) {
+            Ok(()) => {
+                kprintln!("[linux] installed {} bytes at {to}", bytes.len());
+                installed += 1;
+            }
+            Err(reason) => {
+                kprintln!("[linux] cannot install {to}: error {}", reason as i64);
+            }
+        }
+    }
+    if installed > 0 {
+        kprintln!("[linux] {installed} file(s) of Linux runtime installed into the Linux root");
+    }
+}
+
 /// Read a program from the filesystem and start it in a process of its own.
 ///
 /// This is the difference between a system that can run user code and one that
@@ -1464,94 +1625,135 @@ pub unsafe fn start_from_disk_as(
     endowments: &[(ipc::Object, ipc::Rights)],
     personality: crate::process::Personality,
 ) -> Result<alloc::sync::Arc<crate::process::Completion>, UserError> {
-    let partitions = fs::gpt::read().map_err(UserError::PartitionTable)?;
-    let esp = partitions
-        .iter()
-        .find(|partition| partition.is_esp())
-        .ok_or(UserError::NoFilesystem)?;
-    let volume = fs::fat32::Volume::mount(esp.first_lba).map_err(UserError::Filesystem)?;
-    let image = volume.read_file(path).map_err(UserError::Filesystem)?;
+    use crate::process::Personality;
 
-    let space = address_space::AddressSpace::new().map_err(UserError::Space)?;
+    // Where the program itself comes from. A Nexus program is on the EFI system
+    // partition, which is where the build stages them. A translated program
+    // whose path starts with a slash is being named the way Linux names things,
+    // so it is looked for in the Linux root -- which is where a program that
+    // arrived by being downloaded and unpacked actually is, and is the only
+    // place a program could have put one.
+    let image = if personality != Personality::Nexus && path.starts_with('/') {
+        crate::compat::linux_files::read_file(path)
+            .map_err(|reason| UserError::NoInterpreter(alloc::string::String::from(path), reason))?
+    } else {
+        let partitions = fs::gpt::read().map_err(UserError::PartitionTable)?;
+        let esp = partitions
+            .iter()
+            .find(|partition| partition.is_esp())
+            .ok_or(UserError::NoFilesystem)?;
+        let volume = fs::fat32::Volume::mount(esp.first_lba).map_err(UserError::Filesystem)?;
+        volume.read_file(path).map_err(UserError::Filesystem)?
+    };
 
-    // One contiguous span for the whole image, which is what the loader wants:
-    // it computes every segment's place as an offset from the base. The pages
-    // are handed back individually when the address space is dropped, and the
-    // allocator merges them back into the block they came from -- which is why
-    // every page of the span is mapped below, gaps included. A page that was
-    // allocated and never mapped would never be freed, and the block it came
-    // from would stay split for the life of the system.
-    let mut span_base = 0u64;
-    let mut span_pages = 0usize;
+    let space = Arc::new(address_space::AddressSpace::new().map_err(UserError::Space)?);
 
-    // SAFETY: the closure returns a block reachable through the direct map,
-    // which is what `to_virtual` says.
-    let loaded = unsafe {
-        nexus_abi::elf::load(
-            &image,
-            |pages| {
-                let order = order_for_pages(pages);
-                let base = memory::allocate_block(order)?;
-                span_base = base;
-                span_pages = 1usize << order;
-                Some(base)
+    // An `ET_DYN` image names no addresses and has to be told one; an `ET_EXEC`
+    // image names them all and has to be left alone. Asking the header is the
+    // only way to know which, and it is asked before anything is allocated.
+    // A thirty-two bit image is a different format, not a narrower one: a
+    // different header size, a different program header size, and the program
+    // header's fields in a different order. It goes to its own loader.
+    if nexus_abi::elf::elf32::is_thirty_two_bit(&image) != (personality == Personality::Linux32) {
+        kprintln!(
+            "[linux] {path} is {} and was asked for as {}",
+            if nexus_abi::elf::elf32::is_thirty_two_bit(&image) {
+                "a thirty-two bit image"
+            } else {
+                "a sixty-four bit image"
             },
-            layout::phys_to_virt,
-        )
+            if personality == Personality::Linux32 {
+                "thirty-two bit"
+            } else {
+                "sixty-four bit"
+            }
+        );
+        return Err(UserError::Image(nexus_abi::elf::ElfError::WrongType));
+    }
+
+    let movable = personality != Personality::Linux32
+        && nexus_abi::elf::kind(&image).map_err(UserError::Image)? == nexus_abi::elf::Kind::Movable;
+    if movable && personality != Personality::Linux {
+        // This system's own programs are linked at an address. One that was not
+        // would need relocating, and nothing in this system relocates its own.
+        return Err(UserError::Image(nexus_abi::elf::ElfError::WrongBias));
+    }
+    let bias = if movable { LINUX_EXECUTABLE_BASE } else { 0 };
+
+    // SAFETY: the heap and the page allocator are running, and `space` was
+    // created a moment ago so nothing else is mapping into it.
+    let loaded = if personality == Personality::Linux32 {
+        unsafe { load32_into(&image, &space) }
+    } else {
+        unsafe { load_into(&image, bias, &space) }
     }
     .map_err(UserError::Image)?;
 
-    // Every page of the image span, with the permissions of whichever segment
-    // covers it. A page in a gap between segments belongs to the image and has
-    // to be mapped so that it is freed with it, but nothing should be able to
-    // read or run it, so it gets the least of everything.
-    for page in 0..(loaded.image_size / layout::PAGE_SIZE) {
-        let virt = loaded.virt_base + page * layout::PAGE_SIZE;
-        let phys = loaded.phys_base + page * layout::PAGE_SIZE;
-
-        let segment = loaded.segments[..loaded.segment_count]
-            .iter()
-            .find(|segment| virt >= segment.virt_start && virt < segment.virt_start + segment.size);
-
-        let mut flags = paging::USER;
-        match segment {
-            Some(segment) => {
-                if segment.flags.writable {
-                    flags |= paging::WRITABLE;
-                }
-                if !segment.flags.executable {
-                    flags |= paging::NO_EXECUTE;
-                }
-            }
-            None => flags |= paging::NO_EXECUTE,
+    // The program that has to load this one before it can run.
+    //
+    // A program with a `PT_INTERP` is dynamically linked: none of its calls into
+    // a shared library have been resolved, so entering it directly reaches a
+    // symbol table nobody filled in. What happens instead is that the named
+    // program -- the dynamic linker -- is loaded into the same address space,
+    // entered instead of the program, and told in the auxiliary vector where
+    // both images are. It finishes the job in user space and jumps to the real
+    // entry point.
+    //
+    // This is the whole of what the kernel does about dynamic linking, and it is
+    // deliberately the whole of it: relocation, symbol lookup and library search
+    // are the linker's work, and a kernel that did any of them would be a kernel
+    // that had to understand symbol versioning.
+    let interpreter = match if personality == Personality::Linux {
+        nexus_abi::elf::interpreter(&image).map_err(UserError::Image)?
+    } else {
+        None
+    } {
+        Some(needed) => {
+            let bytes = crate::compat::linux_files::read_file(needed).map_err(|reason| {
+                UserError::NoInterpreter(alloc::string::String::from(needed), reason)
+            })?;
+            // SAFETY: as above.
+            let loaded = unsafe { load_into(&bytes, LINUX_INTERPRETER_BASE, &space) }
+                .map_err(UserError::BadInterpreter)?;
+            kprintln!(
+                "[linux] {name} needs {needed}: {} bytes loaded at {:#x}, entry {:#x}",
+                bytes.len(),
+                loaded.bias,
+                loaded.entry_point
+            );
+            Some(loaded)
         }
-
-        // SAFETY: the frame is part of the block just allocated for this image,
-        // and the address is in the user half of a space nothing else has.
-        unsafe { space.map(virt, phys, flags) }.map_err(UserError::Map)?;
-    }
+        None => None,
+    };
 
     // The stack. Several pages rather than one: a program that reads a
     // directory into a buffer, builds a vector for every file in it and sorts
     // the result is a program that overflows four kilobytes -- which it did,
     // and what that looks like is a page fault at an address just below the
-    // stack rather than anything that names the cause.
+    // stack rather than anything that names the cause. A translated program
+    // gets more again, because a dynamic linker runs before it does.
     //
     // Nothing is mapped below the lowest page, so an overflow still faults
-    // rather than quietly writing over something. What changed is how much has
-    // to happen first.
-    let mut stack = 0;
-    for page in 1..=DISK_STACK_PAGES {
+    // rather than quietly writing over something.
+    let stack_pages = match personality {
+        Personality::Nexus => DISK_STACK_PAGES,
+        Personality::Linux | Personality::Linux32 => LINUX_STACK_PAGES,
+    };
+    // A thirty-two bit program's stack has to be somewhere a thirty-two bit
+    // register can point at, and above its image rather than below it.
+    let stack_top = if personality == Personality::Linux32 {
+        LINUX32_STACK_TOP
+    } else {
+        DISK_STACK_TOP
+    };
+    for page in 1..=stack_pages {
         let frame = zeroed_frame()?;
-        if page == 1 {
-            // The top one, which is where the initial contents go.
-            stack = frame;
-        }
-        // SAFETY: as above.
+        // SAFETY: the frame was just allocated and the address is in the user
+        // half of a space nothing else has.
         unsafe {
             space
                 .map(
-                    DISK_STACK_TOP - layout::PAGE_SIZE * page as u64,
+                    stack_top - layout::PAGE_SIZE * page as u64,
                     frame,
                     paging::USER | paging::WRITABLE | paging::NO_EXECUTE,
                 )
@@ -1559,7 +1761,7 @@ pub unsafe fn start_from_disk_as(
         }
     }
 
-    let process = crate::process::Process::with_personality(name, Arc::new(space), personality);
+    let process = crate::process::Process::with_personality(name, Arc::clone(&space), personality);
     let id = process.id;
     // Taken before the process is handed to the scheduler, because after that
     // it may have exited by the time this function returns and the `Arc` in
@@ -1581,25 +1783,396 @@ pub unsafe fn start_from_disk_as(
     // program built for Linux expects a whole structure there, and expects it
     // before its first instruction runs.
     let stack_pointer = match personality {
-        crate::process::Personality::Nexus => DISK_STACK_TOP - INITIAL_STACK_OFFSET,
-        // SAFETY: `stack` is the frame just mapped at the top of this address
-        // space, it is this kernel's to write through the direct map until the
-        // process runs, and the layout is written entirely inside it.
-        crate::process::Personality::Linux => unsafe { system_v_stack(stack, name, &loaded) },
+        Personality::Nexus => DISK_STACK_TOP - INITIAL_STACK_OFFSET,
+        // SAFETY: the stack pages were just mapped into `space`, this kernel is
+        // the only thing writing them until the process runs, and everything
+        // written lies inside them.
+        Personality::Linux => unsafe {
+            system_v_stack(
+                &space,
+                Stack {
+                    top: DISK_STACK_TOP,
+                    pages: stack_pages,
+                    path,
+                    arguments: &[],
+                    environment: &[],
+                },
+                &loaded,
+                interpreter.as_ref(),
+            )?
+        },
+        // SAFETY: as above.
+        Personality::Linux32 => unsafe { system_v_stack32(&space, stack_pages, path, &loaded)? },
     };
 
-    sched::spawn_user(name, loaded.entry_point, stack_pointer, process)
-        .map_err(UserError::Spawn)?;
+    // A dynamically linked program is entered at its *interpreter*, not at its
+    // own entry point. Its own is in the auxiliary vector as `AT_ENTRY`, and
+    // reaching it is the last thing the interpreter does.
+    let entry = interpreter
+        .as_ref()
+        .map_or(loaded.entry_point, |interpreter| interpreter.entry_point);
+
+    sched::spawn_user(name, entry, stack_pointer, process).map_err(UserError::Spawn)?;
 
     kprintln!(
-        "[user] process {id} \"{name}\" loaded from {path}: {} bytes, entry {:#x}, \
-         {} segments in {} KiB",
+        "[user] process {id} \"{name}\" loaded from {path}: {} bytes, entry {entry:#x}, \
+         {} segments at {:#x}",
         image.len(),
-        loaded.entry_point,
         loaded.segment_count,
-        span_pages * layout::PAGE_SIZE as usize / 1024
+        loaded.virt_base
     );
     Ok(completion)
+}
+
+/// Load one image into an address space, and map every page of it.
+///
+/// One contiguous span for the whole image, which is what the loader wants: it
+/// computes every segment's place as an offset from the base. The pages are
+/// handed back individually when the address space is dropped, and the
+/// allocator merges them back into the block they came from -- which is why
+/// every page of the span is mapped here, gaps included. A page that was
+/// allocated and never mapped would never be freed, and the block it came from
+/// would stay split for the life of the system.
+///
+/// Called twice for a dynamically linked program: once for the program and once
+/// for its interpreter. Both go into the same space, at different biases, which
+/// is what makes them one address space with two images in it rather than two
+/// processes.
+///
+/// # Safety
+///
+/// The heap and the page allocator must be running, and nothing else may be
+/// mapping into `space`.
+pub(crate) unsafe fn load_into(
+    image: &[u8],
+    bias: u64,
+    space: &Arc<address_space::AddressSpace>,
+) -> Result<nexus_abi::elf::LoadedImage, nexus_abi::elf::ElfError> {
+    // SAFETY: the closure returns a block reachable through the direct map,
+    // which is what `to_virtual` says.
+    let loaded = unsafe {
+        nexus_abi::elf::load_at(
+            image,
+            bias,
+            |pages| memory::allocate_block(order_for_pages(pages)),
+            layout::phys_to_virt,
+        )
+    }?;
+
+    // SAFETY: upheld by the caller.
+    unsafe { map_image(space, &loaded) }?;
+    Ok(loaded)
+}
+
+/// Map every page of a loaded image into `space`.
+///
+/// Every page of the span, with the permissions of whichever segment covers it.
+/// A page in a gap between segments belongs to the image and has to be mapped
+/// so that it is freed with it, but nothing should be able to read or run it,
+/// so it gets the least of everything.
+///
+/// # Safety
+///
+/// As [`load_into`].
+unsafe fn map_image(
+    space: &Arc<address_space::AddressSpace>,
+    loaded: &nexus_abi::elf::LoadedImage,
+) -> Result<(), nexus_abi::elf::ElfError> {
+    for page in 0..(loaded.image_size / layout::PAGE_SIZE) {
+        let virt = loaded.virt_base + page * layout::PAGE_SIZE;
+        let phys = loaded.phys_base + page * layout::PAGE_SIZE;
+
+        let segment = loaded.segments[..loaded.segment_count]
+            .iter()
+            .find(|segment| virt >= segment.virt_start && virt < segment.virt_start + segment.size);
+
+        let mut flags = paging::USER;
+        match segment {
+            Some(segment) => {
+                if segment.flags.writable {
+                    flags |= paging::WRITABLE;
+                }
+                if !segment.flags.executable {
+                    flags |= paging::NO_EXECUTE;
+                }
+            }
+            None => flags |= paging::NO_EXECUTE,
+        }
+
+        // A movable image is about to be relocated, and relocation is a write
+        // into pages the file marked read-only -- `.got`, `.data.rel.ro`, and
+        // the text of anything not built position-independent. The dynamic
+        // linker asks for the write permission with `mprotect` and gives it back
+        // the same way, which it can now do: see `compat::linux_memory`. So the
+        // permissions here stay the ones the file asked for.
+        //
+        // SAFETY: the frame is part of the block just allocated for this image,
+        // and the address is in the user half of a space nothing else has.
+        unsafe { space.map(virt, phys, flags) }
+            .map_err(|_| nexus_abi::elf::ElfError::OutOfMemory)?;
+    }
+
+    Ok(())
+}
+
+/// Load a program into an address space that already exists, for `execve`.
+///
+/// Everything [`start_from_disk_as`] does after it has made a space, done to a
+/// space it is given instead: the image, its interpreter, the stack, and the
+/// structure a System V program starts on. What it does *not* do is make a
+/// process, because `execve` does not make one -- the whole of what it means is
+/// that this process is now running a different program.
+///
+/// Returns where to enter and what `rsp` should be.
+///
+/// # Safety
+///
+/// `space` must be one whose user half has just been cleared, with nothing
+/// running in it: the calling thread in the kernel, and no siblings.
+pub unsafe fn load_program_into(
+    space: &Arc<address_space::AddressSpace>,
+    path: &str,
+    image: &[u8],
+    arguments: &[alloc::string::String],
+    environment: &[alloc::string::String],
+) -> Result<(u64, u64), UserError> {
+    let movable =
+        nexus_abi::elf::kind(image).map_err(UserError::Image)? == nexus_abi::elf::Kind::Movable;
+    let bias = if movable { LINUX_EXECUTABLE_BASE } else { 0 };
+    // SAFETY: the caller promises the space is empty and that nothing is
+    // running in it.
+    let loaded = unsafe { load_into(image, bias, space) }.map_err(UserError::Image)?;
+
+    let interpreter = match nexus_abi::elf::interpreter(image).map_err(UserError::Image)? {
+        Some(needed) => {
+            let bytes = crate::compat::linux_files::read_file(needed).map_err(|reason| {
+                UserError::NoInterpreter(alloc::string::String::from(needed), reason)
+            })?;
+            // SAFETY: as above.
+            let loaded = unsafe { load_into(&bytes, LINUX_INTERPRETER_BASE, space) }
+                .map_err(UserError::BadInterpreter)?;
+            Some(loaded)
+        }
+        None => None,
+    };
+
+    for page in 1..=LINUX_STACK_PAGES {
+        let frame = zeroed_frame()?;
+        // SAFETY: the frame was just allocated and the address is in the user
+        // half of a space the caller promises is empty.
+        unsafe {
+            space
+                .map(
+                    DISK_STACK_TOP - layout::PAGE_SIZE * page as u64,
+                    frame,
+                    paging::USER | paging::WRITABLE | paging::NO_EXECUTE,
+                )
+                .map_err(UserError::Map)?;
+        }
+    }
+
+    // SAFETY: the stack pages were just mapped and nothing else is writing
+    // them -- the process's only thread is the one running this.
+    let stack = unsafe {
+        system_v_stack(
+            space,
+            Stack {
+                top: DISK_STACK_TOP,
+                pages: LINUX_STACK_PAGES,
+                path,
+                arguments,
+                environment,
+            },
+            &loaded,
+            interpreter.as_ref(),
+        )?
+    };
+    let entry = interpreter
+        .as_ref()
+        .map_or(loaded.entry_point, |interpreter| interpreter.entry_point);
+    Ok((entry, stack))
+}
+
+/// Load a thirty-two bit image, and map every page of it.
+///
+/// The same shape as [`load_into`] with the other parser behind it. It is a
+/// separate function rather than a flag because the two loaders return the same
+/// thing and share nothing else: see `nexus_abi::elf::elf32` for why.
+///
+/// # Safety
+///
+/// As [`load_into`].
+unsafe fn load32_into(
+    image: &[u8],
+    space: &Arc<address_space::AddressSpace>,
+) -> Result<nexus_abi::elf::LoadedImage, nexus_abi::elf::ElfError> {
+    // SAFETY: the closure returns a block reachable through the direct map.
+    let loaded = unsafe {
+        nexus_abi::elf::elf32::load(
+            image,
+            |pages| memory::allocate_block(order_for_pages(pages)),
+            layout::phys_to_virt,
+        )
+    }?;
+    // SAFETY: upheld by the caller.
+    unsafe { map_image(space, &loaded) }?;
+    Ok(loaded)
+}
+
+/// Lay out the stack a thirty-two bit System V program expects.
+///
+/// The same structure as its sixty-four bit counterpart with every word half
+/// the width: `argc`, the argument pointers, a null, the environment, another
+/// null, and the auxiliary vector -- all as thirty-two bit values, because a
+/// program that reads them with thirty-two bit loads would otherwise find the
+/// top half of one word where the next should be.
+///
+/// There is no interpreter and no `AT_BASE`: an i386 program that needs one
+/// needs an i386 interpreter, and there is none on this machine. A static
+/// program is what runs here, which is what the loader refuses to pretend
+/// otherwise about.
+///
+/// # Safety
+///
+/// As [`system_v_stack`].
+unsafe fn system_v_stack32(
+    space: &Arc<address_space::AddressSpace>,
+    pages: usize,
+    path: &str,
+    program: &nexus_abi::elf::LoadedImage,
+) -> Result<u64, UserError> {
+    /// The auxiliary vector types a thirty-two bit program reads, which are the
+    /// same numbers -- only the words they are carried in are narrower.
+    mod at {
+        pub const PHDR: u32 = 3;
+        pub const PHENT: u32 = 4;
+        pub const PHNUM: u32 = 5;
+        pub const PAGESZ: u32 = 6;
+        pub const ENTRY: u32 = 9;
+        pub const UID: u32 = 11;
+        pub const EUID: u32 = 12;
+        pub const GID: u32 = 13;
+        pub const EGID: u32 = 14;
+        pub const CLKTCK: u32 = 17;
+        pub const SECURE: u32 = 23;
+        pub const RANDOM: u32 = 25;
+        pub const EXECFN: u32 = 31;
+    }
+
+    const ROOM: u64 = layout::PAGE_SIZE;
+    const RANDOM_BYTES: usize = 16;
+    const ENVIRONMENT: &[&str] = &["NEXUS=1", "PATH=/usr/bin:/bin", "HOME=/root"];
+
+    let top = LINUX32_STACK_TOP;
+    let bottom = top - layout::PAGE_SIZE * pages as u64;
+
+    let mut put = top - ROOM;
+    let mut place = |bytes: &[u8]| -> Result<u32, UserError> {
+        let at = put;
+        if at + bytes.len() as u64 >= top {
+            return Err(UserError::OutOfMemory);
+        }
+        // SAFETY: inside the reserved room at the top of a stack the caller
+        // promises is mapped and that nothing else is writing.
+        if !unsafe { crate::compat::linux_memory::write_into(space, at, bytes) } {
+            return Err(UserError::OutOfMemory);
+        }
+        put += bytes.len() as u64;
+        // Every address here is below three gigabytes by construction, so the
+        // narrowing cannot lose anything -- and if the constant above ever
+        // moved, this is where it would be noticed.
+        u32::try_from(at).map_err(|_| UserError::OutOfMemory)
+    };
+
+    let mut seed = [0u8; RANDOM_BYTES];
+    if !crate::random::bytes(&mut seed) {
+        kprintln!("[linux32] no randomness for AT_RANDOM; the stack guard will be a constant");
+    }
+    let random_at = place(&seed)?;
+
+    let mut environment_at = alloc::vec::Vec::new();
+    for variable in ENVIRONMENT {
+        let mut bytes = alloc::vec::Vec::from(variable.as_bytes());
+        bytes.push(0);
+        environment_at.push(place(&bytes)?);
+    }
+
+    let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+    path_bytes.push(0);
+    let name_at = place(&path_bytes)?;
+
+    let vector: [(u32, u32); 13] = [
+        (at::PHDR, program.program_headers as u32),
+        (at::PHENT, u32::from(program.program_header_size)),
+        (at::PHNUM, u32::from(program.program_header_count)),
+        (at::PAGESZ, layout::PAGE_SIZE as u32),
+        (at::ENTRY, program.entry_point as u32),
+        (at::UID, 0),
+        (at::EUID, 0),
+        (at::GID, 0),
+        (at::EGID, 0),
+        (at::SECURE, 0),
+        (at::CLKTCK, 100),
+        (at::RANDOM, random_at),
+        (at::EXECFN, name_at),
+    ];
+
+    // argc, one argument pointer and its null; the environment and its null;
+    // then the pairs and the `AT_NULL` -- in four-byte words this time.
+    let words = 1 + 1 + 1 + environment_at.len() as u64 + 1 + (vector.len() as u64 + 1) * 2;
+    let vector_at = ((top - ROOM) - words * 4) & !15;
+    if vector_at < bottom {
+        return Err(UserError::OutOfMemory);
+    }
+
+    let mut words_out: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(words as usize);
+    words_out.push(1); // argc
+    words_out.push(name_at); // argv[0]
+    words_out.push(0);
+    words_out.extend_from_slice(&environment_at);
+    words_out.push(0);
+    for (kind, value) in &vector {
+        words_out.push(*kind);
+        words_out.push(*value);
+    }
+    words_out.push(0); // AT_NULL
+    words_out.push(0);
+
+    let mut bytes = alloc::vec::Vec::with_capacity(words_out.len() * 4);
+    for word in &words_out {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    // SAFETY: the run lies between `bottom` -- checked above -- and the strings.
+    if !unsafe { crate::compat::linux_memory::write_into(space, vector_at, &bytes) } {
+        return Err(UserError::OutOfMemory);
+    }
+
+    kprintln!(
+        "[linux32] {path}: esp {vector_at:#x}, entry {:#x}, {} environment",
+        program.entry_point,
+        environment_at.len()
+    );
+    Ok(vector_at)
+}
+
+/// Where a program's stack goes and what is to be on it.
+///
+/// Five values that travel together: they are one description of one stack, and
+/// passing them separately made a function nobody could call without counting
+/// arguments.
+pub(crate) struct Stack<'a> {
+    /// One past the highest address of the stack.
+    pub top: u64,
+    /// How many pages of it are mapped.
+    pub pages: usize,
+    /// The path the program was run from, which `AT_EXECFN` points at.
+    pub path: &'a str,
+    /// `argv`. Empty means "just the path", which is what a program started by
+    /// the spawn service gets.
+    pub arguments: &'a [alloc::string::String],
+    /// `envp`. Empty means this machine's own, which is what everything but
+    /// `execve` wants.
+    pub environment: &'a [alloc::string::String],
 }
 
 /// Lay out the stack a System V program expects, and say where its `rsp` goes.
@@ -1611,31 +2184,58 @@ pub unsafe fn start_from_disk_as(
 /// have put there, and a program that reads it finds whatever was in the page
 /// if nobody did.
 ///
-/// One argument, which is the program's name; one environment variable; and an
-/// auxiliary vector with the entries a C library reads before `main`.
-///
-/// The auxiliary vector used to be empty here, and `AT_NULL` straight away is a
-/// legal thing for a kernel to put there -- but it is not a thing any real
-/// program survives. `AT_PHDR` is how a libc finds its own `PT_TLS` to set up
-/// thread-local storage; `AT_RANDOM` is sixteen bytes a program is required to
-/// be given and is where the stack guard comes from, so a binary built with
-/// `-fstack-protector` -- which is every distribution's default -- reads that
-/// pointer before it reaches `main` and dies on the spot if it is null.
-///
 /// `rsp` is sixteen-byte aligned, because the ABI says so and because the first
 /// `movaps` in any compiled function faults if it is not.
 ///
+/// # What the auxiliary vector has to carry
+///
+/// It used to be `AT_NULL` straight away. That is a legal thing for a kernel to
+/// put there and not a thing any real program survives.
+///
+/// - `AT_PHDR`, `AT_PHENT`, `AT_PHNUM` are how a C library -- or a dynamic
+///   linker -- finds the *program's* own program headers, which is where its
+///   `PT_TLS` and `PT_DYNAMIC` are. For a dynamically linked program these
+///   describe the program and never the interpreter, which is the distinction
+///   that makes the whole thing work.
+/// - `AT_RANDOM` points at sixteen bytes a program is entitled to, and is where
+///   the stack guard comes from -- so a binary built with `-fstack-protector`,
+///   which is every distribution's default, reads that pointer before it
+///   reaches `main` and dies on the spot if it is null.
+/// - `AT_BASE` is where the interpreter itself was put. It is the one number
+///   the interpreter cannot work out for itself before it has relocated
+///   itself, because working it out is what it needs to be relocated to do. A
+///   dynamically linked program started with `AT_BASE` absent or wrong does not
+///   fail in the linker -- it faults somewhere inside it, with no symbol to say
+///   where. For a static program it is zero, which is the truth: there is no
+///   interpreter.
+/// - `AT_ENTRY` is the *program's* entry point, which for a dynamic program is
+///   where the interpreter jumps when it has finished. The kernel entered the
+///   interpreter instead, so this is the only record of it.
+///
 /// # Safety
 ///
-/// `stack` must be the physical frame mapped at the top of the target address
-/// space, and nothing else may be writing it.
-unsafe fn system_v_stack(stack: u64, name: &str, loaded: &nexus_abi::elf::LoadedImage) -> u64 {
+/// The top `pages` pages below [`DISK_STACK_TOP`] must be mapped writable in
+/// `space`, and nothing else may be writing them.
+unsafe fn system_v_stack(
+    space: &Arc<address_space::AddressSpace>,
+    stack: Stack<'_>,
+    program: &nexus_abi::elf::LoadedImage,
+    interpreter: Option<&nexus_abi::elf::LoadedImage>,
+) -> Result<u64, UserError> {
+    let Stack {
+        top,
+        pages,
+        path,
+        arguments,
+        environment,
+    } = stack;
     /// Auxiliary vector types, as `elf.h` numbers them.
     mod at {
         pub const PHDR: u64 = 3;
         pub const PHENT: u64 = 4;
         pub const PHNUM: u64 = 5;
         pub const PAGESZ: u64 = 6;
+        pub const BASE: u64 = 7;
         pub const ENTRY: u64 = 9;
         pub const UID: u64 = 11;
         pub const EUID: u64 = 12;
@@ -1644,28 +2244,69 @@ unsafe fn system_v_stack(stack: u64, name: &str, loaded: &nexus_abi::elf::Loaded
         pub const CLKTCK: u64 = 17;
         pub const SECURE: u64 = 23;
         pub const RANDOM: u64 = 25;
+        pub const EXECFN: u64 = 31;
     }
 
     /// Bytes set aside at the very top for the strings and the random bytes.
-    const ROOM: u64 = 128;
+    ///
+    /// A page rather than the hundred and twenty-eight bytes this had before,
+    /// because the environment a dynamic program is given is no longer one
+    /// variable: a dynamic linker reads several of them before it does anything
+    /// else, and a program's own path is now in there twice.
+    const ROOM: u64 = layout::PAGE_SIZE;
     /// What `AT_RANDOM` points at: sixteen bytes, and the number is the ABI's.
     const RANDOM_BYTES: usize = 16;
-    /// The environment this machine offers, with its terminator. One variable,
-    /// because a program that looks up `PATH` or `HOME` and finds nothing
-    /// behaves correctly, and one that finds an invented value goes looking in
-    /// a directory that does not exist.
-    const ENVIRONMENT: &[u8] = b"NEXUS=1\0";
 
-    let page = layout::phys_to_virt(stack);
-    let bottom = DISK_STACK_TOP - layout::PAGE_SIZE;
-    // Where an address in the target's stack is in this kernel's view of it.
-    let at_kernel = |address: u64| page + (address - bottom);
+    /// The environment this machine offers.
+    ///
+    /// Short on purpose. A program that looks up a variable and finds nothing
+    /// behaves correctly; one that finds an invented value goes looking in a
+    /// directory that does not exist. `PATH` names the two directories a
+    /// program actually could be in, and `LD_LIBRARY_PATH` names where this
+    /// machine's Linux libraries are -- which a dynamic linker reads before it
+    /// consults anything on disk, and which is the difference between finding a
+    /// library and reporting that it cannot.
+    const ENVIRONMENT: &[&str] = &[
+        "NEXUS=1",
+        "PATH=/usr/bin:/bin",
+        "LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib64:/lib:/usr/lib",
+        "HOME=/root",
+        "TMPDIR=/tmp",
+    ];
 
-    // The strings and the random bytes, packed up from the start of the room
-    // reserved at the very top.
-    let mut put = DISK_STACK_TOP - ROOM;
+    // The program's own path, when the caller gave no arguments at all.
+    // `argv[0]` is what a program reads to find out where it was installed, so
+    // a program started with an empty argument list still gets one -- and
+    // `execve` with a real list gets exactly what it passed.
+    let default_arguments = [alloc::string::String::from(path)];
+    let arguments: &[alloc::string::String] = if arguments.is_empty() {
+        &default_arguments
+    } else {
+        arguments
+    };
 
-    let random_at = put;
+    let bottom = top - layout::PAGE_SIZE * pages as u64;
+
+    // Everything that is a run of bytes goes into the room at the very top, in
+    // one pass, and each piece remembers the address it landed at. A second
+    // pass below writes the pointers, because a pointer cannot be written until
+    // the thing it points at has an address.
+    let mut put = top - ROOM;
+    let mut place = |bytes: &[u8]| -> Result<u64, UserError> {
+        let at = put;
+        if at + bytes.len() as u64 >= top {
+            return Err(UserError::OutOfMemory);
+        }
+        // SAFETY: the range lies inside the reserved room at the top of the
+        // stack, which the caller promises is mapped and which nothing else is
+        // writing until the process runs.
+        if !unsafe { crate::compat::linux_memory::write_into(space, at, bytes) } {
+            return Err(UserError::OutOfMemory);
+        }
+        put += bytes.len() as u64;
+        Ok(at)
+    };
+
     let mut seed = [0u8; RANDOM_BYTES];
     // If the generator is not ready this stays zero, which is worse than real
     // randomness and better than a null pointer: the program starts, and its
@@ -1673,45 +2314,57 @@ unsafe fn system_v_stack(stack: u64, name: &str, loaded: &nexus_abi::elf::Loaded
     if !crate::random::bytes(&mut seed) {
         kprintln!("[linux] no randomness for AT_RANDOM; the stack guard will be a constant");
     }
-    // SAFETY: every write below lands between `put` and `DISK_STACK_TOP`, which
-    // is the top `ROOM` bytes of the page this function owns.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            seed.as_ptr(),
-            at_kernel(random_at) as *mut u8,
-            RANDOM_BYTES,
-        );
-    }
-    put += RANDOM_BYTES as u64;
+    let random_at = place(&seed)?;
 
-    let environment_at = put;
-    // SAFETY: as above.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            ENVIRONMENT.as_ptr(),
-            at_kernel(environment_at) as *mut u8,
-            ENVIRONMENT.len(),
-        );
-    }
-    put += ENVIRONMENT.len() as u64;
-
-    let name_at = put;
-    let bytes = name.as_bytes();
-    let taken = bytes.len().min((DISK_STACK_TOP - put) as usize - 1);
-    // SAFETY: as above; `taken` is bounded by what is left of the reserved room.
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), at_kernel(name_at) as *mut u8, taken);
-        // The terminator, which is what makes it a C string -- and every
-        // program that reads `argv[0]` reads it as one.
-        core::ptr::write_volatile((at_kernel(name_at) + taken as u64) as *mut u8, 0);
+    // The environment this machine offers, unless the caller brought its own.
+    // `execve` does, and a program that set a variable and then replaced itself
+    // would be badly served by having it thrown away.
+    let mut environment_at = alloc::vec::Vec::new();
+    if environment.is_empty() {
+        for variable in ENVIRONMENT {
+            let mut bytes = alloc::vec::Vec::from(variable.as_bytes());
+            bytes.push(0);
+            environment_at.push(place(&bytes)?);
+        }
+    } else {
+        for variable in environment {
+            let mut bytes = alloc::vec::Vec::from(variable.as_bytes());
+            bytes.push(0);
+            environment_at.push(place(&bytes)?);
+        }
     }
 
-    let vector: [(u64, u64); 12] = [
-        (at::PHDR, loaded.program_headers),
-        (at::PHENT, u64::from(loaded.program_header_size)),
-        (at::PHNUM, u64::from(loaded.program_header_count)),
+    // The arguments. `argv[0]` is what a program reads to find out where it was
+    // installed, and a name would send it looking in the wrong place.
+    let mut argument_at = alloc::vec::Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let mut bytes = alloc::vec::Vec::from(argument.as_bytes());
+        bytes.push(0);
+        argument_at.push(place(&bytes)?);
+    }
+    // `AT_EXECFN` is the path the program was run from, which is not the same
+    // as `argv[0]`: a program may be given any argument list its caller likes.
+    let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+    path_bytes.push(0);
+    let name_at = place(&path_bytes)?;
+
+    let vector: [(u64, u64); 14] = [
+        // The *program's* headers, never the interpreter's. A dynamic linker
+        // reads these to find the program's `PT_DYNAMIC`, and pointing them at
+        // its own image would have it relocating itself twice and the program
+        // not at all.
+        (at::PHDR, program.program_headers),
+        (at::PHENT, u64::from(program.program_header_size)),
+        (at::PHNUM, u64::from(program.program_header_count)),
         (at::PAGESZ, layout::PAGE_SIZE),
-        (at::ENTRY, loaded.entry_point),
+        // Where the interpreter was put, and zero when there is not one.
+        (
+            at::BASE,
+            interpreter.map_or(0, |interpreter| interpreter.bias),
+        ),
+        // And where the program's own code starts, which is where the
+        // interpreter jumps when it has finished.
+        (at::ENTRY, program.entry_point),
         // One machine, one user, and that user is the one who turned it on.
         (at::UID, 0),
         (at::EUID, 0),
@@ -1723,32 +2376,73 @@ unsafe fn system_v_stack(stack: u64, name: &str, loaded: &nexus_abi::elf::Loaded
         // what Linux reports and what a program assumes when it has to.
         (at::CLKTCK, 100),
         (at::RANDOM, random_at),
+        (at::EXECFN, name_at),
     ];
 
-    // argc, argv[0] and the null ending the arguments; one environment pointer
-    // and the null ending those; then the pairs, and the `AT_NULL` that ends
-    // them.
-    let words = 3 + 2 + (vector.len() as u64 + 1) * 2;
-    let vector_at = (name_at - words * 8) & !15;
+    // argc, the argument pointers and the null ending them; the environment
+    // pointers and the null ending those; then the pairs and the `AT_NULL`.
+    let words = 1
+        + argument_at.len() as u64
+        + 1
+        + environment_at.len() as u64
+        + 1
+        + (vector.len() as u64 + 1) * 2;
+    //
+    // Below the *whole* reserved block of strings, not below the last string
+    // placed in it. Anchoring on the last one was right for exactly as long as
+    // there was one string after the environment: with two -- an argument and
+    // the path `AT_EXECFN` points at -- the vector ran up into the argument,
+    // and what that looked like was a program reporting that a string it had
+    // been passed was not the string it had been passed. The first byte of
+    // `argv[0]` was the last word of the auxiliary vector.
+    let vector_at = ((top - ROOM) - words * 8) & !15;
+    if vector_at < bottom {
+        return Err(UserError::OutOfMemory);
+    }
+    debug_assert!(
+        vector_at + words * 8 <= top - ROOM,
+        "the argument vector must not reach into the strings above it"
+    );
+    let _ = put;
 
-    // SAFETY: the vector lies below the strings and inside the page, and every
-    // slot written is within the `words` counted above.
-    unsafe {
-        let slot = at_kernel(vector_at) as *mut u64;
-        slot.write_volatile(1); // argc
-        slot.add(1).write_volatile(name_at); // argv[0]
-        slot.add(2).write_volatile(0); // argv is null-terminated
-        slot.add(3).write_volatile(environment_at); // envp[0]
-        slot.add(4).write_volatile(0); // and so is the environment
-        for (index, (kind, value)) in vector.iter().enumerate() {
-            slot.add(5 + index * 2).write_volatile(*kind);
-            slot.add(6 + index * 2).write_volatile(*value);
-        }
-        slot.add(5 + vector.len() * 2).write_volatile(0); // AT_NULL
-        slot.add(6 + vector.len() * 2).write_volatile(0); // with a value of nothing
+    // One flat run of words, built here and written once. Writing it word by
+    // word through the page tables would be the same bytes and one translation
+    // per word, and this way the layout is visible in one place.
+    let mut words_out: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(words as usize);
+    words_out.push(argument_at.len() as u64); // argc
+    words_out.extend_from_slice(&argument_at);
+    words_out.push(0); // argv is null-terminated
+    words_out.extend_from_slice(&environment_at);
+    words_out.push(0); // and so is the environment
+    for (kind, value) in &vector {
+        words_out.push(*kind);
+        words_out.push(*value);
+    }
+    words_out.push(0); // AT_NULL
+    words_out.push(0); // with a value of nothing
+
+    let mut bytes = alloc::vec::Vec::with_capacity(words_out.len() * 8);
+    for word in &words_out {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    // SAFETY: the run lies between `bottom` -- checked above -- and the strings,
+    // which is inside the stack the caller promises is mapped.
+    if !unsafe { crate::compat::linux_memory::write_into(space, vector_at, &bytes) } {
+        return Err(UserError::OutOfMemory);
     }
 
-    vector_at
+    // What the program will find at its stack pointer. Said in the log because
+    // an argument vector is invisible from everywhere else: a program that got
+    // the wrong one reports that a string it was passed is not the string it
+    // was passed, and there is nothing to compare that against.
+    kprintln!(
+        "[linux] {path}: rsp {vector_at:#x}, argc {}, argv[0] {:#x}, {} environment",
+        argument_at.len(),
+        argument_at.first().copied().unwrap_or(0),
+        environment_at.len()
+    );
+
+    Ok(vector_at)
 }
 
 /// Whether the first-run setup has been completed on this machine.
@@ -1828,6 +2522,138 @@ fn order_for_pages(pages: usize) -> usize {
         order += 1;
     }
     order
+}
+
+/// Leave the kernel for ring 3 in *compatibility mode*. Never returns.
+///
+/// The processor is still in long mode; what changes is the code segment. A
+/// descriptor with `L` clear and `D` set makes the processor decode thirty-two
+/// bit instructions, use thirty-two bit addresses, and truncate the stack
+/// pointer to thirty-two bits — which is the whole of what "running a 32-bit
+/// program" means on a 64-bit machine. The page tables, the kernel and every
+/// other process are untouched.
+///
+/// `USER_CODE32_SELECTOR` already existed: `sysret` requires the user segments
+/// to be laid out with the thirty-two bit code segment first, so the descriptor
+/// has been in the table since the system-call boundary was written. Nothing
+/// had ever been entered through it.
+///
+/// `iretq` and not `sysretq`, because `sysret` returns to the *64-bit* code
+/// segment unless `REX.W` is omitted, and taking all five values from the stack
+/// is clearer than a register dance whose meaning depends on an operand-size
+/// prefix.
+///
+/// # Safety
+///
+/// `entry` and `stack_top` must be below four gigabytes and mapped `USER` in
+/// the active address space, executable and writable respectively. The caller
+/// must have set this processor's `rsp0`.
+pub unsafe fn enter32(entry: u64, stack_top: u64) -> ! {
+    /// Interrupts on, and nothing else. A thirty-two bit program is as
+    /// preemptible as any other.
+    const USER_FLAGS: u64 = 1 << 9;
+
+    debug_assert!(entry < u64::from(u32::MAX));
+    debug_assert!(stack_top < u64::from(u32::MAX));
+
+    // SAFETY: upheld by the caller. `swapgs` puts the user's `GS` base in place
+    // and leaves this processor's own in `IA32_KERNEL_GS_BASE`, which is where
+    // the `int 0x80` entry expects to find it.
+    unsafe {
+        core::arch::asm!(
+            "cli",
+            "swapgs",
+            "push {ss}",
+            "push {rsp}",
+            "push {flags}",
+            "push {cs}",
+            "push {rip}",
+            "iretq",
+            ss = in(reg) u64::from(gdt::USER_DATA_SELECTOR),
+            rsp = in(reg) stack_top,
+            flags = in(reg) USER_FLAGS,
+            cs = in(reg) u64::from(gdt::USER_CODE32_SELECTOR),
+            rip = in(reg) entry,
+            options(noreturn),
+        )
+    }
+}
+
+/// Leave the kernel for ring 3 with a whole register state. Never returns.
+///
+/// [`enter`] starts a program: one address, one stack pointer, and nothing else
+/// that matters, because a program's first instruction is entitled to nothing.
+/// This *resumes* one, and the difference is the whole of what `clone` is.
+///
+/// A thread made by `clone` does not begin at an entry point. It begins at the
+/// instruction after its parent's `syscall`, with a copy of its parent's
+/// registers, on a stack the caller nominated, and with a zero in `rax` -- which
+/// is the only thing that tells it apart from the parent when both resume. Every
+/// C library's thread entry sequence then reads the function it is to call out
+/// of a register it set *before* the call: musl and glibc both use `r9`. A
+/// kernel that restored a stack pointer and an address would start a thread that
+/// jumps to whatever was left in that register.
+///
+/// `iretq` rather than `sysretq`, for the same reason [`enter`] uses it: the
+/// flags and the return address are values here rather than whatever the
+/// `syscall` instruction happened to leave, and `iretq` takes all five of its
+/// words from memory.
+///
+/// # Safety
+///
+/// Every address in `frame` must belong to the address space that is active, and
+/// `rip` must be in its user half and executable. The caller must have set this
+/// processor's `rsp0` and syscall stack.
+pub unsafe fn resume(frame: &crate::arch::syscall::Frame) -> ! {
+    // What `iretq` pops, laid out in the order it pops it. Built here as a
+    // value rather than pushed, because pushing needs a spare register and
+    // every register is about to become the user's.
+    let iret: [u64; 5] = [
+        frame.rip,
+        u64::from(gdt::USER_CODE64_SELECTOR),
+        frame.rflags,
+        frame.rsp,
+        u64::from(gdt::USER_DATA_SELECTOR),
+    ];
+
+    // SAFETY: upheld by the caller. The sequence below never touches memory
+    // through `gs` after the `swapgs`, and never returns, so nothing can
+    // observe the half-left kernel it walks through.
+    unsafe {
+        core::arch::asm!(
+            // Masked for the whole of the transition. An interrupt taken after
+            // `swapgs` would arrive in ring 0 with the user's `GS` installed,
+            // and the entry guard would swap the wrong way round.
+            "cli",
+            // The stack becomes the five words above. Nothing returns from
+            // here, so the kernel stack this was standing on is not needed
+            // again -- the next entry from ring 3 lands on `rsp0`, which the
+            // scheduler set.
+            "mov rsp, rsi",
+            "swapgs",
+            // Every register the caller had, read out of the frame. `rdi` holds
+            // the frame and so is loaded from itself, last of all.
+            "mov r15, [rdi + 0]",
+            "mov r14, [rdi + 8]",
+            "mov r13, [rdi + 16]",
+            "mov r12, [rdi + 24]",
+            "mov rbp, [rdi + 32]",
+            "mov rbx, [rdi + 40]",
+            "mov r9,  [rdi + 48]",
+            "mov r8,  [rdi + 56]",
+            "mov r10, [rdi + 64]",
+            "mov rdx, [rdi + 72]",
+            "mov rcx, [rdi + 112]",
+            "mov r11, [rdi + 104]",
+            "mov rax, [rdi + 96]",
+            "mov rsi, [rdi + 80]",
+            "mov rdi, [rdi + 88]",
+            "iretq",
+            in("rdi") core::ptr::from_ref(frame),
+            in("rsi") iret.as_ptr(),
+            options(noreturn),
+        )
+    }
 }
 
 /// Leave the kernel for ring 3. Never returns.

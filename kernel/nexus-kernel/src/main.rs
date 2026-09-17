@@ -33,6 +33,7 @@ mod machine;
 mod memory;
 mod net;
 mod panic;
+mod pipe;
 mod power;
 mod removable;
 
@@ -41,6 +42,7 @@ mod random;
 mod sched;
 mod selftest;
 mod serial;
+mod socket;
 mod sound;
 mod sync;
 mod user;
@@ -684,6 +686,43 @@ fn monitor_thread(_argument: usize) {
             kprintln!(
                 "[mon ] linux {translated} calls translated, {refused} answered ENOSYS,                  {mapped} pages mapped, {open} files open"
             );
+            let (threads, waits, wakes) = compat::linux_threads::statistics();
+            if threads > 0 || waits > 0 {
+                kprintln!(
+                    "[mon ] linux {threads} threads cloned, {waits} futex waits, {wakes} wakes"
+                );
+            }
+            let (frames, events) = compat::linux_display::statistics();
+            if frames > 0 {
+                kprintln!("[mon ] linux {frames} frames presented, {events} events delivered");
+            }
+            let (blocked, immediate) = compat::linux_poll::statistics();
+            let (pipes, carried) = pipe::statistics();
+            if blocked > 0 || pipes > 0 {
+                kprintln!(
+                    "[mon ] linux {blocked} waits blocked, {immediate} answered at once,                      {pipes} pipes carrying {carried} bytes"
+                );
+            }
+            let (connections, accepted, passed) = socket::statistics();
+            let (sockets, listening) = compat::linux_socket::statistics();
+            if sockets > 0 {
+                kprintln!(
+                    "[mon ] linux {sockets} sockets, {listening} names bound,                      {connections} connections ({accepted} accepted), {passed} handles passed"
+                );
+            }
+            let (translated32, refused32) = compat::linux32::statistics();
+            if translated32 > 0 || refused32 > 0 {
+                kprintln!(
+                    "[mon ] linux32 {translated32} i386 calls translated, {refused32} answered ENOSYS"
+                );
+            }
+            let (handlers, signals) = compat::linux_signal::statistics();
+            let replaced = compat::linux_exec::statistics();
+            if handlers > 0 || replaced > 0 {
+                kprintln!(
+                    "[mon ] linux {handlers} signal handlers installed, {signals} delivered,                      {replaced} programs replaced themselves"
+                );
+            }
         }
         let (calls, unknown) = arch::syscall::statistics();
         let (entered, returned) = arch::syscall::yield_statistics();
@@ -766,6 +805,22 @@ fn adopt_local_apic(info: &acpi::AcpiInfo) {
                 // The system-call boundary, which needs both the descriptor
                 // table and per-CPU state and so cannot be opened before here.
                 arch::syscall::init();
+
+                // And the floating-point and vector registers. Nothing in this
+                // kernel uses them and nothing built for this system does
+                // either -- but a program built for Linux is built against an
+                // ABI that *is* SSE, and until this runs its first `xorps`
+                // raises invalid opcode. See `arch::fpu`.
+                arch::fpu::enable();
+            }
+            if arch::fpu::enabled() {
+                kprintln!(
+                    "[fpu ] x87, MMX and SSE enabled for ring 3;                      512 bytes of state saved per thread"
+                );
+            } else {
+                kprintln!(
+                    "[fpu ] the vector unit could not be enabled; foreign programs will fault"
+                );
             }
             arch::syscall::report();
         }
@@ -1444,6 +1499,14 @@ fn seed_packages() {
             || name.ends_with(".AVI")
         {
             "PICTURES"
+        } else if name.ends_with(".DEB") || name.ends_with(".TGZ") || name.ends_with(".TAR") {
+            // Software written for somewhere else, which arrives the way
+            // anything arrives here -- as a file. The downloads folder is where
+            // a browser puts what it fetched, and a demonstration package
+            // travelling on the image belongs in the same place for the same
+            // reason a demonstration picture belongs in PICTURES: it is an
+            // example of the thing, sitting where the real thing would sit.
+            "DOWNLOAD"
         } else if name.ends_with(".NXR") {
             // The root certificate store. It travels the same way and for the
             // same reason as everything else here: a machine that had to fetch

@@ -1,0 +1,46 @@
+[package]
+name = "nexus-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Programs built for Linux, to be run by the compatibility layer."
+
+# A library so the programs below can share one set of system-call wrappers.
+# Every one of them is a foreign program; sharing the wrappers does not make
+# them less foreign, it makes the numbers wrong in one place instead of six.
+[lib]
+name = "nexus_guest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "guest-posix"
+path = "src/bin/posix.rs"
+
+[[bin]]
+name = "guest-threads"
+path = "src/bin/threads.rs"
+
+[[bin]]
+name = "guest-signals"
+path = "src/bin/signals.rs"
+
+[[bin]]
+name = "guest-exec"
+path = "src/bin/exec.rs"
+
+[[bin]]
+name = "guest-execed"
+path = "src/bin/execed.rs"
+
+[[bin]]
+name = "guest-net"
+path = "src/bin/net.rs"
+
+[[bin]]
+name = "guest-wlserver"
+path = "src/bin/wlserver.rs"
+
+[[bin]]
+name = "guest-wlclient"
+path = "src/bin/wlclient.rs"

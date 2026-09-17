@@ -169,6 +169,9 @@ extern "sysv64" fn application_processor_entry(cpu_index: u64) -> ! {
         // invalid opcode the first time a user thread migrated onto it and made
         // a call.
         super::syscall::init();
+        // As on the boot processor: the vector registers have to be turned on
+        // wherever a foreign program might be scheduled, which is everywhere.
+        super::fpu::enable();
     }
 
     STARTED.fetch_add(1, Ordering::Release);

@@ -672,6 +672,83 @@ fn run_a_linux_program() {
         b"linux:BIN/FILES.LX",
         "a Linux program that wrote a file and read it back",
     );
+
+    // Descriptors, a pipe, and waiting for one to be ready. The first program
+    // here that a *compiler* produced rather than an assembler: it is written
+    // in Rust, compiled for `x86_64-unknown-linux-gnu`, linked static with no
+    // C runtime, and would run unchanged on a Linux kernel. See
+    // `tools/nexus-guest`.
+    run_one(
+        b"linux:/usr/bin/posix",
+        "a Linux program that used descriptors, a pipe and poll",
+    );
+
+    // And one built for *i386*: thirty-two bit, `ET_EXEC`, `EM_386`, entered
+    // through a code segment that makes the processor decode thirty-two bit
+    // instructions, making its calls with `int 0x80` and i386's own numbers.
+    // `linux32:` and not `linux:`, because the two are different interfaces and
+    // the asker says which -- the same argument as for `linux:` itself.
+    run_one(
+        b"linux32:/usr/bin/thirty-two",
+        "a Linux program built for i386",
+    );
+
+    // A program that becomes another one. `execve` with no `fork` in front of
+    // it, which is what a bootstrapper is -- and what it hands over is the part
+    // that matters: a pipe it opened stays open across the replacement, which
+    // is how a launcher gives the program it starts a connection it had already
+    // made.
+    run_one(
+        b"linux:/usr/bin/exec",
+        "a Linux program that became another one",
+    );
+
+    // A signal, raised and handled. The one thing in the Unix interface that
+    // runs a program's code at a moment the program did not choose -- and the
+    // program has to still be correct afterwards, which is what the array it
+    // checks across the signal is for.
+    run_one(
+        b"linux:/usr/bin/signals",
+        "a Linux program that handled a signal",
+    );
+
+    // A server and a client on one machine, over a Unix domain socket -- the
+    // shape every desktop protocol on Linux has. The program is both sides,
+    // with the server in a thread of its own, and the last thing it does is
+    // hand a descriptor across the connection with `SCM_RIGHTS`: which is how
+    // a Wayland client gives a compositor a buffer, and without which a client
+    // can talk to a server and cannot hand it anything.
+    run_one(
+        b"linux:/usr/bin/net",
+        "a Linux server and client over a socket",
+    );
+
+    // A fourth, about threads. It makes one with `clone`, blocks on a futex
+    // until the new thread writes the word it is waiting on, and then checks a
+    // second value that thread left in memory they share -- because a futex
+    // that woke it without the thread having run would pass the first check and
+    // fail this one. The new thread makes a system call of its own before it
+    // signals, which is the only way to find out whether a thread entered with
+    // a copied register frame can reach the kernel at all.
+    run_one(b"linux:BIN/THREAD.LX", "a Linux program with two threads");
+
+    // And a fifth, which is a different kind of program rather than a wider
+    // one: it is `ET_DYN` and it has a `PT_INTERP`. Almost every real Linux
+    // program is, and starting one means the kernel loads two images into one
+    // address space, enters the interpreter instead of the program, and hands
+    // it the numbers it cannot work out for itself -- where each image went,
+    // where the program's headers are, and where its entry point is.
+    //
+    // It is asked for by the path a Linux program would name, because that is
+    // the path the interpreter opens to read the program's own file back: it is
+    // installed in the Linux root rather than staged on the EFI partition, by
+    // the list the kernel reads at boot.
+    //
+    // The interpreter stops with a status of its own for each of those numbers,
+    // and the program refuses to run at all if the interpreter did not -- so a
+    // kernel that ignored `PT_INTERP` fails here instead of looking like it
+    // passed. See `tools/nexus-linux-example/src/dynamic.rs`.
+    run_one(b"linux:/usr/bin/dyn", "a dynamically linked Linux program");
 }
 
 /// Start one translated program and wait for it.

@@ -74,6 +74,13 @@ impl Rights {
     pub const TRANSFER: Self = Self(1 << 3);
     /// Everything a freshly created endpoint carries.
     pub const ALL: Self = Self(0b1111);
+    /// No right at all.
+    ///
+    /// For a caller that wants to know *what* a handle names without claiming
+    /// it may do anything with it -- which is a real question: a translated
+    /// program's `read` has to find out whether a descriptor is a file, a pipe
+    /// or the console before it can say whether reading it is allowed.
+    pub const NONE: Self = Self(0);
 
     /// Whether every right in `other` is present.
     #[must_use]
@@ -488,6 +495,39 @@ pub enum Object {
     Process(Arc<crate::process::Completion>),
     /// Somewhere to wait for whichever of several things happens first.
     WaitSet(Arc<crate::waitset::WaitSet>),
+    /// One end of a stream of bytes. See [`crate::pipe`].
+    ///
+    /// A handle names an *end*, not the pipe: "you may read this" and "you may
+    /// write this" are different authorities, and one object that did both
+    /// would make them indistinguishable.
+    Pipe(Arc<crate::pipe::PipeEnd>),
+    /// The machine's own log, as something a handle can name.
+    ///
+    /// Every program can already reach the log, through `nexus_user::log`, and
+    /// that is ambient authority — the one thing this system tries not to have.
+    /// It became worth fixing when a foreign program asked to *duplicate* its
+    /// standard output: a descriptor is a handle here, so a second descriptor
+    /// for the log has to be a second handle to something, and there was
+    /// nothing for it to be a handle to.
+    Console(Console),
+    /// A connection between two programs, or a name something is listening at.
+    ///
+    /// One variant for both because a program's descriptor does not change when
+    /// it calls `listen` or `connect`: the socket it made is the socket it now
+    /// has a connection on. See [`crate::socket::Socket`].
+    Socket(Arc<crate::socket::Socket>),
+}
+
+/// A view of the machine's log, and which of a program's streams it is.
+///
+/// Zero bytes of state beyond the number. What it carries is *authority*: a
+/// program holding one may write to the log, and one that holds none may not —
+/// which will matter more when `log` stops being ambient.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Console {
+    /// 0, 1 or 2: input, output, error. Input reads as end of file, because
+    /// the keyboard belongs to the compositor and is given to windows.
+    pub stream: u8,
 }
 
 impl Object {
@@ -506,6 +546,23 @@ impl Object {
             }
             Self::Process(_) => "process",
             Self::WaitSet(_) => "wait set",
+            Self::Pipe(end) => {
+                if end.is_writing() {
+                    "pipe (writing)"
+                } else {
+                    "pipe (reading)"
+                }
+            }
+            Self::Console(_) => "console",
+            Self::Socket(socket) => {
+                if socket.listener().is_some() {
+                    "socket (listening)"
+                } else if socket.stream().is_some() {
+                    "socket (connected)"
+                } else {
+                    "socket"
+                }
+            }
         }
     }
 }
@@ -691,6 +748,58 @@ impl HandleTable {
             }
             _ => Err(HandleError::WrongKind),
         }
+    }
+
+    /// What `id` names, whatever kind it is.
+    ///
+    /// For a caller that has to decide *from* the kind rather than assert it:
+    /// a `read` on a Linux file descriptor is a read of a file, a pipe or the
+    /// console depending on what the descriptor turned out to be, and asking
+    /// three times and taking whichever succeeded would be three lock
+    /// acquisitions to learn one thing.
+    pub fn object(&self, id: u32, needed: Rights) -> Result<Object, HandleError> {
+        let entries = self.entries.lock();
+        let handle = entries.get(&id).ok_or(HandleError::NotFound)?;
+        if !handle.rights.contains(needed) {
+            return Err(HandleError::Denied);
+        }
+        Ok(handle.object.clone())
+    }
+
+    /// Put another handle to the same object at a number the caller chose.
+    ///
+    /// What `dup2` is, and the reason a shell can redirect: a program is about
+    /// to write to descriptor one, and this puts something else there first.
+    ///
+    /// Whatever was at `to` is closed, which is what `dup2` means and is why it
+    /// cannot be built out of `duplicate` — the replacement has to be atomic
+    /// from the caller's point of view, or a thread could be handed the number
+    /// in the window where it names nothing.
+    ///
+    /// Rights can only be dropped, never gained, exactly as in
+    /// [`duplicate`](Self::duplicate).
+    pub fn duplicate_at(&self, id: u32, to: u32, rights: Rights) -> Result<u32, HandleError> {
+        if to == 0 {
+            // Handle zero is never issued, so it is never a valid target.
+            return Err(HandleError::NotFound);
+        }
+        let mut entries = self.entries.lock();
+        let handle = entries.get(&id).ok_or(HandleError::NotFound)?;
+        if !handle.rights.contains(rights) {
+            return Err(HandleError::Denied);
+        }
+        let object = handle.object.clone();
+        // The old occupant is dropped *after* the new one is in place, outside
+        // the map but still under the lock: dropping a pipe end wakes whoever
+        // was blocked on it, and a reader woken while the number named nothing
+        // would look and find nothing there.
+        let displaced = entries.insert(to, Handle { object, rights });
+        drop(entries);
+        drop(displaced);
+        // The counter only ever goes up, so a number handed out by hand must
+        // not be handed out again by `insert`.
+        self.next.fetch_max(to + 1, Ordering::Relaxed);
+        Ok(to)
     }
 
     /// Another handle to the same object, carrying no more than this one.

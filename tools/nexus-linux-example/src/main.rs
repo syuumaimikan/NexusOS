@@ -24,6 +24,10 @@
 //! exercise is the *interface* — the instruction, the call numbers, the
 //! register convention — not the language it was written in.
 
+mod draw;
+mod dynamic;
+mod threads;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -38,7 +42,7 @@ const PHDR: usize = 56;
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.len() < 2 || arguments.len() > 3 {
-        eprintln!("usage: nexus-linux-example <output.elf> <message> [rich|files]");
+        eprintln!("usage: nexus-linux-example <output.elf> <message> [rich|files|threads|draw|dynamic|interpreter]");
         return ExitCode::FAILURE;
     }
     let output = PathBuf::from(&arguments[0]);
@@ -53,13 +57,25 @@ fn main() -> ExitCode {
         None => Flavour::Plain,
         Some("rich") => Flavour::Rich,
         Some("files") => Flavour::Files,
+        // The pair that is dynamically linked: an `ET_DYN` program whose
+        // `PT_INTERP` names the other, and the other. See `dynamic`.
+        Some("dynamic") => Flavour::Dynamic,
+        Some("interpreter") => Flavour::Interpreter,
+        // Two threads and a lock between them. See `threads`.
+        Some("threads") => Flavour::Threads,
+        // A window. See `draw`.
+        Some("draw") => Flavour::Draw,
         Some(other) => {
             eprintln!("nexus-linux-example: no such kind of program: {other}");
             return ExitCode::FAILURE;
         }
     };
 
-    let image = build(&message, flavour);
+    let image = match flavour {
+        Flavour::Dynamic => dynamic::build(dynamic::Piece::Program, &message),
+        Flavour::Interpreter => dynamic::build(dynamic::Piece::Interpreter, &message),
+        _ => build(&message, flavour),
+    };
 
     if let Err(error) = std::fs::write(&output, &image) {
         eprintln!(
@@ -89,40 +105,45 @@ fn main() -> ExitCode {
 /// methods, each with the byte sequence it emits written down, and the program
 /// below reads as the list of steps it is.
 #[derive(Default)]
-struct Assembler {
-    code: Vec<u8>,
+pub struct Assembler {
+    pub code: Vec<u8>,
 }
 
 impl Assembler {
-    fn at(&self) -> usize {
+    pub fn at(&self) -> usize {
         self.code.len()
     }
-    fn raw(&mut self, bytes: &[u8]) -> &mut Self {
+    pub fn raw(&mut self, bytes: &[u8]) -> &mut Self {
         self.code.extend_from_slice(bytes);
         self
     }
     /// `mov eax, imm32` and friends: the register is in the opcode byte, and
     /// writing to a 32-bit register zeroes the top half, which is why these
     /// serve for small 64-bit values too.
-    fn mov_eax(&mut self, value: u32) -> &mut Self {
+    pub fn mov_eax(&mut self, value: u32) -> &mut Self {
         self.raw(&[0xB8]).raw(&value.to_le_bytes())
     }
-    fn mov_edi(&mut self, value: u32) -> &mut Self {
+    pub fn mov_edi(&mut self, value: u32) -> &mut Self {
         self.raw(&[0xBF]).raw(&value.to_le_bytes())
     }
-    fn mov_esi(&mut self, value: u32) -> &mut Self {
+    pub fn mov_esi(&mut self, value: u32) -> &mut Self {
         self.raw(&[0xBE]).raw(&value.to_le_bytes())
     }
-    fn mov_edx(&mut self, value: u32) -> &mut Self {
+    pub fn mov_edx(&mut self, value: u32) -> &mut Self {
         self.raw(&[0xBA]).raw(&value.to_le_bytes())
     }
-    fn mov_r10d(&mut self, value: u32) -> &mut Self {
+    /// `mov ecx, imm32`. Not a system-call argument register -- `r10` stands in
+    /// for `rcx` there -- but the count `rep` and `div` both use.
+    pub fn mov_ecx(&mut self, value: u32) -> &mut Self {
+        self.raw(&[0xB9]).raw(&value.to_le_bytes())
+    }
+    pub fn mov_r10d(&mut self, value: u32) -> &mut Self {
         self.raw(&[0x41, 0xBA]).raw(&value.to_le_bytes())
     }
-    fn mov_r8d(&mut self, value: u32) -> &mut Self {
+    pub fn mov_r8d(&mut self, value: u32) -> &mut Self {
         self.raw(&[0x41, 0xB8]).raw(&value.to_le_bytes())
     }
-    fn mov_r9d(&mut self, value: u32) -> &mut Self {
+    pub fn mov_r9d(&mut self, value: u32) -> &mut Self {
         self.raw(&[0x41, 0xB9]).raw(&value.to_le_bytes())
     }
     /// `mov rsi, imm64`, for an address that does not fit in thirty-two bits --
@@ -135,11 +156,11 @@ impl Assembler {
     }
     /// `mov rbx, rax` -- the scratch page, kept where a system call cannot
     /// clobber it. Linux's calling convention destroys only `rcx` and `r11`.
-    fn rbx_from_rax(&mut self) -> &mut Self {
+    pub fn rbx_from_rax(&mut self) -> &mut Self {
         self.raw(&[0x48, 0x89, 0xC3])
     }
     /// `mov r12, rax` -- the descriptor, kept for the same reason.
-    fn r12_from_rax(&mut self) -> &mut Self {
+    pub fn r12_from_rax(&mut self) -> &mut Self {
         self.raw(&[0x49, 0x89, 0xC4])
     }
     /// `mov rdi, r12`
@@ -154,7 +175,7 @@ impl Assembler {
     fn rax_from_scratch(&mut self, offset: u32) -> &mut Self {
         self.raw(&[0x48, 0x8B, 0x83]).raw(&offset.to_le_bytes())
     }
-    fn syscall(&mut self) -> &mut Self {
+    pub fn syscall(&mut self) -> &mut Self {
         self.raw(&[0x0F, 0x05])
     }
 
@@ -172,23 +193,23 @@ impl Assembler {
     /// below is one of these, and each `code` is a different number -- so a
     /// failure says which step failed, in the exit status, without a word of
     /// explanation having to survive the journey.
-    fn unless(&mut self, jump: u8, code: u32) -> &mut Self {
+    pub fn unless(&mut self, jump: u8, code: u32) -> &mut Self {
         let block = Self::stop(code);
         let over = u8::try_from(block.len()).expect("a stopping block is twelve bytes");
         self.raw(&[jump, over]).raw(&block)
     }
     /// Carry on if `rax` is not negative.
-    fn expect_not_negative(&mut self, code: u32) -> &mut Self {
+    pub fn expect_not_negative(&mut self, code: u32) -> &mut Self {
         self.raw(&[0x48, 0x85, 0xC0]).unless(0x79, code) // test rax, rax; jns
     }
     /// Carry on if `rax` is exactly `value`.
-    fn expect_exactly(&mut self, value: u32, code: u32) -> &mut Self {
+    pub fn expect_exactly(&mut self, value: u32, code: u32) -> &mut Self {
         self.raw(&[0x48, 0x3D])
             .raw(&value.to_le_bytes())
             .unless(0x74, code) // cmp; je
     }
     /// Carry on if `rax` is `value` or more.
-    fn expect_at_least(&mut self, value: u32, code: u32) -> &mut Self {
+    pub fn expect_at_least(&mut self, value: u32, code: u32) -> &mut Self {
         self.raw(&[0x48, 0x3D])
             .raw(&value.to_le_bytes())
             .unless(0x7D, code) // cmp; jge
@@ -322,6 +343,38 @@ fn files_machine_code(
     a.mov_rcx_imm(first_eight);
     a.raw(&[0x48, 0x39, 0xC8]).unless(0x74, 19); // cmp rax, rcx; je
 
+    // Read again from offset zero while the descriptor is at EOF. Keep a
+    // separate destination so a no-op syscall cannot pass the byte check.
+    a.rdi_from_r12()
+        .rsi_in_scratch(BUFFER + 128)
+        .mov_edx(8)
+        .mov_r10d(0)
+        .mov_eax(17)
+        .syscall()
+        .expect_exactly(8, 27);
+    a.rax_from_scratch(BUFFER + 128).mov_rcx_imm(first_eight);
+    a.raw(&[0x48, 0x39, 0xC8]).unless(0x74, 28);
+    a.rdi_from_r12()
+        .mov_rsi_imm(0)
+        .mov_edx(1)
+        .mov_eax(8)
+        .syscall()
+        .expect_exactly(length, 29); // SEEK_CUR is unchanged.
+    a.rdi_from_r12()
+        .rsi_in_scratch(BUFFER + 128)
+        .mov_edx(8)
+        .mov_r10d(length)
+        .mov_eax(17)
+        .syscall()
+        .expect_exactly(0, 30);
+    a.rdi_from_r12()
+        .rsi_in_scratch(BUFFER + 128)
+        .mov_edx(8)
+        .raw(&[0x49, 0xC7, 0xC2, 0xff, 0xff, 0xff, 0xff]) // mov r10, -1
+        .mov_eax(17)
+        .syscall()
+        .expect_exactly((-22i32) as u32, 31);
+
     a.rdi_from_r12()
         .mov_rsi_imm(0)
         .mov_edx(2) // SEEK_END
@@ -424,6 +477,14 @@ enum Flavour {
     Plain,
     Rich,
     Files,
+    /// An `ET_DYN` executable that names an interpreter.
+    Dynamic,
+    /// The interpreter it names.
+    Interpreter,
+    /// A program that makes a thread and waits on a futex for it.
+    Threads,
+    /// A program that opens a window and draws in it.
+    Draw,
 }
 
 /// The file the `files` program writes, and the directory it lists.
@@ -461,14 +522,33 @@ fn build(message: &[u8], flavour: Flavour) -> Vec<u8> {
                     root,
                 )
             }
+            // The dynamic pair is not built here. Neither of them is `ET_EXEC`,
+            // neither has one program header, and neither names an address --
+            // which is three of the four things this function assumes.
+            Flavour::Threads => threads::machine_code(message_address, length),
+            // `path` is the one string every flavour that needs one puts after
+            // its message. For `files` it is the file it writes; for this it is
+            // the device it opens.
+            Flavour::Draw => draw::machine_code(message_address, length, path),
+            Flavour::Dynamic | Flavour::Interpreter => {
+                unreachable!("the dynamic pair is built by `dynamic::build`, not by this")
+            }
         }
+    };
+
+    // One string after the message, and which one depends on the flavour. No
+    // flavour needs two, so there is one slot rather than a table.
+    let path_bytes: &[u8] = if flavour == Flavour::Draw {
+        draw::DEVICE_PATH
+    } else {
+        PROBE_PATH
     };
 
     let code = assemble(0, 0, 0); // to measure it
     let message_offset = code_offset + code.len();
     let message_address = BASE + message_offset as u64;
     let path_offset = message_offset + message.len();
-    let root_offset = path_offset + PROBE_PATH.len();
+    let root_offset = path_offset + path_bytes.len();
     let code = assemble(
         message_address,
         BASE + path_offset as u64,
@@ -528,7 +608,7 @@ fn build(message: &[u8], flavour: Flavour) -> Vec<u8> {
 
     image.extend_from_slice(&code);
     image.extend_from_slice(message);
-    image.extend_from_slice(PROBE_PATH);
+    image.extend_from_slice(path_bytes);
     image.extend_from_slice(ROOT_PATH);
     assert_eq!(image.len(), total);
     image

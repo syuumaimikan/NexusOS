@@ -27,10 +27,15 @@
 //! | `rcx`, `r11` | destroyed by the instruction itself |
 //!
 //! The argument registers are the SysV C ones with `r10` standing in for `rcx`,
-//! which the instruction takes. They are *not* preserved: a caller that needs
-//! them keeps its own copy. Everything else — `rbx`, `rbp`, `rsp`, `r12`
-//! through `r15` — comes back untouched, which is what makes a call usable from
-//! compiled code without a wrapper that saves the world.
+//! which the instruction takes. Every register other than `rax`, `rcx` and
+//! `r11` comes back untouched, which is what makes a call usable from compiled
+//! code without a wrapper that saves the world — and is the same promise Linux
+//! makes, which matters because the same stub serves both.
+//!
+//! The entry stub saves all of them, not only the ones it must, because a
+//! register frame is what `clone` needs: a new thread starts with a copy of its
+//! parent's registers, and a kernel that had not kept them could not make one.
+//! See [`Frame`].
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -145,39 +150,84 @@ nexus_syscall_entry:
     mov gs:[{user_rsp}], rsp
     mov rsp, gs:[{kernel_rsp}]
 
-    // Move the caller's stack pointer off the per-CPU slot and onto this
-    // thread's own stack, immediately.
+    // The caller's register state, whole, on this thread's own kernel stack.
     //
-    // The slot is scratch for exactly the two instructions above, where there
-    // was nowhere else to put it. It cannot be where the value *lives*: a
-    // system call may block, and a thread that blocks can be resumed on a
-    // different processor, whose slot holds some other thread's stack pointer
-    // or nothing at all. Leaving it there was a bug that only appeared when a
-    // call both blocked and migrated.
+    // The slot in the per-CPU area is scratch for exactly the two instructions
+    // above, where there was nowhere else to put it. It cannot be where the
+    // value *lives*: a system call may block, and a thread that blocks can be
+    // resumed on a different processor, whose slot holds some other thread's
+    // stack pointer or nothing at all. Leaving it there was a bug that only
+    // appeared when a call both blocked and migrated.
+    //
+    // This used to save three registers: the user's stack pointer, and the
+    // `rcx` and `r11` the instruction itself takes. Sixteen now, because of
+    // `clone`. A new thread starts life with *its parent's registers*, all of
+    // them bar two -- that is what Linux's `clone` means, and it is not an
+    // implementation detail a libc could work around: every C library's thread
+    // entry reads the function to call out of a register it set before the
+    // call. A kernel that could only restore three would start a thread that
+    // jumps to whatever was in `r9`.
+    //
+    // The order is chosen so that what is at `rsp` reads as one structure --
+    // see `Frame`. Sixteen pushes is a hundred and twenty-eight bytes, which
+    // leaves the stack as aligned as it found it.
     push qword ptr gs:[{user_rsp}]
+    push rcx        // where the instruction is to return to
+    push r11        // and the flags it took
+    push rax        // the call number, and where its result goes
+    push rdi
+    push rsi
+    push rdx
+    push r10
+    push r8
+    push r9
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
 
-    // `sysretq` needs these two back exactly as the instruction left them.
-    // They are pushed rather than kept in registers because the dispatcher is
-    // ordinary Rust and may use any caller-saved register it likes.
-    push rcx
-    push r11
-
-    // Three pushes leave the stack eight bytes out of the alignment the C ABI
-    // requires at a `call`. One more restores it.
-    sub rsp, 8
-
-    // Shuffle the system-call registers into the C argument registers, right
-    // to left so that nothing is overwritten before it is read.
-    mov r9, r8
-    mov r8, r10
-    mov rcx, rdx
-    mov rdx, rsi
-    mov rsi, rdi
-    mov rdi, rax
+    // The arguments, read back out of the frame rather than shuffled between
+    // registers. Six of them go in registers, and the seventh and eighth --
+    // the sixth system-call argument, and the frame itself -- go on the stack
+    // where the C ABI puts arguments past the sixth.
+    //
+    // Nothing needed six arguments until `mmap` did, and nothing needed the
+    // frame until `clone` did. Linux's `mmap` takes an address, a length, a
+    // protection, a set of flags, a descriptor and an offset, and a
+    // translation layer that could only see five of them would be one whose
+    // file mappings all started at offset zero.
+    mov rbx, rsp
+    push rbx                    // the frame, as the eighth argument
+    push qword ptr [rbx + 48]   // r9, as the seventh
+    mov rdi, [rbx + 96]         // rax: the call number
+    mov rsi, [rbx + 88]         // rdi
+    mov rdx, [rbx + 80]         // rsi
+    mov rcx, [rbx + 72]         // rdx
+    mov r8,  [rbx + 64]         // r10
+    mov r9,  [rbx + 56]         // r8
     call {dispatch}
+    add rsp, 16
 
-    // The result is already in rax, which is where the caller wants it.
-    add rsp, 8
+    // The result goes into the frame, so that coming back out is one uniform
+    // sequence of pops rather than a special case for the one register that
+    // carries an answer.
+    mov [rsp + 96], rax
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    pop r9
+    pop r8
+    pop r10
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rax
     pop r11
     pop rcx
 
@@ -193,6 +243,189 @@ nexus_syscall_entry:
     kernel_rsp = const percpu::offset::SYSCALL_STACK_TOP,
     dispatch = sym dispatch,
 );
+
+/// A caller's register state, as the entry stub leaves it on the kernel stack.
+///
+/// The field order *is* the push order in the stub, reversed, and the two have
+/// to be read together: this is a view of memory the assembler wrote, not a
+/// structure the compiler is free to arrange. Changing either without the other
+/// is a silent mistake, which is why the offsets the stub uses are named in the
+/// comments here.
+///
+/// It exists for `clone`. A new thread begins with a copy of its parent's
+/// registers, differing in two: `rax` is zero, because that is how the child
+/// tells itself apart from the parent, and `rsp` is the stack the caller
+/// nominated. Everything else has to be the parent's, because every C library's
+/// thread entry sequence reads the function it is to call out of a register it
+/// set before the call and expects to find on the other side.
+///
+/// It is also the shape a signal frame will need, on the day signals are
+/// delivered: a signal handler runs on the user's stack and returns to exactly
+/// this state.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Frame {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbp: u64,
+    pub rbx: u64,
+    /// The sixth system-call argument. Stub offset 48.
+    pub r9: u64,
+    /// The fifth. Stub offset 56.
+    pub r8: u64,
+    /// The fourth: `r10` stands in for `rcx`, which the instruction takes.
+    pub r10: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    /// The call number on the way in, the result on the way out. Offset 96.
+    pub rax: u64,
+    /// The caller's `RFLAGS`, which the instruction parked in `r11`.
+    pub rflags: u64,
+    /// Where the instruction is to return to, which it parked in `rcx`.
+    pub rip: u64,
+    /// The caller's stack pointer.
+    pub rsp: u64,
+}
+
+core::arch::global_asm!(
+    r#"
+    .section .text
+    .global nexus_int80_entry
+    .p2align 4
+nexus_int80_entry:
+    // A thirty-two bit program's system call arrives here, through an
+    // interrupt gate rather than through `syscall`. The processor has already
+    // done most of the work the other stub does by hand: it switched to this
+    // thread's kernel stack from the TSS, and it pushed five words --
+    //
+    //     [rsp +  0] rip     [rsp +  8] cs      [rsp + 16] rflags
+    //     [rsp + 24] rsp     [rsp + 32] ss
+    //
+    // -- which is what `iretq` will pop again. What is left is the `GS` swap
+    // and building the register frame the dispatcher reads.
+    swapgs
+
+    // The three words the frame holds that the interrupt frame already has, in
+    // the order the frame wants them: the caller's stack pointer highest, then
+    // where it is to return to, then its flags. Each is read from where the
+    // previous push has just moved it to.
+    push qword ptr [rsp + 24]
+    push qword ptr [rsp + 8]
+    push qword ptr [rsp + 32]
+
+    // And the general registers, in the same order the `syscall` stub uses --
+    // with one difference, which is the only one between the two entries.
+    // `rcx` is not a `Frame` field: at the other boundary the instruction puts
+    // the return address there. On i386 `ecx` is the *second* argument, so it
+    // goes into the slot the fourth argument would occupy, and
+    // `compat::linux32` reads it from there.
+    push rax
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push r8
+    push r9
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rdi, rsp
+    call {dispatch32}
+
+    // The answer, and then whatever the dispatcher did to the frame. A
+    // thirty-two bit `exit` never comes back here at all; anything that does
+    // may have changed where the program resumes, which is how this entry
+    // would deliver a signal if it ever did.
+    mov [rsp + 96], rax
+    mov rax, [rsp + 104]
+    mov [rsp + 144], rax      // the interrupt frame's rflags
+    mov rax, [rsp + 112]
+    mov [rsp + 128], rax      // its rip
+    mov rax, [rsp + 120]
+    mov [rsp + 152], rax      // and its rsp
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    pop r9
+    pop r8
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rax
+
+    // The three copies are done with; what `iretq` pops is the interrupt
+    // frame above them, which now carries whatever the dispatcher decided.
+    add rsp, 24
+    swapgs
+    iretq
+"#,
+    dispatch32 = sym dispatch32,
+);
+
+extern "sysv64" {
+    /// The `int 0x80` entry point. Never called from Rust.
+    fn nexus_int80_entry();
+}
+
+/// Address of that stub, as a plain function item for the descriptor table.
+#[allow(non_upper_case_globals)]
+pub const int80_entry: unsafe extern "sysv64" fn() = nexus_int80_entry;
+
+/// One system call from a thirty-two bit program.
+///
+/// Separate from [`dispatch`] because it is a separate interface: a different
+/// table of numbers, a different set of argument registers, and a different
+/// door into the kernel. Sharing one function would mean a `match` on the
+/// program's width inside every arm.
+extern "sysv64" fn dispatch32(frame: *mut Frame) -> u64 {
+    // As in `dispatch`: the stub arrives with interrupts masked, because an
+    // interrupt gate clears them, and there is somewhere safe to take one now.
+    super::interrupts::enable();
+    CALLS.fetch_add(1, Ordering::Relaxed);
+    crate::sched::stop_if_asked();
+
+    // A sixty-four bit program has no business here. `int 0x80` from one is
+    // either a mistake or an attempt to reach the other table, and answering it
+    // would be answering a call the program did not make the way it thinks.
+    if !matches!(
+        crate::sched::current_process().map(|process| process.personality),
+        Some(crate::process::Personality::Linux32)
+    ) {
+        kprintln!("[linux32] int 0x80 from a program that is not thirty-two bit; refusing");
+        super::interrupts::disable();
+        return (-38i64) as u64;
+    }
+
+    // SAFETY: `frame` points at the register frame the stub built on this
+    // thread's own kernel stack, which nothing else can reach.
+    let answer = crate::compat::linux32::dispatch(unsafe { &mut *frame });
+
+    // And a signal, exactly as at the other boundary.
+    if let Some(process) = crate::sched::current_process() {
+        if crate::compat::linux_signal::pending(process.id.0) {
+            // SAFETY: as above.
+            unsafe {
+                (*frame).rax = answer;
+                crate::compat::linux_signal::deliver(&mut *frame);
+            }
+        }
+    }
+    crate::sched::stop_if_asked();
+    super::interrupts::disable();
+    answer
+}
 
 extern "sysv64" {
     /// The entry point `IA32_LSTAR` holds. Never called from Rust.
@@ -319,6 +552,18 @@ pub enum Call {
     /// passed through memory, which would be a pointer to validate for four
     /// numbers.
     DisplayFlush = 33,
+    /// Make a stream of bytes with two ends. Returns both handles packed into
+    /// one word: the reading end in the high half, the writing end in the low,
+    /// as [`Call::ChannelCreate`] does for a channel.
+    ///
+    /// A channel is not a pipe. A channel carries *messages* -- what comes out
+    /// of one read is exactly what went into one write -- and that boundary is
+    /// a feature. A pipe has no boundaries: three writes of ten bytes are
+    /// thirty bytes, and a reader asking for seven gets seven. Every shell
+    /// pipeline anybody has ever written is the second thing, and until this
+    /// existed a program here could hand another program a message and could
+    /// not hand it a stream. See [`crate::pipe`].
+    PipeCreate = 34,
 }
 
 impl Call {
@@ -362,6 +607,7 @@ impl Call {
             31 => Some(Self::Now),
             32 => Some(Self::Random),
             33 => Some(Self::DisplayFlush),
+            34 => Some(Self::PipeCreate),
             _ => None,
         }
     }
@@ -425,6 +671,12 @@ extern "sysv64" fn dispatch(
     argument2: u64,
     argument3: u64,
     argument4: u64,
+    // The sixth, which no Nexus call takes: this system's own interface has
+    // five, and the stub passes six because Linux's `mmap` has six. Named
+    // rather than dropped, so that the shape of the call the stub makes is
+    // visible here and not only in the assembler.
+    _argument5: u64,
+    frame: *mut Frame,
 ) -> u64 {
     // The stub arrives with interrupts masked, because until it had switched
     // stacks there was nowhere safe to take one. There is now.
@@ -446,9 +698,44 @@ extern "sysv64" fn dispatch(
         crate::sched::current_process().map(|process| process.personality),
         Some(crate::process::Personality::Linux)
     ) {
-        let answer = crate::compat::linux::dispatch(
-            number, argument0, argument1, argument2, argument3, argument4,
-        );
+        // SAFETY: `frame` points at the register frame the entry stub built on
+        // this thread's own kernel stack, which stays alive for the whole of
+        // this call and is not aliased -- nothing else can reach another
+        // thread's kernel stack.
+        // The frame carries the arguments as well as the number, so it is all
+        // that has to be handed over: the six values below are the same six
+        // registers it already holds.
+        // SAFETY: `frame` points at this thread's own kernel stack, which
+        // nothing else can reach; the stub restores the registers from it on
+        // the way out, which is what lets `rt_sigreturn` and signal delivery
+        // change where the program resumes.
+        let answer = crate::compat::linux::dispatch(number, unsafe { &mut *frame });
+
+        // And a signal, if one is waiting.
+        //
+        // Here, on the way out, and nowhere else. A thread that is *in* the
+        // kernel has a register state that can be described and resumed; one
+        // interrupted anywhere else may be halfway through an instruction
+        // sequence the compiler expected to finish. Linux delivers from more
+        // places than this; the difference is that a program which spins
+        // without making a system call cannot be signalled here, and that is
+        // written down in `compat::linux_signal` rather than discovered.
+        //
+        // The answer goes into the frame *first*, so that the frame the handler
+        // returns through carries what the program's interrupted call was going
+        // to give it. Without that, a `write` interrupted by a signal would
+        // appear to return the number of the call rather than the bytes.
+        if let Some(process) = crate::sched::current_process() {
+            if crate::compat::linux_signal::pending(process.id.0) {
+                // SAFETY: `frame` points at this thread's own kernel stack,
+                // which nothing else can reach, and the stub restores the
+                // registers from it on the way out.
+                unsafe {
+                    (*frame).rax = answer;
+                    crate::compat::linux_signal::deliver(&mut *frame);
+                }
+            }
+        }
         super::interrupts::disable();
         return answer;
     }
@@ -530,6 +817,7 @@ extern "sysv64" fn dispatch(
         },
         Some(Call::Random) => random(argument0, argument1),
         Some(Call::DisplayFlush) => display_flush(argument0, argument1, argument2),
+        Some(Call::PipeCreate) => pipe_create(),
         None => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             kprintln!("[sys ] unimplemented system call {number}");
@@ -950,6 +1238,34 @@ fn memory_map(handle: u64, address: u64, writable: u64) -> u64 {
     }
 
     bytes
+}
+
+/// [`Call::PipeCreate`]: a stream of bytes, and the two ends of it.
+///
+/// Both handles come back in one word, the reading end in the high half. The
+/// same shape as `channel_create`, and for the same reason: two handles are one
+/// answer, and a call that returned them separately would have a moment where a
+/// caller held one and not the other.
+///
+/// The rights are what each end can actually do. A reading end carries `READ`
+/// and not `WRITE`, so a program that was handed one cannot write into the pipe
+/// -- not because this layer remembers which end it is, but because the handle
+/// does not carry the right.
+fn pipe_create() -> u64 {
+    let process = match caller() {
+        Ok(process) => process,
+        Err(error) => return error,
+    };
+    let (reading, writing) = crate::pipe::Pipe::pair();
+    let read_handle = process.handles.insert(
+        crate::ipc::Object::Pipe(reading),
+        crate::ipc::Rights::READ | crate::ipc::Rights::CLOSE | crate::ipc::Rights::TRANSFER,
+    );
+    let write_handle = process.handles.insert(
+        crate::ipc::Object::Pipe(writing),
+        crate::ipc::Rights::WRITE | crate::ipc::Rights::CLOSE | crate::ipc::Rights::TRANSFER,
+    );
+    (u64::from(read_handle) << 32) | u64::from(write_handle)
 }
 
 /// [`Call::MemorySize`]: how large a memory object is.

@@ -196,6 +196,71 @@ impl AddressSpace {
         unsafe { paging::unmap_page_in(self.root, virt) }
     }
 
+    /// Change what a page in this space permits, without moving it.
+    ///
+    /// Returns the frame, which does not change hands: this is not an unmap and
+    /// a map, and a caller taking write permission away from a page does not
+    /// become responsible for freeing anything.
+    ///
+    /// # Safety
+    ///
+    /// `virt` must be in the user half, and `flags` must include `USER` --
+    /// clearing it makes the page unreachable from ring 3 rather than making it
+    /// less permissive, which is not what any caller of this means.
+    pub unsafe fn protect(&self, virt: u64, flags: u64) -> Result<u64, paging::MapError> {
+        debug_assert!(virt < layout::USER_SPACE_END);
+        debug_assert!(flags & paging::USER != 0);
+        // SAFETY: upheld by the caller; `self.root` is live for as long as
+        // `self` is.
+        unsafe { paging::protect_page_in(self.root, virt, flags) }
+    }
+
+    /// Take everything out of the user half, leaving the space empty and
+    /// usable.
+    ///
+    /// What `execve` needs, and the one operation that treats an address space
+    /// as something to be *reused* rather than made and dropped. Every mapping
+    /// goes, every table under the root goes, and the root's own low entries
+    /// are cleared -- which is the part `free_user_half` does not do, because
+    /// it runs when the root is about to be freed as well.
+    ///
+    /// A frame marked `SHARED` is unmapped and not freed, exactly as at
+    /// teardown: it belongs to a memory object something else may still be
+    /// mapping, and freeing it here would take it from them.
+    ///
+    /// # Safety
+    ///
+    /// Nothing may be running in the user half of this space. For `execve` that
+    /// means the calling thread is in the kernel and is the process's only
+    /// thread -- a sibling still in ring 3 would have the ground taken out from
+    /// under it.
+    pub unsafe fn clear_user_half(&self) {
+        for index in 0..KERNEL_FIRST_ENTRY {
+            // SAFETY: `self.root` is a live table and `index` is in range.
+            let entry = unsafe { paging::read_table_entry(self.root, index) };
+            if entry & paging::PRESENT == 0 {
+                continue;
+            }
+            // SAFETY: the entry names a live page-directory-pointer table that
+            // nothing is using, by the caller's promise.
+            unsafe { free_table(entry & paging::ADDRESS_MASK, 1) };
+            // And the entry itself, so the next mapping builds a fresh table
+            // rather than following a pointer into freed memory.
+            //
+            // SAFETY: as above.
+            unsafe { paging::write_table_entry(self.root, index, 0) };
+        }
+
+        // Every translation in the user half is now wrong, on every processor
+        // that has one cached. Reloading `cr3` here covers this one; the others
+        // cannot be running this space, because the caller promises nothing is.
+        if paging::active_root() == self.root {
+            // SAFETY: the root is this space's own and is still live -- only
+            // what is under it has gone.
+            unsafe { paging::flush_all() };
+        }
+    }
+
     /// What `virt` translates to in this space, if anything.
     #[must_use]
     pub fn translate(&self, virt: u64) -> Option<u64> {

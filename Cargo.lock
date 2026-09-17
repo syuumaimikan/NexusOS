@@ -36,6 +36,14 @@ version = "0.1.0"
 dependencies = [
  "nexus-machine",
  "nexus-user",
+ "nexus-utf8",
+]
+
+[[package]]
+name = "nexus-archive"
+version = "0.1.0"
+dependencies = [
+ "nexus-inflate",
 ]
 
 [[package]]
@@ -149,6 +157,14 @@ dependencies = [
 
 [[package]]
 name = "nexus-font"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-guest"
+version = "0.1.0"
+
+[[package]]
+name = "nexus-guest32"
 version = "0.1.0"
 
 [[package]]
@@ -306,6 +322,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-render3d"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-roots"
 version = "0.1.0"
 dependencies = [
@@ -352,6 +372,14 @@ dependencies = [
 [[package]]
 name = "nexus-shellwords"
 version = "0.1.0"
+
+[[package]]
+name = "nexus-solid"
+version = "0.1.0"
+dependencies = [
+ "nexus-render3d",
+ "nexus-user",
+]
 
 [[package]]
 name = "nexus-store"
@@ -412,6 +440,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-unpack"
+version = "0.1.0"
+dependencies = [
+ "nexus-abi",
+ "nexus-api",
+ "nexus-archive",
+ "nexus-inflate",
+ "nexus-user",
+]
+
+[[package]]
 name = "nexus-update"
 version = "0.1.0"
 
@@ -432,6 +471,10 @@ version = "0.1.0"
 dependencies = [
  "nexus-mm",
 ]
+
+[[package]]
+name = "nexus-utf8"
+version = "0.1.0"
 
 [[package]]
 name = "nexus-view"
