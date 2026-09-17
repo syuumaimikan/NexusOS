@@ -1,0 +1,11 @@
+[package]
+name = "nexus-spirv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SPIR-V shader modules: read them, and run them, with no graphics hardware and no Vulkan."
+
+[lib]
+name = "nexus_spirv"
+path = "src/lib.rs"

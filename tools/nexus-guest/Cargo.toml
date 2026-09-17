@@ -13,6 +13,9 @@ description = "Programs built for Linux, to be run by the compatibility layer."
 name = "nexus_guest"
 path = "src/lib.rs"
 
+[dependencies]
+nexus-spirv = { path = "../../shared/nexus-spirv" }
+
 [[bin]]
 name = "guest-posix"
 path = "src/bin/posix.rs"
@@ -44,3 +47,11 @@ path = "src/bin/wlserver.rs"
 [[bin]]
 name = "guest-wlclient"
 path = "src/bin/wlclient.rs"
+
+# The one program here that is not only system calls: it reads a SPIR-V module
+# and runs it. The crate it uses is a Nexus one, which is fine -- it is
+# `#![no_std]` and knows nothing about either system. What makes these programs
+# foreign is the interface they call, not the code they are built from.
+[[bin]]
+name = "guest-shader"
+path = "src/bin/shader.rs"

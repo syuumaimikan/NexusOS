@@ -264,6 +264,59 @@ machine and no toolchain here could build one. It was tested against the client
 in this repository, written from the same protocol description. That is a weaker
 claim than "Wayland works" and it is the one being made.
 
+### A SPIR-V shader, read and run
+
+`scripts/test-shader.ps1`, evidence in `build/shader.png` · `cargo test -p nexus-spirv`
+
+Nobody writes SPIR-V. It is what `glslang`, `shaderc` and `naga` *emit*, and it
+is what Vulkan takes: `vkCreateShaderModule` is handed a block of it and nothing
+else. A machine that cannot read SPIR-V cannot run a shader anybody else
+compiled, whatever else it can draw — so it is the first thing between this
+system and any graphics interface worth the name.
+
+`shared/nexus-spirv` reads a module and runs it. Twenty-one host tests cover the
+header, the instruction stream, strings (whose length decides where every later
+operand is), types, constants, `Location` and `BuiltIn` decorations, the
+extended instruction set, and `OpPhi` — which is the part that looks strange and
+is not: in single-assignment form a value that depends on which way control came
+has to say so.
+
+`tools/nexus-guest/src/bin/shader.rs` is a program **built for Linux** that
+assembles a module, reads it back, and runs it once per fragment into the window
+the compositor gave it. The shader is the one every tutorial starts with:
+
+```glsl
+vec2 uv = gl_FragCoord.xy / vec2(160.0, 100.0);
+float ring = 1.0 - clamp(length(uv - vec2(0.5)) * 2.4, 0.0, 1.0);
+colour = vec4(uv.x * 0.25 + ring, uv.y * 0.35 + ring * 0.2, ring, 1.0);
+```
+
+It uses what makes a shader a shader rather than a loop: an input it did not
+declare the contents of, component arithmetic, and two functions out of
+`GLSL.std.450`. The test checks from outside the machine that the *disc* is on
+the screen and that it fades outwards — a window of one flat colour, or one the
+shader never touched, fails that.
+
+Two things fell out of it that are worth naming:
+
+- **A `no_std` program with no libc still needs a heap.** Reading a module needs
+  `Vec`. `tools/nexus-guest/src/heap.rs` is a bump pointer over one `mmap`, and
+  it never frees — which works only because a shader invocation has *no state
+  that outlives it*. The program takes a mark, runs one fragment, and winds the
+  pointer back. Sixteen thousand invocations, each allocating hundreds of times,
+  leave the arena holding the module and the colours and nothing else.
+- **`core` has no `sqrt` and no `floor`.** They are one instruction on this
+  processor and library calls elsewhere, so the standard library owns them.
+  `nexus_spirv::run` carries its own.
+
+**This is not Vulkan, and it is not conformant SPIR-V.** No images or samplers,
+no uniform or storage buffers, no push constants, no matrices, no function
+calls, no atomics; an instruction that is not implemented is reported *by
+number* rather than skipped. And the module it runs was assembled in this
+repository, not produced by `glslang` — there is no shader compiler on this
+machine, so what is proved is that the reader agrees with the specification as
+written down here.
+
 ### Earlier, and still true
 
 `pread64` with positive offsets, EOF and negative-offset rejection, leaving the
@@ -279,18 +332,49 @@ interfaces it needs.
 | Process/runtime services | **Threads, futex, TLS, signals, pipes, poll/epoll, Unix sockets, `execve` done** | `fork`, kernel-raised signals, `O_CLOEXEC`, filesystem links and permissions, `AF_INET` sockets | libc and threading test suites run in the guest without success-returning stubs |
 | 32-bit execution | **A static i386 program runs** | Structure-passing calls (`stat64`, `iovec`, `timespec`, `sigaction`), `set_thread_area` and an LDT for thread-local storage, a 32-bit interpreter and 32-bit libraries | The Steam bootstrap starts |
 | Linux desktop transport | **A window is negotiated, drawn, resized, typed at and closed** | Tested against `libwayland` rather than against a client written from the same description; an XKB keymap; pointer and touch; subsurfaces, popups and regions; several clients; protocol errors; then Xwayland | An **unmodified** `libwayland` client presents frames, resizes, receives input and releases buffers |
-| Vulkan | **Not started** | Port an actual ICD and its OS interfaces; for Venus, capset negotiation, contexts, blob resources, host-visible mappings, synchronization | The Vulkan loader discovers the ICD, `vulkaninfo` succeeds and `vkcube` presents; then conformance |
+| Shaders | **A SPIR-V module is read and executed, and its pixels reach the screen** | A module from a real compiler rather than from this repository; images, samplers, buffers, push constants, matrices, function calls; compiling a module instead of interpreting it | `glslang`'s output for a non-trivial shader runs and matches a reference image |
+| Vulkan | **Not started** | An actual ICD and its OS interfaces — which needs a libc first; or, for Venus, capset negotiation, contexts, blob resources, host-visible mappings, synchronization | The Vulkan loader discovers the ICD, `vulkaninfo` succeeds and `vkcube` presents; then conformance |
 | Steam installation | **Not started** | Package decompression, dependencies and scripts; the runtime bootstrap; graphics, audio and network integration | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
 
-Vulkan is a driver and a runtime, each larger than this operating system, and
-nothing has been done towards it. Steam needs it, plus glibc, plus 32-bit
-libraries, plus an embedded Chromium that wants pages this system does not
-make.
+## Can Mesa not just be used?
+
+It is the right question and the answer is worth writing down, because "is there
+open-source OpenGL and Vulkan" has an emphatic yes attached to it. Mesa contains
+`lavapipe`, a software Vulkan that passes conformance; `llvmpipe`, a software
+OpenGL; `zink`, OpenGL over Vulkan; and drivers for real hardware. SwiftShader is
+a second software Vulkan. `virglrenderer` and Venus pass the work to a host.
+All of it is free, and none of it is the obstacle.
+
+**The obstacle is that Mesa is a program for a POSIX system, and this is not one
+yet.** It wants a C library, `pthreads`, `dlopen`, `/dev/dri` or a windowing
+backend, and — for every path that is not painfully slow — LLVM. This machine
+has *no libc at all*. Nothing on it can link against one, because there is not
+one to link against.
+
+So the ordering is not a matter of taste:
+
+| | needs |
+|---|---|
+| Mesa, SwiftShader, any real ICD | a C library, threads for C, `dlopen`, and LLVM for the fast paths |
+| glibc's own `ld-linux-x86-64.so.2` | the same C library it is part of |
+| Steam's bootstrap | a 32-bit C library, and a 64-bit one for everything after |
+
+All three roads run through the same gate, and it is not a graphics gate. A
+libc — musl is the plausible one, being small and static-friendly — is the piece
+that unlocks Mesa, the real dynamic loader, and Steam at once. Everything in the
+table above that says "not started" is downstream of it.
+
+What *can* be done without a libc is what has been done: take the published
+formats, which are Khronos specifications rather than anybody's code, and
+implement them. That is what `shared/nexus-spirv` is. It is not a substitute for
+Mesa and is not pretending to be one — it is the half of the problem that does
+not need a C library, done first because it could be.
 
 ## Verification
 
 ```powershell
 cargo test --offline -p nexus-abi
+cargo test --offline -p nexus-spirv
 cargo kernel --offline
 cargo guest --offline
 cargo guest32 --offline
@@ -299,6 +383,7 @@ cargo guest32 --offline
 ./scripts/test-linux.ps1
 ./scripts/test-linux-window.ps1
 ./scripts/test-wayland.ps1
+./scripts/test-shader.ps1
 ```
 
 `build.ps1` builds the guest programs, stages them, and writes `BIN/LINUX.LST`,

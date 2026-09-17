@@ -28,21 +28,27 @@
     How long to wait for the boot, in seconds.
 #>
 [CmdletBinding()]
-param([int]$Timeout = 300)
+param([int]$Timeout = 300, [switch]$Fresh)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'qemu.ps1')
+. (Join-Path $PSScriptRoot 'private-machine.ps1')
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
-$EspDir = Join-Path $BuildDir 'esp'
 $Log = Join-Path $BuildDir 'linux-test.log'
 
-if (-not (Test-Path (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI'))) {
-    throw 'no staged ESP; run build.ps1 first'
-}
+# A copy of the built machine that this run has to itself. `build/esp` and the
+# disk image are shared, and a QEMU holding them is somebody else's build dying
+# at `llvm-objcopy: permission denied` with nothing in the message about QEMU.
+# Every test in this family shares one copy, because no two of them run at the
+# same time and eight gigabytes each would be absurd. See
+# `scripts/private-machine.ps1`.
+$Machine = Get-PrivateMachine -BuildDir $BuildDir -Name 'linux-machine' -Fresh:$Fresh
+$MachineDir = $Machine.BuildDir
+$EspDir = $Machine.EspDir
 
 $QemuExe = Get-Command qemu-system-x86_64 -ErrorAction Stop
 $QemuDir = Split-Path -Parent $QemuExe.Source
@@ -55,7 +61,7 @@ Copy-Item (Join-Path $QemuDir 'share\edk2-i386-vars.fd') $FirmwareVars -Force
 
 if (Test-Path $Log) { Remove-Item $Log -Force }
 
-$QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
+$QemuArgs = Get-NexusQemuArgs -BuildDir $MachineDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $Log -Headless
 
 Write-Host '==> Booting NexusOS' -ForegroundColor Cyan

@@ -43,6 +43,7 @@ use core::arch::asm;
 
 pub mod call;
 pub mod fmt;
+pub mod heap;
 pub mod wayland;
 
 /// A system call with no arguments.

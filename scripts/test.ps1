@@ -104,7 +104,8 @@ $HostLibraries = @(
     'nexus-html', 'nexus-http', 'nexus-i18n', 'nexus-image', 'nexus-ime', 'nexus-index',
     'nexus-inflate', 'nexus-json', 'nexus-look', 'nexus-machine', 'nexus-mm', 'nexus-net',
     'nexus-netclient', 'nexus-pkg', 'nexus-shellwords', 'nexus-time', 'nexus-tls', 'nexus-update',
-    'nexus-user', 'nexus-utf8', 'nexus-window', 'nexus-lang', 'nexus-archive', 'nexus-render3d', 'nexus-netscan'
+    'nexus-user', 'nexus-utf8', 'nexus-window', 'nexus-lang', 'nexus-archive', 'nexus-render3d', 'nexus-netscan',
+    'nexus-spirv'
 )
 
 # Programs that run on the development machine rather than on Nexus: the package

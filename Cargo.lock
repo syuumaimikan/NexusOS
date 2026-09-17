@@ -162,6 +162,9 @@ version = "0.1.0"
 [[package]]
 name = "nexus-guest"
 version = "0.1.0"
+dependencies = [
+ "nexus-spirv",
+]
 
 [[package]]
 name = "nexus-guest32"
@@ -298,6 +301,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-netool"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-netclient",
+ "nexus-netscan",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
+name = "nexus-netscan"
+version = "0.1.0"
+
+[[package]]
 name = "nexus-nex"
 version = "0.1.0"
 dependencies = [
@@ -320,6 +339,10 @@ version = "0.1.0"
 dependencies = [
  "nexus-crypto",
 ]
+
+[[package]]
+name = "nexus-probe"
+version = "0.1.0"
 
 [[package]]
 name = "nexus-render3d"
@@ -380,6 +403,10 @@ dependencies = [
  "nexus-render3d",
  "nexus-user",
 ]
+
+[[package]]
+name = "nexus-spirv"
+version = "0.1.0"
 
 [[package]]
 name = "nexus-store"

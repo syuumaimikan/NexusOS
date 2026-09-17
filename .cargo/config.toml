@@ -33,10 +33,13 @@ bootloader = ["build", "-p", "nexus-boot", "--target", "x86_64-unknown-uefi"]
 # Programs built for Linux, run by the compatibility layer. A separate alias
 # because they are a separate world: a different target, a different system-call
 # interface, and `core` rebuilt for a target this machine has no `std` for.
+# `alloc` as well as `core`, because one of them reads a SPIR-V module and that
+# needs a `Vec`. The allocator underneath it is `nexus_guest::heap`, which is a
+# bump pointer over one `mmap` -- there is no libc here to get a heap from.
 guest = [
     "build", "-p", "nexus-guest", "-p", "nexus-probe", "--release",
     "--target", "x86_64-unknown-linux-gnu",
-    "-Zbuild-std=core,compiler_builtins",
+    "-Zbuild-std=core,compiler_builtins,alloc",
     "-Zbuild-std-features=compiler-builtins-mem",
 ]
 # The same, for i386. A separate crate because a `#![no_std]` crate is built for
