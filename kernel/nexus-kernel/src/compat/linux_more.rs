@@ -56,8 +56,6 @@ mod also {
     pub const EIO: u64 = (-5i64) as u64;
     /// Nothing is wrong; ask again.
     pub const EAGAIN: u64 = (-11i64) as u64;
-    /// No such file or directory.
-    pub const ENOENT: u64 = (-2i64) as u64;
 }
 
 /// Try to answer a call `linux::dispatch` did not recognise.
@@ -1023,11 +1021,19 @@ fn select(
 /// a relative one to be relative to. A caller passing anything but `AT_FDCWD`
 /// gets a move it did not ask for, so it is refused instead.
 fn rename(from: u64, to: u64) -> u64 {
-    let Some(from) = path_at(from) else {
-        return error::EFAULT;
+    // Their reader and their walk, not a second pair of mine. The first
+    // version of this had its own, and it read exactly one byte: `user_range`
+    // returns the length you *asked for* rather than the largest it would
+    // permit, so a path of any length came back as its first character and
+    // every rename answered EFAULT. One resolver is also one set of rules about
+    // `.` and `..`.
+    let from = match linux_files::path_of(from) {
+        Ok(path) => path,
+        Err(why) => return why,
     };
-    let Some(to) = path_at(to) else {
-        return error::EFAULT;
+    let to = match linux_files::path_of(to) {
+        Ok(path) => path,
+        Err(why) => return why,
     };
 
     let (from_parent, from_name) = match split(&from) {
@@ -1039,15 +1045,24 @@ fn rename(from: u64, to: u64) -> u64 {
         None => return error::EINVAL,
     };
 
-    let Some(from_directory) = walk(from_parent) else {
-        return also::ENOENT;
+    let from_directory = match linux_files::walk(from_parent) {
+        Ok(node) => node,
+        Err(why) => return why,
     };
-    let Some(to_directory) = walk(to_parent) else {
-        return also::ENOENT;
+    let to_directory = match linux_files::walk(to_parent) {
+        Ok(node) => node,
+        Err(why) => return why,
     };
     match crate::fs::store::rename_child(&from_directory, from_name, &to_directory, to_name) {
         Ok(()) => 0,
-        Err(_) => error::EINVAL,
+        Err(why) => {
+            // Named in the log rather than flattened into one errno. A rename
+            // that refuses is a rename somebody has to debug, and "EINVAL" for
+            // all of "no such name", "already there" and "that would make a
+            // loop" is three different problems wearing one number.
+            crate::kprintln!("[linux] rename {from} -> {to} refused: {why:?}");
+            error::EINVAL
+        }
     }
 }
 
@@ -1067,22 +1082,6 @@ fn renameat2(from: u64, to: u64, flags: u64) -> u64 {
     rename(from, to)
 }
 
-/// A path a program handed over, as text.
-fn path_at(pointer: u64) -> Option<alloc::string::String> {
-    /// The longest path this will read. A name longer than this is a program
-    /// that has lost track of its own buffer.
-    const LONGEST: u64 = 4096;
-    let (at, length) = user_range(pointer, 1, LONGEST)?;
-    // SAFETY: at least one byte at this address belongs to the caller. The loop
-    // stops at the first zero and at `length`, so nothing past the checked
-    // range is read.
-    let bytes = unsafe { core::slice::from_raw_parts(at as *const u8, length) };
-    let end = bytes.iter().position(|byte| *byte == 0)?;
-    core::str::from_utf8(&bytes[..end])
-        .ok()
-        .map(alloc::string::ToString::to_string)
-}
-
 /// A path split into the directory holding it and the name inside.
 fn split(path: &str) -> Option<(&str, &str)> {
     let trimmed = path.trim_end_matches('/');
@@ -1096,30 +1095,3 @@ fn split(path: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// The directory a path names, walked from the root a Linux program sees.
-///
-/// **The Linux root, not the store's.** A translated program's `/` is the
-/// `linux` directory inside this machine's own store, and a rename that walked
-/// from the store root would look for the file somewhere it was never put --
-/// which is exactly what happened: the file was created, the rename refused,
-/// and nothing about the message said which of the two roots was meant.
-///
-/// From the root every time, because that is where every path here starts:
-/// there is no working directory for a relative one to be relative to.
-fn walk(path: &str) -> Option<alloc::sync::Arc<crate::fs::store::Node>> {
-    let mut at = linux_files::root().ok()?;
-    for part in path.split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        // `..` is refused rather than resolved, the same rule the archive
-        // reader follows: a path containing one sometimes works, which is a
-        // rule nobody can hold in their head while reading the code that uses
-        // it.
-        if part == ".." {
-            return None;
-        }
-        at = crate::fs::store::open_child(&at, part).ok()?;
-    }
-    Some(at)
-}

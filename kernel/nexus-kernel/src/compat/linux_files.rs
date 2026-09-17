@@ -188,7 +188,7 @@ pub(super) fn root() -> Result<Arc<Node>, u64> {
 }
 
 /// Read a path out of the caller's memory.
-fn path_of(pointer: u64) -> Result<String, u64> {
+pub(super) fn path_of(pointer: u64) -> Result<String, u64> {
     // The length is not given, so it has to be found -- and looked for only
     // inside the user half, one byte at a time, stopping at the cap. A path
     // with no terminator must end as a refusal and not as a walk off the end of
@@ -216,7 +216,7 @@ fn path_of(pointer: u64) -> Result<String, u64> {
 /// the root and does not move. `.` is skipped and `..` is refused: a directory
 /// handle is the authority to reach what is under it, and a path that could
 /// climb out of the subtree would make that authority mean nothing.
-fn walk(path: &str) -> Result<Arc<Node>, u64> {
+pub(super) fn walk(path: &str) -> Result<Arc<Node>, u64> {
     let mut node = root()?;
     for component in path.split('/') {
         if component.is_empty() || component == "." {

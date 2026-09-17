@@ -49,10 +49,49 @@ Copy-Item (Join-Path $QemuDir 'share\edk2-i386-vars.fd') $FirmwareVars -Force
 
 if (Test-Path $Log) { Remove-Item $Log -Force }
 
-$MonitorPort = Get-Random -Minimum 28000 -Maximum 30000
+<#
+.SYNOPSIS
+    A host TCP port nothing is listening on, found by trying to listen on it.
+
+.DESCRIPTION
+    Picking at random and hoping is what this did, and what every other script
+    here does. When the pick collides QEMU exits before it boots, and what is
+    left is a serial log holding nothing but the firmware's clear-screen codes
+    -- which reads exactly like a machine that failed for no reason.
+
+    The guest's HTTP forward matters more than the monitor, because that one
+    has a *fixed* default: `Get-NexusQemuArgs` puts it on 18080 unless told
+    otherwise, so two machines at once always collide on it and the second one
+    says
+
+        Could not set up host forwarding rule 'tcp:127.0.0.1:18080-:80'
+
+    on standard error, which nothing here reads.
+#>
+function Get-FreePort {
+    param([int]$From, [int]$To)
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        $candidate = Get-Random -Minimum $From -Maximum $To
+        $listener = $null
+        try {
+            $listener = New-Object System.Net.Sockets.TcpListener(
+                [System.Net.IPAddress]::Loopback, $candidate)
+            $listener.Start()
+            return $candidate
+        } catch {
+            continue
+        } finally {
+            if ($listener) { $listener.Stop() }
+        }
+    }
+    throw "could not find a free port between $From and $To"
+}
+
+$MonitorPort = Get-FreePort -From 28000 -To 30000
+$HttpPort = Get-FreePort -From 18100 -To 18999
 $arguments = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $Log `
-    -MonitorPort $MonitorPort -Headless
+    -MonitorPort $MonitorPort -HostHttpPort $HttpPort -Headless
 
 Write-Host '==> Setting the machine up, so the tests have one to run on' -ForegroundColor Cyan
 $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $arguments -PassThru -NoNewWindow
