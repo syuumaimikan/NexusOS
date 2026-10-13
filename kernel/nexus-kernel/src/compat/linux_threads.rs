@@ -173,7 +173,7 @@ pub fn clone(
     // says why that is a refusal and not a thread.
     if flags & f::VM == 0 {
         crate::kprintln!(
-            "[linux] clone without CLONE_VM is fork, which is not translated; answering ENOSYS"
+            "[linux] clone without CLONE_VM flags={flags:#x} stack={stack:#x} parent_tid={parent_tid:#x} child_tid={child_tid:#x} is fork, which is not translated; answering ENOSYS"
         );
         return error::ENOSYS;
     }

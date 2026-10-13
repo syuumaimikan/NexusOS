@@ -710,6 +710,7 @@ fn socketcall(operation: u64, arguments: u64) -> u64 {
         1 | 2 | 3 | 5 => 3,
         4 => 2,
         8 | 9 | 10 | 18 => 4,
+        14 | 15 => 5,
         _ => {
             crate::kprintln!("[linux32] socketcall operation {operation} is not implemented");
             return error::ENOSYS;
@@ -719,15 +720,15 @@ fn socketcall(operation: u64, arguments: u64) -> u64 {
         return error::EBADF;
     };
     let Some((pointer, _)) =
-        crate::arch::syscall::user_range_for(&process, arguments, count * 4, 16, false)
+        crate::arch::syscall::user_range_for(&process, arguments, count * 4, 20, false)
     else {
         return error::EFAULT;
     };
-    let mut values = [0u64; 4];
+    let mut values = [0u64; 5];
     for index in 0..count as usize {
         values[index] = unsafe { (pointer as *const u32).add(index).read_unaligned() } as u64;
     }
-    let [a, b, c, d] = values;
+    let [a, b, c, d, e] = values;
     // The native stream endpoint has no descriptor-level nonblocking mode yet.
     // MSG_DONTWAIT receives below are implemented, but silently ignoring a
     // requested SOCK_NONBLOCK would create a blocking descriptor instead.
@@ -764,6 +765,10 @@ fn socketcall(operation: u64, arguments: u64) -> u64 {
         9 if d & !0x4000 == 0 => socket::send(a, b, c, d),
         10 if d & !0x40 == 0 => socket::receive(a, b, c, d),
         18 if d == 0 => socket::accept(a, b, c, 0),
+        14 | 15 => {
+            crate::kprintln!("[linux32] socketcall option op={operation} fd={a} level={b} option={c} length_arg={e}; not implemented");
+            error::ENOSYS
+        }
         _ => error::ENOSYS,
     }
 }

@@ -93,6 +93,10 @@ try {
         if ($Log.Contains('runtime-probe: PASS all configured runtimes')) { $Passed = $true; break }
     }
     if (-not $Passed) { throw "Runtime test did not finish: $Serial" }
+    if (-not $Log.Contains('[test] private address snapshot verified:')) {
+        throw "Missing native private address-space snapshot evidence: $Serial"
+    }
+    Write-Host 'PASS: native private address snapshot, independent writes/unmaps, permissions/guards and failed-copy cleanup'
     $ExitGroupRuntimes = @('musl')
     if ($WithGlibc) { $ExitGroupRuntimes += 'glibc' }
     if ($WithGlibc32) { $ExitGroupRuntimes += 'glibc32' }

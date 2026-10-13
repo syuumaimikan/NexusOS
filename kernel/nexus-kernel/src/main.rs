@@ -1134,6 +1134,7 @@ fn self_test() {
     // repository's history. One of them did it once in seven boots.
     for (name, run) in [
         ("memory", memory_self_test as fn()),
+        ("private address snapshot", memory::address_snapshot::self_test),
         ("the heap", heap_self_test),
         ("the scheduler", scheduler_self_test),
         ("TLB shootdown", tlb_self_test),

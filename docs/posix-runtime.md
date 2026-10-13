@@ -479,9 +479,15 @@ assertion: `build/steam-diagnostic-20d2711abfc74dee9d593e534b0d6c6e/serial.log`.
 The genuine random-source descriptor resolves that assertion. The bootstrap
 then exits with 4294967192 at `main.cpp (1433)`, unable to initialise its update
 UI's IPC socket: `build/steam-diagnostic-5ae73e56f22b425cb098adbe7825584e/serial.log`.
-Adding the i386 socketcall stream path moves it to unimplemented socket option
-operations, while it still reports update-UI initialisation failure with that
-same status: `build/steam-diagnostic-135d05b3a549460da54acd1a83d52253/serial.log`.
+After adding the i386 socketcall stream path, unimplemented socket options and
+the refused process-fork request appear before that same update-UI failure:
+`build/steam-diagnostic-135d05b3a549460da54acd1a83d52253/serial.log`.
+The decoded current diagnostic identifies two level-6/option-1 requests and
+clone flags `0x1200011`; the explicitly reported fatal operation is fork:
+`build/steam-diagnostic-74cdfb2d63334a68a125ca01f3b60afd/serial.log`.
+Native private address-space snapshots are now implemented and tested as a
+prerequisite, but Linux child creation/reaping is still missing. See
+[native fork work and its remaining requirements](fork.md).
 FIFO, flock, permissions, i386 signals, further process/network and desktop
 services remain incomplete. None of these diagnostics proves sign-in.
 
