@@ -222,12 +222,28 @@ impl KernelGs {
         let from_user = frame.code_segment & 3 == 3;
         if from_user {
             FROM_USER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        // NMI can arrive after SWAPGS on exit or while a TLS selector reload
+        // temporarily replaces the active kernel GS base. In both cases CS is
+        // still ring zero. The inactive kernel MSR, rather than CS alone,
+        // identifies the matching swap required for the handler.
+        let swapped = from_user
+            || unsafe {
+                let active = super::syscall::read_msr(0xc000_0101);
+                active >> 63 == 0
+                    && kernel_base_is_inactive(active, super::syscall::read_msr(0xc000_0102))
+            };
+        if swapped {
             // SAFETY: entered from ring 3, so the kernel's base is the
             // inactive one; `Drop` performs the matching swap.
             unsafe { super::percpu::swap_gs() };
         }
-        Self(from_user)
+        Self(swapped)
     }
+}
+
+fn kernel_base_is_inactive(active: u64, inactive: u64) -> bool {
+    active >> 63 == 0 && inactive >> 63 != 0
 }
 
 impl Drop for KernelGs {
@@ -246,6 +262,14 @@ impl Drop for KernelGs {
 /// that triple-faults on the first interrupt with nothing to say about why.
 /// Run at boot rather than under `cargo test`; see [`crate::selftest`].
 pub fn layout_self_test() -> Result<(), &'static str> {
+    let kernel = 0xffff_8000_1234_0000;
+    if !kernel_base_is_inactive(0x1234, kernel)
+        || kernel_base_is_inactive(kernel, 0x1234)
+        || kernel_base_is_inactive(kernel, kernel)
+        || kernel_base_is_inactive(0, 0)
+    {
+        return Err("NMI GS transition detection is inconsistent");
+    }
     if size_of::<Entry>() != 16 || size_of::<InterruptDescriptorTable>() != 16 * 256 {
         return Err("a descriptor or the table is not the size the architecture defines");
     }

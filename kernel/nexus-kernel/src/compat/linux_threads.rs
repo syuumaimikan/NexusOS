@@ -39,12 +39,11 @@
 //! lock nobody can take. So the comparison and the decision to sleep happen
 //! under one lock here, and a waker takes the same lock.
 //!
-//! What this is not is a futex keyed by *physical* address. Linux keys a shared
-//! futex by the page it lives in, so two processes mapping one page share a
-//! lock. This keys by process and virtual address, so a futex in shared memory
-//! between two processes does not work -- and `FUTEX_WAIT` on one is refused
-//! rather than silently private, because a lock that looks taken to one side
-//! and free to the other is worse than a lock that fails.
+//! Private mappings use the process and virtual address as their key, even
+//! without `FUTEX_PRIVATE_FLAG`. Shared memory-object mappings use the backing
+//! physical word, so aliases and other processes join the same wait queue.
+//! Bitset operations currently accept only `FUTEX_BITSET_MATCH_ANY`; selective
+//! bitsets are refused. WAIT_BITSET also accepts absolute realtime deadlines.
 
 extern crate alloc;
 
@@ -82,9 +81,7 @@ pub mod flag {
 mod op {
     pub const WAIT: u64 = 0;
     pub const WAKE: u64 = 1;
-    /// The same two, promising the futex is not in shared memory. Every lock
-    /// inside one process carries this, and it is the only kind that works
-    /// here -- see the note at the top of the file.
+    /// Use a process-local key even when the backing frame is shared.
     pub const PRIVATE: u64 = 128;
     /// `FUTEX_WAIT_BITSET`, which a C library uses for a timed wait with an
     /// absolute deadline. Treated as `FUTEX_WAIT` with its own timeout rules.
@@ -211,6 +208,31 @@ pub fn clone(
         return error::ENOSYS;
     };
 
+    let thread_pointer = if flags & f::SETTLS != 0 {
+        if tls >= nexus_abi::layout::USER_SPACE_END {
+            return error::EFAULT;
+        }
+        if process.personality == crate::process::Personality::Linux32 {
+            let (entry, descriptor) = match super::linux32::clone_tls(tls) {
+                Ok(value) => value,
+                Err(error) => return error,
+            };
+            Some(crate::sched::ThreadTls::Compat { entry, descriptor })
+        } else {
+            Some(crate::sched::ThreadTls::FsBase(tls))
+        }
+    } else {
+        None
+    };
+    for (required, address) in [
+        (flags & f::PARENT_SETTID != 0, parent_tid),
+        (flags & f::CHILD_SETTID != 0, child_tid),
+    ] {
+        if required && !writable_word(&process, address) {
+            return error::EFAULT;
+        }
+    }
+
     {
         let mut counts = COUNTS.lock();
         // One, not zero: the thread making this call is the process's first and
@@ -232,16 +254,28 @@ pub fn clone(
     child.rax = 0;
     child.rsp = stack;
 
-    let thread_pointer = if flags & f::SETTLS != 0 {
-        if tls >= nexus_abi::layout::USER_SPACE_END {
-            return error::EFAULT;
-        }
-        Some(tls)
-    } else {
-        None
-    };
-
-    let started = crate::sched::spawn_user_thread(Arc::clone(&process), child, thread_pointer);
+    let started =
+        crate::sched::spawn_user_thread(Arc::clone(&process), child, thread_pointer, |id| {
+            super::linux_semaphore::inherit_undo(
+                crate::arch::percpu::current_thread(),
+                id.0,
+                flags & 0x0004_0000 != 0,
+            );
+            // SAFETY: checked writable before taking the scheduler lock. This
+            // initializes identifiers before the child becomes runnable, so an
+            // immediate exit cannot race a late parent write or clear registration.
+            unsafe {
+                if flags & f::PARENT_SETTID != 0 {
+                    core::ptr::write_unaligned(parent_tid as *mut u32, id.0 as u32);
+                }
+                if flags & f::CHILD_SETTID != 0 {
+                    core::ptr::write_unaligned(child_tid as *mut u32, id.0 as u32);
+                }
+            }
+            if flags & f::CHILD_CLEARTID != 0 && child_tid != 0 {
+                CLEARED.lock().insert(id.0, child_tid);
+            }
+        });
     let Ok(id) = started else {
         COUNTS
             .lock()
@@ -249,20 +283,6 @@ pub fn clone(
             .and_modify(|count| *count = count.saturating_sub(1));
         return error::ENOMEM;
     };
-
-    // Where the library is to find the new thread's identifier. Both of these
-    // are writes into the *shared* address space, so they can be done from here
-    // whichever thread they are for.
-    if flags & f::PARENT_SETTID != 0 && !write_word(parent_tid, id.0) {
-        crate::kprintln!("[linux] clone could not write the child identifier for the parent");
-    }
-    if flags & f::CHILD_SETTID != 0 && !write_word(child_tid, id.0) {
-        crate::kprintln!("[linux] clone could not write the child identifier for the child");
-    }
-    // And what to clear when it ends, which is how `pthread_join` finds out.
-    if flags & f::CHILD_CLEARTID != 0 && child_tid != 0 {
-        CLEARED.lock().insert(id.0, child_tid);
-    }
 
     CREATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     id.0
@@ -286,26 +306,59 @@ pub fn ending(thread: u64) {
     let Some(process) = crate::sched::current_process() else {
         return;
     };
-    wake(process.id.0, address, u64::MAX);
+    if let Some(key) = key_for(&process, address, false) {
+        wake(key, u64::MAX);
+    }
+}
+
+/// Register the word Linux clears on this thread's exit.
+pub fn set_tid_address(address: u64) -> u64 {
+    let thread = crate::arch::percpu::current_thread();
+    if address == 0 {
+        CLEARED.lock().remove(&thread);
+    } else {
+        CLEARED.lock().insert(thread, address);
+    }
+    thread
 }
 
 /// `futex(address, operation, expected, timeout, ...)`.
 ///
 /// Two operations, which between them are every lock a C library has: wait
 /// until the word changes, and wake whoever is waiting.
-pub fn futex(address: u64, operation: u64, expected: u64, timeout: u64) -> u64 {
+pub fn futex(address: u64, operation: u64, expected: u64, timeout: u64, bitset: u64) -> u64 {
+    futex_width(address, operation, expected, timeout, bitset, false)
+}
+
+pub fn futex32(address: u64, operation: u64, expected: u64, timeout: u64, bitset: u64) -> u64 {
+    futex_width(address, operation, expected, timeout, bitset, true)
+}
+
+fn futex_width(
+    address: u64,
+    operation: u64,
+    expected: u64,
+    timeout: u64,
+    bitset: u64,
+    time32: bool,
+) -> u64 {
     // The bits that say "private" and "against the wall clock" change nothing
     // here and are cleared before the operation is read: a translation that did
     // not clear them would answer `ENOSYS` to every lock a real program takes,
     // because every one of them is private.
     let bare = operation & !(op::PRIVATE | op::CLOCK_REALTIME);
 
-    // Shared futexes are refused rather than treated as private. See the note
-    // at the top of the file: a lock that looks taken to one process and free
-    // to another is worse than one that fails.
-    if operation & op::PRIVATE == 0 && matches!(bare, op::WAIT | op::WAIT_BITSET) {
-        crate::kprintln!("[linux] a shared futex is not translated; answering EOPNOTSUPP");
+    let realtime = operation & op::CLOCK_REALTIME != 0;
+    if realtime && bare != op::WAIT_BITSET {
         return EOPNOTSUPP;
+    }
+    if matches!(bare, op::WAIT_BITSET | op::WAKE_BITSET) {
+        if bitset as u32 == 0 {
+            return error::EINVAL;
+        }
+        if bitset as u32 != u32::MAX {
+            return EOPNOTSUPP;
+        }
     }
 
     let Some(process) = crate::sched::current_process() else {
@@ -314,10 +367,26 @@ pub fn futex(address: u64, operation: u64, expected: u64, timeout: u64) -> u64 {
     if !address.is_multiple_of(4) || address >= nexus_abi::layout::USER_SPACE_END {
         return error::EINVAL;
     }
+    let Some(key) = key_for(&process, address, operation & op::PRIVATE != 0) else {
+        return error::EFAULT;
+    };
 
     match bare {
-        op::WAIT | op::WAIT_BITSET => wait(process.id.0, address, expected, timeout),
-        op::WAKE | op::WAKE_BITSET => wake(process.id.0, address, expected),
+        op::WAIT | op::WAIT_BITSET => wait(
+            key,
+            address,
+            expected,
+            timeout,
+            bare == op::WAIT_BITSET,
+            realtime,
+            time32,
+        ),
+        op::WAKE | op::WAKE_BITSET => {
+            if expected as u32 > i32::MAX as u32 {
+                return error::EINVAL;
+            }
+            wake(key, u64::from(expected as u32))
+        }
         _ => {
             crate::kprintln!("[linux] futex operation {bare} is not translated");
             error::ENOSYS
@@ -326,13 +395,32 @@ pub fn futex(address: u64, operation: u64, expected: u64, timeout: u64) -> u64 {
 }
 
 /// The queue for one futex, made if it is not there.
-fn queue_for(process: u64, address: u64) -> Arc<WaitQueue> {
-    Arc::clone(
-        FUTEXES
-            .lock()
-            .entry((process, address))
+fn key_for(process: &crate::process::Process, address: u64, private: bool) -> Option<(u64, u64)> {
+    crate::arch::syscall::user_range(address, 4, 4)?;
+    let root = process.address_space.root();
+    let flags = crate::memory::paging::flags_in(root, address)?;
+    if !private && flags & crate::memory::paging::SHARED != 0 {
+        Some((0, process.address_space.translate(address)?))
+    } else {
+        Some((process.id.0, address))
+    }
+}
+
+fn queue_for(key: (u64, u64)) -> Option<Arc<WaitQueue>> {
+    let mut queues = FUTEXES.lock();
+    if queues.len() >= 4096 && !queues.contains_key(&key) {
+        // A table-only reference has no wait or wake in progress. Removing it
+        // cannot split a live queue, and bounds idle shared-key bookkeeping.
+        queues.retain(|_, queue| Arc::strong_count(queue) != 1);
+        if queues.len() >= 4096 {
+            return None;
+        }
+    }
+    Some(Arc::clone(
+        queues
+            .entry(key)
             .or_insert_with(|| Arc::new(WaitQueue::new())),
-    )
+    ))
 }
 
 /// `FUTEX_WAIT`: sleep unless the word has already changed.
@@ -344,8 +432,18 @@ fn queue_for(process: u64, address: u64) -> Arc<WaitQueue> {
 /// and before the sleep is one this thread sees rather than one it sleeps
 /// through. Getting this wrong does not produce a slow program; it produces a
 /// thread asleep for ever holding a lock.
-fn wait(process: u64, address: u64, expected: u64, timeout: u64) -> u64 {
-    let queue = queue_for(process, address);
+fn wait(
+    key: (u64, u64),
+    address: u64,
+    expected: u64,
+    timeout: u64,
+    absolute: bool,
+    realtime: bool,
+    time32: bool,
+) -> u64 {
+    let Some(queue) = queue_for(key) else {
+        return error::ENOMEM;
+    };
     WAITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     // A timeout is a `struct timespec` in the caller's memory, or null for "no
@@ -353,12 +451,19 @@ fn wait(process: u64, address: u64, expected: u64, timeout: u64) -> u64 {
     let deadline = if timeout == 0 {
         None
     } else {
-        let Some(seconds) = read_word(timeout) else {
+        let times = if time32 {
+            read_u32(timeout)
+                .zip(read_u32(timeout.saturating_add(4)))
+                .map(|(s, n)| (s as i32 as i64 as u64, n as i32 as i64 as u64))
+        } else {
+            read_word(timeout).zip(read_word(timeout.saturating_add(8)))
+        };
+        let Some((seconds, nanoseconds)) = times else {
             return error::EFAULT;
         };
-        let Some(nanoseconds) = read_word(timeout + 8) else {
-            return error::EFAULT;
-        };
+        if (seconds as i64) < 0 || nanoseconds >= 1_000_000_000 {
+            return error::EINVAL;
+        }
         // In ticks, because that is what a wait queue's deadline is measured
         // in. A machine whose timer has not started yet has no rate, and a
         // deadline computed from a rate of zero is one that has already passed
@@ -367,71 +472,82 @@ fn wait(process: u64, address: u64, expected: u64, timeout: u64) -> u64 {
         if rate == 0 {
             None
         } else {
-            let milliseconds = seconds
-                .saturating_mul(1000)
-                .saturating_add(nanoseconds / 1_000_000);
-            Some(
-                crate::arch::time::ticks().saturating_add(milliseconds.saturating_mul(rate) / 1000),
-            )
+            let ticks = seconds
+                .saturating_mul(rate)
+                .saturating_add(nanoseconds.saturating_mul(rate).div_ceil(1_000_000_000));
+            Some(if realtime {
+                let now_ticks = crate::arch::time::ticks();
+                let wall_seconds = match crate::drivers::rtc::now() {
+                    Some(value) => value,
+                    None => return error::EINVAL,
+                };
+                let wall_ticks = wall_seconds
+                    .saturating_mul(rate)
+                    .saturating_add(now_ticks % rate);
+                now_ticks.saturating_add(ticks.saturating_sub(wall_ticks))
+            } else if absolute {
+                ticks
+            } else {
+                crate::arch::time::ticks().saturating_add(ticks)
+            })
         }
     };
 
-    loop {
-        let seen = queue.generation();
+    let seen = queue.generation();
 
-        // The comparison, against the caller's memory. A word that is not what
-        // the caller expected means somebody has already changed it, and going
-        // to sleep would be sleeping through a change that has happened.
-        let Some(current) = read_u32(address) else {
-            return error::EFAULT;
-        };
-        if u64::from(current) != expected & 0xFFFF_FFFF {
-            return EAGAIN;
-        }
-
-        // A thread told to stop must not stay blocked on something that may
-        // never arrive -- the same rule every blocking call in this kernel
-        // follows.
-        if crate::sched::cancelled() {
-            return (-4i64) as u64; // EINTR
-        }
-        if let Some(deadline) = deadline {
-            if crate::arch::time::ticks() >= deadline {
-                return ETIMEDOUT;
-            }
-            // The clock is a second waker, so a wait with a deadline ends when
-            // the deadline passes and not only when somebody wakes it -- which
-            // is the one thing a timed wait exists not to do.
-            queue.wait_if_unchanged_until(seen, deadline);
-        } else {
-            queue.wait_if_unchanged(seen);
-        }
-
-        // Round again: a wake is permission to look, not a promise that the
-        // word changed. Several threads waiting on one lock are all woken and
-        // all but one find it taken again.
-        let Some(current) = read_u32(address) else {
-            return error::EFAULT;
-        };
-        if u64::from(current) != expected & 0xFFFF_FFFF {
-            return 0;
-        }
+    // The comparison, against the caller's memory. A word that is not what
+    // the caller expected means somebody has already changed it, and going
+    // to sleep would be sleeping through a change that has happened.
+    let Some(current) = read_u32(address) else {
+        return error::EFAULT;
+    };
+    if u64::from(current) != expected & 0xFFFF_FFFF {
+        return EAGAIN;
     }
+
+    // A thread told to stop must not stay blocked on something that may
+    // never arrive -- the same rule every blocking call in this kernel
+    // follows.
+    if crate::sched::cancelled() {
+        return (-4i64) as u64; // EINTR
+    }
+    if let Some(deadline) = deadline {
+        if crate::arch::time::ticks() >= deadline {
+            return ETIMEDOUT;
+        }
+        // The clock is a second waker, so a wait with a deadline ends when
+        // the deadline passes and not only when somebody wakes it -- which
+        // is the one thing a timed wait exists not to do.
+        queue.wait_if_unchanged_until(seen, deadline);
+    } else {
+        queue.wait_if_unchanged(seen);
+    }
+
+    // FUTEX_WAKE completes a wait even if the word is unchanged. The C
+    // library owns the condition loop, not the kernel. A generation change
+    // also covers a wake between the comparison and joining the queue.
+    if queue.generation() != seen {
+        return 0;
+    }
+    if crate::sched::cancelled() {
+        return (-4i64) as u64;
+    }
+    if deadline.is_some_and(|end| crate::arch::time::ticks() >= end) {
+        return ETIMEDOUT;
+    }
+    // A scheduler wake without a futex wake may be spurious, as on Linux.
+    0
 }
 
 /// `FUTEX_WAKE`: wake up to `count` of them.
 ///
-/// The count is not honoured exactly: this wakes everything on the queue and
-/// returns how many there were. Waking one when one was asked for needs a queue
-/// that can hand out a single waiter, and [`WaitQueue`] wakes all of them --
-/// which is correct, because every waiter re-checks the word and goes back to
-/// sleep if it is still taken, and is more expensive than it needs to be. That
-/// is a performance difference and not a correctness one, and it is written
-/// down rather than left to be discovered under contention.
-fn wake(process: u64, address: u64, count: u64) -> u64 {
+fn wake(key: (u64, u64), count: u64) -> u64 {
+    if count == 0 {
+        return 0;
+    }
     let queue = {
         let futexes = FUTEXES.lock();
-        futexes.get(&(process, address)).map(Arc::clone)
+        futexes.get(&key).map(Arc::clone)
     };
     let Some(queue) = queue else {
         // Nothing has ever waited here, which is the common case for an
@@ -439,9 +555,12 @@ fn wake(process: u64, address: u64, count: u64) -> u64 {
         // and the one time it did there was nobody to wake.
         return 0;
     };
-    let woken = queue.wake_all();
+    let mut woken = 0;
+    while woken < count && queue.wake_one() {
+        woken += 1;
+    }
     WAKES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    (woken as u64).min(count)
+    woken
 }
 
 /// Read a thirty-two bit word out of the caller's memory.
@@ -462,6 +581,12 @@ fn read_word(address: u64) -> Option<u64> {
 
 /// Write a thirty-two bit word into it, which is what a thread identifier is.
 fn write_word(address: u64, value: u64) -> bool {
+    let Some(process) = crate::sched::current_process() else {
+        return false;
+    };
+    if !writable_word(&process, address) {
+        return false;
+    }
     let Some((pointer, _)) = crate::arch::syscall::user_range(address, 4, 4) else {
         return false;
     };
@@ -470,6 +595,14 @@ fn write_word(address: u64, value: u64) -> bool {
     // put next to it.
     unsafe { core::ptr::write_volatile(pointer as *mut u32, value as u32) };
     true
+}
+
+fn writable_word(process: &crate::process::Process, address: u64) -> bool {
+    crate::arch::syscall::user_range(address, 4, 4).is_some()
+        && [address, address.saturating_add(3)].into_iter().all(|at| {
+            crate::memory::paging::flags_in(process.address_space.root(), at)
+                .is_some_and(|flags| flags & crate::memory::paging::WRITABLE != 0)
+        })
 }
 
 /// `set_robust_list(head, length)`.

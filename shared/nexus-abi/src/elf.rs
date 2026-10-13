@@ -67,6 +67,8 @@ pub enum ElfError {
     SegmentOutOfBounds,
     /// The image contains no `PT_LOAD` segment.
     NoLoadableSegments,
+    /// More loadable segments than the fixed output table can represent.
+    TooManySegments,
     /// The loader could not obtain physical memory for the image.
     OutOfMemory,
     /// A segment claims `p_filesz > p_memsz`, which is malformed.
@@ -91,6 +93,7 @@ impl fmt::Display for ElfError {
             Self::PhdrOutOfBounds => "program header table extends past end of file",
             Self::SegmentOutOfBounds => "segment contents extend past end of file",
             Self::NoLoadableSegments => "no PT_LOAD segments",
+            Self::TooManySegments => "too many PT_LOAD segments",
             Self::OutOfMemory => "could not allocate physical memory for the image",
             Self::InconsistentSegment => "segment has p_filesz greater than p_memsz",
             Self::WrongBias => "an ET_EXEC image cannot be moved and an ET_DYN one must be",
@@ -516,6 +519,7 @@ pub mod elf32 {
     const ELFDATA2LSB: u8 = 1;
     /// `ET_EXEC`.
     const ET_EXEC: u16 = 2;
+    const ET_DYN: u16 = 3;
     /// `EM_386`.
     const EM_386: u16 = 3;
     /// Size of `Elf32_Ehdr`, and of one `Elf32_Phdr`.
@@ -558,11 +562,7 @@ pub mod elf32 {
         }
         let e_type = read_u16(image, 16).ok_or(ElfError::TooSmall)?;
         let e_machine = read_u16(image, 18).ok_or(ElfError::TooSmall)?;
-        // `ET_DYN` is not accepted: a thirty-two bit program that needs an
-        // interpreter needs a thirty-two bit interpreter, and there is none on
-        // this machine. Refusing here is better than loading one and entering
-        // an entry point whose relocations nobody applied.
-        if e_type != ET_EXEC || e_machine != EM_386 {
+        if !matches!(e_type, ET_EXEC | ET_DYN) || e_machine != EM_386 {
             return Err(ElfError::WrongType);
         }
         Ok((
@@ -571,6 +571,56 @@ pub mod elf32 {
             read_u16(image, 42).ok_or(ElfError::TooSmall)?,
             read_u16(image, 44).ok_or(ElfError::TooSmall)?,
         ))
+    }
+
+    /// Addressed executable or position-independent i386 image.
+    pub fn kind(image: &[u8]) -> Result<super::Kind, ElfError> {
+        parse_header(image)?;
+        Ok(if read_u16(image, 16) == Some(ET_DYN) {
+            super::Kind::Movable
+        } else {
+            super::Kind::Fixed
+        })
+    }
+
+    /// Interpreter path in the i386 program-header layout.
+    pub fn interpreter(image: &[u8]) -> Result<Option<&str>, ElfError> {
+        let (_, phoff, stride, count) = parse_header(image)?;
+        if stride as usize != PHDR_SIZE {
+            return Err(ElfError::PhdrOutOfBounds);
+        }
+        let mut result = None;
+        for index in 0..usize::from(count) {
+            let at = phoff as usize + index * PHDR_SIZE;
+            let header = image
+                .get(at..at + PHDR_SIZE)
+                .ok_or(ElfError::PhdrOutOfBounds)?;
+            if read_u32(header, 0) != Some(3) {
+                continue;
+            }
+            if result.is_some() {
+                return Err(ElfError::InconsistentSegment);
+            }
+            let offset = read_u32(header, 4).ok_or(ElfError::PhdrOutOfBounds)? as usize;
+            let length = read_u32(header, 16).ok_or(ElfError::PhdrOutOfBounds)? as usize;
+            let bytes = image
+                .get(
+                    offset
+                        ..offset
+                            .checked_add(length)
+                            .ok_or(ElfError::SegmentOutOfBounds)?,
+                )
+                .ok_or(ElfError::SegmentOutOfBounds)?;
+            if bytes.len() < 2 || bytes.last() != Some(&0) || bytes[..bytes.len() - 1].contains(&0)
+            {
+                return Err(ElfError::InconsistentSegment);
+            }
+            result = Some(
+                core::str::from_utf8(&bytes[..bytes.len() - 1])
+                    .map_err(|_| ElfError::InconsistentSegment)?,
+            );
+        }
+        Ok(result)
     }
 
     /// One `PT_LOAD` segment of a thirty-two bit image.
@@ -633,6 +683,25 @@ pub mod elf32 {
     /// As [`super::load`].
     pub unsafe fn load<A, V>(
         image: &[u8],
+        allocate: A,
+        to_virtual: V,
+    ) -> Result<LoadedImage, ElfError>
+    where
+        A: FnMut(usize) -> Option<u64>,
+        V: Fn(u64) -> u64,
+    {
+        // SAFETY: forwarded allocator and direct-map guarantees.
+        unsafe { load_at(image, 0, allocate, to_virtual) }
+    }
+
+    /// Load an i386 image with a page-aligned virtual bias. Relocations remain
+    /// the userspace interpreter's responsibility.
+    ///
+    /// # Safety
+    /// As [`load`].
+    pub unsafe fn load_at<A, V>(
+        image: &[u8],
+        bias: u64,
         mut allocate: A,
         to_virtual: V,
     ) -> Result<LoadedImage, ElfError>
@@ -641,13 +710,43 @@ pub mod elf32 {
         V: Fn(u64) -> u64,
     {
         let (entry_point, phoff, phentsize, phnum) = parse_header(image)?;
+        let movable = kind(image)? == super::Kind::Movable;
+        if !bias.is_multiple_of(PAGE_SIZE)
+            || (!movable && bias != 0)
+            || (movable && bias == 0)
+            || phentsize as usize != PHDR_SIZE
+        {
+            return Err(ElfError::WrongBias);
+        }
+        let relocated_entry = u64::from(entry_point)
+            .checked_add(bias)
+            .filter(|at| *at < 0x1_0000_0000)
+            .ok_or(ElfError::WrongBias)?;
 
         let mut min_vaddr = u64::MAX;
         let mut max_vaddr_end = 0u64;
         let mut found_any = false;
+        let mut loadable_count = 0;
         for_each_load_segment(image, phoff, phentsize, phnum, |header| {
             if header.memsz == 0 {
                 return Ok(());
+            }
+            loadable_count += 1;
+            if loadable_count > MAX_SEGMENTS {
+                return Err(ElfError::TooManySegments);
+            }
+            let file_end = (header.offset as usize)
+                .checked_add(header.filesz as usize)
+                .ok_or(ElfError::SegmentOutOfBounds)?;
+            if file_end > image.len() {
+                return Err(ElfError::SegmentOutOfBounds);
+            }
+            if u64::from(header.vaddr)
+                .checked_add(u64::from(header.memsz))
+                .and_then(|end| end.checked_add(bias))
+                .is_none_or(|end| end > 0x1_0000_0000)
+            {
+                return Err(ElfError::WrongBias);
             }
             found_any = true;
             min_vaddr = min_vaddr.min(align_down(u64::from(header.vaddr)));
@@ -659,8 +758,8 @@ pub mod elf32 {
             return Err(ElfError::NoLoadableSegments);
         }
 
-        let virt_base = min_vaddr;
-        let image_size = max_vaddr_end - virt_base;
+        let virt_base = min_vaddr + bias;
+        let image_size = max_vaddr_end - min_vaddr;
         let phys_base = allocate((image_size / PAGE_SIZE) as usize).ok_or(ElfError::OutOfMemory)?;
 
         // SAFETY: the caller guarantees the span is allocated and writable
@@ -692,7 +791,7 @@ pub mod elf32 {
             let source = image
                 .get(file_start..file_end)
                 .ok_or(ElfError::SegmentOutOfBounds)?;
-            let destination = phys_base + (u64::from(header.vaddr) - virt_base);
+            let destination = phys_base + (u64::from(header.vaddr) - min_vaddr);
             // SAFETY: inside the span allocated and zeroed above.
             unsafe {
                 core::ptr::copy_nonoverlapping(
@@ -705,8 +804,8 @@ pub mod elf32 {
                 let start = align_down(u64::from(header.vaddr));
                 let end = align_up(u64::from(header.vaddr) + u64::from(header.memsz));
                 segments[segment_count] = LoadedSegment {
-                    virt_start: start,
-                    phys_start: phys_base + (start - virt_base),
+                    virt_start: start + bias,
+                    phys_start: phys_base + (start - min_vaddr),
                     size: end - start,
                     flags: SegmentFlags {
                         readable: header.flags & PF_R != 0,
@@ -725,16 +824,20 @@ pub mod elf32 {
                 return Ok(());
             }
             let start = header.offset;
-            let end = start + header.filesz;
-            let table_end = phoff + u32::from(phentsize) * u32::from(phnum);
+            let end = start
+                .checked_add(header.filesz)
+                .ok_or(ElfError::SegmentOutOfBounds)?;
+            let table_end = phoff
+                .checked_add(u32::from(phentsize) * u32::from(phnum))
+                .ok_or(ElfError::PhdrOutOfBounds)?;
             if phoff >= start && table_end <= end {
-                program_headers = u64::from(header.vaddr) + u64::from(phoff - start);
+                program_headers = u64::from(header.vaddr) + u64::from(phoff - start) + bias;
             }
             Ok(())
         })?;
 
         Ok(LoadedImage {
-            entry_point: u64::from(entry_point),
+            entry_point: relocated_entry,
             virt_base,
             phys_base,
             image_size,
@@ -743,8 +846,8 @@ pub mod elf32 {
             program_headers,
             program_header_size: phentsize,
             program_header_count: phnum,
-            bias: 0,
-            relocatable: false,
+            bias,
+            relocatable: movable,
         })
     }
 }
@@ -756,6 +859,113 @@ mod tests {
     extern crate alloc;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    fn dynamic_i386_image() -> Vec<u8> {
+        let interpreter = b"/lib/ld-linux.so.2\0";
+        let mut image = vec![0u8; 52 + 64];
+        image[0..4].copy_from_slice(&ELF_MAGIC);
+        image[4..7].copy_from_slice(&[1, 1, 1]);
+        image[16..18].copy_from_slice(&3u16.to_le_bytes());
+        image[18..20].copy_from_slice(&3u16.to_le_bytes());
+        image[24..28].copy_from_slice(&(116u32 + interpreter.len() as u32).to_le_bytes());
+        image[28..32].copy_from_slice(&52u32.to_le_bytes());
+        image[42..44].copy_from_slice(&32u16.to_le_bytes());
+        image[44..46].copy_from_slice(&2u16.to_le_bytes());
+        image.extend_from_slice(interpreter);
+        image.extend_from_slice(b"i386 code");
+        let size = image.len() as u32;
+        image[52..56].copy_from_slice(&1u32.to_le_bytes());
+        image[68..72].copy_from_slice(&size.to_le_bytes());
+        image[72..76].copy_from_slice(&(size + 64).to_le_bytes());
+        image[76..80].copy_from_slice(&5u32.to_le_bytes());
+        image[84..88].copy_from_slice(&3u32.to_le_bytes());
+        image[88..92].copy_from_slice(&116u32.to_le_bytes());
+        image[100..104].copy_from_slice(&(interpreter.len() as u32).to_le_bytes());
+        image
+    }
+
+    #[test]
+    fn i386_loader_preserves_code_bss_and_rebases_auxiliary_addresses() {
+        let image = dynamic_i386_image();
+        assert_eq!(elf32::interpreter(&image), Ok(Some("/lib/ld-linux.so.2")));
+        let mut destination = Destination::new(2);
+        destination.storage.fill(0xff);
+        let loaded =
+            unsafe { elf32::load_at(&image, 0x0800_0000, |_| Some(destination.base), |at| at) }
+                .unwrap();
+        assert_eq!(loaded.virt_base, 0x0800_0000);
+        assert_eq!(loaded.program_headers, 0x0800_0034);
+        assert_eq!(loaded.entry_point, 0x0800_0087);
+        assert_eq!(destination.bytes_at(0, image.len()), image);
+        assert!(destination
+            .bytes_at(image.len() as u64, 64)
+            .iter()
+            .all(|byte| *byte == 0));
+        assert_eq!(loaded.segments[0].virt_start, loaded.virt_base);
+    }
+
+    #[test]
+    fn i386_loader_refuses_overflow_and_bad_interpreter_before_allocation() {
+        let mut image = dynamic_i386_image();
+        unsafe {
+            assert_eq!(
+                elf32::load_at(&image, 0, |_| panic!("must not allocate"), |at| at).err(),
+                Some(ElfError::WrongBias)
+            );
+            assert_eq!(
+                elf32::load_at(
+                    &image,
+                    0x1_0000_0000,
+                    |_| panic!("must not allocate"),
+                    |at| at
+                )
+                .err(),
+                Some(ElfError::WrongBias)
+            );
+        }
+        image[134] = b'x';
+        assert!(elf32::interpreter(&image).is_err());
+    }
+
+    #[test]
+    fn i386_loader_validates_file_bounds_and_segment_capacity_before_allocation() {
+        let mut image = dynamic_i386_image();
+        image[56..60].copy_from_slice(&u32::MAX.to_le_bytes());
+        unsafe {
+            assert_eq!(
+                elf32::load_at(
+                    &image,
+                    0x0800_0000,
+                    |_| panic!("must not allocate"),
+                    |at| at
+                )
+                .err(),
+                Some(ElfError::SegmentOutOfBounds)
+            );
+        }
+        image = dynamic_i386_image();
+        let count = MAX_SEGMENTS + 1;
+        image.resize(52 + 32 * count, 0);
+        image[44..46].copy_from_slice(&(count as u16).to_le_bytes());
+        for index in 0..count {
+            let at = 52 + 32 * index;
+            image[at..at + 32].fill(0);
+            image[at..at + 4].copy_from_slice(&1u32.to_le_bytes());
+            image[at + 20..at + 24].copy_from_slice(&4096u32.to_le_bytes());
+        }
+        unsafe {
+            assert_eq!(
+                elf32::load_at(
+                    &image,
+                    0x0800_0000,
+                    |_| panic!("must not allocate"),
+                    |at| at
+                )
+                .err(),
+                Some(ElfError::TooManySegments)
+            );
+        }
+    }
 
     /// Build one whose single `PT_LOAD` starts at file offset zero, so the
     /// headers are inside the image the program can read.

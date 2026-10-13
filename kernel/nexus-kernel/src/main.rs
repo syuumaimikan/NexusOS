@@ -24,6 +24,7 @@ mod compat;
 mod crash;
 mod display;
 mod drivers;
+mod event;
 mod framebuffer;
 mod fs;
 mod i18n;
@@ -207,6 +208,10 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // SAFETY: called once, before anything drives a device.
     let devices = unsafe { drivers::pci::enumerate() };
     drivers::pci::report(&devices);
+    // Native Blackwell discovery reads identity only; firmware scanout is kept
+    // until the native GPU command and memory drivers can take over.
+    // SAFETY: enumeration finished and no driver has claimed these BARs.
+    unsafe { drivers::nvidia::probe(&devices) };
     // Before any driver runs. Taking an interrupt is something a driver asks
     // for; leaving one raised by a device nobody listens to is what jams the
     // line everybody else shares.
@@ -1251,6 +1256,11 @@ fn nexusfs_self_test() {
 #[cfg(feature = "deep-selftest")]
 fn deep_filesystem_checks() {
     use fs::store;
+
+    match store::symlink_self_test() {
+        Ok(verdict) => kprintln!("[test] {verdict}"),
+        Err(error) => kprintln!("[test] FAILED: symlinks: {error}"),
+    }
 
     match store::self_test() {
         Ok(verdict) => kprintln!("[test] {verdict}"),

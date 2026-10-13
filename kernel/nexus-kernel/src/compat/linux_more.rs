@@ -30,9 +30,8 @@
 //! Three answers here are suspiciously simple and each is what Linux itself
 //! says:
 //!
-//! - **`readlink` on something that is not a symbolic link is `EINVAL`.** This
-//!   filesystem has no symbolic links, so that is the answer for every path
-//!   that exists, and it is the correct one rather than an evasion.
+//! - **`readlink` on a regular file is `EINVAL`.** `/proc/self/exe` instead
+//!   names the actual image recorded by the loader; absent paths get `ENOENT`.
 //! - **`madvise` is advice.** A kernel is allowed to ignore it, and returning
 //!   success without acting is conforming behaviour -- for the advisory values.
 //!   `MADV_DONTNEED` is *not* advice, because a program may rely on reading
@@ -77,8 +76,8 @@ pub fn translate(number: u64, frame: &crate::arch::syscall::Frame) -> Option<u64
         call::FSYNC | call::FDATASYNC => fsync(a),
         call::READV => readv(a, b, c),
         call::LSTAT => lstat(a, b),
-        call::READLINK => readlink(a),
-        call::READLINKAT => readlinkat(a, b),
+        call::READLINK => readlinkat((-100i64) as u64, a, b, c),
+        call::READLINKAT => readlinkat(a, b, c, d),
         call::FCNTL => fcntl(a, b, c),
         call::PWRITE64 => pwrite64(a, b, c, d),
         call::STATX => statx(a, b, c, frame.r8),
@@ -90,9 +89,9 @@ pub fn translate(number: u64, frame: &crate::arch::syscall::Frame) -> Option<u64
         call::FSTATFS => statfs_into(b),
         call::SELECT => select(a, b, c, d, frame.r8, Timeout::Microseconds),
         call::PSELECT6 => select(a, b, c, d, frame.r8, Timeout::Nanoseconds),
-        call::RENAME => rename(a, b),
-        call::RENAMEAT => rename(b, d),
-        call::RENAMEAT2 => renameat2(b, d, frame.r8),
+        call::RENAME => renameat2((-100i64) as u64, a, (-100i64) as u64, b, 0),
+        call::RENAMEAT => renameat2(a, b, c, d, 0),
+        call::RENAMEAT2 => renameat2(a, b, c, d, frame.r8),
         _ => return None,
     })
 }
@@ -173,6 +172,18 @@ struct Descriptor {
 /// Called from `Process::drop` beside the other `forget`s.
 pub fn forget(process: u64) {
     FLAGS.lock().retain(|(owner, _), _| *owner != process);
+}
+
+pub(super) fn remember_cloexec(process: u64, descriptor: u64, on: bool) {
+    FLAGS
+        .lock()
+        .entry((process, descriptor))
+        .or_default()
+        .close_on_exec = on;
+}
+
+pub(super) fn forget_descriptor(process: u64, descriptor: u64) {
+    FLAGS.lock().remove(&(process, descriptor));
 }
 
 fn whose() -> Option<u64> {
@@ -388,9 +399,9 @@ fn sysinfo(out: u64) -> u64 {
     put(0, crate::arch::time::uptime_ms() / 1000); // uptime, seconds
     put(32, total); // totalram
     put(40, free); // freeram
-    // `mem_unit`, at the end: the multiplier for every memory field above.
-    // One, because the figures here are already bytes.
-    // SAFETY: inside the range checked above.
+                   // `mem_unit`, at the end: the multiplier for every memory field above.
+                   // One, because the figures here are already bytes.
+                   // SAFETY: inside the range checked above.
     unsafe { core::ptr::write_unaligned((at as *mut u8).add(80) as *mut u32, 1) };
     0
 }
@@ -494,32 +505,56 @@ fn readv(descriptor: u64, vectors: u64, count: u64) -> u64 {
 
 /// `lstat(path, out)`.
 ///
-/// The same as `stat` here, and that is a fact about this filesystem rather
-/// than a shortcut: NexusFS has no symbolic links, so there is nothing for
-/// `lstat` to decline to follow.
+/// Native nodes have no symlinks. For the executable's proc link this returns
+/// link metadata rather than following it to the actual image node.
 fn lstat(path: u64, out: u64) -> u64 {
     /// `AT_FDCWD`, which `newfstatat` takes to mean "relative to where I am".
     const AT_FDCWD: u64 = (-100i64) as u64;
-    linux_files::newfstatat(AT_FDCWD, path, out)
+    linux_files::newfstatat(AT_FDCWD, path, out, 0x100)
 }
 
-/// `readlink(path, buffer, size)`.
-///
-/// `EINVAL` is what Linux answers for a path that is not a symbolic link, and
-/// since this filesystem has none, it is the answer for every path that exists.
-/// A C library reading `/proc/self/exe` gets a refusal it knows how to handle
-/// rather than a made-up path it would then open.
-fn readlink(path: u64) -> u64 {
-    if user_range(path, 1, 1).is_none() {
-        return error::EFAULT;
+/// `readlinkat(directory, path, buffer, size)`, also used by readlink.
+fn readlinkat(directory: u64, path: u64, buffer: u64, size: u64) -> u64 {
+    if (size as u32 as i32) <= 0 {
+        return error::EINVAL;
     }
-    error::EINVAL
-}
-
-/// `readlinkat(directory, path, buffer, size)`. The same, as a C library asks
-/// it.
-fn readlinkat(_directory: u64, path: u64) -> u64 {
-    readlink(path)
+    let path = match linux_files::path_of(path) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    let resolved = match super::linux_paths::resolve_no_follow(directory, &path) {
+        Ok(resolved) => resolved,
+        Err(error) => return error,
+    };
+    if super::linux_random::known(&resolved.path) {
+        return error::EINVAL;
+    }
+    let target = match super::linux_proc::link(&resolved.path) {
+        Some(Ok(target)) => target,
+        Some(Err(error)) => return error,
+        None => match resolved.node() {
+            Ok(node) if node.is_symlink() => match crate::fs::store::read_link(&node) {
+                Ok(target) => target,
+                Err(error) => return linux_files::errno(error),
+            },
+            Ok(_) => return error::EINVAL,
+            Err(error) => return error,
+        },
+    };
+    let taken = target.len().min(size as u32 as usize);
+    let Some(process) = crate::sched::current_process() else {
+        return error::ENOSYS;
+    };
+    let Some((output, _)) =
+        crate::arch::syscall::user_range_for(&process, buffer, taken as u64, 4096, true)
+    else {
+        return error::EFAULT;
+    };
+    // readlink truncates to the supplied count and never adds a terminator.
+    unsafe {
+        core::ptr::copy_nonoverlapping(target.as_ptr(), output as *mut u8, taken);
+    }
+    taken as u64
 }
 
 /// `fcntl(fd, command, argument)`.
@@ -543,9 +578,19 @@ fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
     // The descriptor has to exist whatever is being asked about it, and asking
     // first means `fcntl` on a closed one is `EBADF` rather than a cheerful
     // answer about flags nobody owns.
-    if linux_files::describe(descriptor).is_err() {
-        return error::EBADF;
-    }
+    let (counter, view, random) = match linux_files::describe(descriptor) {
+        Ok(linux_files::Descriptor::Other(crate::ipc::Object::Counter(counter))) => {
+            (Some(counter), None, None)
+        }
+        Ok(linux_files::Descriptor::Other(crate::ipc::Object::ProcessData(view))) => {
+            (None, Some(view), None)
+        }
+        Ok(linux_files::Descriptor::Other(crate::ipc::Object::Random(random))) => {
+            (None, None, Some(random))
+        }
+        Ok(_) => (None, None, None),
+        Err(_) => return error::EBADF,
+    };
     let Some(process) = whose() else {
         return error::EINVAL;
     };
@@ -562,7 +607,11 @@ fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
             }
             let new = linux_files::dup(descriptor);
             if (new as i64) >= 0 && command == F_DUPFD_CLOEXEC {
-                FLAGS.lock().entry((process, new)).or_default().close_on_exec = true;
+                FLAGS
+                    .lock()
+                    .entry((process, new))
+                    .or_default()
+                    .close_on_exec = true;
             }
             new
         }
@@ -581,6 +630,26 @@ fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
             0
         }
         F_GETFL => {
+            if let Some(random) = random {
+                return if random
+                    .nonblocking
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                {
+                    O_NONBLOCK
+                } else {
+                    0
+                };
+            }
+            if let Some(view) = view {
+                return if view.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
+                    O_NONBLOCK
+                } else {
+                    0
+                };
+            }
+            if let Some(counter) = counter {
+                return O_RDWR | if counter.nonblocking() { O_NONBLOCK } else { 0 };
+            }
             let non_blocking = FLAGS
                 .lock()
                 .get(&(process, descriptor))
@@ -588,6 +657,24 @@ fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
             O_RDWR | if non_blocking { O_NONBLOCK } else { 0 }
         }
         F_SETFL => {
+            if let Some(random) = random {
+                random.nonblocking.store(
+                    argument & O_NONBLOCK != 0,
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                return 0;
+            }
+            if let Some(view) = view {
+                view.nonblocking.store(
+                    argument & O_NONBLOCK != 0,
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                return 0;
+            }
+            if let Some(counter) = counter {
+                counter.set_nonblocking(argument & O_NONBLOCK != 0);
+                return 0;
+            }
             // Only the bit `F_SETFL` is allowed to change. The access mode and
             // the creation flags are fixed once a file is open, and Linux
             // ignores them here rather than refusing.
@@ -600,6 +687,14 @@ fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
         }
         _ => error::EINVAL,
     }
+}
+
+pub(super) fn mark_cloexec(process: u64, descriptor: u64) {
+    FLAGS
+        .lock()
+        .entry((process, descriptor))
+        .or_default()
+        .close_on_exec = true;
 }
 
 /// `pwrite64(fd, buffer, count, offset)`.
@@ -644,44 +739,46 @@ fn pwrite64(descriptor: u64, buffer: u64, count: u64, offset: u64) -> u64 {
 fn statx(directory: u64, path: u64, flags: u64, out: u64) -> u64 {
     /// `struct statx` is 256 bytes.
     const SIZE: u64 = 256;
-    /// `STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_SIZE | STATX_BLOCKS`.
-    const FILLED: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004 | 0x0000_0200 | 0x0000_0400;
+    /// TYPE, MODE, NLINK, INO, SIZE and BLOCKS. Inode identity is essential:
+    /// dynamic loaders otherwise deduplicate every library as the main image.
+    const FILLED: u32 =
+        0x0000_0001 | 0x0000_0002 | 0x0000_0004 | 0x0000_0100 | 0x0000_0200 | 0x0000_0400;
     /// `S_IFDIR | 0755` and `S_IFREG | 0644`, as `linux_files` reports them.
-    const DIRECTORY: u16 = 0o040_755;
-    const FILE: u16 = 0o100_644;
     /// `AT_EMPTY_PATH`: stat the descriptor itself rather than a path under it.
     const AT_EMPTY_PATH: u64 = 0x1000;
 
-    let Some((at, _)) = user_range(out, SIZE, SIZE) else {
+    let Some(process) = crate::sched::current_process() else {
+        return error::ENOSYS;
+    };
+    let Some((at, _)) = crate::arch::syscall::user_range_for(&process, out, SIZE, SIZE, true)
+    else {
         return error::EFAULT;
     };
 
     // Which node is being asked about. An empty path means the descriptor
     // itself, which is how `fstat` is spelled in `statx`.
-    let empty = match user_range(path, 1, 1) {
-        // SAFETY: one byte the caller owns, checked by `user_range`.
-        Some((pointer, _)) => unsafe { core::ptr::read(pointer as *const u8) == 0 },
-        None => true,
-    };
-    if !empty && flags & AT_EMPTY_PATH == 0 {
-        // A path relative to a directory descriptor, and resolving one is
-        // `linux_files`'s business rather than this file's.
-        return error::ENOSYS;
+    if flags & !(0x100 | 0x800 | AT_EMPTY_PATH | 0x6000) != 0 || flags & 0x6000 == 0x6000 {
+        return error::EINVAL;
     }
-    let Ok(node) = linux_files::node_of(directory) else {
-        return error::EBADF;
+    let path = match linux_files::path_of(path) {
+        Ok(path) => path,
+        Err(error) => return error,
     };
-
-    let size = crate::fs::store::size(&node).unwrap_or(0);
-    let is_directory = node.is_directory();
+    let info = match linux_files::metadata_at(directory, Some(&path), flags) {
+        Ok(info) => info,
+        Err(error) => return error,
+    };
     let mut fields = [0u8; SIZE as usize];
     fields[0..4].copy_from_slice(&FILLED.to_le_bytes());
     fields[4..8].copy_from_slice(&4096u32.to_le_bytes());
-    fields[16..20].copy_from_slice(&(if is_directory { 2u32 } else { 1 }).to_le_bytes());
-    let mode: u16 = if is_directory { DIRECTORY } else { FILE };
-    fields[28..30].copy_from_slice(&mode.to_le_bytes());
-    fields[40..48].copy_from_slice(&size.to_le_bytes());
-    fields[48..56].copy_from_slice(&size.div_ceil(512).to_le_bytes());
+    fields[16..20].copy_from_slice(&(info.links as u32).to_le_bytes());
+    fields[28..30].copy_from_slice(&(info.mode as u16).to_le_bytes());
+    fields[32..40].copy_from_slice(&info.inode.to_le_bytes());
+    fields[40..48].copy_from_slice(&info.size.to_le_bytes());
+    fields[48..56].copy_from_slice(&info.blocks.to_le_bytes());
+    fields[128..132].copy_from_slice(&((info.rdevice >> 8) as u32).to_le_bytes());
+    fields[132..136].copy_from_slice(&((info.rdevice & 0xff) as u32).to_le_bytes());
+    fields[140..144].copy_from_slice(&(info.device as u32).to_le_bytes());
 
     // SAFETY: the range was checked above and is exactly this many bytes.
     unsafe {
@@ -840,9 +937,9 @@ fn statfs_into(out: u64) -> u64 {
     fields[8..16].copy_from_slice(&BLOCK.to_le_bytes()); // f_bsize
     fields[16..24].copy_from_slice(&(total / BLOCK).to_le_bytes()); // f_blocks
     fields[24..32].copy_from_slice(&(free / BLOCK).to_le_bytes()); // f_bfree
-    // f_bavail: what an unprivileged program may use. The same as free, because
-    // this filesystem keeps no reserve and there is no privilege here to be
-    // outside of.
+                                                                   // f_bavail: what an unprivileged program may use. The same as free, because
+                                                                   // this filesystem keeps no reserve and there is no privilege here to be
+                                                                   // outside of.
     fields[32..40].copy_from_slice(&(free / BLOCK).to_le_bytes());
     // f_files and f_ffree are left zero rather than guessed. The volume knows
     // its inode counts, but reaching them from here would mean holding the
@@ -921,7 +1018,11 @@ fn select(
             Timeout::Microseconds => (fraction as u64) / 1000,
             Timeout::Nanoseconds => (fraction as u64) / 1_000_000,
         };
-        Some((whole as u64).saturating_mul(1000).saturating_add(milliseconds))
+        Some(
+            (whole as u64)
+                .saturating_mul(1000)
+                .saturating_add(milliseconds),
+        )
     };
 
     // Read the three sets once. They are the question; the answer is written
@@ -938,7 +1039,11 @@ fn select(
         // SAFETY: `bytes` bytes the caller owns, checked above, copied into a
         // buffer of at least that size.
         unsafe {
-            core::ptr::copy_nonoverlapping(at as *const u8, asked[which].as_mut_ptr(), bytes as usize);
+            core::ptr::copy_nonoverlapping(
+                at as *const u8,
+                asked[which].as_mut_ptr(),
+                bytes as usize,
+            );
         }
     }
 
@@ -1005,93 +1110,56 @@ fn select(
         if let Some((at, _)) = user_range(*set, bytes, bytes) {
             // SAFETY: the same `bytes` bytes checked when they were read.
             unsafe {
-                core::ptr::copy_nonoverlapping(found[which].as_ptr(), at as *mut u8, bytes as usize);
+                core::ptr::copy_nonoverlapping(
+                    found[which].as_ptr(),
+                    at as *mut u8,
+                    bytes as usize,
+                );
             }
         }
     }
     ready
 }
 
-/// `rename(from, to)`, and the directory-relative spellings of it.
-///
-/// Both paths are read out and handed to the filesystem, which does the move in
-/// one transaction. The directory descriptors of `renameat` are ignored, and
-/// that is a real limitation rather than an oversight: every path on this
-/// machine is resolved from the root, because there is no working directory for
-/// a relative one to be relative to. A caller passing anything but `AT_FDCWD`
-/// gets a move it did not ask for, so it is refused instead.
-fn rename(from: u64, to: u64) -> u64 {
-    // Their reader and their walk, not a second pair of mine. The first
-    // version of this had its own, and it read exactly one byte: `user_range`
-    // returns the length you *asked for* rather than the largest it would
-    // permit, so a path of any length came back as its first character and
-    // every rename answered EFAULT. One resolver is also one set of rules about
-    // `.` and `..`.
+/// Rename through the actual old and new directory authorities.
+fn renameat2(old_directory: u64, from: u64, new_directory: u64, to: u64, flags: u64) -> u64 {
+    // Native rename currently cannot replace existing destinations. Exchange
+    // and whiteout remain unsupported; NOREPLACE is fully honored.
+    if flags & !1 != 0 {
+        return error::EINVAL;
+    }
     let from = match linux_files::path_of(from) {
         Ok(path) => path,
-        Err(why) => return why,
+        Err(error) => return error,
     };
     let to = match linux_files::path_of(to) {
         Ok(path) => path,
-        Err(why) => return why,
+        Err(error) => return error,
     };
-
-    let (from_parent, from_name) = match split(&from) {
-        Some(split) => split,
-        None => return error::EINVAL,
+    let old = match super::linux_paths::resolve_entry(old_directory, &from) {
+        Ok(path) => path,
+        Err(error) => return error,
     };
-    let (to_parent, to_name) = match split(&to) {
-        Some(split) => split,
-        None => return error::EINVAL,
+    let new = match super::linux_paths::resolve_entry(new_directory, &to) {
+        Ok(path) => path,
+        Err(error) => return error,
     };
-
-    let from_directory = match linux_files::walk(from_parent) {
-        Ok(node) => node,
-        Err(why) => return why,
+    let (old_parent, old_name) = match old.entry(&from) {
+        Ok(entry) => entry,
+        Err(error) => return error,
     };
-    let to_directory = match linux_files::walk(to_parent) {
-        Ok(node) => node,
-        Err(why) => return why,
+    let (new_parent, new_name) = match new.entry(&to) {
+        Ok(entry) => entry,
+        Err(error) => return error,
     };
-    match crate::fs::store::rename_child(&from_directory, from_name, &to_directory, to_name) {
+    if let Err(error) = old.node() {
+        return error;
+    }
+    if to.ends_with('/') && !old.node.as_ref().is_some_and(|node| node.is_directory()) {
+        return (-20i64) as u64;
+    }
+    match crate::fs::store::rename_child(old_parent, old_name, new_parent, new_name) {
         Ok(()) => 0,
-        Err(why) => {
-            // Named in the log rather than flattened into one errno. A rename
-            // that refuses is a rename somebody has to debug, and "EINVAL" for
-            // all of "no such name", "already there" and "that would make a
-            // loop" is three different problems wearing one number.
-            crate::kprintln!("[linux] rename {from} -> {to} refused: {why:?}");
-            error::EINVAL
-        }
+        Err(error) => linux_files::errno(error),
     }
 }
-
-/// `renameat2(olddir, old, newdir, new, flags)`.
-///
-/// The flags are the reason it exists and none of them can be honoured here:
-/// `RENAME_NOREPLACE` is what this already does, `RENAME_EXCHANGE` swaps two
-/// names atomically, and `RENAME_WHITEOUT` is for overlay filesystems. Anything
-/// but zero and `NOREPLACE` is refused rather than silently downgraded -- a
-/// program asking for an atomic exchange and getting an ordinary move would
-/// lose one of the two files.
-fn renameat2(from: u64, to: u64, flags: u64) -> u64 {
-    const RENAME_NOREPLACE: u64 = 1;
-    if flags & !RENAME_NOREPLACE != 0 {
-        return error::EINVAL;
-    }
-    rename(from, to)
-}
-
-/// A path split into the directory holding it and the name inside.
-fn split(path: &str) -> Option<(&str, &str)> {
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        Some(0) => Some(("/", &trimmed[1..])),
-        Some(at) => Some((&trimmed[..at], &trimmed[at + 1..])),
-        // A bare name, which is relative to the root here because there is
-        // nowhere else for it to be relative to.
-        None if !trimmed.is_empty() => Some(("/", trimmed)),
-        None => None,
-    }
-}
-

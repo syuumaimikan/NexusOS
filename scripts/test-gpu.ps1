@@ -114,7 +114,7 @@ foreach ($expected in @(
         # Not the slot: adding a device renumbers the bus after it, and that
         # is a fact about the argument list rather than about the driver.
         'virtio GPU at ',
-        ': 1280x800 scanout',
+        ': 1920x1200 scanout',
         'resource 1 attached',
         # And it took the rectangle.
         'drew three bands into the scanout and the GPU took them'
@@ -173,10 +173,10 @@ if (-not (Test-Path $Scanout)) {
     $colours = $seen.Count
 
     $checks++
-    if ($width -eq 1280 -and $height -eq 800) {
+    if ($width -eq 1920 -and $height -eq 1200) {
         Write-Host "    ok   the host's picture of the GPU is ${width}x${height}" -ForegroundColor DarkGray
     } else {
-        $failures += "the GPU's picture is ${width}x${height}, not 1280x800"
+        $failures += "the GPU's picture is ${width}x${height}, not 1920x1200"
         Write-Host "    FAIL the picture is ${width}x${height}" -ForegroundColor Red
     }
 

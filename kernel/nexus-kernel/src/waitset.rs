@@ -68,6 +68,8 @@ pub enum Watched {
     /// second is an answer a caller has to act on, and a set that reported only
     /// the first would leave a reader of a finished pipe asleep for ever.
     Pipe(Arc<crate::pipe::PipeEnd>),
+    /// A notification is ready when its counter can be read.
+    Counter(Arc<crate::event::Counter>),
     /// Ready when a connection can be used, or when its peer has gone.
     Stream(Arc<crate::socket::Stream>),
     /// Ready when somebody has connected and nobody has accepted them yet.
@@ -81,6 +83,7 @@ impl Watched {
             Self::Channel(endpoint) => endpoint.queued() > 0 || !endpoint.peer_open(),
             Self::Process(completion) => completion.status().is_some(),
             Self::Pipe(end) => end.readable() || end.writable(),
+            Self::Counter(counter) => counter.readiness().0,
             Self::Stream(stream) => stream.readable() || !stream.connected(),
             Self::Listener(listener) => listener.ready(),
         }
@@ -93,6 +96,7 @@ impl Watched {
             Self::Channel(endpoint) => endpoint.watch(weak),
             Self::Process(completion) => completion.watch(weak),
             Self::Pipe(end) => end.pipe().watch(weak),
+            Self::Counter(counter) => counter.watch(weak),
             Self::Stream(stream) => stream.watch(weak),
             Self::Listener(listener) => listener.watch(weak),
         }

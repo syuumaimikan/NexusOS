@@ -1,10 +1,14 @@
 # Steam and graphics compatibility
 
-Implementation boundary, 2026-09-17. The chosen direction is to extend the
+Implementation boundary, 2026-10-13. The chosen direction is to extend the
 NexusOS kernel and Linux compatibility layer; a Linux guest is not the solution.
 
-**Steam does not run. Vulkan and OpenGL are not implemented, and no part of
-glibc or musl is present on this machine.** Downloading and
+**Steam does not run. Real x86-64 musl and x86-64/i386 glibc 2.36,
+libwayland-client, libffi, Mesa OSMesa/softpipe and SwiftShader CPU Vulkan run on
+the custom kernel. Physical RTX 5060 acceleration is not implemented.**
+OpenGL depth and GLSL rendering pass, including actual
+Wayland window pixels. See
+[the runtime build and verification](posix-runtime.md). Downloading and
 unpacking a Debian archive is not a runnable Steam installation. Do not mark
 Steam installed or create a working Steam launcher until the runtime and its
 dependencies actually execute.
@@ -17,6 +21,22 @@ started.
 ## Verified
 
 Named beside each claim is the script that checks it.
+
+### Upstream Mesa software OpenGL
+
+`scripts/test-posix-runtime.ps1 -WithWayland -WithMesa -DeepFilesystemChecks -Timeout 300`
+
+Pinned Mesa 23.3.6, cross-built against musl, creates a real OSMesa context and
+reports the softpipe driver. The test draws near/far triangles, compiles and
+links GLSL, and checks rendered pixels. The Mesa-linked Wayland client then
+renders into its shared memfd buffer; an independent compositor screenshot
+checks the resized triangle and its depth occlusion. CPU rendering is verified;
+GLX/EGL, DRM and accelerated GPU rendering remain incomplete. The separate
+SwiftShader ICD passes a compute submission test using its real shader compiler.
+
+NexusFS's former approximately 2 MiB file limit is extended to 64 MiB, with
+versioned double-indirect metadata, remount/fsck/shrink tests and bounded boot
+imports. This makes the actual 12 MiB stripped Mesa library installable.
 
 ### Programs built for Linux, compiled here
 
@@ -51,10 +71,12 @@ it four numbers it cannot work out for itself.
 - `BIN/LINUX.LST` on the EFI partition says what to install into the Linux root
   at boot, which is how an interpreter gets somewhere a program can name it.
 
-**This is not glibc's `ld-linux-x86-64.so.2`.** The interpreter it was tested
-against is hand-assembled and lives in this repository. What is verified is the
-kernel's half of the contract; whether glibc's loader works against it is
-untested and unknown.
+`scripts/test-posix-runtime.ps1` also runs a real dynamically linked musl
+program through the unmodified Alpine musl interpreter. `dlopen`, `dlsym` and
+shared-library TLS pass. With `-WithGlibc32`, both unmodified Debian GNU loaders
+also pass actual allocation, file/clock, pthread/TLS and dlopen tests.
+The i386 path uses int 0x80, packed structures and per-thread GDT/GS TLS.
+It is a tested foundation, not a complete Steam runtime.
 
 ### The vector unit
 
@@ -82,7 +104,12 @@ AVX is still absent: that needs `XCR0` and `xsave`, and a program built with
 offset; `PROT_EXEC`; `mprotect` that changes the page tables and leaves the
 contents alone; per-process placement. Refused, deliberately:
 writable-and-executable in one mapping, so no just-in-time compiler runs;
-`MAP_SHARED` of a *file*, because the promise cannot be kept; `PROT_NONE`.
+`MAP_SHARED` of a *file*, because the promise cannot be kept.
+
+`PROT_NONE` now reserves supervisor-only guard pages. Restoring permissions
+preserves their bytes. Kernel-side pointer validation rejects guard and absent
+pages. `mprotect` retains shared-frame ownership metadata. These paths are
+checked by the real libc probe in `scripts/test-posix-runtime.ps1`.
 
 `memfd_create` and `ftruncate` make memory with a descriptor on it — a
 `MemoryObject`, which is what this system already calls memory more than one
@@ -102,6 +129,11 @@ register set before the call. `CLONE_SETTLS`, with `FS_BASE` carried across the
 context switch. `futex` `WAIT`/`WAKE`, with and without a timeout.
 `CLONE_CHILD_CLEARTID`, which is what makes `pthread_join` return. `exit` ends a
 thread; `exit_group` ends the program.
+
+`scripts/test-posix-runtime.ps1` verifies real musl pthreads, independent TLS,
+immediate exits/repeated joins, non-private futex waits, shared-memory aliases,
+unchanged-word wake, zero-count wake and monotonic deadlines. Selective bitsets,
+realtime deadlines, PI and requeue remain unsupported.
 
 `fork` is refused with `ENOSYS` rather than quietly made into a thread.
 
@@ -156,6 +188,15 @@ which is what makes a bootstrapper able to hand the program it starts a
 connection it had already made. `O_CLOEXEC` is not honoured. A program with more
 than one thread is refused rather than raced.
 
+Both libc widths now also pass actual chdir/fchdir/getcwd, relative directory-FD
+file operations, parent traversal and directory rename identity tests. x86-64
+relative execve retains cwd and records the actual executable independently of
+argv[0]. Persistent symlinks and native /dev/urandom also pass real libc tests.
+The official Steam bootstrap gets past chdir, data-link and random-source
+failures, then stops while initialising update-UI IPC. FIFO, flock, permissions,
+socket options and i386 signals remain incomplete. Current logs and native
+filesystem limitations are in [the runtime evidence](posix-runtime.md).
+
 ### Thirty-two bit programs
 
 `scripts/test-linux.ps1`
@@ -179,16 +220,19 @@ is in pages, which is why i386 has a second `mmap` — reads it back, unmaps it,
 and walks its own auxiliary vector, which is in *four-byte* words. The last
 check compares `AT_ENTRY` against where `_start` really is.
 
-What is translated is the calls whose arguments are integers and pointers.
-Everything that passes a structure is refused by name, because the structures
-differ: `struct stat64` is not `struct stat`, an `iovec` is eight bytes rather
-than sixteen, a `timespec` is eight rather than sixteen, and `set_thread_area`
-wants a local descriptor table this system does not have. So a thirty-two bit
-program that reads, writes, maps memory and exits runs; one that asks for the
-time or installs a signal handler is told so by name.
+`scripts/test-posix-runtime.ps1 -WithGlibc32` additionally executes the actual
+Debian i386 GNU loader and libc. ELF32 ET_DYN/PT_INTERP and the four-byte
+auxiliary vector now load the interpreter at a separate bias. Packed stat64,
+statx file identities, eight-byte iovecs, legacy timespecs and fixed-width
+time64 calls are translated. Unsupported structures remain ENOSYS.
 
-There is no thirty-two bit interpreter, so an `ET_DYN` i386 image is refused
-rather than loaded and entered unrelocated.
+`set_thread_area` and `get_thread_area` manage three GDT TLS slots per thread;
+an LDT is not required for these calls. CLONE_SETTLS reads an i386 user_desc,
+and CPU switches preserve the descriptors, FS/GS selectors and user bases
+while retaining the kernel's GS base. Real GNU pthread create/join, concurrent
+TLS, shared futex aliases/deadlines, 80 immediate exits, 256 pipe/poll round
+trips and dlopen/library TLS pass. Signal actions/frames and several process
+and socket APIs remain incomplete. These probes do not establish Steam support.
 
 ### A window for a Linux program
 
@@ -259,10 +303,10 @@ machine's own keyboard protocol carries *characters*; Wayland carries evdev key
 codes, which are positions on a keyboard. The compositor maps back, assuming an
 English layout, and that is the one place in the program that guesses.
 
-It has never been tested against `libwayland`, because there is none on this
-machine and no toolchain here could build one. It was tested against the client
-in this repository, written from the same protocol description. That is a weaker
-claim than "Wayland works" and it is the one being made.
+`scripts/test-posix-runtime.ps1 -WithWayland` now checks the server against a C
+client using unmodified upstream `libwayland-client` and `libffi`, with xdg-shell
+bindings generated by the upstream scanner. Frames, visible resize, keyboard
+input, buffer release and close pass. The server limitations above still apply.
 
 ### A SPIR-V shader, read and run
 
@@ -328,13 +372,15 @@ interfaces it needs.
 
 | Stage | State | What is left | Acceptance evidence |
 | --- | --- | --- | --- |
-| Dynamic ELF execution | **Kernel half done** | A real libc on the disk | An unmodified program starts through *glibc's* loader |
-| Process/runtime services | **Threads, futex, TLS, signals, pipes, poll/epoll, Unix sockets, `execve` done** | `fork`, kernel-raised signals, `O_CLOEXEC`, filesystem links and permissions, `AF_INET` sockets | libc and threading test suites run in the guest without success-returning stubs |
-| 32-bit execution | **A static i386 program runs** | Structure-passing calls (`stat64`, `iovec`, `timespec`, `sigaction`), `set_thread_area` and an LDT for thread-local storage, a 32-bit interpreter and 32-bit libraries | The Steam bootstrap starts |
-| Linux desktop transport | **A window is negotiated, drawn, resized, typed at and closed** | Tested against `libwayland` rather than against a client written from the same description; an XKB keymap; pointer and touch; subsurfaces, popups and regions; several clients; protocol errors; then Xwayland | An **unmodified** `libwayland` client presents frames, resizes, receives input and releases buffers |
+| Dynamic ELF execution | **Real musl and glibc 2.36 loaders, dlopen and TLS verified** | Broader GNU library/application coverage | Focused unmodified-libc probes start through glibc's loader and exit successfully |
+| Process/runtime services | **Focused real-musl tests pass; threads, futex, TLS, signals, pipes, readiness, Unix sockets and execve have implementations** | `fork`, kernel-raised signals, `O_CLOEXEC`, filesystem links and permissions, `AF_INET` sockets, broader futex operations and conformance | libc and threading test suites run in the guest without success-returning stubs |
+| 32-bit execution | **Actual i386 glibc loader, allocation, stat64/statx, pthread GS TLS, futex/join and dlopen verified** | i386 signal actions/frames, complete process/socket interfaces, bootstrap dependencies and application coverage | The actual Steam bootstrap starts |
+| Linux desktop transport | **Upstream libwayland client presents, resizes, receives input and releases buffers** | An XKB keymap; pointer and touch; subsurfaces, popups and regions; several clients; protocol errors; then Xwayland | Current focused gate passes with the upstream library; broader desktop applications remain untested |
+| Software OpenGL | **Real Mesa OSMesa/softpipe depth and GLSL pixels pass, including Wayland presentation** | Broader API coverage/conformance; EGL/GLX/window-system integration; GPU acceleration | Current triangle, shader, resize and screenshot checks pass; full application compatibility remains untested |
 | Shaders | **A SPIR-V module is read and executed, and its pixels reach the screen** | A module from a real compiler rather than from this repository; images, samplers, buffers, push constants, matrices, function calls; compiling a module instead of interpreting it | `glslang`'s output for a non-trivial shader runs and matches a reference image |
-| Vulkan | **Not started** | An actual ICD and its OS interfaces — which needs a libc first; or, for Venus, capset negotiation, contexts, blob resources, host-visible mappings, synchronization | The Vulkan loader discovers the ICD, `vulkaninfo` succeeds and `vkcube` presents; then conformance |
-| Steam installation | **Not started** | Package decompression, dependencies and scripts; the runtime bootstrap; graphics, audio and network integration | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
+| Vulkan | **Upstream SwiftShader CPU ICD compiles SPIR-V and submits a compute dispatch** | Vulkan loader discovery, WSI/swapchain, broader graphics tests, conformance and hardware driver | The Vulkan loader discovers the ICD, `vulkaninfo` succeeds and `vkcube` presents; then conformance |
+| Physical RTX 5060 | **Native PCI and read-only Blackwell identity discovery implemented; hardware boot untested** | GSP firmware boot, DMA/IOMMU, VRAM/virtual address spaces, fences, interrupts, command submission and native Vulkan integration | NexusOS boots on the physical card and GPU-generated pixels reach the display |
+| Steam installation | **Official ELF32 bootstrap loads and enters initialisation; fails before client sign-in** | System V IPC, i386 signals, `/proc`, permissions, shell/bootstrap scripts and complete graphics/audio/network integration | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
 
 ## Can Mesa not just be used?
 
@@ -345,11 +391,12 @@ OpenGL; `zink`, OpenGL over Vulkan; and drivers for real hardware. SwiftShader i
 a second software Vulkan. `virglrenderer` and Venus pass the work to a host.
 All of it is free, and none of it is the obstacle.
 
-**The obstacle is that Mesa is a program for a POSIX system, and this is not one
-yet.** It wants a C library, `pthreads`, `dlopen`, `/dev/dri` or a windowing
-backend, and — for every path that is not painfully slow — LLVM. This machine
-has *no libc at all*. Nothing on it can link against one, because there is not
-one to link against.
+Mesa needs a C library, `pthreads`, `dlopen`, a windowing/device backend and,
+for LLVM-based drivers, LLVM. Real musl allocation, threading, dynamic linking
+and the libwayland client path have passed focused tests. Mesa OSMesa/softpipe
+now also runs and renders real GLSL through shared Wayland buffers. SwiftShader's
+Subzero backend compiles and executes a genuine Vulkan compute pipeline.
+LLVM-based drivers and physical GPU rendering remain unverified.
 
 So the ordering is not a matter of taste:
 
@@ -360,11 +407,11 @@ So the ordering is not a matter of taste:
 | Steam's bootstrap | a 32-bit C library, and a 64-bit one for everything after |
 
 All three roads run through the same gate, and it is not a graphics gate. A
-libc — musl is the plausible one, being small and static-friendly — is the piece
-that unlocks Mesa, the real dynamic loader, and Steam at once. Everything in the
-table above that says "not started" is downstream of it.
+libc is an early dependency, now verified with musl and x86-64/i386 glibc. Steam's
+remaining runtime requirements need separate work. Mesa does not become a working graphics
+stack merely because these focused libc tests pass.
 
-What *can* be done without a libc is what has been done: take the published
+Work completed before libc integration includes taking the published
 formats, which are Khronos specifications rather than anybody's code, and
 implement them. That is what `shared/nexus-spirv` is. It is not a substitute for
 Mesa and is not pretending to be one — it is the half of the problem that does
@@ -379,6 +426,10 @@ cargo kernel --offline
 cargo guest --offline
 cargo guest32 --offline
 ./scripts/build.ps1
+./scripts/build.ps1 -WithWaylandRuntime
+./scripts/build.ps1 -WithWaylandRuntime -WithMesaRuntime -SkipDiskImage
+./scripts/test-posix-runtime.ps1 -WithWayland
+./scripts/test-posix-runtime.ps1 -WithWayland -WithMesa -DeepFilesystemChecks -Timeout 300
 ./scripts/configure-disk.ps1
 ./scripts/test-linux.ps1
 ./scripts/test-linux-window.ps1

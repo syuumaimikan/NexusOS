@@ -579,6 +579,15 @@ const fn gutter() -> u32 {
 }
 
 impl App for Editor {
+    fn close_requested(&mut self) -> bool {
+        if self.dirty && !self.warned {
+            self.warned = true;
+            self.status = nexus_i18n::text("edit.unsaved").to_string();
+            self.touch_all();
+            return false;
+        }
+        true
+    }
     fn draw(&mut self, canvas: &mut Canvas) {
         let bounds = canvas.bounds();
         if bounds.width != self.width || bounds.height != self.height {

@@ -163,6 +163,18 @@ pub(super) fn ready_now(descriptor: u64) -> i16 {
         // A file is always both. There is nothing to wait for: a read of it
         // returns bytes or end of file, and neither blocks.
         Ok(Descriptor::File(_, _)) => event::IN | event::OUT,
+        Ok(Descriptor::Other(crate::ipc::Object::ProcessData(_))) => event::IN | event::OUT,
+        Ok(Descriptor::Other(crate::ipc::Object::Random(_))) => {
+            if crate::random::available() {
+                event::IN
+            } else {
+                event::ERR
+            }
+        }
+        Ok(Descriptor::Other(crate::ipc::Object::Counter(counter))) => {
+            let (readable, writable) = counter.readiness();
+            (if readable { event::IN } else { 0 }) | (if writable { event::OUT } else { 0 })
+        }
         Ok(Descriptor::Pipe(end)) => {
             let mut bits = 0;
             if end.is_writing() {
@@ -239,6 +251,9 @@ pub(super) fn ready_now(descriptor: u64) -> i16 {
 fn watchable(descriptor: u64) -> Option<Watched> {
     match describe(descriptor) {
         Ok(Descriptor::Pipe(end)) => Some(Watched::Pipe(end)),
+        Ok(Descriptor::Other(crate::ipc::Object::Counter(counter))) => {
+            Some(Watched::Counter(counter))
+        }
         Ok(Descriptor::Other(crate::ipc::Object::Channel(endpoint))) => {
             Some(Watched::Channel(endpoint))
         }
@@ -277,7 +292,7 @@ fn deadline_of(milliseconds: i64) -> Option<u64> {
 ///
 /// Returns false when nothing could be waited on, which is a caller's cue to
 /// stop rather than spin: a set with no members never signals.
-fn sleep_on(members: &[Watched], deadline: Option<u64>) -> bool {
+fn sleep_on(members: &[Watched], deadline: Option<u64>, ready: impl FnOnce() -> bool) -> bool {
     if members.is_empty() {
         return false;
     }
@@ -288,11 +303,15 @@ fn sleep_on(members: &[Watched], deadline: Option<u64>) -> bool {
         // into a failure.
         let _ = set.add(key as u64, member.clone());
     }
-    // The generation is read before anything is tested, so a signal that lands
-    // between the test the caller already did and this wait is seen as a change
-    // rather than slept through.
+    // Registration and generation capture must precede a second readiness
+    // check. A write between the caller's earlier check and registration has
+    // already happened and cannot change the newly-created set's generation.
+    // Check the caller's requested events: a generic Stream is also writable,
+    // which must not turn a read-only poll into a busy loop.
     let seen = set.change_count();
-    set.wait_since(seen, deadline);
+    if !ready() {
+        set.wait_since(seen, deadline);
+    }
     true
 }
 
@@ -380,7 +399,12 @@ pub fn poll(fds: u64, count: u64, timeout: i64) -> u64 {
             .filter_map(|(descriptor, _)| watchable(*descriptor))
             .collect();
         WAITED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if !sleep_on(&members, deadline) {
+        if !sleep_on(&members, deadline, || {
+            watching.iter().any(|(descriptor, asked)| {
+                *descriptor != u64::MAX
+                    && ready_now(*descriptor) & (asked | event::ERR | event::HUP | event::NVAL) != 0
+            })
+        }) {
             // Nothing here can ever become ready, and nothing is ready now. A
             // caller that waited would wait for ever, so it is told nothing
             // happened -- which is the truth.
@@ -573,7 +597,14 @@ pub fn wait(set: u64, events: u64, most: u64, timeout: i64) -> u64 {
             .filter_map(|(descriptor, _)| watchable(u64::from(*descriptor)))
             .collect();
         WAITED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if !sleep_on(&members, deadline) {
+        if !sleep_on(&members, deadline, || {
+            interests.iter().any(|(descriptor, want)| {
+                let now = ready_now(u64::from(*descriptor));
+                now & (event::ERR | event::HUP | event::NVAL) != 0
+                    || (now & event::IN != 0 && want.events & epoll::IN != 0)
+                    || (now & event::OUT != 0 && want.events & epoll::OUT != 0)
+            })
+        }) {
             return 0;
         }
     }

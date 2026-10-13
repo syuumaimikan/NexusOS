@@ -501,6 +501,11 @@ pub enum Object {
     /// write this" are different authorities, and one object that did both
     /// would make them indistinguishable.
     Pipe(Arc<crate::pipe::PipeEnd>),
+    /// A counted notification, shared by every handle to it.
+    Counter(Arc<crate::event::Counter>),
+    /// A read-only view of argument/environment bytes of the owning process.
+    ProcessData(Arc<crate::process::ProcessData>),
+    Random(Arc<crate::random::Device>),
     /// The machine's own log, as something a handle can name.
     ///
     /// Every program can already reach the log, through `nexus_user::log`, and
@@ -554,6 +559,9 @@ impl Object {
                 }
             }
             Self::Console(_) => "console",
+            Self::Counter(_) => "event counter",
+            Self::ProcessData(_) => "process information",
+            Self::Random(_) => "random source",
             Self::Socket(socket) => {
                 if socket.listener().is_some() {
                     "socket (listening)"
@@ -746,6 +754,7 @@ impl HandleTable {
             Object::Process(completion) => {
                 Ok(crate::waitset::Watched::Process(Arc::clone(completion)))
             }
+            Object::Counter(counter) => Ok(crate::waitset::Watched::Counter(Arc::clone(counter))),
             _ => Err(HandleError::WrongKind),
         }
     }

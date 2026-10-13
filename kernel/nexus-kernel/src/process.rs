@@ -54,6 +54,7 @@
 //! created by asking whoever is allowed to answer, not by a system call that
 //! trusts the asker.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -227,6 +228,25 @@ pub enum Personality {
     Linux32,
 }
 
+/// The image actually installed by the loader, independently of its interpreter.
+#[derive(Default)]
+pub struct Image {
+    pub path: String,
+    pub file: Option<Arc<crate::fs::store::Node>>,
+    pub arguments: (u64, u64),
+    pub environment: (u64, u64),
+}
+
+/// An open view of a process's initial argument or environment memory.
+/// Duplicated handles share the cursor; no reference back to the process is
+/// retained, so a process holding its own information cannot form an Arc cycle.
+pub struct ProcessData {
+    pub owner: ProcessId,
+    pub environment: bool,
+    pub position: crate::sync::IrqSpinLock<u64>,
+    pub nonblocking: AtomicBool,
+}
+
 pub struct Process {
     pub id: ProcessId,
     pub name: String,
@@ -234,6 +254,14 @@ pub struct Process {
     pub personality: Personality,
     /// The page tables its threads run on.
     pub address_space: Arc<AddressSpace>,
+    /// Native shared mappings keep their frames alive after handles are moved
+    /// or closed. Dropped after the address-space field during final teardown.
+    pub memory_mappings: crate::sync::IrqSpinLock<BTreeMap<u64, Arc<crate::ipc::MemoryObject>>>,
+    pub image: crate::sync::IrqSpinLock<Image>,
+    /// The actual directory held by the process, rather than a cached pathname.
+    /// None starts at the compatibility root without requiring a mounted disk
+    /// while this process is constructed. Threads share their process's cwd.
+    pub working_directory: crate::sync::IrqSpinLock<Option<Arc<crate::fs::store::Node>>>,
     /// The objects it may name, and what it may do with them.
     pub handles: HandleTable,
     /// Where its ending is recorded, and who is waiting for it.
@@ -268,6 +296,9 @@ impl Process {
             name: String::from(name),
             personality,
             address_space,
+            memory_mappings: crate::sync::IrqSpinLock::new(BTreeMap::new()),
+            image: crate::sync::IrqSpinLock::new(Image::default()),
+            working_directory: crate::sync::IrqSpinLock::new(None),
             // A Linux process's handles start at three, because its handles
             // are its file descriptors and nought, one and two are spoken for.
             // See `compat::linux_files`.

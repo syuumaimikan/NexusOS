@@ -174,6 +174,8 @@ enum Call {
     Now = 31,
     Random = 32,
     DisplayFlush = 33,
+    NodeSymlink = 35,
+    NodeReadLink = 36,
 }
 
 /// Make a system call.
@@ -705,6 +707,7 @@ pub fn rights(handle: Handle) -> Result<u32, Error> {
 pub enum Kind {
     File,
     Directory,
+    Symlink,
 }
 
 /// One entry of a directory, borrowed from the buffer it was read into.
@@ -736,6 +739,9 @@ pub fn open(directory: Handle, name: &str) -> Result<Handle, Error> {
 
 /// Make a file or a directory, and open it.
 pub fn create(directory: Handle, name: &str, kind: Kind) -> Result<Handle, Error> {
+    if kind == Kind::Symlink {
+        return Err(Error::Invalid);
+    }
     // SAFETY: as above.
     let result = unsafe {
         syscall(
@@ -749,6 +755,39 @@ pub fn create(directory: Handle, name: &str, kind: Kind) -> Result<Handle, Error
         )
     };
     check(result).map(|handle| Handle(handle as u32))
+}
+
+/// Create an immutable link. Native open returns its node without following
+/// the target; the caller's namespace resolver decides how to interpret it.
+pub fn symlink(directory: Handle, name: &str, target: &str) -> Result<Handle, Error> {
+    let result = unsafe {
+        syscall(
+            Call::NodeSymlink,
+            u64::from(directory.0),
+            name.as_ptr() as u64,
+            name.len() as u64,
+            target.as_ptr() as u64,
+            target.len() as u64,
+            0,
+        )
+    };
+    check(result).map(|handle| Handle(handle as u32))
+}
+
+/// Read a link's target, without NUL. Too-small buffers are refused.
+pub fn read_link(node: Handle, buffer: &mut [u8]) -> Result<usize, Error> {
+    let result = unsafe {
+        syscall(
+            Call::NodeReadLink,
+            u64::from(node.0),
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+            0,
+        )
+    };
+    check(result).map(|length| length as usize)
 }
 
 /// Remove a name, and the thing it named.
@@ -821,6 +860,7 @@ impl<'a> Iterator for Entries<'a> {
         let length = self.packed[4] as usize;
         let kind = match self.packed[5] {
             2 => Kind::Directory,
+            3 => Kind::Symlink,
             _ => Kind::File,
         };
         if self.packed.len() < 8 + length {

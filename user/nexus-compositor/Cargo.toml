@@ -13,3 +13,4 @@ test = false
 
 [dependencies]
 nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }

@@ -215,6 +215,11 @@ pub trait App {
         let _ = (width, height);
     }
 
+    /// A decoration requested closing. Editors can decline while data is dirty.
+    fn close_requested(&mut self) -> bool {
+        true
+    }
+
     /// How long to wait before being woken anyway, in milliseconds.
     ///
     /// `None` — the default — means wait until something happens, which is what
@@ -641,6 +646,14 @@ impl Window {
             return Heard::Gone;
         };
         let bytes = &message[..received.bytes];
+
+        if bytes == b"close" {
+            return if app.close_requested() {
+                Heard::Gone
+            } else {
+                Heard::Changed
+            };
+        }
 
         if bytes == wire::SHOWN {
             return Heard::Shown;

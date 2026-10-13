@@ -38,6 +38,8 @@
 
 extern crate alloc;
 
+pub mod raster3d;
+
 use alloc::vec::Vec;
 
 pub use nexus_font as font;
@@ -520,7 +522,7 @@ pub const LINE_HEIGHT: u32 = font::CELL_HEIGHT;
 /// which depends on a font -- and the compositor draws no text on purpose. The
 /// cost of them drifting apart is fourteen pixels of overlap, which is the
 /// trade being made knowingly rather than by accident.
-pub const TITLE_BAR: u32 = 14;
+pub const TITLE_BAR: u32 = 32;
 
 /// A stack of things laid out one under another.
 ///

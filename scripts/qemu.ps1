@@ -16,6 +16,18 @@
 
 Set-StrictMode -Version Latest
 
+function Start-NexusQemu {
+    param([string]$Executable, [string[]]$Arguments, [string]$ErrorLog)
+    # Start-Process joins ArgumentList into a Windows command line. Quote each
+    # argument, including doubled trailing backslashes and embedded quotes.
+    $quoted = @($Arguments | ForEach-Object {
+        '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+    })
+    $options = @{ FilePath = $Executable; ArgumentList = $quoted; PassThru = $true; WindowStyle = 'Hidden' }
+    if ($ErrorLog) { $options.RedirectStandardError = $ErrorLog }
+    return Start-Process @options
+}
+
 # The disk NexusOS drives, made by make-disk.ps1. Data only: it carries a GPT
 # and a FAT32 filesystem, and deliberately nothing to boot from.
 function Get-NexusDiskImage {
@@ -204,7 +216,7 @@ function Assert-DiskSize {
     if ($got -ne $want) {
         throw ("$(Split-Path -Leaf $Image) is $([math]::Round($got / 1MB)) MiB and the build " +
             "makes $([math]::Round($want / 1MB)) MiB. Something rebuilt it without asking " +
-            'Get-NexusDiskSizes; run build.ps1 to make it again.')
+            'Get-NexusDiskSizes. Preserve it as a backup before explicitly creating a matching image.')
     }
 }
 
@@ -243,6 +255,10 @@ function Get-NexusQemuArgs {
         [switch]$StopOnFault,
         [switch]$BootFromImage
     )
+
+    foreach ($path in @($BuildDir, $EspDir, $FirmwareCode, $FirmwareVars, $SerialLog)) {
+        if ($path.Contains(',')) { throw "QEMU option paths containing commas are unsupported: $path" }
+    }
 
     $arguments = @(
         '-machine', 'q35',

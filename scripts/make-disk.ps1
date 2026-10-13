@@ -37,6 +37,9 @@
 .PARAMETER FatMiB
     How much of it the FAT32 partition takes. The rest, less the backup GPT, is
     NexusFS's.
+.PARAMETER UpdatePrograms
+    Refresh only the FAT32 program partition of an existing matching image.
+    Preserve NexusFS, its user settings/files, and both GPT copies.
 
 .NOTES
     The image is streamed rather than built in memory.
@@ -55,7 +58,8 @@ param(
     [string]$SourceDir,
     [string]$ProgramDir,
     [int]$SizeMiB = 64,
-    [int]$FatMiB = 40
+    [int]$FatMiB = 40,
+    [switch]$UpdatePrograms
 )
 
 $ErrorActionPreference = 'Stop'
@@ -207,12 +211,15 @@ $FatCount = 2
 # size needs the cluster count, which needs the FAT size; this over-estimates by
 # at most a sector, which costs nothing and is what every formatter does.
 $tmp1 = $PartitionSectors - $ReservedSectors
-$tmp2 = (256 * $SectorsPerCluster) + $FatCount
+$tmp2 = (128 * $SectorsPerCluster) + $FatCount
 $FatSectors = [int][math]::Floor(($tmp1 + $tmp2 - 1) / $tmp2)
 
 $FatStart = $PartitionStart + $ReservedSectors
 $DataStart = $FatStart + $FatCount * $FatSectors
 $ClusterCount = [int][math]::Floor(($PartitionEnd - $DataStart + 1) / $SectorsPerCluster)
+if ($FatSectors * ($SectorSize / 4) -lt $ClusterCount + 2) {
+    throw 'FAT32 allocation table cannot hold all data clusters'
+}
 
 if ($ClusterCount -lt 65525) {
     throw "only $ClusterCount clusters; FAT32 needs at least 65525"
@@ -588,6 +595,37 @@ $script:Canvas = $image
 # ---------------------------------------------------------------------------
 # Out to the file: the head, then labelled sectors for the gap, then the tail.
 # ---------------------------------------------------------------------------
+if ($UpdatePrograms) {
+    # Exclusive access prevents updating the program partition beneath QEMU.
+    $stream = [IO.File]::Open($Output, 'Open', 'ReadWrite', 'None')
+    try {
+        if ($stream.Length -ne $TotalSectors * $SectorSize) { throw 'Existing disk size differs; refusing to erase or resize it' }
+        # This writer owns a deterministic GPT layout. Verify both copies before
+        # touching the FAT, so changing FatMiB can never overwrite NexusFS.
+        foreach ($region in @(
+            @{ At = 0L; Bytes = $image; Count = 34 * $SectorSize },
+            @{ At = $TailStart * $SectorSize; Bytes = $tail; Count = $tail.Length }
+        )) {
+            $old = New-Object byte[] $region.Count
+            $stream.Position = $region.At
+            $read = 0
+            while ($read -lt $old.Length) {
+                $got = $stream.Read($old, $read, $old.Length - $read)
+                if ($got -eq 0) { throw 'Truncated partition table' }
+                $read += $got
+            }
+            for ($index = 0; $index -lt $old.Length; $index++) {
+                if ($old[$index] -ne $region.Bytes[$index]) { throw 'Existing GPT layout differs; refusing to overwrite user data' }
+            }
+        }
+        $offset = [int]($PartitionStart * $SectorSize)
+        $stream.Position = $offset
+        $stream.Write($image, $offset, [int]($PartitionSectors * $SectorSize))
+        $stream.Flush($true)
+    } finally { $stream.Dispose() }
+    Write-Host "  refreshed program partition; NexusFS preserved -> $Output"
+    return
+}
 $stream = [System.IO.File]::Create($Output)
 try {
     $stream.Write($image, 0, $image.Length)

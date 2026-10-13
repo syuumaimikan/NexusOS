@@ -1,5 +1,26 @@
 # A custom kernel, the Linux userspace ABI, and Mesa on top
 
+Update, 2026-10-12: the probe output below describes an earlier baseline. Real
+x86-64 musl now passes allocation, files, guards, pthread/TLS, futex and dynamic
+linking tests on the NexusOS kernel. Upstream libwayland/libffi also pass the
+window transport test. See [the current runtime evidence](posix-runtime.md).
+Real Mesa OSMesa/softpipe now also passes OpenGL depth and GLSL pixel tests,
+including visible output through the upstream Wayland library. GNU libc 2.36
+for both x86-64 and i386, and the upstream SwiftShader CPU Vulkan ICD now pass
+focused runtime tests. i386 includes actual GNU loader/dlopen and pthread/GS
+TLS tests. Real libc probes also verify System V semaphore transactions,
+SEM_UNDO ownership and eventfd/epoll notifications at both widths. Actual
+executable identity and live proc argument/environment bytes are implemented,
+including x86-64 execve metadata refresh and i386 directory reads. Native cwd,
+directory-relative paths and x86-64 relative execve also pass real libc probes.
+Persistent links and native random-source descriptors also pass both widths;
+the Steam bootstrap now proceeds beyond chdir/data-link/random failures to
+update-UI IPC initialisation. Legacy i386 stream socketcall and parallel group
+exit status are tested. Socket options, signals and
+several process/socket APIs are still incomplete.
+Steam and physical GPU rendering remain incomplete. The historical dependency analysis below is not a current
+acceptance report.
+
 ```
 probe: have getpid (39)
 probe: MISSING mremap (25) -- realloc of a mapping

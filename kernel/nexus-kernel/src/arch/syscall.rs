@@ -337,7 +337,11 @@ nexus_int80_entry:
     push r15
 
     mov rdi, rsp
+    // The interrupt frame leaves RSP eight bytes off the SysV call alignment.
+    // Keep the Frame pointer unchanged while aligning the kernel call.
+    sub rsp, 8
     call {dispatch32}
+    add rsp, 8
 
     // The answer, and then whatever the dispatcher did to the frame. A
     // thirty-two bit `exit` never comes back here at all; anything that does
@@ -564,11 +568,13 @@ pub enum Call {
     /// existed a program here could hand another program a message and could
     /// not hand it a stream. See [`crate::pipe`].
     PipeCreate = 34,
+    NodeSymlink = 35,
+    NodeReadLink = 36,
 }
 
 impl Call {
     /// How many calls exist.
-    pub const COUNT: usize = 34;
+    pub const COUNT: usize = 37;
 
     /// The call `number` names, if it names one.
     fn from_number(number: u64) -> Option<Self> {
@@ -608,6 +614,8 @@ impl Call {
             32 => Some(Self::Random),
             33 => Some(Self::DisplayFlush),
             34 => Some(Self::PipeCreate),
+            35 => Some(Self::NodeSymlink),
+            36 => Some(Self::NodeReadLink),
             _ => None,
         }
     }
@@ -791,6 +799,10 @@ extern "sysv64" fn dispatch(
         Some(Call::MemorySize) => memory_size(argument0),
         Some(Call::NodeOpen) => node_open(argument0, argument1, argument2),
         Some(Call::NodeCreate) => node_create(argument0, argument1, argument2, argument3),
+        Some(Call::NodeSymlink) => {
+            node_symlink(argument0, argument1, argument2, argument3, argument4)
+        }
+        Some(Call::NodeReadLink) => node_read_link(argument0, argument1, argument2),
         Some(Call::NodeRemove) => node_remove(argument0, argument1, argument2),
         Some(Call::NodeList) => node_list(argument0, argument1, argument2),
         Some(Call::NodeRead) => node_read(argument0, argument1, argument2),
@@ -888,6 +900,19 @@ fn log(pointer: u64, length: u64) -> u64 {
 /// pointer with a field offset added is still a null pointer as far as anything
 /// useful is concerned, and `0x18` is no better an address than `0`.
 pub fn user_range(pointer: u64, length: u64, limit: u64) -> Option<(u64, usize)> {
+    let process = crate::sched::current_process()?;
+    user_range_for(&process, pointer, length, limit, false)
+}
+
+/// Validate using an already-resolved process, without acquiring the scheduler
+/// lock under an object lock. Output buffers must also have writable mappings.
+pub fn user_range_for(
+    process: &crate::process::Process,
+    pointer: u64,
+    length: u64,
+    limit: u64,
+    writing: bool,
+) -> Option<(u64, usize)> {
     if length == 0 || length > limit {
         return None;
     }
@@ -897,6 +922,23 @@ pub fn user_range(pointer: u64, length: u64, limit: u64) -> Option<(u64, usize)>
     let end = pointer.checked_add(length)?;
     if end > nexus_abi::layout::USER_SPACE_END {
         return None;
+    }
+    // A numeric user address can still name an absent page or a PROT_NONE
+    // reservation. Validate each page before any kernel-side dereference.
+    let first = pointer & !(nexus_mm::PAGE_SIZE - 1);
+    let last = (end - 1) & !(nexus_mm::PAGE_SIZE - 1);
+    let mut page = first;
+    loop {
+        let flags = crate::memory::paging::flags_in(process.address_space.root(), page)?;
+        if flags & crate::memory::paging::USER == 0
+            || (writing && flags & crate::memory::paging::WRITABLE == 0)
+        {
+            return None;
+        }
+        if page == last {
+            break;
+        }
+        page += nexus_mm::PAGE_SIZE;
     }
     Some((pointer, length as usize))
 }
@@ -1222,6 +1264,8 @@ fn memory_map(handle: u64, address: u64, writable: u64) -> u64 {
         flags |= crate::memory::paging::WRITABLE;
     }
 
+    let mut mappings = process.memory_mappings.lock();
+
     for index in 0..memory.pages() {
         let Some(frame) = memory.frame(index) else {
             return EINVAL;
@@ -1233,7 +1277,7 @@ fn memory_map(handle: u64, address: u64, writable: u64) -> u64 {
         // process's own space.
         match unsafe { process.address_space.map(virt, frame, flags) } {
             Ok(()) => {}
-            Err(crate::memory::paging::MapError::AlreadyMapped) => {
+            Err(_) => {
                 // Undo the pages already mapped, so a request that collides
                 // partway through leaves the caller as it found it.
                 for done in 0..index {
@@ -1241,18 +1285,14 @@ fn memory_map(handle: u64, address: u64, writable: u64) -> u64 {
                     // SAFETY: mapped by this loop a moment ago, and marked
                     // shared, so unmapping does not free the frame.
                     unsafe {
-                        let _ = crate::memory::paging::unmap_page_in(
-                            process.address_space.root(),
-                            virt,
-                        );
+                        let _ = process.address_space.unmap(virt);
                     }
                 }
                 return EINVAL;
             }
-            Err(_) => return EINVAL,
         }
     }
-
+    mappings.insert(address, memory);
     bytes
 }
 
@@ -1469,6 +1509,56 @@ fn node_create(directory: u64, pointer: u64, length: u64, is_directory: u64) -> 
     }
 }
 
+fn node_symlink(directory: u64, pointer: u64, length: u64, target: u64, target_length: u64) -> u64 {
+    let (node, rights) = match caller_node(directory, crate::ipc::Rights::WRITE) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+    let Some(name) = user_name(pointer, length) else {
+        return EINVAL;
+    };
+    let Some((target, length)) = user_range(target, target_length, 4095) else {
+        return EINVAL;
+    };
+    let Ok(target) =
+        core::str::from_utf8(unsafe { core::slice::from_raw_parts(target as *const u8, length) })
+    else {
+        return EINVAL;
+    };
+    match crate::fs::store::create_link(&node, name, target) {
+        Ok(child) => insert_node(child, rights),
+        Err(error) => store_error(error),
+    }
+}
+
+fn node_read_link(descriptor: u64, pointer: u64, capacity: u64) -> u64 {
+    let (node, _) = match caller_node(descriptor, crate::ipc::Rights::READ) {
+        Ok(found) => found,
+        Err(error) => return error,
+    };
+    if !node.is_symlink() {
+        return EINVAL;
+    }
+    let target = match crate::fs::store::read_link(&node) {
+        Ok(target) => target,
+        Err(error) => return store_error(error),
+    };
+    if capacity < target.len() as u64 {
+        return ETOOBIG;
+    }
+    let Some(process) = crate::sched::current_process() else {
+        return ENOPROC;
+    };
+    let Some((output, _)) = user_range_for(&process, pointer, target.len() as u64, 4095, true)
+    else {
+        return EINVAL;
+    };
+    unsafe {
+        core::ptr::copy_nonoverlapping(target.as_ptr(), output as *mut u8, target.len());
+    }
+    target.len() as u64
+}
+
 /// [`Call::NodeRemove`]: remove a name, and the thing it named.
 fn node_remove(directory: u64, pointer: u64, length: u64) -> u64 {
     let (node, _) = match caller_node(directory, crate::ipc::Rights::WRITE) {
@@ -1507,6 +1597,7 @@ fn node_list(directory: u64, pointer: u64, capacity: u64) -> u64 {
         packed.push(entry.name.len() as u8);
         packed.push(match entry.kind {
             crate::fs::nexusfs::Kind::Directory => 2,
+            crate::fs::nexusfs::Kind::Symlink => 3,
             _ => 1,
         });
         packed.extend_from_slice(&[0, 0]);
@@ -2009,6 +2100,14 @@ fn memory_unmap(handle: u64, address: u64) -> u64 {
         return EINVAL;
     }
 
+    let mut mappings = process.memory_mappings.lock();
+    if mappings
+        .get(&address)
+        .is_some_and(|mapped| !alloc::sync::Arc::ptr_eq(mapped, &memory))
+    {
+        return EINVAL;
+    }
+
     // Every page has to be one this object is actually mapped at, checked
     // before any of them is removed. An address that happens to be mapped to
     // something else is not this object, and unmapping it would be unmapping
@@ -2033,6 +2132,7 @@ fn memory_unmap(handle: u64, address: u64) -> u64 {
         }
     }
 
+    mappings.remove(&address);
     bytes
 }
 

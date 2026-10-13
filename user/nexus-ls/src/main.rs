@@ -148,6 +148,7 @@ fn run(argument: &str) -> u32 {
             // distinction that changes what can be done with a name.
             Kind::Directory => alloc::format!("{}/", entry.name),
             Kind::File => entry.name.to_string(),
+            Kind::Symlink => alloc::format!("{}@", entry.name),
         });
     }
 

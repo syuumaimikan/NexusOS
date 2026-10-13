@@ -338,6 +338,40 @@ pub fn self_test() -> Result<String, StoreError> {
         return Ok(format!("FAILED: the large file differs at byte {at}"));
     }
 
+    // Real runtime libraries cross the old single-indirect limit. Stream over
+    // three double-indirect leaves, then remount/check and read every byte.
+    let mut chunk = alloc::vec![0u8; 64 * 1024];
+    let extended_len = 6 * 1024 * 1024 + 511;
+    for offset in (0..extended_len).step_by(chunk.len()) {
+        let take = chunk.len().min(extended_len - offset);
+        for (index, byte) in chunk[..take].iter_mut().enumerate() {
+            let at = offset + index;
+            *byte = ((at.wrapping_mul(31) ^ (at >> 12)) as u8).wrapping_add(7);
+        }
+        volume.write_at(large, offset as u64, &chunk[..take])?;
+    }
+    let mut remounted = Volume::mount(volume.start_lba())?;
+    let checked = remounted.check()?;
+    if !checked.clean() {
+        return Ok(String::from(
+            "FAILED: checking double-indirect metadata changed live blocks",
+        ));
+    }
+    for offset in (0..extended_len).step_by(chunk.len()) {
+        let take = chunk.len().min(extended_len - offset);
+        if remounted.read_at(large, offset as u64, &mut chunk[..take])? != take {
+            return Ok(String::from("FAILED: a remounted large file was short"));
+        }
+        for (index, byte) in chunk[..take].iter().enumerate() {
+            let at = offset + index;
+            let expected = ((at.wrapping_mul(31) ^ (at >> 12)) as u8).wrapping_add(7);
+            if *byte != expected {
+                return Ok(format!("FAILED: double-indirect data differs at {at}"));
+            }
+        }
+    }
+    drop(remounted);
+
     // Shrinking has to give the blocks back, not merely stop pointing at them.
     let (_, free_with_large) = volume.space();
     volume.write(large, b"small again")?;
@@ -346,6 +380,21 @@ pub fn self_test() -> Result<String, StoreError> {
         return Ok(String::from(
             "FAILED: shrinking a file did not release its blocks",
         ));
+    }
+
+    // Reusing the freed blocks must zero an offset-write gap, including bytes
+    // within an old partial tail and all new blocks past single indirection.
+    volume.write(large, b"x")?;
+    let gap_end = 3 * 1024 * 1024 + 13;
+    volume.write_at(large, gap_end, b"z")?;
+    for offset in (1..gap_end as usize).step_by(chunk.len()) {
+        let take = chunk.len().min(gap_end as usize - offset);
+        if volume.read_at(large, offset as u64, &mut chunk[..take])? != take {
+            return Ok(String::from("FAILED: an offset-write gap was short"));
+        }
+        if chunk[..take].iter().any(|byte| *byte != 0) {
+            return Ok(String::from("FAILED: an offset-write gap exposed old data"));
+        }
     }
 
     // The things that must be refused.
@@ -363,8 +412,7 @@ pub fn self_test() -> Result<String, StoreError> {
     if volume.create(directory, "a/b", Kind::File) != Err(FsError::BadName) {
         return Ok(String::from("FAILED: a name with a separator was accepted"));
     }
-    let too_large: Vec<u8> = alloc::vec![0; MAX_FILE + 1];
-    if volume.write(large, &too_large) != Err(FsError::TooLarge) {
+    if volume.write_at(large, MAX_FILE as u64, &[1]) != Err(FsError::TooLarge) {
         return Ok(String::from(
             "FAILED: a file larger than the format can describe was accepted",
         ));
@@ -441,6 +489,13 @@ pub fn journal_self_test() -> Result<String, StoreError> {
     Ok(volume.journal_self_test()?)
 }
 
+#[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
+pub fn symlink_self_test() -> Result<String, StoreError> {
+    let mut volume = VOLUME.lock();
+    let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
+    Ok(volume.symlink_self_test()?)
+}
+
 /// Remove a name and everything under it.
 // Compiled always and called only by the build that runs the destructive
 // filesystem checks; see `deep-selftest`.
@@ -500,19 +555,34 @@ static REMOVAL: IrqSpinLock<BTreeMap<u32, bool>> = IrqSpinLock::new(BTreeMap::ne
 pub struct Node {
     inode: u32,
     directory: bool,
+    symlink: bool,
 }
 
 impl Node {
+    /// Persistent identity within the mounted NexusFS volume.
+    #[must_use]
+    pub const fn inode(&self) -> u32 {
+        self.inode
+    }
+
     /// Register an open reference to `inode`.
-    fn open(inode: u32, directory: bool) -> Arc<Self> {
+    fn open(inode: u32, kind: Kind) -> Arc<Self> {
         *OPEN.lock().entry(inode).or_insert(0) += 1;
-        Arc::new(Self { inode, directory })
+        Arc::new(Self {
+            inode,
+            directory: kind == Kind::Directory,
+            symlink: kind == Kind::Symlink,
+        })
     }
 
     /// Whether it is a directory rather than a file.
     #[must_use]
     pub const fn is_directory(&self) -> bool {
         self.directory
+    }
+
+    pub const fn is_symlink(&self) -> bool {
+        self.symlink
     }
 }
 
@@ -647,7 +717,7 @@ pub fn root() -> Result<Arc<Node>, StoreError> {
     let volume = VOLUME.lock();
     volume.as_ref().ok_or(StoreError::NoDisk)?;
     drop(volume);
-    Ok(Node::open(super::nexusfs::ROOT, true))
+    Ok(Node::open(super::nexusfs::ROOT, Kind::Directory))
 }
 
 /// Open one name inside a directory.
@@ -655,12 +725,12 @@ pub fn open_child(parent: &Node, name: &str) -> Result<Arc<Node>, StoreError> {
     if !parent.directory {
         return Err(StoreError::Fs(FsError::WrongKind));
     }
-    let entry = {
-        let mut volume = VOLUME.lock();
-        let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
-        volume.lookup(parent.inode, name)?
-    };
-    Ok(Node::open(entry.inode, entry.kind == Kind::Directory))
+    let mut guard = VOLUME.lock();
+    let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
+    let entry = volume.lookup(parent.inode, name)?;
+    // Pin before unlocking; otherwise unlink can recycle the inode between
+    // lookup and open. The returned node is not dropped under the volume lock.
+    Ok(Node::open(entry.inode, entry.kind))
 }
 
 /// Make a file or directory inside a directory, and open it.
@@ -673,12 +743,26 @@ pub fn create_child(parent: &Node, name: &str, directory: bool) -> Result<Arc<No
     } else {
         Kind::File
     };
-    let inode = {
-        let mut volume = VOLUME.lock();
-        let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
-        volume.create(parent.inode, name, kind)?
-    };
-    Ok(Node::open(inode, directory))
+    let mut guard = VOLUME.lock();
+    let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
+    let inode = volume.create(parent.inode, name, kind)?;
+    Ok(Node::open(inode, kind))
+}
+
+pub fn create_link(parent: &Node, name: &str, target: &str) -> Result<Arc<Node>, StoreError> {
+    if !parent.is_directory() {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let mut guard = VOLUME.lock();
+    let volume = guard.as_mut().ok_or(StoreError::NoDisk)?;
+    let inode = volume.symlink(parent.inode, name, target)?;
+    Ok(Node::open(inode, Kind::Symlink))
+}
+
+pub fn read_link(node: &Node) -> Result<String, StoreError> {
+    let guard = VOLUME.lock();
+    let volume = guard.as_ref().ok_or(StoreError::NoDisk)?;
+    Ok(volume.read_link(node.inode)?)
 }
 
 /// Remove a name, and the thing it named.
@@ -804,6 +888,58 @@ pub fn entries(node: &Node) -> Result<Vec<super::nexusfs::Entry>, StoreError> {
     let mut volume = VOLUME.lock();
     let volume = volume.as_mut().ok_or(StoreError::NoDisk)?;
     Ok(volume.list(node.inode)?)
+}
+
+/// A directory's current ancestry beneath an authority root. Names are read
+/// from the mounted namespace, so renaming an open directory does not detach
+/// its holders from it. Nodes are pinned under the volume lock before a
+/// concurrent unlink can reuse an ancestor inode. No node is dropped while
+/// that sleeping lock is held.
+pub struct DirectoryLocation {
+    pub names: Vec<String>,
+    pub nodes: Vec<Arc<Node>>,
+}
+
+pub fn directory_location(root: &Node, directory: &Node) -> Result<DirectoryLocation, StoreError> {
+    if !root.is_directory() || !directory.is_directory() {
+        return Err(StoreError::Fs(FsError::WrongKind));
+    }
+    let mut volume_guard = VOLUME.lock();
+    let volume = volume_guard.as_mut().ok_or(StoreError::NoDisk)?;
+    let mut parents: BTreeMap<u32, (u32, String)> = BTreeMap::new();
+    let mut pending = alloc::collections::VecDeque::new();
+    parents.insert(root.inode, (root.inode, String::new()));
+    pending.push_back(root.inode);
+    while !parents.contains_key(&directory.inode) {
+        let inode = pending
+            .pop_front()
+            .ok_or(StoreError::Fs(FsError::NotFound))?;
+        for entry in volume.list(inode)? {
+            if entry.kind == Kind::Directory && !parents.contains_key(&entry.inode) {
+                parents.insert(entry.inode, (inode, entry.name));
+                pending.push_back(entry.inode);
+            }
+        }
+    }
+    let mut names = Vec::new();
+    let mut inodes = Vec::new();
+    let mut inode = directory.inode;
+    while inode != root.inode {
+        let (parent, name) = parents
+            .get(&inode)
+            .ok_or(StoreError::Fs(FsError::Corrupt))?;
+        names.push(name.clone());
+        inodes.push(inode);
+        inode = *parent;
+    }
+    names.reverse();
+    inodes.push(root.inode);
+    inodes.reverse();
+    let nodes = inodes
+        .into_iter()
+        .map(|inode| Node::open(inode, Kind::Directory))
+        .collect();
+    Ok(DirectoryLocation { names, nodes })
 }
 
 /// Everything in an open file.

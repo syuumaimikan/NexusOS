@@ -817,7 +817,30 @@ fn draw(
 
     match look.style {
         Style::Plain => canvas.fill(canvas.bounds(), top),
-        Style::Gradient => canvas.gradient(canvas.bounds(), top, bottom),
+        Style::Gradient => {
+            // Smooth colour fields are rendered directly so the desktop has
+            // no image download or resolution-dependent wallpaper asset.
+            for y in 0..height {
+                let ny = y * 1024 / height.max(1);
+                let base = top.blend(bottom, (ny * 255 / 1024) as u8);
+                for x in 0..width {
+                    let nx = x * 1024 / width.max(1);
+                    let mut colour = base;
+                    for (cx, cy, tint) in [
+                        (180i32, 760i32, 0x00df9dae),
+                        (760, 330, 0x008c80ca),
+                        (900, 850, 0x008ce0de),
+                    ] {
+                        let dx = nx as i32 - cx;
+                        let dy = ny as i32 - cy;
+                        let strength = (320_000i32 - dx * dx - dy * dy).max(0) as u32;
+                        colour =
+                            colour.blend(nexus_ui::Colour(tint), (strength * 170 / 320_000) as u8);
+                    }
+                    canvas.set(x, y, colour);
+                }
+            }
+        }
         Style::Stars => {
             canvas.gradient(canvas.bounds(), top, bottom);
             stars(&mut canvas, look, width, height, frame);

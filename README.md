@@ -8,7 +8,7 @@ scheduler, filesystem and userspace. It is not a Linux distribution or fork.
 The goal is an OS that people and AI agents can operate together through
 explicit, scoped authority.
 
-**Status — 2026-09-15:** NexusOS has ring-3 processes, SMP scheduling, bounded
+**Status — 2026-10-14:** NexusOS has ring-3 processes, SMP scheduling, bounded
 IPC, persistent storage, networking and a graphical desktop. Nexus AI now has a
 real, read-only userspace service, bounded context selection and an opt-in local
 TinyStories inference worker verified in QEMU. A separate keyword-based assistant
@@ -36,13 +36,13 @@ hardware support or production readiness.
 | Processes and IPC | Ring 3, spawn service, completion/kill, narrowed handles, shared memory, waitsets, byte-stream pipes | No `fork`; a Nexus program starts with one thread |
 | Storage | GPT, FAT32 program loading, writable NexusFS, block cache | See [NexusFS](docs/nexusfs.md) for format and durability limits |
 | Drivers | PCI, legacy virtio block/network, PS/2 keyboard/mouse, RTC, speaker | Limited device families; GPU/NPU inference is unavailable |
-| Desktop | Userspace compositor, surfaces, focus/input, resize, window client library | Software framebuffer rendering |
+| Desktop | Userspace compositor, rounded window decorations, shadows, Dock, focus/input, resize, window client library | Software rendering; physical GPU acceleration is unfinished |
 | Applications | Desktop shell, terminal, browser, files/search, settings, setup, wallpaper, package store | Native applications use explicit service/directory handles |
 | Network | IPv4, ARP, ICMP, UDP/TCP, DNS, HTTP and browser HTTPS | [TLS 1.3 client](shared/nexus-tls/src/lib.rs) has a limited cipher/group set; no TLS 1.2 |
 | Packages | Signed package tooling, installation and update logic | Development keys are for testing; see [keys](keys/README.md) |
 | Language | English/Japanese strings, UTF-8 rendering, kana input support | See [Japanese input](docs/japanese-input.md) for scope |
 | Nexus AI | Bounded tool runtime, permission gates, observed-result verification, transient context, guest service | Service executes only `system.info`; separate heuristic assistant and opt-in tiny English model are not connected |
-| Linux compatibility | Translated x86-64 calls above the Nexus interface: files, memory, threads and futexes, signals, pipes, `poll`/`epoll`, `AF_UNIX` sockets with `SCM_RIGHTS`, `execve`, `ET_DYN` and `PT_INTERP` loading, shared memory by descriptor, a window through the compositor, a Wayland window negotiated through `xdg-shell` and then drawn, resized, typed at and closed, static i386 programs in compatibility mode, and a SPIR-V shader read and run once per fragment into a window | No libc is present; no `fork`, kernel-raised signals or `AF_INET`; 32-bit is limited to calls that pass no structures; the Wayland side has never been run against `libwayland` itself; SPIR-V is read and interpreted but there is no Vulkan, no OpenGL and no ICD, and no X11. **Steam does not run** — see [Steam and graphics](docs/steam-graphics.md) |
+| Linux compatibility | Translated x86-64/i386 calls, real musl/glibc loaders and thread probes, relative paths and persistent symlinks, random descriptors, futexes, pipes, `poll`/`epoll`, local stream sockets, upstream libwayland client transport, CPU Mesa OpenGL and SwiftShader Vulkan | Partial ABI; no `fork`, Linux internet sockets, complete i386 signals/permissions, X11 or GPU Vulkan backend. **Steam sign-in remains unfinished** — see [runtime evidence](docs/posix-runtime.md) and [Steam and graphics](docs/steam-graphics.md) |
 
 ## Architecture
 
@@ -98,6 +98,33 @@ Run from the repository root:
 On an unconfigured disk the setup application collects initial preferences.
 See [first run](docs/first-run.md), [terminal](docs/terminal.md) and
 [settings](docs/settings.md).
+
+`run.ps1` creates the default disk from staged programs if it is missing, and
+builds the default ESP if needed. Existing disks keep their settings and files;
+`build.ps1` refreshes their FAT32 program partition without replacing NexusFS.
+`build.ps1 -Clean` clears compiler/staging outputs while preserving persistent
+storage and dependency caches. A custom `-BuildDirectory` needs its own staged
+ESP and either an existing disk or staged programs.
+
+Old owned runtime/Steam/graphics test payloads are pruned automatically when
+building, launching, or starting another focused test. The two newest runs per
+family, active runs, serial logs, PNGs, and unknown files remain. Inspect or run
+the same cleanup manually with `scripts/clean.ps1 -WhatIf` or `scripts/clean.ps1`.
+`scripts/test-scripts.ps1` checks cleanup and preservation of disk contents.
+`scripts/test-run.ps1` uses a disposable copy of a configured default build to
+check a desktop boot, paths containing spaces, missing markers, port conflicts
+and concurrent launch refusal.
+
+Headless runs with `-Until` fail if their marker is missing, QEMU fails, or the
+guest halts. Diagnostics are in the selected build directory's `serial.log`
+and `qemu-error.log`. `-HostHttpPort 0` selects an available forwarding port.
+`-Release` requires outputs staged by `build.ps1 -Release`.
+
+The optional [Linux/Wayland/Mesa/Vulkan runtimes](docs/posix-runtime.md) and
+[RTX 5060 work](docs/rtx-5060.md) have separate build and verification commands.
+Steam sign-in and physical NVIDIA rendering remain unfinished. Completed,
+verified development changes are committed and pushed automatically; unrelated
+local edits are preserved (see [repository instructions](AGENTS.md)).
 
 ```powershell
 # Release binaries and an interactive boot

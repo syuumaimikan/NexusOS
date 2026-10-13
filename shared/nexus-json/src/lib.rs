@@ -32,8 +32,12 @@
 //! not parse is a thing somebody has to find in an editor.
 
 #![deny(unsafe_op_in_unsafe_fn)]
+#![no_std]
+extern crate alloc;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
-use std::fmt::Write as _;
+use core::fmt::Write as _;
 
 /// How deeply values may nest.
 ///
@@ -134,7 +138,9 @@ impl Value {
     #[must_use]
     pub fn as_i64(&self) -> Option<i64> {
         match self {
-            Self::Number(value) if value.fract() == 0.0 && value.is_finite() => Some(*value as i64),
+            Self::Number(value) if (*value as i64) as f64 == *value && value.is_finite() => {
+                Some(*value as i64)
+            }
             _ => None,
         }
     }
@@ -294,7 +300,7 @@ fn newline(out: &mut String, indent: Option<usize>, depth: usize) {
 
 /// Whole numbers without a decimal point, because `3` is what a count is.
 fn write_number(out: &mut String, value: f64) {
-    if value.is_finite() && value.fract() == 0.0 && value.abs() < 9.0e15 {
+    if value.is_finite() && (value as i64) as f64 == value && value.abs() < 9.0e15 {
         let _ = write!(out, "{}", value as i64);
     } else if value.is_finite() {
         let _ = write!(out, "{value}");
@@ -338,13 +344,13 @@ pub struct Trouble {
     pub at: usize,
 }
 
-impl std::fmt::Display for Trouble {
-    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Trouble {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(out, "{} at byte {}", self.what, self.at)
     }
 }
 
-impl std::error::Error for Trouble {}
+impl core::error::Error for Trouble {}
 
 /// Read a document.
 pub fn parse(text: &str) -> Result<Value, Trouble> {
@@ -514,7 +520,7 @@ impl Reader<'_> {
                     // the end of the character is what `char_indices` is for.
                     let rest = &self.bytes[self.at..];
                     let width = utf8_width(rest[0]);
-                    let Some(piece) = rest.get(..width).and_then(|b| std::str::from_utf8(b).ok())
+                    let Some(piece) = rest.get(..width).and_then(|b| core::str::from_utf8(b).ok())
                     else {
                         return Err(self.trouble("this is not valid text"));
                     };
@@ -584,7 +590,7 @@ impl Reader<'_> {
                 self.at += 1;
             }
         }
-        let text = std::str::from_utf8(&self.bytes[start..self.at])
+        let text = core::str::from_utf8(&self.bytes[start..self.at])
             .map_err(|_| self.trouble("this is not a number"))?;
         text.parse::<f64>().map(Value::Number).map_err(|_| Trouble {
             what: "this is not a number".to_string(),

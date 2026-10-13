@@ -14,12 +14,37 @@
     Build with optimisations (cargo --release).
 
 .PARAMETER Clean
-    Remove build outputs before building.
+    Remove staged build outputs and Cargo artifacts before building. Preserve
+    persistent disks, user settings, runtime/toolchain caches and test evidence.
+.PARAMETER WithPosixRuntime
+    Build and embed pinned musl plus libc-linked verification programs.
+.PARAMETER WithWaylandRuntime
+    Embed upstream libwayland and a generated-protocol desktop client. Implies
+    WithPosixRuntime. WSL is used only for the build-time protocol scanner.
+.PARAMETER WithMesaRuntime
+    Build and embed Mesa OSMesa/softpipe for CPU OpenGL and GLSL. With
+    WithWaylandRuntime, F6 also draws a depth-tested GLSL triangle.
+.PARAMETER SkipDiskImage
+    Stage the build without creating or refreshing the disk's program partition.
+.PARAMETER WithGlibcRuntime
+    Embed pinned Debian glibc 2.36 and genuine x86-64 libc/thread/dlopen probes.
+.PARAMETER WithGlibc32Runtime
+    Also embed the i386 GNU loader, libraries and pthread/dlopen probes.
+    Implies WithGlibcRuntime.
+.PARAMETER WithVulkanRuntime
+    Build and embed the upstream SwiftShader CPU Vulkan ICD and SPIR-V probe.
 #>
 [CmdletBinding()]
 param(
     [switch]$Release,
     [switch]$Clean,
+    [switch]$WithPosixRuntime,
+    [switch]$WithWaylandRuntime,
+    [switch]$WithMesaRuntime,
+    [switch]$WithGlibcRuntime,
+    [switch]$WithGlibc32Runtime,
+    [switch]$WithVulkanRuntime,
+    [switch]$SkipDiskImage,
     # Build the kernel with its destructive filesystem checks on.
     #
     # What the test suite uses. They write a thousand blocks across the store,
@@ -30,19 +55,26 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($WithGlibc32Runtime) { $WithGlibcRuntime = $true }
 
 . (Join-Path $PSScriptRoot 'stage.ps1')
 # For `Get-NexusDiskSizes`: how big the disk is belongs in one place, with
 # the rest of what the machine is.
 . (Join-Path $PSScriptRoot 'qemu.ps1')
+. (Join-Path $PSScriptRoot 'runtime-stage.ps1')
+. (Join-Path $PSScriptRoot 'maintenance.ps1')
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
 $EspDir = Join-Path $BuildDir 'esp'
+Invoke-NexusCleanup
 
 if ($Clean) {
     Write-Host '==> Cleaning' -ForegroundColor Cyan
-    if (Test-Path $BuildDir) { Remove-Item -Recurse -Force $BuildDir }
+    foreach ($name in @('esp', 'programs', 'package', 'usb-files')) {
+        $generated = Assert-NexusGeneratedPath -Path (Join-Path $BuildDir $name) -Root $BuildDir
+        if (Test-Path -LiteralPath $generated) { Remove-Item -LiteralPath $generated -Recurse -Force }
+    }
     Push-Location $RepoRoot
     try { cargo clean } finally { Pop-Location }
 }
@@ -141,8 +173,16 @@ $StagedAi = Publish-Program -Elf $AiElf -ProgramDir $ProgramDir -Name 'ai.elf'
 $aiSize = [math]::Round((Get-Item $StagedAi).Length / 1KB, 1)
 
 $GeminiElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-gemini"
-$StagedGemini = Publish-Program -Elf $GeminiElf -ProgramDir $ProgramDir -Name 'gemini.elf'
-$geminiSize = [math]::Round((Get-Item $StagedGemini).Length / 1KB, 1)
+$geminiSize = 0
+# The optional Gemini program is still a separate local development change in
+# some checkouts. Do not require its old target artifact in the committed tree.
+$GeminiDeclared = [IO.File]::ReadAllText((Join-Path $RepoRoot 'user/nexus-ai/Cargo.toml')) -match '(?m)^name\s*=\s*"nexus-gemini"\s*$'
+if ($GeminiDeclared) {
+    $StagedGemini = Publish-Program -Elf $GeminiElf -ProgramDir $ProgramDir -Name 'gemini.elf'
+    $geminiSize = [math]::Round((Get-Item $StagedGemini).Length / 1KB, 1)
+} elseif (Test-Path -LiteralPath (Join-Path $ProgramDir 'gemini.elf')) {
+    Remove-Item -LiteralPath (Join-Path $ProgramDir 'gemini.elf') -Force
+}
 
 $ViewElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-view"
 $StagedView = Publish-Program -Elf $ViewElf -ProgramDir $ProgramDir -Name 'view.elf'
@@ -414,6 +454,19 @@ BIN/GSHADER.LX  /usr/bin/shader
 BIN/G32.LX      /usr/bin/thirty-two
 '@, $utf8NoBom)
 
+if ($WithPosixRuntime -or $WithWaylandRuntime -or $WithMesaRuntime -or $WithGlibcRuntime -or $WithVulkanRuntime) {
+    & (Join-Path $PSScriptRoot 'build-posix-runtime.ps1')
+    if ($WithWaylandRuntime) {
+        & (Join-Path $PSScriptRoot 'build-wayland-runtime.ps1') -SkipPosixBuild
+    }
+    if ($WithMesaRuntime) {
+        & (Join-Path $PSScriptRoot 'build-mesa-runtime.ps1') -SkipPosixBuild -WithWayland:$WithWaylandRuntime
+    }
+    if ($WithGlibcRuntime) { & (Join-Path $PSScriptRoot 'build-glibc-runtime.ps1') -WithI386:$WithGlibc32Runtime }
+    if ($WithVulkanRuntime) { & (Join-Path $PSScriptRoot 'build-vulkan-runtime.ps1') }
+    Publish-PosixRuntime -ProgramDir $ProgramDir -WithWayland:$WithWaylandRuntime -WithMesa:$WithMesaRuntime -WithGlibc:$WithGlibcRuntime -WithVulkan:$WithVulkanRuntime -WithGlibc32:$WithGlibc32Runtime
+}
+
 # A package, built on this machine by the tool that makes them and read on the
 # other side by the program that installs them. Both use `shared/nexus-pkg`, so
 # the format has exactly one implementation: a packer with its own idea of the
@@ -588,10 +641,11 @@ $DiskMiB = $sizes.SizeMiB
 $DiskFatMiB = $sizes.FatMiB
 $stale = -not (Test-Path $DiskImage)
 if (-not $stale) {
-    # An image of the wrong size is stale whatever its timestamp says. Without
-    # this, changing the size above would leave every existing checkout running
-    # on the old disk and wondering why it had not grown.
-    if ((Get-Item $DiskImage).Length -ne [long]$DiskMiB * 1MB) { $stale = $true }
+    # Size changes require an explicit migration/backup, never an automatic
+    # replacement of persistent user settings and files.
+    if ((Get-Item $DiskImage).Length -ne [long]$DiskMiB * 1MB) {
+        throw 'Existing persistent disk has a different size. Move it to a backup location before creating a new disk.'
+    }
 }
 if (-not $stale) {
     $imageTime = (Get-Item $DiskImage).LastWriteTimeUtc
@@ -600,16 +654,20 @@ if (-not $stale) {
         Select-Object -First 1
     if ($newest -and $newest.LastWriteTimeUtc -gt $imageTime) { $stale = $true }
 }
-if ($stale) {
-    Write-Host '==> Making the disk image' -ForegroundColor Cyan
+if ($stale -and -not $SkipDiskImage) {
+    Write-Host '==> Staging programs on the disk (preserving existing NexusFS)' -ForegroundColor Cyan
+    $updateArgs = @()
+    if (Test-Path -LiteralPath $DiskImage) { $updateArgs = @('-UpdatePrograms') }
     & powershell -NoProfile -ExecutionPolicy Bypass `
         -File (Join-Path $PSScriptRoot 'make-disk.ps1') -Output $DiskImage `
-        -ProgramDir $ProgramDir -SizeMiB $DiskMiB -FatMiB $DiskFatMiB
+        -ProgramDir $ProgramDir -SizeMiB $DiskMiB -FatMiB $DiskFatMiB @updateArgs
     if ($LASTEXITCODE -ne 0) { throw 'could not make the disk image' }
 }
 
 Write-Host ''
 Write-Host 'NexusOS build complete' -ForegroundColor Green
+@{ Profile = $Profile; DeepSelfTest = [bool]$DeepSelfTest } | ConvertTo-Json |
+    Set-Content -LiteralPath (Join-Path $BuildDir 'build.json') -Encoding UTF8
 Write-Host "  bootloader : $bootSize KiB  -> EFI\BOOT\BOOTX64.EFI"
 Write-Host "  kernel     : $kernelSize KiB  -> nexus\kernel.elf  (from $unstrippedSize KiB with symbols)"
 Write-Host "  init       : $initSize KiB  -> BIN\INIT.ELF on the disk"
@@ -636,7 +694,7 @@ Write-Host "  cat/head/grep: $($textSizes -join '/') KiB  -> BIN\{CAT,HEAD,GREP}
 Write-Host "  nex        : $nexSize KiB  -> BIN\NEX.ELF on the disk"
 Write-Host "  assistant  : $assistSize KiB  -> BIN\ASSIST.ELF on the disk"
 Write-Host "  ai service : $aiSize KiB  -> BIN\AI.ELF on the disk"
-Write-Host "  gemini agt : $geminiSize KiB  -> BIN\GEMINI.ELF on the disk"
+if ($GeminiDeclared) { Write-Host "  gemini agt : $geminiSize KiB  -> BIN\GEMINI.ELF on the disk" }
 Write-Host "  unpack     : $unpackSize KiB  -> BIN\UNPACK.ELF on the disk"
 Write-Host "  solid      : $solidSize KiB  -> BIN\SOLID.ELF on the disk"
 Write-Host "  netool     : $netoolSize KiB  -> BIN\NETOOL.ELF on the disk"
@@ -660,4 +718,8 @@ Write-Host ("  linux i386 : {0:N0} bytes, ET_EXEC/EM_386 -> /usr/bin/thirty-two"
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''
-Write-Host 'Run it with: .\scripts\run.ps1'
+if ($SkipDiskImage) {
+    Write-Host 'Artifacts staged; disk image creation was skipped.'
+} else {
+    Write-Host 'Run it with: .\scripts\run.ps1'
+}

@@ -56,7 +56,10 @@ function Invoke-Screendump {
 
     if (Test-Path $Path) { Remove-Item $Path -Force }
 
-    $Writer.WriteLine("screendump $Path")
+    # HMP splits command words on spaces. Quoted forward-slash paths work on
+    # Windows as well and do not turn path backslashes into escape sequences.
+    $monitorPath = $Path.Replace('\', '/').Replace('"', '\"')
+    $Writer.WriteLine('screendump "' + $monitorPath + '"')
     if (-not (Wait-ForStableFile -Path $Path)) {
         throw 'QEMU never finished the screendump'
     }

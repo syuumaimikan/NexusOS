@@ -296,7 +296,15 @@ programs by name, and kanji conversion passes its eight.
 
 ## What is not here
 
-No 3D, as above. No cursor plane, which virtio-gpu has as a second queue. No
+No GPU-accelerated 3D. Native programs can now use the CPU triangle renderer in
+`user/nexus-ui/src/raster3d.rs`: integer perspective projection, flat-shaded
+triangles, inverse-depth testing, screen clipping and top-left coverage. The
+client window displays a rotating cube through the existing shared surface and
+compositor. This is not a Vulkan, OpenGL or Wayland implementation. Geometry
+crossing the near plane must be clipped by the caller; the cube stays in front
+of it. There are no shaders, textures or blending in this renderer.
+
+No cursor plane, which virtio-gpu has as a second queue. No
 multiple scanouts, though the device reports up to sixteen. No mode setting —
 the display's size is taken as the host gives it. No interrupt: the control
 queue is polled, which is right for a command that answers in microseconds and

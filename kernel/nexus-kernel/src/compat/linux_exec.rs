@@ -145,7 +145,22 @@ pub fn execve(path: u64, argv: u64, envp: u64, frame: &mut Frame) -> u64 {
         Ok(environment) => environment,
         Err(reason) => return reason,
     };
-    let image = match crate::compat::linux_files::read_file(&path) {
+    let resolved =
+        match super::linux_paths::resolve(super::linux_files::AT_FDCWD as u32 as u64, &path) {
+            Ok(resolved) => resolved,
+            Err(reason) => return reason,
+        };
+    let executable = match resolved.node() {
+        Ok(node) => node,
+        Err(reason) => return reason,
+    };
+    if executable.is_directory() {
+        return (-21i64) as u64;
+    }
+    let executable_path = super::linux_proc::link(&resolved.path)
+        .and_then(Result::ok)
+        .unwrap_or(resolved.path);
+    let image = match crate::fs::store::read_node(&executable).map_err(super::linux_files::errno) {
         Ok(image) => image,
         Err(reason) => return reason,
     };
@@ -204,6 +219,7 @@ pub fn execve(path: u64, argv: u64, envp: u64, frame: &mut Frame) -> u64 {
             crate::sched::exit();
         }
     };
+    stack.record_image(&process, &executable_path, Some(executable));
 
     // The new program's starting state. Every register zero but the two that
     // matter, which is what a program is entitled to: the System V ABI says
@@ -228,7 +244,7 @@ pub fn execve(path: u64, argv: u64, envp: u64, frame: &mut Frame) -> u64 {
         // arithmetic flags of the one it replaced.
         rflags: 0x202,
         rip: entry,
-        rsp: stack,
+        rsp: stack.pointer,
     };
 
     // And the thread pointer, which belonged to the old program's thread-local

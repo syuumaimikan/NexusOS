@@ -619,22 +619,9 @@ const STARTED: usize = 2;
 const GAP: u32 = 8;
 /// How tall a window's title bar is.
 ///
-/// Drawn over the top of the client's own surface rather than taking space away
-/// from it. Taking space would mean the client's surface and its window were
-/// different sizes, which is a second rectangle to keep in step for the sake of
-/// fourteen pixels a client was going to fill with its own border anyway.
-/// How tall the bar along the top of a window is.
-///
-/// A client's surface is copied whole and then this is painted over the top of
-/// it, so the first fourteen rows a program draws are lost. `nexus_ui::TITLE_BAR`
-/// is the same number, for programs that want their first line to be visible.
-///
-/// Two constants rather than one, and worth saying why: sharing it would mean
-/// this program depending on `nexus-ui`, which depends on a font -- and the
-/// reason this bar has no text on it is that the compositor deliberately has no
-/// font. Fourteen pixels of decoration is not worth that dependency. If they
-/// ever disagree the cost is cosmetic, which is the trade being made.
-const TITLE: u32 = 14;
+/// Painted over the client surface. Native applications use the shared UI
+/// constant to reserve room for the title and window controls.
+const TITLE: u32 = nexus_ui::TITLE_BAR;
 /// How large the corner is that resizes a window.
 ///
 /// Twenty and not twelve. Twelve was chosen when this program owned a fifth of
@@ -653,7 +640,7 @@ const GRIP: u32 = 20;
 /// strip was sized when it lived at the bottom of a fifth of the display, and
 /// on a screen twelve hundred tall a twenty-four-pixel bar with twenty-pixel
 /// tabs in it is a row of targets a hand has to aim at.
-const TASKBAR: u32 = 36;
+const TASKBAR: u32 = 92;
 
 /// The smallest a window may be made.
 ///
@@ -766,7 +753,7 @@ fn everything(screen: &Screen) -> Region {
 
 /// Where the wallpaper is: everything above the strip.
 fn region_of_wallpaper(screen: &Screen) -> Region {
-    Region::of(screen.x, screen.y, screen.width, screen.usable_height())
+    Region::of(screen.x, screen.y, screen.width, screen.height)
 }
 
 /// The strip along the bottom.
@@ -776,7 +763,12 @@ fn strip(screen: &Screen) -> Region {
 
 /// Where a window is.
 fn region_of(tile: &Tile) -> Region {
-    Region::of(tile.x, tile.y, tile.width, tile.height)
+    Region {
+        left: tile.x.saturating_sub(12),
+        top: tile.y.saturating_sub(12),
+        right: tile.x + tile.width + 12,
+        bottom: tile.y + tile.height + 12,
+    }
 }
 
 /// What part of its own surface a client says it changed.
@@ -926,10 +918,14 @@ struct Tile {
     live: bool,
     /// Frames composited from it, for the report at the end.
     frames: u32,
+    /// Release the submitted shared buffer only after this batch is composited.
+    acknowledge: bool,
     /// Keys forwarded to it, likewise.
     keys: u32,
     /// Put away, and reachable only by its tab.
     minimised: bool,
+    restored: Option<(u32, u32, u32, u32)>,
+    title: &'static str,
 }
 
 impl Tile {
@@ -1014,8 +1010,8 @@ extern "C" fn main() -> ! {
     // Two tiles side by side, with a gap around and between them. Laid out
     // before any client exists, because a client is told the size of its
     // surface and cannot be told twice.
-    let tile_width = (screen.width - GAP * (STARTED as u32 + 1)) / STARTED as u32;
-    let tile_height = screen.usable_height() - GAP * 2;
+    let tile_width = (screen.width * 2 / 5).min(700);
+    let tile_height = (screen.usable_height() * 3 / 5).min(600);
     if tile_width == 0 || tile_height == 0 {
         failed("compositor: FAILED: the rectangle it was given is too small to divide");
         finish();
@@ -1029,8 +1025,8 @@ extern "C" fn main() -> ! {
 
     let mut tiles: [Option<Tile>; CLIENTS] = [const { None }; CLIENTS];
     for (index, slot) in tiles.iter_mut().enumerate().take(STARTED) {
-        let x = screen.x + GAP + (tile_width + GAP) * index as u32;
-        let y = screen.y + GAP;
+        let x = screen.x + screen.width / 12 + (tile_width / 2) * index as u32;
+        let y = screen.y + screen.usable_height() / 8 + 70 * index as u32;
         match start_client(index, x, y, tile_width, tile_height) {
             Some(tile) => *slot = Some(tile),
             None => finish(),
@@ -1128,7 +1124,7 @@ fn start_wallpaper(screen: &Screen) -> Option<Tile> {
             x: screen.x,
             y: screen.y,
             width: screen.width,
-            height: screen.usable_height(),
+            height: screen.height,
         },
         0,
         &lent,
@@ -1245,7 +1241,7 @@ fn run_setup(screen: &Screen) {
                     match nexus_user::receive(tile.channel, &mut message, &mut none) {
                         Ok(_) => {
                             frames += 1;
-                            composite(screen, &tile);
+                            composite(screen, &tile, false, false);
                             if nexus_user::send(tile.channel, b"shown", &[]).is_err() {
                                 finished = true;
                             }
@@ -1694,8 +1690,17 @@ fn start_program(
         height,
         live: true,
         frames: 0,
+        acknowledge: false,
         keys: 0,
         minimised: false,
+        restored: None,
+        title: match program {
+            CLIENT => "NexusUI",
+            BROWSER => "Web",
+            TERMINAL => "Terminal",
+            EDITOR => "Editor",
+            _ => "Nexus",
+        },
     })
 }
 
@@ -2027,9 +2032,7 @@ fn serve(
                             // moving wallpaper costing a full-screen composite
                             // every frame and costing its own area.
                             drawn = damaged_region(tile, &message[..received.bytes]);
-                            if nexus_user::send(tile.channel, b"shown", &[]).is_err() {
-                                nexus_user::unwatch(set, KEY_WALL).ok();
-                            }
+                            tile.acknowledge = true;
                         }
                         painted += 1;
                         pending = pending.union(drawn);
@@ -2100,23 +2103,17 @@ fn serve(
                             // Anything else is a frame, which it does draw.
                             tile.frames += 1;
                             composited += 1;
-                            if nexus_user::send(tile.channel, b"shown", &[]).is_err() {
-                                stop_listening(set, tile, index);
-                            }
+                            tile.acknowledge = true;
                             pending = pending.union(region_of(tile));
                         }
                     }
                     Ok(received) => {
                         tile.frames += 1;
                         composited += 1;
-                        // Answered, so the client knows the buffer is free
-                        // again. Without this it would redraw while this
-                        // program was still reading, which is what tearing is.
-                        if nexus_user::send(tile.channel, b"shown", &[]).is_err() {
-                            // It has gone between the message and the reply,
-                            // which is ordinary and not a failure.
-                            stop_listening(set, tile, index);
-                        }
+                        // The shared surface is still needed by the repaint
+                        // below. Releasing it here permits the client to draw
+                        // over it before the compositor has consumed its frame.
+                        tile.acknowledge = true;
                         // That window and no other, and -- when the client
                         // said so -- only the part of it that changed. This is
                         // what damage tracking exists for: a client redrawing
@@ -2284,10 +2281,9 @@ fn serve(
             // built up is kept: waking repaints everything anyway, so what this
             // saves is the work of drawing frames nobody can see.
             go_dark(screen);
-            continue;
         }
 
-        if !pending.is_empty() {
+        if !asleep && !pending.is_empty() {
             batched += 1;
             repaint(
                 screen,
@@ -2301,6 +2297,33 @@ fn serve(
                 pending,
             );
             pending = Region::nothing();
+        }
+        // A shown reply promises that this batch has finished reading the
+        // shared surface. It must follow repaint, including for Wayland frame
+        // callbacks layered on the native display protocol. Hidden/asleep
+        // frames are released without reading them so clients can keep running.
+        for (index, tile) in tiles.iter_mut().enumerate() {
+            if let Some(tile) = tile.as_mut() {
+                if core::mem::take(&mut tile.acknowledge)
+                    && nexus_user::send(tile.channel, b"shown", &[]).is_err()
+                {
+                    stop_listening(set, tile, index);
+                }
+            }
+        }
+        if let Some(tile) = shell.as_mut() {
+            if core::mem::take(&mut tile.acknowledge)
+                && nexus_user::send(tile.channel, b"shown", &[]).is_err()
+            {
+                nexus_user::unwatch(set, KEY_SHELL).ok();
+            }
+        }
+        if let Some(tile) = wallpaper.as_mut() {
+            if core::mem::take(&mut tile.acknowledge)
+                && nexus_user::send(tile.channel, b"shown", &[]).is_err()
+            {
+                nexus_user::unwatch(set, KEY_WALL).ok();
+            }
         }
     }
 
@@ -2661,12 +2684,7 @@ fn read_shell(
 
     if message == b"damaged" {
         desktop.frames += 1;
-        // Answered, so the desktop knows its strip is free again. The same
-        // handshake every client gets, for the same reason: without it the
-        // strip would be redrawn while this program was still reading it.
-        if nexus_user::send(desktop.channel, b"shown", &[]).is_err() {
-            nexus_user::unwatch(set, KEY_SHELL).ok();
-        }
+        desktop.acknowledge = true;
         return Some(Asked::Drew);
     }
 
@@ -3504,11 +3522,59 @@ fn read_pointer(
         // the other way would give focus to the window *under* the one that was
         // clicked, which looks like the click going through it.
         for &index in order.iter().rev() {
-            let Some(tile) = tiles.get(index).and_then(Option::as_ref) else {
+            let Some(tile) = tiles.get_mut(index).and_then(Option::as_mut) else {
                 continue;
             };
             if !tile.live || tile.minimised || !tile.contains(cursor.x, cursor.y) {
                 continue;
+            }
+
+            if tile.title_contains(cursor.x, cursor.y)
+                && cursor.x >= tile.x + 10
+                && cursor.x < tile.x + 58
+            {
+                let control = (cursor.x - tile.x - 10) / 16;
+                cursor.held = true;
+                cursor.dragging = None;
+                match control {
+                    0 => {
+                        nexus_user::send(tile.channel, b"close", &[]).ok();
+                        nexus_user::log("compositor: decoration requested closing").ok();
+                    }
+                    1 => {
+                        tile.minimised = true;
+                        nexus_user::log("compositor: decoration minimised the window").ok();
+                    }
+                    _ => {
+                        if let Some((x, y, width, height)) = tile.restored {
+                            if resize(index, tile, width, height).is_ok()
+                                && tile.width == width
+                                && tile.height == height
+                            {
+                                tile.x = x;
+                                tile.y = y;
+                                tile.restored = None;
+                                nexus_user::log("compositor: decoration restored the window").ok();
+                            }
+                        } else {
+                            let previous = (tile.x, tile.y, tile.width, tile.height);
+                            let width = screen.width.saturating_sub(32);
+                            let height = screen.usable_height().saturating_sub(32);
+                            if resize(index, tile, width, height).is_ok()
+                                && tile.width == width
+                                && tile.height == height
+                            {
+                                tile.restored = Some(previous);
+                                tile.x = screen.x + 16;
+                                tile.y = screen.y + 16;
+                                nexus_user::log("compositor: decoration maximised the window").ok();
+                            }
+                        }
+                    }
+                }
+                raise(order, index);
+                *focus = index;
+                return Some(everything(screen));
             }
 
             if tile.grip_contains(cursor.x, cursor.y) {
@@ -3807,7 +3873,14 @@ fn repaint(
     // saved pixels underneath it would be saved from a framebuffer that already
     // had a pointer in it, and the pointer would smear.
     let damage = damage.union(Region::of(cursor.x, cursor.y, CURSOR as u32, CURSOR as u32));
-    let damage = damage.union(Region::nothing()); // keep the bounds sane
+    // Shadows and the pointer can extend past the last display pixel. Both
+    // memory writes and the GPU transfer rectangle must use clipped bounds.
+    let damage = Region {
+        left: damage.left.min(screen.screen_width),
+        top: damage.top.min(screen.screen_height),
+        right: damage.right.min(screen.screen_width),
+        bottom: damage.bottom.min(screen.screen_height),
+    };
     if damage.is_empty() {
         return;
     }
@@ -3835,7 +3908,7 @@ fn repaint(
         BACKGROUND,
     );
     if let Some(wallpaper) = wallpaper {
-        composite(screen, wallpaper);
+        composite(screen, wallpaper, false, false);
     }
 
     for &index in order {
@@ -3845,7 +3918,8 @@ fn repaint(
         if !tile.live || tile.minimised {
             continue;
         }
-        composite(screen, tile);
+        shadow(screen, tile);
+        composite(screen, tile, true, false);
         title_bar(screen, tile, index == focus);
         grip(screen, tile, index == focus);
         outline(screen, tile, index == focus);
@@ -3856,7 +3930,7 @@ fn repaint(
     // what is drawn in there, and the moment it did it would be a compositor
     // deciding what a dock looks like.
     match shell {
-        Some(shell) => composite(screen, shell),
+        Some(shell) => composite(screen, shell, false, true),
         // Nothing has it. Filled rather than left as it was, because the strip
         // is reserved space and the last thing drawn in it is not the truth
         // about a machine whose desktop has ended.
@@ -3926,8 +4000,8 @@ fn fill(screen: &Screen, x: u32, y: u32, width: u32, height: u32, colour: u32) {
     let (left, top, right, bottom) = clip::current();
     let x0 = x.max(left);
     let y0 = y.max(top);
-    let x1 = (x + width).min(right);
-    let y1 = (y + height).min(bottom);
+    let x1 = (x + width).min(right).min(screen.screen_width);
+    let y1 = (y + height).min(bottom).min(screen.screen_height);
     if x1 <= x0 || y1 <= y0 {
         return;
     }
@@ -3953,26 +4027,53 @@ fn fill(screen: &Screen, x: u32, y: u32, width: u32, height: u32, colour: u32) {
 /// is also what there is to take hold of -- a window with no bar is a window
 /// that cannot be picked up without picking up whatever is inside it.
 fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
-    let colour = if focused { accent(150) } else { accent(52) };
-    fill(
-        screen,
-        tile.x,
-        tile.y,
-        tile.width,
-        TITLE.min(tile.height),
-        colour,
-    );
-
-    // Three lines at the left, so the bar reads as something to grab rather
-    // than as a band of colour. There is no text: drawing it would need a font,
-    // which is the kernel's and not this program's.
-    let mark = if focused { 0x00CFE4FF } else { 0x004A5A70 };
-    for line in 0..3u32 {
-        let row = tile.y + 4 + line * 3;
-        if row >= tile.y + TITLE.min(tile.height) {
-            break;
+    let colour = if focused { 0x00edf0f7 } else { 0x00dbe1ec };
+    for y in 0..TITLE.min(tile.height) {
+        for x in 0..tile.width {
+            if rounded_inside(x, y, tile.width, tile.height) {
+                fill(screen, tile.x + x, tile.y + y, 1, 1, colour);
+            }
         }
-        fill(screen, tile.x + 6, row, (tile.width / 4).max(1), 1, mark);
+    }
+    for (index, colour) in [0x00ee6a63, 0x00e8bb4e, 0x005cc88a].iter().enumerate() {
+        for y in 0..11u32 {
+            for x in 0..11u32 {
+                let dx = x as i32 - 5;
+                let dy = y as i32 - 5;
+                if dx * dx + dy * dy <= 26 && 12 + index as u32 * 16 + x < tile.width {
+                    fill(
+                        screen,
+                        tile.x + 12 + index as u32 * 16 + x,
+                        tile.y + 10 + y,
+                        1,
+                        1,
+                        if focused { *colour } else { 0x009ba7ba },
+                    );
+                }
+            }
+        }
+    }
+    // Render the title to a tiny packed canvas, then copy through the same
+    // clipped path as decorations so damage never overwrites another window.
+    let width = nexus_ui::measure(tile.title);
+    if width + 140 <= tile.width {
+        let mut pixels = alloc::vec![colour; width as usize * 16];
+        let mut canvas =
+            unsafe { nexus_ui::Canvas::packed(pixels.as_mut_ptr() as usize, width, 16) };
+        canvas.set_text_style(nexus_ui::font::Face::Smooth, true);
+        canvas.text(0, 0, tile.title, nexus_ui::Colour(0x003d485c));
+        for y in 0..16 {
+            for x in 0..width {
+                fill(
+                    screen,
+                    tile.x + (tile.width - width) / 2 + x,
+                    tile.y + 8 + y,
+                    1,
+                    1,
+                    pixels[(y * width + x) as usize],
+                );
+            }
+        }
     }
 }
 
@@ -3988,22 +4089,77 @@ fn read_i32(buffer: &[u8], offset: usize) -> i32 {
 /// draw, cannot draw, and cannot remove -- a client that could paint its own
 /// focus ring could claim focus it does not have.
 fn outline(screen: &Screen, tile: &Tile, focused: bool) {
-    let colour = if focused { accent(255) } else { accent(60) };
+    let colour = if focused { 0x00c3cddd } else { 0x00a3afc2 };
+    for y in 0..tile.height {
+        for x in 0..tile.width {
+            if rounded_inside(x, y, tile.width, tile.height)
+                && (x == 0
+                    || y == 0
+                    || x + 1 == tile.width
+                    || y + 1 == tile.height
+                    || !rounded_inside(
+                        x.saturating_sub(1),
+                        y.saturating_sub(1),
+                        tile.width.saturating_sub(2),
+                        tile.height.saturating_sub(2),
+                    ))
+            {
+                fill(screen, tile.x + x, tile.y + y, 1, 1, colour);
+            }
+        }
+    }
+}
 
-    for row in 0..tile.height {
-        let edge = row < 2 || row + 2 >= tile.height;
-        let destination = FRAMEBUFFER_AT
-            + (((tile.y + row) as usize * screen.stride as usize) + tile.x as usize) * 4;
+fn rounded_inside(x: u32, y: u32, width: u32, height: u32) -> bool {
+    let radius = 8.min(width / 2).min(height / 2);
+    if radius == 0 {
+        return true;
+    }
+    let dx = radius.saturating_sub(1 + x.min(width.saturating_sub(1 + x)));
+    let dy = radius.saturating_sub(1 + y.min(height.saturating_sub(1 + y)));
+    dx * dx + dy * dy <= radius * radius
+}
 
-        for column in 0..tile.width as usize {
-            if !edge && column >= 2 && column + 2 < tile.width as usize {
+fn mix_pixel(a: u32, b: u32, opacity: u32) -> u32 {
+    let mut result = 0;
+    for shift in [0, 8, 16] {
+        result |= ((((a >> shift) & 255) * (255 - opacity) + ((b >> shift) & 255) * opacity) / 255)
+            << shift;
+    }
+    result
+}
+
+fn shadow(screen: &Screen, tile: &Tile) {
+    let (left, top, right, bottom) = clip::current();
+    for y in tile.y.saturating_sub(12).max(top)
+        ..(tile.y + tile.height + 12)
+            .min(bottom)
+            .min(screen.screen_height)
+    {
+        for x in tile.x.saturating_sub(12).max(left)
+            ..(tile.x + tile.width + 12)
+                .min(right)
+                .min(screen.screen_width)
+        {
+            let dx = tile
+                .x
+                .saturating_sub(x)
+                .max(x.saturating_sub(tile.x + tile.width - 1));
+            let dy = tile
+                .y
+                .saturating_sub(y)
+                .max(y.saturating_sub(tile.y + tile.height - 1));
+            let distance = dx.max(dy);
+            if distance == 0 || distance >= 12 {
                 continue;
             }
-            // SAFETY: as in `composite` -- the framebuffer is mapped writable
-            // and this address is inside this tile's own rectangle, which was
-            // checked against the screen when the display was taken.
+            let at = FRAMEBUFFER_AT + (y as usize * screen.stride as usize + x as usize) * 4;
             unsafe {
-                core::ptr::write_volatile((destination + column * 4) as *mut u32, colour);
+                let under = core::ptr::read_volatile(at as *const u32);
+                core::ptr::write_volatile(
+                    at as *mut u32,
+                    mix_pixel(under, 0x00171e38, (12 - distance) * 4),
+                );
             }
         }
     }
@@ -4031,7 +4187,7 @@ fn process_key(index: usize) -> u64 {
 /// Row by row, because the surface is tightly packed and the framebuffer is
 /// not: the display's scanlines are as long as the hardware says, which is not
 /// always as long as the picture.
-fn composite(screen: &Screen, tile: &Tile) {
+fn composite(screen: &Screen, tile: &Tile, rounded: bool, glass: bool) {
     // The same clip, applied to the copy. What is not damaged is not copied,
     // which is where nearly all of the saving is: a window is tens of thousands
     // of pixels and the thing that changed is usually one of them.
@@ -4051,13 +4207,32 @@ fn composite(screen: &Screen, tile: &Tile) {
             FRAMEBUFFER_AT + ((row as usize * screen.stride as usize) + x0 as usize) * 4;
 
         for column in 0..(x1 - x0) as usize {
+            if rounded
+                && !rounded_inside(
+                    x0 - tile.x + column as u32,
+                    row - tile.y,
+                    tile.width,
+                    tile.height,
+                )
+            {
+                continue;
+            }
             // SAFETY: both mappings are live and writable, the source offset is
             // inside a surface of `width * height * 4` bytes, and the
             // destination was checked against the screen when the display was
             // taken and is bounded by this tile's own rectangle.
             unsafe {
                 let pixel = core::ptr::read_volatile((source + column * 4) as *const u32);
-                core::ptr::write_volatile((destination + column * 4) as *mut u32, pixel);
+                if glass && pixel == 0 {
+                    continue;
+                }
+                let target = (destination + column * 4) as *mut u32;
+                let result = if glass && pixel >> 24 != 0 {
+                    mix_pixel(core::ptr::read_volatile(target), pixel, pixel >> 24)
+                } else {
+                    pixel
+                };
+                core::ptr::write_volatile(target, result);
             }
         }
     }

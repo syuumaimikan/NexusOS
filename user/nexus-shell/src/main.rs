@@ -157,7 +157,6 @@ mod state {
 const MAX_WINDOWS: usize = 8;
 
 /// How wide the button that starts a program is.
-const LAUNCH_WIDTH: u32 = 72;
 
 /// Pixels between things in the strip.
 const GAP: u32 = 4;
@@ -166,7 +165,6 @@ const GAP: u32 = 4;
 ///
 /// Five pixels on a thirty-two pixel button: enough to read as rounded at a
 /// glance and not so much that a short label sits in a lozenge.
-const RADIUS: u32 = 5;
 
 /// Everything this program knows about the desktop.
 struct Desktop {
@@ -218,84 +216,39 @@ struct Desktop {
 }
 
 impl Desktop {
-    /// Where the button that starts a program is.
+    fn dock_left(&self) -> u32 {
+        self.width.saturating_sub(self.dock_width()) / 2
+    }
+
+    fn dock_width(&self) -> u32 {
+        (7 * 72 + 6 * 8 + 28).min(self.width.saturating_sub(24))
+    }
+
+    fn app(&self, index: u32) -> Rect {
+        let width = self.dock_width().saturating_sub(6 * 8 + 28) / 7;
+        Rect::new(self.dock_left() + 14 + index * (width + 8), 26, width, 48)
+    }
+
     fn launcher(&self) -> Rect {
-        Rect::new(GAP, GAP / 2, LAUNCH_WIDTH, self.height.saturating_sub(GAP))
+        self.app(0)
     }
-
-    /// Where the button that opens a page is.
-    ///
-    /// Beside the one that starts a program, because they are the same kind of
-    /// thing: both ask the compositor for a window, and which program goes in
-    /// it is the compositor's decision and not this one's.
     fn web(&self) -> Rect {
-        let width = nexus_ui::measure(nexus_i18n::text("shell.web")) + GAP * 4;
-        Rect::new(
-            GAP * 2 + LAUNCH_WIDTH,
-            GAP / 2,
-            width,
-            self.height.saturating_sub(GAP),
-        )
+        self.app(1)
     }
-
-    /// Where the button that opens a terminal is.
     fn terminal(&self) -> Rect {
-        let web = self.web();
-        let width = nexus_ui::measure(nexus_i18n::text("shell.term")) + GAP * 4;
-        Rect::new(
-            web.x + web.width + GAP,
-            GAP / 2,
-            width,
-            self.height.saturating_sub(GAP),
-        )
+        self.app(2)
     }
-
-    /// Where the button that opens the settings is.
     fn settings(&self) -> Rect {
-        let terminal = self.terminal();
-        let width = nexus_ui::measure(nexus_i18n::text("shell.settings")) + GAP * 4;
-        Rect::new(
-            terminal.x + terminal.width + GAP,
-            GAP / 2,
-            width,
-            self.height.saturating_sub(GAP),
-        )
+        self.app(3)
     }
-
-    /// Where the button that opens the packages is.
     fn packages(&self) -> Rect {
-        let settings = self.settings();
-        let width = nexus_ui::measure(nexus_i18n::text("shell.packages")) + GAP * 4;
-        Rect::new(
-            settings.x + settings.width + GAP,
-            GAP / 2,
-            width,
-            self.height.saturating_sub(GAP),
-        )
+        self.app(4)
     }
-
-    /// Where the button that opens the pictures is.
     fn pictures(&self) -> Rect {
-        let packages = self.packages();
-        let width = nexus_ui::measure(nexus_i18n::text("shell.pictures")) + GAP * 4;
-        Rect::new(
-            packages.x + packages.width + GAP,
-            GAP / 2,
-            width,
-            self.height.saturating_sub(GAP),
-        )
+        self.app(5)
     }
-
-    /// Where the button that opens the agent is.
     fn assist(&self) -> Rect {
-        let pictures = self.pictures();
-        let width = nexus_ui::measure(nexus_i18n::text("shell.assist")) + GAP * 4;
-        Rect::new(
-            pictures.x + pictures.width + GAP,
-            GAP / 2,
-            width,
-            self.height.saturating_sub(GAP),
-        )
+        self.app(6)
     }
 
     /// Where the button that ends the session is, and how wide.
@@ -306,12 +259,7 @@ impl Desktop {
     /// clip one of them.
     fn leave(&self) -> Rect {
         let width = nexus_ui::measure(nexus_i18n::text("shell.leave")) + GAP * 4;
-        Rect::new(
-            self.width.saturating_sub(width + GAP),
-            GAP / 2,
-            width,
-            self.height.saturating_sub(GAP),
-        )
+        Rect::new(self.width.saturating_sub(width + GAP), GAP / 2, width, 20)
     }
 
     /// Where the button that turns the machine off is.
@@ -354,19 +302,8 @@ impl Desktop {
     /// brought back. A tab that shuffled sideways under the pointer would be a
     /// tab somebody clicked and missed.
     fn tab(&self, slot: usize) -> Rect {
-        let last = self.assist();
-        let left = last.x + last.width + GAP;
-        let available = self
-            .width
-            .saturating_sub(left + GAP)
-            .saturating_sub(self.reserved());
-        let each = (available / self.slots.max(1) as u32).saturating_sub(GAP);
-        Rect::new(
-            left + slot as u32 * (each + GAP),
-            GAP / 2,
-            each,
-            self.height.saturating_sub(GAP),
-        )
+        let left = self.dock_left() + 14;
+        Rect::new(left + slot as u32 * 28, 77, 24, 10)
     }
 
     /// How many windows are put away.
@@ -966,245 +903,129 @@ fn clicked(desktop: &mut Desktop, x: u32, y: u32) -> Option<bool> {
 
 /// Draw the whole strip.
 fn draw(desktop: &Desktop) {
-    // SAFETY: the strip is mapped here, writable, and at least
-    // `width * height * 4` bytes -- checked against the mapping before the
-    // first frame.
     let mut canvas = unsafe { Canvas::packed(SURFACE_AT, desktop.width, desktop.height) };
-
-    // The face and the blending a person chose, from the same settings file the
-    // colours come from.
-    canvas.set_text_style(
-        nexus_ui::font::Face::parse(Some(desktop.look.font.name())),
-        desktop.look.smooth,
-    );
-
-    // The strip is a darker version of the background's bottom, so a machine
-    // with a warm wallpaper does not have a cold bar under it; everything that
-    // can be pressed is the accent.
-    let ground = Colour(
-        desktop
-            .look
-            .bottom
-            .towards(nexus_look::Colour::new(0, 0, 0), 90)
-            .packed(),
-    );
+    canvas.set_text_style(nexus_ui::font::Face::Smooth, true);
+    // Zero is transparent only for the desktop overlay. All app surfaces
+    // retain their original opaque pixel format.
+    canvas.fill(canvas.bounds(), Colour(0));
+    let ink = Colour::rgb(38, 45, 63);
+    let muted = Colour::rgb(99, 110, 132);
     let accent = Colour(desktop.look.accent.packed());
-    let ink = Colour::rgb(0xC8, 0xD4, 0xE8);
-
-    canvas.fill(canvas.bounds(), ground);
-
-    // A machine that is stopping has nothing else worth saying. The buttons are
-    // about to stop meaning anything, so they are not drawn -- a strip full of
-    // things to press, over a screen that has gone dark, invites somebody to
-    // press one.
     if let Some(what) = &desktop.stopping {
-        canvas.text_centred(canvas.bounds(), what, Colour::rgb(0xE6, 0xEC, 0xF5));
+        canvas.fill(canvas.bounds(), Colour::rgb(235, 239, 248));
+        canvas.text_centred(canvas.bounds(), what, ink);
         return;
     }
-
-    // The launcher, which is the only thing on this machine that starts a
-    // program by being pressed.
-    let launcher = desktop.launcher();
-    canvas.panel(
-        launcher,
-        RADIUS,
-        accent.blend(Colour::rgb(0, 0, 0), 120),
-        accent,
+    canvas.fill_rounded(
+        Rect::new(8, 0, desktop.width.saturating_sub(16), 22),
+        9,
+        Colour(0xbde8edf5),
     );
-    canvas.text_centred(
-        launcher,
-        nexus_i18n::text("shell.launch"),
-        Colour::rgb(0xF0, 0xF4, 0xFF),
+    canvas.text(20, 3, "Nexus", ink);
+    if !desktop.clock.is_empty() {
+        canvas.text(84, 3, &desktop.clock, muted);
+    }
+    for (area, label) in [
+        (desktop.sleep(), "shell.sleep"),
+        (desktop.restart(), "shell.restart"),
+        (desktop.shutdown(), "shell.shutdown"),
+        (desktop.leave(), "shell.leave"),
+    ] {
+        canvas.text_centred(area, nexus_i18n::text(label), muted);
+    }
+    let dock = Rect::new(desktop.dock_left(), 22, desktop.dock_width(), 68);
+    canvas.fill_rounded(dock, 18, Colour(0xcbe8edf5));
+    canvas.fill_rounded(
+        Rect::new(dock.x + 8, dock.y, dock.width.saturating_sub(16), 1),
+        0,
+        Colour::rgb(249, 251, 255),
     );
-
-    // The button that opens a page, next to the one that starts a program.
-    let web = desktop.web();
-    canvas.panel(
-        web,
-        RADIUS,
-        accent.blend(Colour::rgb(0, 0, 0), 150),
-        accent.blend(ground, 90),
-    );
-    canvas.text_centred(
-        web,
-        nexus_i18n::text("shell.web"),
-        Colour::rgb(0xE8, 0xF0, 0xFF),
-    );
-
-    // And the one that opens a prompt.
-    let terminal = desktop.terminal();
-    canvas.panel(
-        terminal,
-        RADIUS,
-        Colour::rgb(0x10, 0x20, 0x18),
-        Colour::rgb(0x4E, 0x8E, 0x5C),
-    );
-    canvas.text_centred(
-        terminal,
-        nexus_i18n::text("shell.term"),
-        Colour::rgb(0xD8, 0xF0, 0xDC),
-    );
-
-    // And the one that opens the machine's own settings.
-    let settings = desktop.settings();
-    canvas.panel(
-        settings,
-        RADIUS,
-        Colour::rgb(0x22, 0x1C, 0x30),
-        Colour::rgb(0x7A, 0x6C, 0xA8),
-    );
-    canvas.text_centred(
-        settings,
-        nexus_i18n::text("shell.settings"),
-        Colour::rgb(0xE4, 0xDE, 0xF4),
-    );
-
-    // And the one that opens what there is to install.
-    let packages = desktop.packages();
-    canvas.panel(
-        packages,
-        RADIUS,
-        Colour::rgb(0x2A, 0x20, 0x14),
-        Colour::rgb(0xA8, 0x8C, 0x54),
-    );
-    canvas.text_centred(
-        packages,
-        nexus_i18n::text("shell.packages"),
-        Colour::rgb(0xF4, 0xEA, 0xD4),
-    );
-
-    // And the one that opens the pictures.
-    let pictures = desktop.pictures();
-    canvas.panel(
-        pictures,
-        RADIUS,
-        Colour::rgb(0x14, 0x26, 0x26),
-        Colour::rgb(0x54, 0x9C, 0x9C),
-    );
-    canvas.text_centred(
-        pictures,
-        nexus_i18n::text("shell.pictures"),
-        Colour::rgb(0xD8, 0xF0, 0xF0),
-    );
-
-    // And the one that opens the agent.
-    let assist = desktop.assist();
-    canvas.panel(
-        assist,
-        RADIUS,
-        Colour::rgb(0x2A, 0x14, 0x22),
-        Colour::rgb(0xB0, 0x68, 0x90),
-    );
-    canvas.text_centred(
-        assist,
-        nexus_i18n::text("shell.assist"),
-        Colour::rgb(0xF4, 0xDC, 0xE8),
-    );
-
-    for slot in 0..desktop.slots {
-        let tab = desktop.tab(slot);
-        if tab.width == 0 {
-            break;
+    let colours = [
+        0x6868e8, 0x348fe8, 0x374152, 0x8795aa, 0xe9a84a, 0x47b5a2, 0xc77ad6,
+    ];
+    let labels = [
+        "shell.launch",
+        "shell.web",
+        "shell.term",
+        "shell.settings",
+        "shell.packages",
+        "shell.pictures",
+        "shell.assist",
+    ];
+    for index in 0..7 {
+        let area = desktop.app(index);
+        let icon = Rect::new(
+            area.x + area.width.saturating_sub(28) / 2,
+            area.y,
+            28.min(area.width),
+            28,
+        );
+        canvas.fill_rounded(icon, 8, Colour(colours[index as usize]));
+        let white = Colour::rgb(255, 255, 255);
+        match index {
+            0 => {
+                for row in 0..2 {
+                    for column in 0..2 {
+                        canvas.fill_rounded(
+                            Rect::new(icon.x + 7 + column * 8, icon.y + 7 + row * 8, 6, 6),
+                            2,
+                            white,
+                        );
+                    }
+                }
+            }
+            1 => {
+                canvas.outline(icon.inset(6), 1, white);
+                canvas.fill(Rect::new(icon.x + 6, icon.y + 13, 16, 2), white);
+                canvas.fill(Rect::new(icon.x + 13, icon.y + 6, 2, 16), white);
+            }
+            2 => {
+                canvas.text(icon.x + 6, icon.y + 6, ">_", white);
+            }
+            3 => {
+                canvas.fill_rounded(icon.inset(6), 8, white);
+                canvas.fill_rounded(icon.inset(10), 4, Colour(colours[index as usize]));
+            }
+            4 => {
+                canvas.outline(icon.inset(6), 2, white);
+                canvas.fill(Rect::new(icon.x + 13, icon.y + 6, 2, 16), white);
+            }
+            5 => {
+                canvas.outline(icon.inset(5), 1, white);
+                canvas.fill_rounded(Rect::new(icon.x + 9, icon.y + 9, 4, 4), 2, white);
+                canvas.fill(Rect::new(icon.x + 8, icon.y + 18, 12, 3), white);
+            }
+            _ => {
+                canvas.text(icon.x + 6, icon.y + 6, "AI", white);
+            }
         }
+        let label = nexus_i18n::text(labels[index as usize]);
+        if nexus_ui::measure(label) <= area.width {
+            canvas.text_centred(Rect::new(area.x, area.y + 30, area.width, 16), label, ink);
+        }
+    }
+    for slot in 0..desktop.slots {
+        let area = desktop.tab(slot);
         let state = desktop.windows[slot];
         if state == state::GONE {
-            // An empty slot is the ground with an edge around it, which is not
-            // the same thing as the strip being shorter.
-            canvas.panel(tab, RADIUS, ground, ground.blend(ink, 40));
             continue;
         }
-
-        let colour = match state {
-            state::AWAY => accent.blend(Colour::rgb(0, 0, 0), 90),
-            state::FOCUSED => Colour::rgb(0x19, 0x33, 0x50),
-            _ => Colour::rgb(0x11, 0x1E, 0x30),
-        };
-        // The focused window's tab is the only one with the accent around it,
-        // which is what makes it findable without reading any of them.
-        let edge = if state == state::FOCUSED {
+        let colour = if state == state::FOCUSED {
             accent
         } else {
-            colour
+            muted
         };
-        canvas.panel(tab, RADIUS, colour, edge);
-        let label = nexus_i18n::format("shell.window", &[("number", &(slot + 1))]);
-        canvas.text_centred(tab, &label, ink);
-    }
-
-    // The way out, at the very edge, drawn in a colour nothing else uses: it is
-    // the one control here that cannot be undone by pressing it again.
-    let leave = desktop.leave();
-    canvas.fill(leave, Colour::rgb(0x3A, 0x14, 0x18));
-    canvas.outline(leave, 1, Colour::rgb(0xB0, 0x48, 0x50));
-    canvas.text_centred(
-        leave,
-        nexus_i18n::text("shell.leave"),
-        Colour::rgb(0xF0, 0xD8, 0xD8),
-    );
-
-    // The three that stop the machine, quieter than the way out: they are
-    // reversible in a way it is not -- a machine that has been turned off can
-    // be turned on again, and a session that has ended has taken the windows
-    // with it.
-    for (rect, label) in [
-        (desktop.shutdown(), "shell.shutdown"),
-        (desktop.restart(), "shell.restart"),
-        (desktop.sleep(), "shell.sleep"),
-    ] {
-        canvas.fill(rect, Colour::rgb(0x18, 0x22, 0x36));
-        canvas.outline(rect, 1, Colour::rgb(0x38, 0x4A, 0x68));
-        canvas.text_centred(rect, nexus_i18n::text(label), Colour::rgb(0xC8, 0xD4, 0xE6));
-    }
-
-    // The right-hand end, in the order a person reads back from the edge: the
-    // clock, then whose machine this is, then what is running. Each is drawn
-    // only if it fits in what is left after the one outside it, and the whole
-    // lot is cut at the last tab -- text drawn over a tab is a strip that
-    // cannot be read.
-    let last = desktop.tab(desktop.slots.saturating_sub(1));
-    let floor = last.x + last.width;
-    let mut right = desktop.sleep().x.saturating_sub(GAP * 2);
-    let baseline = GAP / 2 + 2;
-
-    if !desktop.clock.is_empty() {
-        let width = nexus_ui::measure(&desktop.clock);
-        if right.saturating_sub(width) > floor {
-            right -= width;
-            canvas.text(right, baseline, &desktop.clock, ink);
-            right = right.saturating_sub(GAP * 3);
+        canvas.fill_rounded(Rect::new(area.x + 9, area.y + 2, 6, 6), 3, colour);
+        if state == state::AWAY {
+            canvas.fill_rounded(
+                Rect::new(area.x + 10, area.y + 3, 4, 4),
+                2,
+                Colour::rgb(232, 237, 245),
+            );
         }
     }
-
     if let Some(text) = desktop.update_line() {
-        let width = nexus_ui::measure(&text);
-        if right.saturating_sub(width) > floor {
-            right -= width;
-            canvas.text(right, baseline, &text, accent);
-            right = right.saturating_sub(GAP * 3);
-        }
-    }
-
-    if let Some(name) = &desktop.owner {
-        let label = nexus_i18n::format("shell.owner", &[("name", name)]);
-        let width = nexus_ui::measure(&label);
-        if right.saturating_sub(width) > floor {
-            right -= width;
-            canvas.text(right, baseline, &label, ink.blend(ground, 60));
-            right = right.saturating_sub(GAP * 3);
-        }
-    }
-
-    let away = desktop.away();
-    let status: String = if desktop.empty() {
-        nexus_i18n::text("shell.none").to_string()
-    } else if away > 0 {
-        nexus_i18n::format("shell.hidden", &[("number", &away)])
-    } else {
-        return;
-    };
-    let width = nexus_ui::measure(&status);
-    if right.saturating_sub(width) > floor {
-        canvas.text(right - width, baseline, &status, ink.blend(ground, 90));
+        canvas.text(dock.x + 250, 76, &text, muted);
     }
 }
 

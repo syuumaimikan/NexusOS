@@ -312,20 +312,38 @@ pub fn spawn_user(
 /// because anything copies anything.
 ///
 /// `registers` is the state the thread begins in, which for a `clone` is its
-/// parent's with a zero in `rax` and a stack of its own. `thread_pointer` is
-/// what `fs` is to point at while it runs, which a C library sets for every
-/// thread it makes and which is per-thread state the switch now carries.
+/// parent's with a zero in `rax` and a stack of its own. TLS is an FS base
+/// for x86-64 or a validated GDT descriptor for i386. Without an override,
+/// the child inherits the current bases, selectors and descriptor table.
 ///
 /// The name is the process's, so that the log says which program a thread
 /// belongs to rather than giving every thread of every program the same word.
+pub enum ThreadTls {
+    FsBase(u64),
+    Compat { entry: u32, descriptor: u64 },
+}
+
 pub fn spawn_user_thread(
     process: Arc<crate::process::Process>,
     registers: crate::arch::syscall::Frame,
-    thread_pointer: Option<u64>,
+    tls: Option<ThreadTls>,
+    // Initialize caller-owned thread metadata before another CPU can run it.
+    // Runs under the scheduler lock; must not call scheduler operations.
+    before_start: impl FnOnce(ThreadId),
 ) -> Result<ThreadId, SpawnError> {
     let name = crate::alloc::string::String::from(process.name.as_str());
     let id = {
         let mut scheduler = SCHEDULER.lock();
+        let inherited_tls = scheduler
+            .threads
+            .get(&ThreadId(percpu::current_thread()))
+            .map_or([0; 3], |parent| parent.compat_tls);
+        let (fs, gs): (u16, u16);
+        unsafe {
+            core::arch::asm!("mov {fs:x}, fs", "mov {gs:x}, gs", fs=out(reg) fs, gs=out(reg) gs, options(nostack, preserves_flags));
+        }
+        let inherited_fs_base = unsafe { arch::syscall::read_msr(FS_BASE) };
+        let inherited_gs_base = unsafe { arch::syscall::read_msr(0xc000_0102) };
         let id = scheduler.create(&name, Priority::Normal, user_trampoline, 0)?;
         if let Some(thread) = scheduler.threads.get_mut(&id) {
             thread.user_start = Some(UserStart {
@@ -336,18 +354,98 @@ pub fn spawn_user_thread(
             // Taken from the caller if it named one, and otherwise the same one
             // the calling thread is using -- which is what a `clone` without
             // `CLONE_SETTLS` means, and is not the same as none.
-            thread.thread_pointer = thread_pointer.unwrap_or_else(||
-                // SAFETY: reading this processor's `IA32_FS_BASE`, which is the
-                // calling thread's because it is the one running.
-                unsafe { arch::syscall::read_msr(FS_BASE) });
+            thread.thread_pointer = inherited_fs_base;
+            thread.compat_tls = inherited_tls;
+            thread.user_fs_selector = fs;
+            thread.user_gs_selector = gs;
+            thread.user_gs_base = inherited_gs_base;
+            match tls {
+                Some(ThreadTls::FsBase(base)) => {
+                    thread.thread_pointer = base;
+                    thread.user_fs_selector = 0;
+                }
+                Some(ThreadTls::Compat { entry, descriptor }) => {
+                    let slot = (entry - arch::gdt::TLS_FIRST) as usize;
+                    thread.compat_tls[slot] = descriptor;
+                    let selected = ((entry as u16) << 3) | 3;
+                    let base = ((descriptor >> 16) & 0xffff)
+                        | ((descriptor >> 32) & 0xff) << 16
+                        | (descriptor >> 56) << 24;
+                    if fs == selected {
+                        thread.thread_pointer = base;
+                    }
+                    if gs == selected {
+                        thread.user_gs_base = base;
+                    }
+                }
+                None => {}
+            }
             thread.process = Some(process);
         }
+        before_start(id);
         scheduler.enqueue(id);
         id
     };
 
     percpu::request_reschedule_everywhere();
     Ok(id)
+}
+
+/// Read one of the current thread's i386 TLS descriptors.
+pub fn compat_tls_get(entry: u32) -> Option<u64> {
+    let slot = entry.checked_sub(arch::gdt::TLS_FIRST)? as usize;
+    let scheduler = SCHEDULER.lock();
+    scheduler
+        .threads
+        .get(&ThreadId(percpu::current_thread()))?
+        .compat_tls
+        .get(slot)
+        .copied()
+}
+
+/// Install a validated ring-three TLS descriptor; -1 allocates a free slot.
+pub fn compat_tls_set(entry: u32, descriptor: u64) -> Option<u32> {
+    let mut scheduler = SCHEDULER.lock();
+    let thread = scheduler
+        .threads
+        .get_mut(&ThreadId(percpu::current_thread()))?;
+    let slot = if entry == u32::MAX {
+        thread.compat_tls.iter().position(|value| *value == 0)?
+    } else {
+        entry.checked_sub(arch::gdt::TLS_FIRST)? as usize
+    };
+    *thread.compat_tls.get_mut(slot)? = descriptor;
+    // The scheduler lock masks interrupts, so the current CPU cannot change
+    // between selecting its GDT and installing the descriptor.
+    unsafe {
+        arch::gdt::install_tls(percpu::cpu_index() as usize, thread.compat_tls);
+    }
+    let selected = ((slot as u16 + arch::gdt::TLS_FIRST as u16) << 3) | 3;
+    let (mut fs, mut gs): (u16, u16);
+    unsafe {
+        core::arch::asm!("mov {fs:x}, fs", "mov {gs:x}, gs", fs=out(reg) fs, gs=out(reg) gs, options(nostack, preserves_flags));
+    }
+    let mut fs_base = unsafe { arch::syscall::read_msr(FS_BASE) };
+    let mut gs_base = unsafe { arch::syscall::read_msr(0xc000_0102) };
+    let base = ((descriptor >> 16) & 0xffff)
+        | ((descriptor >> 32) & 0xff) << 16
+        | (descriptor >> 56) << 24;
+    if fs == selected {
+        fs_base = base;
+        if descriptor == 0 {
+            fs = 0;
+        }
+    }
+    if gs == selected {
+        gs_base = base;
+        if descriptor == 0 {
+            gs = 0;
+        }
+    }
+    unsafe {
+        arch::gdt::restore_tls_selectors(fs, gs, fs_base, gs_base);
+    }
+    Some(slot as u32 + arch::gdt::TLS_FIRST)
 }
 
 /// The kernel side of a user thread: hand the processor to ring 3.
@@ -598,6 +696,7 @@ fn finish_switch() {
 
 /// Retire the running thread. Never returns.
 pub fn exit() -> ! {
+    crate::compat::linux_semaphore::ending(percpu::current_thread());
     {
         let mut scheduler = SCHEDULER.lock();
         let current = ThreadId(percpu::current_thread());
@@ -848,6 +947,18 @@ pub fn schedule() {
                 //
                 // SAFETY: reading this processor's `IA32_FS_BASE`.
                 thread.thread_pointer = unsafe { arch::syscall::read_msr(FS_BASE) };
+                thread.user_gs_base = unsafe { arch::syscall::read_msr(0xc000_0102) };
+                unsafe {
+                    core::arch::asm!("mov {fs:x}, fs", "mov {gs:x}, gs", fs=out(reg) thread.user_fs_selector, gs=out(reg) thread.user_gs_selector, options(nostack, preserves_flags));
+                }
+                // Firmware may have left a cached selector that now indexes
+                // our TSS. Its cached base worked until a reload; it must not
+                // be restored as though it were a user data segment.
+                for selector in [&mut thread.user_fs_selector, &mut thread.user_gs_selector] {
+                    if !matches!(*selector, 0 | 0x1b | 0x23 | 0x2b | 0x43 | 0x4b | 0x53) {
+                        *selector = 0;
+                    }
+                }
                 // And the vector registers, for the same reason and with the
                 // same consequence if it is skipped: the outgoing thread's are
                 // in the processor, and nothing else knows them.
@@ -858,7 +969,16 @@ pub fn schedule() {
                 &mut thread.stack_pointer as *mut u64
             };
 
-            let (incoming_stack, incoming_kernel_stack, incoming_root, incoming_fs) = {
+            let (
+                incoming_stack,
+                incoming_kernel_stack,
+                incoming_root,
+                incoming_fs,
+                tls,
+                fs_selector,
+                gs_selector,
+                gs_base,
+            ) = {
                 let thread = scheduler
                     .threads
                     .get_mut(&next)
@@ -879,6 +999,10 @@ pub fn schedule() {
                     thread.kernel_stack_top(),
                     thread.page_table_root(),
                     thread.thread_pointer,
+                    thread.compat_tls,
+                    thread.user_fs_selector,
+                    thread.user_gs_selector,
+                    thread.user_gs_base,
                 )
             };
 
@@ -922,6 +1046,10 @@ pub fn schedule() {
             // ever a user address -- `arch_prctl` checks that before it accepts
             // one, and a thread that has not set one has zero here.
             unsafe { arch::syscall::write_msr(FS_BASE, incoming_fs) };
+            unsafe {
+                arch::gdt::install_tls(percpu::cpu_index() as usize, tls);
+                arch::gdt::restore_tls_selectors(fs_selector, gs_selector, incoming_fs, gs_base);
+            }
 
             percpu::set_current_thread(next.0);
             scheduler.context_switches += 1;

@@ -13,11 +13,13 @@
 //! inodes says what each file is and where its blocks are; and directories are
 //! ordinary files whose contents happen to be a list of names.
 //!
-//! An inode carries eleven direct block numbers and one indirect, which is a
-//! block full of block numbers. That puts the largest file at just over two
-//! megabytes. It is a small number and it is an honest one: a second level of
-//! indirection is four lines and would make the limit a gigabyte, and adding it
-//! before anything needs it would be adding a path nothing has ever walked.
+//! An inode carries eleven direct block numbers, one indirect block and a
+//! double-indirect root. Files are limited to 64 MiB so their metadata fits in
+//! one journal transaction. Version-two volumes remain readable; the first
+//! double-indirect write upgrades the superblock to version three atomically
+//! with the inode, preventing older kernels from reclaiming live index blocks.
+//! Immutable symbolic links upgrade to version four in the same transaction
+//! as their target and directory entry. Both earlier versions remain readable.
 //!
 //! # Reading and writing part of a file
 //!
@@ -105,12 +107,11 @@ const SECTORS_PER_BLOCK: u64 = (BLOCK_SIZE / SECTOR_SIZE) as u64;
 
 /// What a NexusFS superblock says it is.
 const MAGIC: &[u8; 8] = b"NEXUSFS\0";
-/// The only version this understands.
-///
-/// Two, because version one had no journal and its regions start in different
-/// places. A reader that took a version-one superblock for this one would find
-/// the inode table where the journal is.
-const VERSION: u32 = 2;
+/// Version two introduced the journal; three adds double indirection.
+const VERSION: u32 = 3;
+/// Symlink inodes require v4; keep the v3 double-indirect feature threshold.
+const SYMLINK_VERSION: u32 = 4;
+const LEGACY_VERSION: u32 = 2;
 
 /// What a journal descriptor says it is.
 const JOURNAL_MAGIC: &[u8; 8] = b"NEXUSJRN";
@@ -137,7 +138,8 @@ const DIRECT: usize = 11;
 /// Block numbers in one indirect block.
 const PER_INDIRECT: usize = BLOCK_SIZE / 8;
 /// Blocks a file can occupy.
-const MAX_BLOCKS: usize = DIRECT + PER_INDIRECT;
+const SINGLE_BLOCKS: usize = DIRECT + PER_INDIRECT;
+const MAX_BLOCKS: usize = 64 * 1024 * 1024 / BLOCK_SIZE;
 /// Bytes a file can hold.
 pub const MAX_FILE: usize = MAX_BLOCKS * BLOCK_SIZE;
 
@@ -163,6 +165,8 @@ pub enum Kind {
     File,
     /// A directory.
     Directory,
+    /// An immutable pathname, followed by a namespace resolver.
+    Symlink,
 }
 
 impl Kind {
@@ -171,6 +175,7 @@ impl Kind {
             Self::Free => 0,
             Self::File => 1,
             Self::Directory => 2,
+            Self::Symlink => 3,
         }
     }
 
@@ -178,6 +183,7 @@ impl Kind {
         match value {
             1 => Self::File,
             2 => Self::Directory,
+            3 => Self::Symlink,
             _ => Self::Free,
         }
     }
@@ -189,6 +195,7 @@ impl core::fmt::Display for Kind {
             Self::Free => "free",
             Self::File => "file",
             Self::Directory => "directory",
+            Self::Symlink => "symlink",
         })
     }
 }
@@ -262,6 +269,7 @@ impl core::fmt::Display for FsError {
 /// are the only fields that move.
 #[derive(Debug, Clone, Copy)]
 struct Superblock {
+    version: u32,
     total_blocks: u64,
     inode_count: u64,
     journal_start: u64,
@@ -311,6 +319,8 @@ struct Inode {
     direct: [u64; DIRECT],
     /// Block holding further block numbers, or zero for none.
     indirect: u64,
+    /// Stored in the formerly reserved four bytes at inode offset four.
+    double_indirect: u32,
 }
 
 impl Inode {
@@ -323,6 +333,7 @@ impl Inode {
             modified: 0,
             direct: [0; DIRECT],
             indirect: 0,
+            double_indirect: 0,
         }
     }
 
@@ -340,6 +351,7 @@ impl Inode {
             modified: read_u64(bytes, 24),
             direct,
             indirect: read_u64(bytes, 120),
+            double_indirect: read_u32(bytes, 4),
         }
     }
 
@@ -348,6 +360,7 @@ impl Inode {
         bytes[..INODE_SIZE].fill(0);
         write_u16(bytes, 0, self.kind.to_raw());
         write_u16(bytes, 2, self.links);
+        write_u32(bytes, 4, self.double_indirect);
         write_u64(bytes, 8, self.size);
         write_u64(bytes, 16, self.created);
         write_u64(bytes, 24, self.modified);
@@ -420,6 +433,7 @@ pub struct Volume {
     /// here too, so that an operation reading a block it has already changed
     /// sees its own change and not what is still on the disk.
     pending: Option<Vec<(u64, Box<[u8; BLOCK_SIZE]>)>>,
+    before: Option<Superblock>,
     /// Which transaction this will be, for the descriptor and the log.
     sequence: u64,
 }
@@ -479,8 +493,10 @@ impl Volume {
             // superblock, which is a partition that has no filesystem on it --
             // exactly what it was before.
             pending: None,
+            before: None,
             sequence: 0,
             superblock: Superblock {
+                version: LEGACY_VERSION,
                 total_blocks,
                 inode_count,
                 journal_start,
@@ -550,7 +566,7 @@ impl Volume {
             return Err(FsError::NotFormatted);
         }
         let version = read_u32(&block, field::VERSION);
-        if version != VERSION {
+        if version != VERSION && version != LEGACY_VERSION && version != SYMLINK_VERSION {
             return Err(FsError::WrongVersion(version));
         }
 
@@ -569,6 +585,7 @@ impl Volume {
         }
 
         let superblock = Superblock {
+            version,
             total_blocks: read_u64(&block, field::TOTAL_BLOCKS),
             inode_count: read_u64(&block, field::INODE_COUNT),
             journal_start: read_u64(&block, field::JOURNAL_START),
@@ -604,6 +621,7 @@ impl Volume {
             start_lba,
             superblock,
             pending: None,
+            before: None,
             sequence: 0,
         };
 
@@ -623,6 +641,7 @@ impl Volume {
                 read_block_at(start_lba, 0, &mut fresh)?;
                 volume.superblock.free_blocks = read_u64(&fresh, field::FREE_BLOCKS);
                 volume.superblock.free_inodes = read_u64(&fresh, field::FREE_INODES);
+                volume.superblock.version = read_u32(&fresh, field::VERSION);
             }
         }
 
@@ -739,7 +758,7 @@ impl Volume {
     /// reader can see the name, the thing it names is already there.
     pub fn create(&mut self, directory: u32, name: &str, kind: Kind) -> Result<u32, FsError> {
         check_name(name)?;
-        if kind == Kind::Free {
+        if matches!(kind, Kind::Free | Kind::Symlink) {
             return Err(FsError::WrongKind);
         }
 
@@ -786,6 +805,113 @@ impl Volume {
         self.write_inode_data(directory, &contents, true)?;
         self.write_superblock()?;
         Ok(number)
+    }
+
+    /// Publish the link inode, immutable target and parent entry in one journal
+    /// transaction. v2/v3 readers must refuse the resulting v4 volume.
+    pub fn symlink(&mut self, directory: u32, name: &str, target: &str) -> Result<u32, FsError> {
+        check_name(name)?;
+        if target.is_empty() || target.as_bytes().contains(&0) {
+            return Err(FsError::BadName);
+        }
+        if target.len() >= 4096 {
+            return Err(FsError::TooLarge);
+        }
+        let parent = self.read_inode(directory)?;
+        if parent.kind != Kind::Directory {
+            return Err(FsError::WrongKind);
+        }
+        let contents = self.read_inode_data(&parent)?;
+        if parse_directory(&contents)?
+            .iter()
+            .any(|(_, existing, _)| existing == name)
+        {
+            return Err(FsError::Exists);
+        }
+        self.begin();
+        let result = self.symlink_within(directory, name, target, contents);
+        match result {
+            Ok(number) => {
+                self.commit()?;
+                Ok(number)
+            }
+            Err(error) => {
+                self.abandon();
+                Err(error)
+            }
+        }
+    }
+
+    fn symlink_within(
+        &mut self,
+        directory: u32,
+        name: &str,
+        target: &str,
+        contents: Vec<u8>,
+    ) -> Result<u32, FsError> {
+        self.superblock.version = self.superblock.version.max(SYMLINK_VERSION);
+        let number = self.create_within(directory, name, Kind::Symlink, contents)?;
+        self.write_inode_data(number, target.as_bytes(), true)?;
+        self.write_superblock()?;
+        Ok(number)
+    }
+
+    #[cfg_attr(not(feature = "deep-selftest"), allow(dead_code))]
+    pub fn symlink_self_test(&mut self) -> Result<String, FsError> {
+        let before = self.space();
+        let name = "link-journal-test";
+        let target = "../native/immutable-target";
+        let contents = self.read_inode_data(&self.read_inode(ROOT)?)?;
+        self.begin();
+        let number = self.symlink_within(ROOT, name, target, contents)?;
+        self.commit_and_stop()?;
+        let mut recovered = Self::mount(self.start_lba)?;
+        let entry = recovered.lookup(ROOT, name)?;
+        if recovered.superblock.version != SYMLINK_VERSION
+            || entry.kind != Kind::Symlink
+            || entry.inode != number
+            || recovered.read_link(number)? != target
+            || !matches!(
+                recovered.write(number, b"overwrite"),
+                Err(FsError::WrongKind)
+            )
+        {
+            return Err(FsError::Corrupt);
+        }
+        recovered.unlink(ROOT, name)?;
+        let long = "x".repeat(4095);
+        let number = recovered.symlink(ROOT, name, &long)?;
+        if !matches!(
+            recovered.symlink(ROOT, name, "replacement"),
+            Err(FsError::Exists)
+        ) {
+            return Err(FsError::Corrupt);
+        }
+        let again = Self::mount(self.start_lba)?;
+        if again.read_link(number)? != long {
+            return Err(FsError::Corrupt);
+        }
+        recovered.unlink(ROOT, name)?;
+        let contents = recovered.read_inode_data(&recovered.read_inode(ROOT)?)?;
+        recovered.begin();
+        recovered.symlink_within(ROOT, name, "never committed", contents)?;
+        recovered.abandon();
+        *self = Self::mount(self.start_lba)?;
+        if !matches!(self.lookup(ROOT, name), Err(FsError::NotFound)) || self.space() != before {
+            return Err(FsError::Corrupt);
+        }
+        Ok(String::from("symlinks verified: v4 upgrade and target/name journal replay, remount, immutable bytes, abandon and no leaked blocks"))
+    }
+
+    pub fn read_link(&self, number: u32) -> Result<String, FsError> {
+        let inode = self.read_inode(number)?;
+        if inode.kind != Kind::Symlink {
+            return Err(FsError::WrongKind);
+        }
+        if inode.size == 0 || inode.size >= 4096 {
+            return Err(FsError::Corrupt);
+        }
+        String::from_utf8(self.read_inode_data(&inode)?).map_err(|_| FsError::Corrupt)
     }
 
     /// Remove a name, and the thing it named.
@@ -1209,37 +1335,55 @@ impl Volume {
             return Ok(());
         }
 
+        if wanted > MAX_BLOCKS {
+            return Err(FsError::TooLarge);
+        }
+        let original = inode.clone();
+        let original_len = blocks.len();
         let mut taken = Vec::new();
-        // A file that grows past its direct blocks needs somewhere to keep the
-        // rest; that block is metadata and is not counted as content.
-        if wanted > DIRECT && inode.indirect == 0 {
-            // Nothing has been taken yet, so a failure here owes nothing back.
-            let block = self.allocate_block()?;
-            inode.indirect = block;
-            taken.push(block);
-            let empty = [0u8; BLOCK_SIZE];
-            if let Err(error) = self.write_block(block, &empty) {
-                self.give_back(&taken);
-                return Err(error);
+        let result = (|| {
+            if wanted > DIRECT && inode.indirect == 0 {
+                inode.indirect = self.allocate_block()?;
+                taken.push(inode.indirect);
+                self.write_block(inode.indirect, &[0; BLOCK_SIZE])?;
             }
-        }
-        while blocks.len() < wanted {
-            match self.allocate_block() {
-                Ok(block) => {
-                    blocks.push(block);
-                    taken.push(block);
+            if wanted > SINGLE_BLOCKS {
+                if inode.double_indirect == 0 {
+                    let root = self.allocate_block()?;
+                    taken.push(root);
+                    inode.double_indirect = u32::try_from(root).map_err(|_| FsError::TooLarge)?;
+                    self.write_block(root, &[0; BLOCK_SIZE])?;
                 }
-                Err(error) => {
-                    // The list is left as it was found, so the caller's inode
-                    // still describes a file that exists.
-                    blocks
-                        .truncate(blocks.len() - (taken.len() - usize::from(inode.indirect != 0)));
-                    self.give_back(&taken);
-                    return Err(error);
+                let root = u64::from(inode.double_indirect);
+                let mut index = [0u8; BLOCK_SIZE];
+                self.read_block(self.checked_data_block(root)?, &mut index)?;
+                for slot in 0..(wanted - SINGLE_BLOCKS).div_ceil(PER_INDIRECT) {
+                    if read_u64(&index, slot * 8) == 0 {
+                        let leaf = self.allocate_block()?;
+                        taken.push(leaf);
+                        self.write_block(leaf, &[0; BLOCK_SIZE])?;
+                        write_u64(&mut index, slot * 8, leaf);
+                    }
                 }
+                self.write_block(root, &index)?;
+                self.superblock.version = self.superblock.version.max(VERSION);
             }
+            while blocks.len() < wanted {
+                let block = self.allocate_block()?;
+                taken.push(block);
+                // Newly allocated data must not expose a deleted file, including
+                // the unwritten gap before an offset write.
+                self.write_block_now(block, &[0; BLOCK_SIZE])?;
+                blocks.push(block);
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            blocks.truncate(original_len);
+            *inode = original;
+            self.give_back(&taken);
         }
-        Ok(())
+        result
     }
 
     /// Change part of a file, growing it if the change runs past the end.
@@ -1317,7 +1461,6 @@ impl Volume {
             return Ok(0);
         }
 
-        let blocks = self.block_list(&inode)?;
         let available = (inode.size - offset) as usize;
         let wanted = buffer.len().min(available);
 
@@ -1328,7 +1471,7 @@ impl Volume {
             let index = at / BLOCK_SIZE;
             let within = at % BLOCK_SIZE;
             let take = (BLOCK_SIZE - within).min(wanted - done);
-            let block = *blocks.get(index).ok_or(FsError::Corrupt)?;
+            let block = self.file_block(&inode, index)?;
 
             self.read_block(block, &mut block_buffer)?;
             buffer[done..done + take].copy_from_slice(&block_buffer[within..within + take]);
@@ -1375,13 +1518,31 @@ impl Volume {
         // indirect one, and keeping it would be a block held by a file that
         // cannot reach it. It is cleared from the inode before it is freed, so
         // no inode ever points at a block the bitmap says is free.
-        let stranded = if wanted <= DIRECT && inode.indirect != 0 {
+        let mut stranded = Vec::new();
+        if inode.double_indirect != 0 {
+            let root = u64::from(inode.double_indirect);
+            let mut index = [0u8; BLOCK_SIZE];
+            self.read_block(self.checked_data_block(root)?, &mut index)?;
+            let keep = wanted.saturating_sub(SINGLE_BLOCKS).div_ceil(PER_INDIRECT);
+            for slot in keep..PER_INDIRECT {
+                let leaf = read_u64(&index, slot * 8);
+                if leaf != 0 {
+                    stranded.push(self.checked_data_block(leaf)?);
+                    write_u64(&mut index, slot * 8, 0);
+                }
+            }
+            if keep == 0 {
+                stranded.push(root);
+                inode.double_indirect = 0;
+            } else {
+                self.write_block(root, &index)?;
+            }
+        }
+        if wanted <= DIRECT && inode.indirect != 0 {
             let block = inode.indirect;
             inode.indirect = 0;
-            Some(block)
-        } else {
-            None
-        };
+            stranded.push(block);
+        }
 
         inode.size = data.len() as u64;
         inode.modified = crate::arch::time::ticks();
@@ -1400,6 +1561,10 @@ impl Volume {
         for block in self.block_list(&inode)? {
             self.free_block(block)?;
         }
+        for block in self.double_metadata(&inode)? {
+            self.free_block(block)?;
+        }
+        inode.double_indirect = 0;
         if inode.indirect != 0 {
             self.free_block(inode.indirect)?;
             inode.indirect = 0;
@@ -1407,6 +1572,32 @@ impl Volume {
         inode.direct = [0; DIRECT];
         inode.size = 0;
         self.write_inode(number, &inode)
+    }
+
+    /// The blocks a file's contents live in, in order.
+    fn file_block(&self, inode: &Inode, index: usize) -> Result<u64, FsError> {
+        if index >= inode.data_blocks() || inode.data_blocks() > MAX_BLOCKS {
+            return Err(FsError::Corrupt);
+        }
+        if index < DIRECT {
+            return self.checked_data_block(inode.direct[index]);
+        }
+        let mut table = [0u8; BLOCK_SIZE];
+        if index < SINGLE_BLOCKS {
+            self.read_block(self.checked_data_block(inode.indirect)?, &mut table)?;
+            return self.checked_data_block(read_u64(&table, (index - DIRECT) * 8));
+        }
+        if self.superblock.version < VERSION {
+            return Err(FsError::Corrupt);
+        }
+        self.read_block(
+            self.checked_data_block(u64::from(inode.double_indirect))?,
+            &mut table,
+        )?;
+        let within = index - SINGLE_BLOCKS;
+        let leaf = self.checked_data_block(read_u64(&table, within / PER_INDIRECT * 8))?;
+        self.read_block(leaf, &mut table)?;
+        self.checked_data_block(read_u64(&table, within % PER_INDIRECT * 8))
     }
 
     /// The blocks a file's contents live in, in order.
@@ -1425,11 +1616,53 @@ impl Volume {
             }
             let mut buffer = [0u8; BLOCK_SIZE];
             self.read_block(self.checked_data_block(inode.indirect)?, &mut buffer)?;
-            for index in 0..count - DIRECT {
+            for index in 0..(count - DIRECT).min(PER_INDIRECT) {
                 blocks.push(self.checked_data_block(read_u64(&buffer, index * 8))?);
             }
         }
+        if count > SINGLE_BLOCKS {
+            if self.superblock.version < VERSION || inode.double_indirect == 0 {
+                return Err(FsError::Corrupt);
+            }
+            let mut root = [0u8; BLOCK_SIZE];
+            let mut leaf = [0u8; BLOCK_SIZE];
+            self.read_block(
+                self.checked_data_block(u64::from(inode.double_indirect))?,
+                &mut root,
+            )?;
+            for slot in 0..(count - SINGLE_BLOCKS).div_ceil(PER_INDIRECT) {
+                self.read_block(
+                    self.checked_data_block(read_u64(&root, slot * 8))?,
+                    &mut leaf,
+                )?;
+                let take = (count - blocks.len()).min(PER_INDIRECT);
+                for index in 0..take {
+                    blocks.push(self.checked_data_block(read_u64(&leaf, index * 8))?);
+                }
+            }
+        }
         Ok(blocks)
+    }
+
+    /// All double-indirect metadata, also used by truncate and fsck.
+    fn double_metadata(&self, inode: &Inode) -> Result<Vec<u64>, FsError> {
+        if inode.double_indirect == 0 {
+            return Ok(Vec::new());
+        }
+        if self.superblock.version < VERSION {
+            return Err(FsError::Corrupt);
+        }
+        let root = self.checked_data_block(u64::from(inode.double_indirect))?;
+        let mut buffer = [0u8; BLOCK_SIZE];
+        self.read_block(root, &mut buffer)?;
+        let mut result = vec![root];
+        for slot in 0..PER_INDIRECT {
+            let leaf = read_u64(&buffer, slot * 8);
+            if leaf != 0 {
+                result.push(self.checked_data_block(leaf)?);
+            }
+        }
+        Ok(result)
     }
 
     /// Point an inode at exactly these blocks.
@@ -1449,10 +1682,26 @@ impl Volume {
                 return Err(FsError::Corrupt);
             }
             let mut buffer = [0u8; BLOCK_SIZE];
-            for (index, block) in blocks[DIRECT..].iter().enumerate() {
+            for (index, block) in blocks[DIRECT..blocks.len().min(SINGLE_BLOCKS)]
+                .iter()
+                .enumerate()
+            {
                 write_u64(&mut buffer, index * 8, *block);
             }
             self.write_block(inode.indirect, &buffer)?;
+        }
+        if blocks.len() > SINGLE_BLOCKS {
+            let root_block = self.checked_data_block(u64::from(inode.double_indirect))?;
+            let mut root = [0u8; BLOCK_SIZE];
+            self.read_block(root_block, &mut root)?;
+            for (slot, chunk) in blocks[SINGLE_BLOCKS..].chunks(PER_INDIRECT).enumerate() {
+                let leaf = self.checked_data_block(read_u64(&root, slot * 8))?;
+                let mut buffer = [0u8; BLOCK_SIZE];
+                for (index, block) in chunk.iter().enumerate() {
+                    write_u64(&mut buffer, index * 8, *block);
+                }
+                self.write_block(leaf, &buffer)?;
+            }
         }
         Ok(())
     }
@@ -1498,6 +1747,9 @@ impl Volume {
         let inode = Inode::decode(&buffer[offset..offset + INODE_SIZE]);
         if inode.kind == Kind::Free {
             return Err(FsError::BadInode(number));
+        }
+        if inode.kind == Kind::Symlink && self.superblock.version < SYMLINK_VERSION {
+            return Err(FsError::Corrupt);
         }
         Ok(inode)
     }
@@ -1688,6 +1940,7 @@ impl Volume {
     /// half-written filesystem.
     fn begin(&mut self) {
         if self.pending.is_none() {
+            self.before = Some(self.superblock);
             self.pending = Some(Vec::new());
         }
     }
@@ -1698,6 +1951,9 @@ impl Volume {
     /// is nothing to undo -- which is the whole reason for holding them.
     fn abandon(&mut self) {
         self.pending = None;
+        if let Some(before) = self.before.take() {
+            self.superblock = before;
+        }
     }
 
     /// Write the operation down, then carry it out.
@@ -1720,10 +1976,12 @@ impl Volume {
             return Ok(());
         };
         if pending.is_empty() {
+            self.before = None;
             return Ok(());
         }
-        self.journal(&pending)?;
-        self.apply(&pending)
+        let result = self.journal(&pending).and_then(|()| self.apply(&pending));
+        self.before = None;
+        result
     }
 
     /// Write the operation down. Everything after this is repeatable.
@@ -1847,6 +2105,13 @@ impl Volume {
                 let mut claims: Vec<u64> = blocks;
                 if inode.indirect != 0 {
                     claims.push(inode.indirect);
+                }
+                match self.double_metadata(&inode) {
+                    Ok(metadata) => claims.extend(metadata),
+                    Err(_) => {
+                        report.unreadable += 1;
+                        continue;
+                    }
                 }
                 for block in claims {
                     if block >= total {
@@ -2081,6 +2346,7 @@ impl Volume {
             start_lba: self.start_lba,
             superblock: self.superblock,
             pending: None,
+            before: None,
             sequence: self.sequence,
         };
         if unrecovered.read(file)? != BEFORE {
@@ -2194,7 +2460,7 @@ impl Volume {
         let sb = &self.superblock;
         let mut block = [0u8; BLOCK_SIZE];
         block[field::MAGIC..field::MAGIC + 8].copy_from_slice(MAGIC);
-        write_u32(&mut block, field::VERSION, VERSION);
+        write_u32(&mut block, field::VERSION, sb.version);
         write_u32(&mut block, field::BLOCK_SIZE, BLOCK_SIZE as u32);
 
         for (offset, value) in [
@@ -2402,6 +2668,7 @@ pub fn format_self_test() -> Result<(), &'static str> {
     inode.direct[0] = 100;
     inode.direct[DIRECT - 1] = 110;
     inode.indirect = 999;
+    inode.double_indirect = 1234;
     let mut raw = [0u8; INODE_SIZE];
     inode.encode(&mut raw);
     let read = Inode::decode(&raw);
@@ -2411,7 +2678,11 @@ pub fn format_self_test() -> Result<(), &'static str> {
     if read.created != 12 || read.modified != 34 {
         return Err("an inode's times did not survive the round trip");
     }
-    if read.direct[0] != 100 || read.direct[DIRECT - 1] != 110 || read.indirect != 999 {
+    if read.direct[0] != 100
+        || read.direct[DIRECT - 1] != 110
+        || read.indirect != 999
+        || read.double_indirect != 1234
+    {
         return Err("an inode's block numbers did not survive the round trip");
     }
     // Three blocks for nine thousand bytes: the last one is mostly empty and
@@ -2451,7 +2722,7 @@ pub fn format_self_test() -> Result<(), &'static str> {
     }
 
     // And the size the pointers describe.
-    if MAX_BLOCKS != DIRECT + PER_INDIRECT || MAX_FILE != MAX_BLOCKS * BLOCK_SIZE {
+    if MAX_BLOCKS > SINGLE_BLOCKS + PER_INDIRECT * PER_INDIRECT || MAX_FILE != 64 * 1024 * 1024 {
         return Err("the largest file is not what the pointers describe");
     }
     if 32 + DIRECT * 8 + 8 > INODE_SIZE {

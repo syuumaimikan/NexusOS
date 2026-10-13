@@ -11,5 +11,21 @@ name = "nexus-init"
 path = "src/main.rs"
 test = false
 
+[[bin]]
+name = "nexus-runtime-probe"
+path = "src/runtime_probe.rs"
+test = false
+
+[[bin]]
+name = "nexus-steam-diagnostic"
+path = "src/steam_diagnostic.rs"
+test = false
+
 [dependencies]
 nexus-user = { path = "../nexus-user" }
+
+[features]
+runtime-mesa-probe = []
+runtime-glibc-probe = []
+runtime-glibc32-probe = []
+runtime-vulkan-probe = []

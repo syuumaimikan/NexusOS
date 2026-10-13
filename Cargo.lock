@@ -105,6 +105,7 @@ dependencies = [
 name = "nexus-compositor"
 version = "0.1.0"
 dependencies = [
+ "nexus-ui",
  "nexus-user",
 ]
 

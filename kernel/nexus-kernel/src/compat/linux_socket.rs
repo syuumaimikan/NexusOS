@@ -248,7 +248,7 @@ pub fn socketpair(family: u64, kind: u64, protocol: u64, fds: u64) -> u64 {
     let Some(process) = crate::sched::current_process() else {
         return error::ENOSYS;
     };
-    let Some((pointer, _)) = crate::arch::syscall::user_range(fds, 8, 8) else {
+    let Some((pointer, _)) = crate::arch::syscall::user_range_for(&process, fds, 8, 8, true) else {
         return error::EFAULT;
     };
 
@@ -387,6 +387,30 @@ pub fn accept(descriptor: u64, address: u64, length: u64, flags: u64) -> u64 {
         return error::ENOSYS;
     };
 
+    // Validate all outputs before dequeuing the connection or allocating an
+    // FD. socklen_t is four bytes at both widths, including at a page boundary.
+    let peer = if address != 0 {
+        let Some((length_pointer, _)) =
+            crate::arch::syscall::user_range_for(&process, length, 4, 4, true)
+        else {
+            return error::EFAULT;
+        };
+        let room = unsafe { (length_pointer as *const u32).read_unaligned() }.min(2);
+        let output = if room != 0 {
+            let Some((output, _)) =
+                crate::arch::syscall::user_range_for(&process, address, room as u64, 2, true)
+            else {
+                return error::EFAULT;
+            };
+            output
+        } else {
+            0
+        };
+        Some((length_pointer, output, room as usize))
+    } else {
+        None
+    };
+
     let stream = if flags & kind::NONBLOCK != 0 {
         match listener.accept_now() {
             Some(stream) => stream,
@@ -410,19 +434,13 @@ pub fn accept(descriptor: u64, address: u64, length: u64, flags: u64) -> u64 {
     // its own, so what goes here is the family and nothing else -- which is
     // what Linux writes for an unnamed peer, and is why a server that wants to
     // know who connected has to ask a different way.
-    if address != 0 && length != 0 {
-        if let Some((at, _)) = crate::arch::syscall::user_range(length, 8, 8) {
-            // SAFETY: eight bytes inside the user half.
-            let room = unsafe { core::ptr::read_unaligned(at as *const u32) };
-            if room >= 2 {
-                if let Some((into, _)) = crate::arch::syscall::user_range(address, 2, SOCKADDR_UN) {
-                    // SAFETY: two bytes inside the user half.
-                    unsafe { core::ptr::write_unaligned(into as *mut u16, family::UNIX as u16) };
-                }
+    if let Some((length, output, room)) = peer {
+        let family = (family::UNIX as u16).to_le_bytes();
+        unsafe {
+            if room != 0 {
+                core::ptr::copy_nonoverlapping(family.as_ptr(), output as *mut u8, room);
             }
-            // SAFETY: as above; the length the caller gets back is what was
-            // written, which is what `accept` promises.
-            unsafe { core::ptr::write_unaligned(at as *mut u32, 2) };
+            (length as *mut u32).write_unaligned(2);
         }
     }
     u64::from(handle)
@@ -444,7 +462,11 @@ pub fn receive(descriptor: u64, buffer: u64, count: u64, flags: u64) -> u64 {
     if wanted == 0 {
         return 0;
     }
-    let Some((pointer, length)) = crate::arch::syscall::user_range(buffer, wanted, MAX_TRANSFER)
+    let Some(process) = crate::sched::current_process() else {
+        return error::EBADF;
+    };
+    let Some((pointer, length)) =
+        crate::arch::syscall::user_range_for(&process, buffer, wanted, MAX_TRANSFER, true)
     else {
         return error::EFAULT;
     };
@@ -527,6 +549,22 @@ fn header_of(at: u64) -> Result<MessageHeader, u64> {
         })
     }
 }
+
+/// The most `iovec`s one message may carry.
+///
+/// Linux's `UIO_MAXIOV`, and the same number on purpose: a program that works
+/// against Linux and not here, because the two chose different limits, is a
+/// worse outcome than either limit.
+///
+/// A count above it is **refused**, not cut down. Truncating would send the
+/// first thousand vectors and report the byte count as though that were the
+/// whole message -- and a caller that had handed over more would have no way to
+/// tell that from a short write it should retry. `EMSGSIZE` is what Linux
+/// answers and it says what happened.
+const MAX_VECTORS: u64 = 1024;
+
+/// `EMSGSIZE`: the message is too long to be sent as one.
+const EMSGSIZE: u64 = (-90i64) as u64;
 
 /// `SOL_SOCKET`, and the one control message type this understands.
 const SOL_SOCKET: u32 = 1;
@@ -617,9 +655,12 @@ pub fn sendmsg(descriptor: u64, message: u64, _flags: u64) -> u64 {
     let mut payload: Vec<u8> = Vec::new();
     if header.vector_count > 0 {
         const IOVEC: u64 = 16;
-        let count = header.vector_count.min(64);
+        if header.vector_count > MAX_VECTORS {
+            return EMSGSIZE;
+        }
+        let count = header.vector_count;
         let Some((base, _)) =
-            crate::arch::syscall::user_range(header.vectors, count * IOVEC, 64 * IOVEC)
+            crate::arch::syscall::user_range(header.vectors, count * IOVEC, MAX_VECTORS * IOVEC)
         else {
             return error::EFAULT;
         };
@@ -681,12 +722,15 @@ pub fn recvmsg(descriptor: u64, message: u64, flags: u64) -> u64 {
 
     // How much the caller has room for, across its vectors.
     const IOVEC: u64 = 16;
-    let count = header.vector_count.min(64);
+    if header.vector_count > MAX_VECTORS {
+        return EMSGSIZE;
+    }
+    let count = header.vector_count;
     let mut room = 0u64;
     let mut targets: Vec<(u64, u64)> = Vec::new();
     if count > 0 {
         let Some((base, _)) =
-            crate::arch::syscall::user_range(header.vectors, count * IOVEC, 64 * IOVEC)
+            crate::arch::syscall::user_range(header.vectors, count * IOVEC, MAX_VECTORS * IOVEC)
         else {
             return error::EFAULT;
         };

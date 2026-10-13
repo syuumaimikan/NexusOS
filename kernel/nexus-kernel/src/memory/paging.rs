@@ -39,6 +39,9 @@ pub const GLOBAL: u64 = 1 << 8;
 /// away would free a frame the first had already returned. The object that owns
 /// the frames frees them when its last handle does.
 pub const SHARED: u64 = 1 << 9;
+/// A reserved user-half page inaccessible from ring 3 (PROT_NONE).
+/// Kept present for ownership and later protection changes, with USER cleared.
+pub const GUARD: u64 = 1 << 10;
 /// Instruction fetches through this mapping fault.
 pub const NO_EXECUTE: u64 = 1 << 63;
 

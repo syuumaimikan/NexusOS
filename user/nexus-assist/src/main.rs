@@ -515,6 +515,7 @@ fn gather(
             format!("{prefix}/{}", entry.name)
         };
         match entry.kind {
+            Kind::Symlink => {}
             Kind::Directory => {
                 if let Ok(child) = nexus_user::open(directory, entry.name) {
                     gather(child, &name, index, read, depth + 1);

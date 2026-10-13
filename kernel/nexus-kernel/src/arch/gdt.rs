@@ -41,7 +41,7 @@ pub const KERNEL_CODE_SELECTOR: u16 = 0x08;
 /// Selector of the kernel data segment.
 pub const KERNEL_DATA_SELECTOR: u16 = 0x10;
 /// Selector of the 32-bit user code segment. Present only to satisfy the
-/// `sysret` selector arithmetic; NexusOS does not run 32-bit user code.
+/// `sysret` selector arithmetic and Linux i386 compatibility execution.
 pub const USER_CODE32_SELECTOR: u16 = 0x18 | 3;
 /// Selector of the user data segment.
 pub const USER_DATA_SELECTOR: u16 = 0x20 | 3;
@@ -128,17 +128,17 @@ impl TaskStateSegment {
 
 /// The Global Descriptor Table.
 ///
-/// Nine slots: null, kernel code, kernel data, user code 32, user data, user
-/// code 64, and two consumed by the 16-byte TSS descriptor, plus one spare so
-/// the table is a whole number of 16-byte units.
+/// Twelve slots: null, kernel code, kernel data, user code 32, user data, user
+/// code 64, two consumed by the 16-byte TSS descriptor, three per-thread TLS
+/// descriptors and one spare. The table occupies whole 16-byte units.
 #[repr(C, align(16))]
 struct GlobalDescriptorTable {
-    entries: [u64; 9],
+    entries: [u64; 12],
 }
 
 impl GlobalDescriptorTable {
     const fn new() -> Self {
-        Self { entries: [0; 9] }
+        Self { entries: [0; 12] }
     }
 }
 
@@ -248,6 +248,44 @@ pub unsafe fn init(cpu_index: usize) {
             selector = in(reg) TSS_SELECTOR,
             options(nostack, preserves_flags),
         );
+    }
+}
+
+/// Three per-thread Linux i386 TLS slots, after the two TSS words.
+pub const TLS_FIRST: u32 = 8;
+
+/// Install the incoming thread's TLS descriptors into this CPU's GDT.
+///
+/// # Safety
+/// Current processor only, interrupts disabled. Descriptors must be validated
+/// ring-three 32-bit data segments or zero; kernel/TSS slots are never touched.
+pub unsafe fn install_tls(cpu_index: usize, entries: [u64; 3]) {
+    unsafe {
+        let table = core::ptr::addr_of_mut!(GDTS[cpu_index]);
+        for (index, entry) in entries.iter().enumerate() {
+            (*table).entries[TLS_FIRST as usize + index] = *entry;
+        }
+    }
+}
+
+/// Restore user FS/GS selectors without losing the kernel's active GS base.
+///
+/// # Safety
+/// Current CPU, interrupts disabled, selectors zero or installed user segments.
+pub unsafe fn restore_tls_selectors(fs: u16, gs: u16, fs_base: u64, user_gs_base: u64) {
+    const GS_BASE: u32 = 0xc000_0101;
+    const KERNEL_GS_BASE: u32 = 0xc000_0102;
+    unsafe {
+        let kernel_base = super::syscall::read_msr(GS_BASE);
+        // An NMI can interrupt MOV GS even with ordinary interrupts masked.
+        // Keep a kernel base in the inactive MSR during this short window so
+        // KernelGs can recover it before any handler reads per-CPU memory.
+        super::syscall::write_msr(KERNEL_GS_BASE, kernel_base);
+        core::arch::asm!("mov fs, {fs:x}", "mov gs, {gs:x}", fs=in(reg) fs, gs=in(reg) gs, options(nostack, preserves_flags));
+        // Nothing between MOV GS and this write may access per-CPU GS data.
+        super::syscall::write_msr(GS_BASE, kernel_base);
+        super::syscall::write_msr(KERNEL_GS_BASE, user_gs_base);
+        super::syscall::write_msr(0xc000_0100, fs_base);
     }
 }
 

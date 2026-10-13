@@ -50,6 +50,12 @@ pub enum FatError {
     BadName,
 }
 
+/// A streamed copy keeps source and destination failures distinct.
+pub enum CopyError<E> {
+    Read(FatError),
+    Write(E),
+}
+
 impl core::fmt::Display for FatError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -391,7 +397,7 @@ impl Volume {
     ///
     /// Separators may be either slash; the on-disk form has neither, so which
     /// one a caller writes is a matter of where the string came from.
-    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, FatError> {
+    fn file_entry(&self, path: &str) -> Result<Entry, FatError> {
         let mut directory = self.root_cluster;
         let mut components = path.split(['/', '\\']).filter(|part| !part.is_empty());
 
@@ -412,10 +418,58 @@ impl Volume {
         if entry.is_directory {
             return Err(FatError::WrongKind);
         }
+        Ok(entry)
+    }
+
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, FatError> {
+        let entry = self.file_entry(path)?;
         // Bounded by the size the directory entry states, so a file shorter
         // than its last cluster does not come back padded with whatever was
         // there before.
         self.read_chain(entry.cluster, entry.size as usize)
+    }
+
+    /// Copy a file in bounded chunks instead of allocating its whole contents.
+    pub fn read_file_chunks<E>(
+        &self,
+        path: &str,
+        mut write: impl FnMut(u64, &[u8]) -> Result<(), E>,
+    ) -> Result<u64, CopyError<E>> {
+        let entry = self.file_entry(path).map_err(CopyError::Read)?;
+        let mut remaining = entry.size as usize;
+        let mut cluster = entry.cluster;
+        let mut visited = 0usize;
+        let mut offset = 0u64;
+        let mut chunk = Vec::with_capacity(64 * 1024);
+        let mut sector = [0u8; SECTOR_SIZE];
+        while remaining > 0 {
+            visited += 1;
+            if visited > MAX_CHAIN {
+                return Err(CopyError::Read(FatError::ChainTooLong));
+            }
+            // Validate the cluster before computing its sectors.
+            let next = self.next_cluster(cluster).map_err(CopyError::Read)?;
+            for index in 0..self.sectors_per_cluster {
+                self.source
+                    .read_sector(self.cluster_lba(cluster) + u64::from(index), &mut sector)
+                    .map_err(CopyError::Read)?;
+                let take = remaining.min(SECTOR_SIZE);
+                chunk.extend_from_slice(&sector[..take]);
+                remaining -= take;
+                if chunk.len() == 64 * 1024 || remaining == 0 {
+                    write(offset, &chunk).map_err(CopyError::Write)?;
+                    offset += chunk.len() as u64;
+                    chunk.clear();
+                }
+                if remaining == 0 {
+                    break;
+                }
+            }
+            if remaining != 0 {
+                cluster = next.ok_or(CopyError::Read(FatError::BadGeometry))?;
+            }
+        }
+        Ok(offset)
     }
 
     /// The partition this was mounted from.

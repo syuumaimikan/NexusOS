@@ -173,16 +173,19 @@ pub fn forget(process: u64) {
 /// The page-table flags a `PROT_*` set asks for, or `None` if it asks for
 /// something this system does not make.
 ///
-/// `PROT_NONE` is refused rather than approximated. An allocator puts a
-/// `PROT_NONE` page between its arenas as a guard, and a "guard page" that could
-/// be read and written without faulting would be a guard that guards nothing
-/// while looking like it does.
+/// `PROT_NONE` retains the frame as a supervisor-only, non-executable guard.
+/// User access faults; `mprotect` can restore permissions without losing bytes.
 ///
 /// Writable and executable together is refused for the reason in the module
 /// note: this system maps no such page for its own programs.
 fn page_flags(protection: u64) -> Option<u64> {
     use flag as f;
-    if protection == f::PROT_NONE || protection & f::PROT_READ == 0 {
+    if protection == f::PROT_NONE {
+        return Some(paging::PRESENT | paging::NO_EXECUTE | paging::GUARD);
+    }
+    if protection & !(f::PROT_READ | f::PROT_WRITE | f::PROT_EXEC) != 0
+        || protection & f::PROT_READ == 0
+    {
         return None;
     }
     if protection & f::PROT_WRITE != 0 && protection & f::PROT_EXEC != 0 {
@@ -555,7 +558,14 @@ pub fn mprotect(address: u64, length: u64, protection: u64) -> u64 {
         return error::ENOSYS;
     };
 
-    for page in 0..length.div_ceil(PAGE) {
+    let pages = length.div_ceil(PAGE);
+    if address
+        .checked_add(pages.saturating_mul(PAGE))
+        .is_none_or(|end| end > nexus_abi::layout::USER_SPACE_END)
+    {
+        return error::ENOMEM;
+    }
+    for page in 0..pages {
         let virt = address + page * PAGE;
         if virt >= nexus_abi::layout::USER_SPACE_END {
             return error::ENOMEM;
@@ -564,8 +574,13 @@ pub fn mprotect(address: u64, length: u64, protection: u64) -> u64 {
         // Linux answers: the range has a hole, and a caller that wanted the
         // whole range protected has not got it.
         //
-        // SAFETY: the address is in the user half and the flags include `USER`,
-        // which `page_flags` always sets. The frame does not change hands.
+        let Some(old) = paging::flags_in(process.address_space.root(), virt) else {
+            return error::ENOMEM;
+        };
+        // Keep ownership metadata: mprotect changes access, not who frees the
+        // frame. In particular a protected memfd must remain a SHARED mapping.
+        let flags = flags | (old & paging::SHARED);
+        // SAFETY: bounded user address; flags describe USER or a reserved GUARD.
         if unsafe { process.address_space.protect(virt, flags) }.is_err() {
             return error::ENOMEM;
         }

@@ -101,6 +101,8 @@ mod call {
     pub const LSEEK: u64 = 8;
     pub const ACCESS: u64 = 21;
     pub const GETCWD: u64 = 79;
+    pub const CHDIR: u64 = 80;
+    pub const FCHDIR: u64 = 81;
     pub const MKDIR: u64 = 83;
     pub const UNLINK: u64 = 87;
     pub const RMDIR: u64 = 84;
@@ -242,6 +244,27 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
     let _argument5 = frame.r9;
 
     match number {
+        284 | 290 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_eventfd::create(argument0, if number == 284 { 0 } else { argument1 })
+        }
+        64 | 65 | 66 | 220 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            match number {
+                64 => super::linux_semaphore::get(argument0, argument1, argument2),
+                65 => super::linux_semaphore::operate(argument0, argument1, argument2, 0, false),
+                66 => super::linux_semaphore::control(
+                    argument0,
+                    argument1,
+                    argument2,
+                    _argument3,
+                    super::linux_semaphore::Layout::Native64,
+                ),
+                _ => super::linux_semaphore::operate(
+                    argument0, argument1, argument2, _argument3, false,
+                ),
+            }
+        }
         call::WRITE => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             files::write(argument0, argument1, argument2)
@@ -283,11 +306,11 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
         }
         call::NEWFSTATAT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            files::newfstatat(argument0, argument1, argument2)
+            files::newfstatat(argument0, argument1, argument2, frame.r10)
         }
         call::STAT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            files::newfstatat(files::AT_FDCWD as u32 as u64, argument0, argument1)
+            files::newfstatat(files::AT_FDCWD as u32 as u64, argument0, argument1, 0)
         }
         call::GETDENTS64 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -305,6 +328,16 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             files::getcwd(argument0, argument1)
         }
+        call::CHDIR | call::FCHDIR => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if number == call::CHDIR {
+                super::linux_paths::chdir(argument0)
+            } else {
+                super::linux_paths::fchdir(argument0)
+            }
+        }
+        88 => super::linux_paths::symlinkat(argument0, files::AT_FDCWD as u32 as u64, argument1),
+        266 => super::linux_paths::symlinkat(argument0, argument1, argument2),
         call::MKDIRAT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             files::mkdirat(argument0, argument1)
@@ -315,13 +348,15 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
         }
         call::UNLINKAT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            files::unlinkat(argument0, argument1)
+            files::unlinkat(argument0, argument1, argument2)
         }
-        // `unlink` and `rmdir` are the same operation on a store that knows
-        // which of the two a name is.
         call::UNLINK | call::RMDIR => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            files::unlinkat(files::AT_FDCWD as u32 as u64, argument0)
+            files::unlinkat(
+                files::AT_FDCWD as u32 as u64,
+                argument0,
+                if number == call::RMDIR { 0x200 } else { 0 },
+            )
         }
         call::GETRANDOM => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -498,7 +533,7 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
         }
         call::FUTEX => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            threads::futex(argument0, argument1, argument2, _argument3)
+            threads::futex(argument0, argument1, argument2, _argument3, _argument5)
         }
         call::SET_ROBUST_LIST => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -621,7 +656,11 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
             REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             signal::not_translated("rt_sigtimedwait")
         }
-        call::SET_TID_ADDRESS | call::GETTID => {
+        call::SET_TID_ADDRESS => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            threads::set_tid_address(argument0)
+        }
+        call::GETTID => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             crate::arch::percpu::current_thread()
         }
@@ -849,7 +888,7 @@ pub(super) fn uname_into(buffer: u64) -> u64 {
 /// uptime -- which is what each of them means. A machine with no clock gets
 /// uptime for both, because a wall clock that starts at 1970 every boot is
 /// worse than one a program can tell is not a wall clock.
-fn clock_gettime(which: u64, buffer: u64) -> u64 {
+pub(super) fn clock_gettime(which: u64, buffer: u64) -> u64 {
     /// `CLOCK_REALTIME` and `CLOCK_MONOTONIC`.
     const REALTIME: u64 = 0;
     const MONOTONIC: u64 = 1;
@@ -949,6 +988,10 @@ pub(super) fn exit_now(status: u64) -> ! {
 /// return to ring 3.
 fn exit(status: u64) -> ! {
     if let Some(process) = crate::sched::current_process() {
+        // Claim the exit status before publishing cancellation. A sibling can
+        // observe the flag at a syscall boundary immediately and otherwise
+        // win Completion::finish(KILLED) before this thread records its exit.
+        process.completion.finish(status);
         // The flag first, then the wakes: a thread woken before the flag is set
         // looks at it, finds nothing, and goes back to sleep.
         process.completion.cancel();
@@ -956,7 +999,6 @@ fn exit(status: u64) -> ! {
         if others > 0 {
             crate::sched::wake_process_threads(process.id);
         }
-        process.completion.finish(status);
         kprintln!(
             "[linux] process {} \"{}\" exited with status {status} through the Linux boundary\
              {}",
@@ -981,8 +1023,11 @@ fn exit(status: u64) -> ! {
 /// `CLONE_CHILD_CLEARTID` named -- cleared, and anything waiting on it woken.
 /// That is what makes a `pthread_join` return, and without it a program that
 /// joins a thread does not continue.
-fn exit_thread(status: u64) -> ! {
+pub(super) fn exit_thread(status: u64) -> ! {
     let here = crate::arch::percpu::current_thread();
+    // Undo state must be visible before CLONE_CHILD_CLEARTID lets a joiner
+    // observe that this thread has finished. sched::exit also covers forced exits.
+    super::linux_semaphore::ending(here);
     let last = crate::sched::current_process().is_none_or(|process| {
         // The word the library is waiting on, cleared while this thread can
         // still reach its own address space.

@@ -115,6 +115,8 @@ pub mod event {
     pub const RESIZED: u32 = 3;
     /// The compositor has gone, and there is no window any more.
     pub const CLOSED: u32 = 4;
+    /// The window decoration requests closing; the client may decline.
+    pub const CLOSE_REQUEST: u32 = 5;
 }
 
 /// The words the compositor's protocol uses.
@@ -564,6 +566,8 @@ fn absorb(process: u64, descriptor: u32, message: &ipc::Message) {
                 (event::CLOSED, 0)
             }
         }
+    } else if message.bytes.as_slice() == b"close" {
+        (event::CLOSE_REQUEST, 0)
     } else if message.bytes.len() >= 5 {
         // A key, in the five bytes the compositor forwards: one of kind and
         // four of value. Kind 1 is a character and everything else is a key

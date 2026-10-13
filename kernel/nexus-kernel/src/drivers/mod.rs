@@ -6,6 +6,7 @@
 pub mod ac97;
 pub mod keyboard;
 pub mod mouse;
+pub mod nvidia;
 pub mod pci;
 pub mod rtc;
 pub mod speaker;

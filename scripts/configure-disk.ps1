@@ -18,10 +18,13 @@
 
 .PARAMETER Timeout
     How long to wait for the wizard, in seconds.
+.PARAMETER BuildDirectory
+    Build directory containing the ESP and disk. Defaults to build.
 #>
 [CmdletBinding()]
 param(
-    [int]$Timeout = 240
+    [int]$Timeout = 240,
+    [string]$BuildDirectory = 'build'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,7 +33,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'qemu.ps1')
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$BuildDir = Join-Path $RepoRoot 'build'
+$BuildDir = if ([IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory } else { Join-Path $RepoRoot $BuildDirectory }
 $EspDir = Join-Path $BuildDir 'esp'
 $Log = Join-Path $BuildDir 'configure.log'
 
@@ -94,7 +97,7 @@ $arguments = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
     -MonitorPort $MonitorPort -HostHttpPort $HttpPort -Headless
 
 Write-Host '==> Setting the machine up, so the tests have one to run on' -ForegroundColor Cyan
-$process = Start-Process -FilePath $QemuExe.Source -ArgumentList $arguments -PassThru -NoNewWindow
+$process = Start-NexusQemu -Executable $QemuExe.Source -Arguments $arguments -ErrorLog (Join-Path $BuildDir 'configure-error.log')
 
 function Wait-For {
     param([string]$Text, [int]$Seconds)
@@ -184,10 +187,8 @@ try {
         # when the power went off is a directory that can come back without the
         # entry the wizard had just put in it -- which shows up two tests later
         # as a machine that says it has never been set up.
-        if (-not (Wait-For -Text 'the machine is up to date' -Seconds 120)) {
-            if (-not (Wait-For -Text 'update: installed' -Seconds 30)) {
-                Write-Host '    the updater never finished; carrying on' -ForegroundColor DarkYellow
-            }
+        if ($null -eq (Wait-ForAny -Texts @('the machine is up to date', 'update: installed') -Seconds 150)) {
+            throw "The updater did not finish; see $Log"
         }
         # And let the filesystem finish with all of it before the machine stops.
         Start-Sleep -Seconds 5

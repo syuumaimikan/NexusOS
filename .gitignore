@@ -15,3 +15,5 @@
 # one of these that survives, and if something does it is rubbish rather than
 # a file anybody can read.
 *.writing
+__pycache__/
+*.py[cod]

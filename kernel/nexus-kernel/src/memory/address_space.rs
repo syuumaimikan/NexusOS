@@ -204,12 +204,11 @@ impl AddressSpace {
     ///
     /// # Safety
     ///
-    /// `virt` must be in the user half, and `flags` must include `USER` --
-    /// clearing it makes the page unreachable from ring 3 rather than making it
-    /// less permissive, which is not what any caller of this means.
+    /// `virt` must be in the user half. `flags` must include `USER`, or `GUARD`
+    /// when the caller deliberately reserves a page inaccessible from ring 3.
     pub unsafe fn protect(&self, virt: u64, flags: u64) -> Result<u64, paging::MapError> {
         debug_assert!(virt < layout::USER_SPACE_END);
-        debug_assert!(flags & paging::USER != 0);
+        debug_assert!(flags & (paging::USER | paging::GUARD) != 0);
         // SAFETY: upheld by the caller; `self.root` is live for as long as
         // `self` is.
         unsafe { paging::protect_page_in(self.root, virt, flags) }

@@ -837,7 +837,7 @@ unsafe fn ask(gpu: &mut Gpu, request: &[u8], reply: &mut [u8]) -> Option<u32> {
     /// and nothing this driver sends is anywhere near this long.
     const ANSWER_AT: u64 = 2048;
 
-    if request.len() > ANSWER_AT as usize || reply.len() < 4 {
+    if request.len() > ANSWER_AT as usize || reply.len() < 4 || reply.len() > 2048 {
         return None;
     }
 

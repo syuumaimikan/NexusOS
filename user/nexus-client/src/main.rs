@@ -179,6 +179,10 @@ extern "C" fn main() -> ! {
                 failed("client: FAILED: the compositor stopped answering");
                 finish();
             };
+            if &reply[..received.bytes] == b"close" {
+                nexus_user::log("client: accepted decoration close").ok();
+                finish();
+            }
             if &reply[..received.bytes] == SHOWN {
                 break;
             }
@@ -256,6 +260,10 @@ fn live(mut width: u32, mut height: u32, tint: u32, surface: &mut Handle) {
             return;
         };
         if received.bytes == 0 {
+            return;
+        }
+        if &message[..received.bytes] == b"close" {
+            nexus_user::log("client: accepted decoration close").ok();
             return;
         }
 
@@ -368,6 +376,29 @@ fn draw(width: u32, height: u32, tint: u32, frame: u32) {
         if row.width > 0 {
             let filled = (keys * 16).min(row.width);
             canvas.fill(Rect::new(row.x, row.y + 4, filled, 4), accent);
+        }
+    }
+
+    // A bounded sub-surface keeps the depth attachment small even after resize.
+    // Presentation and input still use the ordinary compositor protocol.
+    if width >= 144 && height >= 220 {
+        let side = 96;
+        let x = width - side - 16;
+        let y = height - side - 16;
+        // SAFETY: this rectangle is inside the validated parent mapping;
+        // rows retain the parent's stride and drawing here is sequential.
+        let mut view = unsafe {
+            Canvas::strided(
+                SURFACE_AT + ((y as usize * width as usize + x as usize) * 4),
+                side,
+                side,
+                width,
+            )
+        };
+        if let Some(pixels) = nexus_ui::raster3d::cube(&mut view, frame) {
+            if frame == 0 && pixels > 0 {
+                nexus_user::log("client: software 3D cube rendered into compositor surface").ok();
+            }
         }
     }
 }

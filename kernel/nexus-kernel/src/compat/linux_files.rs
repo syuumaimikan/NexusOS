@@ -110,7 +110,6 @@ const MAX_TRANSFER: u64 = 64 * 1024;
 
 /// Longest path this will walk, and longest single component.
 const MAX_PATH: u64 = 4096;
-const MAX_COMPONENT: usize = 255;
 
 /// Where each open descriptor has got to, keyed by process and handle.
 ///
@@ -123,7 +122,7 @@ static POSITIONS: IrqSpinLock<BTreeMap<(u64, u32), u64>> = IrqSpinLock::new(BTre
 ///
 /// Not a single catch-all: a program that cannot tell "no such file" from "the
 /// disk is broken" retries the wrong one.
-fn errno(error: StoreError) -> u64 {
+pub(super) fn errno(error: StoreError) -> u64 {
     use crate::fs::nexusfs::FsError;
     match error {
         StoreError::Fs(FsError::NotFound) => ENOENT,
@@ -187,6 +186,22 @@ pub(super) fn root() -> Result<Arc<Node>, u64> {
     }
 }
 
+/// Standard temporary storage is part of the runtime filesystem, not a file
+/// an application must create before it can create its own temporary folder.
+pub fn prepare_root() -> Result<(), u64> {
+    let root = root()?;
+    match store::open_child(&root, "tmp") {
+        Ok(node) if node.is_directory() => Ok(()),
+        Ok(_) => Err(ENOTDIR),
+        Err(StoreError::Fs(crate::fs::nexusfs::FsError::NotFound)) => {
+            store::create_child(&root, "tmp", true)
+                .map(|_| ())
+                .map_err(errno)
+        }
+        Err(error) => Err(errno(error)),
+    }
+}
+
 /// Read a path out of the caller's memory.
 pub(super) fn path_of(pointer: u64) -> Result<String, u64> {
     // The length is not given, so it has to be found -- and looked for only
@@ -210,40 +225,9 @@ pub(super) fn path_of(pointer: u64) -> Result<String, u64> {
     Err(ENAMETOOLONG)
 }
 
-/// Walk a path from the Linux root and open what it names.
-///
-/// Absolute and relative are the same walk, because the working directory is
-/// the root and does not move. `.` is skipped and `..` is refused: a directory
-/// handle is the authority to reach what is under it, and a path that could
-/// climb out of the subtree would make that authority mean nothing.
-pub(super) fn walk(path: &str) -> Result<Arc<Node>, u64> {
-    let mut node = root()?;
-    for component in path.split('/') {
-        if component.is_empty() || component == "." {
-            continue;
-        }
-        if component == ".." {
-            return Err(EACCES);
-        }
-        if component.len() > MAX_COMPONENT {
-            return Err(ENAMETOOLONG);
-        }
-        node = store::open_child(&node, component).map_err(errno)?;
-    }
-    Ok(node)
-}
-
-/// Split a path into the directory holding the last name, and that name.
-fn split(path: &str) -> Result<(Arc<Node>, String), u64> {
-    let trimmed = path.trim_end_matches('/');
-    let (parent, name) = match trimmed.rsplit_once('/') {
-        Some((parent, name)) => (parent, name),
-        None => ("", trimmed),
-    };
-    if name.is_empty() || name == "." || name == ".." {
-        return Err(error::EINVAL);
-    }
-    Ok((walk(parent)?, String::from(name)))
+/// Open a path using the process's actual working directory.
+pub(crate) fn walk(path: &str) -> Result<Arc<Node>, u64> {
+    super::linux_paths::resolve(AT_FDCWD as u32 as u64, path)?.node()
 }
 
 /// The calling process, or the error a call outside one gets.
@@ -681,7 +665,7 @@ pub(super) fn node_of(descriptor: u64) -> Result<Arc<Node>, u64> {
 ///
 /// It walks the same subtree every translated program's paths walk, through the
 /// same `walk`, so an interpreter is reachable exactly when a program could
-/// have opened it by name -- and `..` is refused here as it is everywhere else.
+/// have opened it by name, with the same cwd and parent traversal rules.
 ///
 /// # Errors
 ///
@@ -715,7 +699,13 @@ pub fn read_file(path: &str) -> Result<Vec<u8>, u64> {
 /// # Errors
 ///
 /// The Linux error number for whatever stopped it.
+#[allow(dead_code)] // In-memory installers; boot imports use the streamed path.
 pub fn install(path: &str, bytes: &[u8]) -> Result<(), u64> {
+    let (_, file, _) = prepare_install(path)?;
+    store::write_node(&file, bytes).map_err(errno)
+}
+
+fn prepare_install(path: &str) -> Result<(Arc<Node>, Arc<Node>, &str), u64> {
     let (directories, name) = match path.trim_end_matches('/').rsplit_once('/') {
         Some(split) => split,
         None => ("", path),
@@ -752,7 +742,36 @@ pub fn install(path: &str, bytes: &[u8]) -> Result<(), u64> {
         }
         Err(error) => return Err(errno(error)),
     };
-    store::write_node(&file, bytes).map_err(errno)
+    Ok((node, file, name))
+}
+
+/// Stream a boot runtime from FAT into the Linux root without a whole-file
+/// kernel allocation. Failed copies are removed so a later boot can retry.
+pub fn install_from_fat(
+    volume: &crate::fs::fat32::Volume,
+    from: &str,
+    to: &str,
+) -> Result<u64, crate::fs::fat32::CopyError<u64>> {
+    use crate::fs::fat32::CopyError;
+    if exists(to) {
+        return Err(CopyError::Write(EEXIST));
+    }
+    let (parent, file, name) = prepare_install(to).map_err(CopyError::Write)?;
+    let result = volume.read_file_chunks(from, |offset, bytes| {
+        store::write_node_at(&file, offset, bytes)
+            .map_err(errno)
+            .and_then(|written| {
+                if written == bytes.len() as u64 {
+                    Ok(())
+                } else {
+                    Err((-5i64) as u64)
+                }
+            })
+    });
+    if result.is_err() {
+        let _ = store::remove_child(&parent, name);
+    }
+    result
 }
 
 /// Whether a path in the Linux root already names a file.
@@ -795,31 +814,52 @@ pub fn open_count() -> usize {
 
 /// `openat(dirfd, path, flags, mode)`.
 ///
-/// `dirfd` must be `AT_FDCWD`: opening relative to another descriptor needs a
-/// directory handle to walk from, and this layer's working directory is the
-/// root, so the two are the same walk. A real `dirfd` is refused rather than
-/// quietly treated as the root, because those differ exactly when a program is
-/// relying on the difference.
+/// Absolute names start at the Linux root; relative names use cwd or dirfd.
 pub fn openat(directory: u64, pointer: u64, flags: u64) -> u64 {
-    if !is_cwd(directory) {
+    if flags & (flag::CREAT | flag::DIRECTORY) == (flag::CREAT | flag::DIRECTORY) {
         return error::EINVAL;
     }
     let path = match path_of(pointer) {
         Ok(path) => path,
         Err(error) => return error,
     };
+    let resolver = if flags & 0o400000 != 0
+        || flags & (flag::CREAT | flag::EXCL) == (flag::CREAT | flag::EXCL)
+    {
+        super::linux_paths::resolve_no_follow
+    } else {
+        super::linux_paths::resolve
+    };
+    let resolved = match resolver(directory, &path) {
+        Ok(resolved) => resolved,
+        Err(error) => return error,
+    };
+    if let Some(result) = super::linux_proc::open(&resolved.path, flags) {
+        return result;
+    }
+    if super::linux_random::known(&resolved.path) {
+        return super::linux_random::open(flags);
+    }
 
     // A device rather than a file. Checked here, before the walk, because the
     // walk would create `dev/nexus/display` as an ordinary empty file the first
     // time a program opened it with `O_CREAT` -- and then every boot after that
     // would find a file there and open it, and the program would draw into the
     // disk.
-    if super::linux_display::is_device(&path) {
+    if super::linux_display::is_device(&resolved.path) {
         return super::linux_display::open();
     }
 
+    if resolved.node.as_ref().is_some_and(|node| node.is_symlink()) {
+        return if flags & (flag::CREAT | flag::EXCL) == (flag::CREAT | flag::EXCL) {
+            EEXIST
+        } else {
+            (-40i64) as u64
+        };
+    }
+
     let writing = flags & (flag::WRONLY | flag::RDWR) != 0;
-    let node = match walk(&path) {
+    let node = match resolved.node() {
         Ok(node) => Some(node),
         // Missing is only an error if the caller did not ask for it to be made.
         Err(code) if code == ENOENT && flags & flag::CREAT != 0 => None,
@@ -852,17 +892,18 @@ pub fn openat(directory: u64, pointer: u64, flags: u64) -> u64 {
             node
         }
         None => {
-            let (parent, name) = match split(&path) {
-                Ok(split) => split,
-                Err(code) => {
-                    crate::kprintln!(
-                        "[linux] openat {path:?} refused: split gave {}",
-                        code as i64
-                    );
-                    return code;
-                }
+            // open(O_CREAT) creates files, never missing directories.
+            if flags & flag::DIRECTORY != 0 {
+                return ENOENT;
+            }
+            if path.ends_with('/') || resolved.path.ends_with('/') {
+                return EISDIR;
+            }
+            let (parent, name) = match resolved.entry(&path) {
+                Ok(entry) => entry,
+                Err(error) => return error,
             };
-            match store::create_child(&parent, &name, flags & flag::DIRECTORY != 0) {
+            match store::create_child(parent, name, false) {
                 Ok(node) => node,
                 Err(error) => {
                     crate::kprintln!("[linux] openat {path:?} could not create: {error}");
@@ -931,6 +972,7 @@ pub fn close(descriptor: u64) -> u64 {
     };
     POSITIONS.lock().remove(&(process.id.0, handle));
     super::linux_poll::forget_descriptor(process.id.0, handle);
+    super::linux_more::forget_descriptor(process.id.0, descriptor);
     // Closed whatever it is -- a file, a pipe end, the console, a window's
     // channel. Dropping the last handle to a pipe end is what tells the other
     // side there is nothing more coming, so this is not merely bookkeeping.
@@ -977,6 +1019,19 @@ fn read_at(descriptor: u64, buffer: u64, count: u64, offset: Option<u64>) -> u64
             };
         }
         Ok(Descriptor::File(node, handle)) => (node, handle),
+        Ok(Descriptor::Other(crate::ipc::Object::ProcessData(view))) => {
+            let Ok(process) = process() else {
+                return error::EBADF;
+            };
+            if process
+                .handles
+                .object(descriptor as u32, crate::ipc::Rights::READ)
+                .is_err()
+            {
+                return error::EBADF;
+            }
+            return super::linux_proc::read(&view, buffer, count, offset);
+        }
         // A socket, read with `read` rather than `recv`. Every program that
         // speaks a protocol over one does this: a socket is a descriptor, and
         // the whole point of a descriptor is that the code using it does not
@@ -986,6 +1041,20 @@ fn read_at(descriptor: u64, buffer: u64, count: u64, offset: Option<u64>) -> u64
                 ESPIPE
             } else {
                 super::linux_socket::receive(descriptor, buffer, count, 0)
+            };
+        }
+        Ok(Descriptor::Other(crate::ipc::Object::Counter(_))) => {
+            return if offset.is_some() {
+                ESPIPE
+            } else {
+                super::linux_eventfd::read(descriptor, buffer, count)
+            };
+        }
+        Ok(Descriptor::Other(crate::ipc::Object::Random(_))) => {
+            return if offset.is_some() {
+                ESPIPE
+            } else {
+                super::linux_random::read(descriptor, buffer, count)
             };
         }
         Ok(Descriptor::Other(_)) => return error::EBADF,
@@ -1045,6 +1114,9 @@ pub fn write(descriptor: u64, buffer: u64, count: u64) -> u64 {
         Ok(Descriptor::File(node, handle)) => (node, handle),
         Ok(Descriptor::Other(crate::ipc::Object::Socket(_))) => {
             return super::linux_socket::send(descriptor, buffer, count, 0);
+        }
+        Ok(Descriptor::Other(crate::ipc::Object::Counter(_))) => {
+            return super::linux_eventfd::write(descriptor, buffer, count);
         }
         Ok(Descriptor::Other(_)) => return error::EBADF,
         Err(reason) => return reason,
@@ -1163,6 +1235,15 @@ fn write_console(stream: u8, buffer: u64, count: u64) -> u64 {
 
 /// `lseek(fd, offset, whence)`.
 pub fn lseek(descriptor: u64, offset: u64, whence: u64) -> u64 {
+    if matches!(
+        describe(descriptor),
+        Ok(Descriptor::Other(crate::ipc::Object::Random(_)))
+    ) {
+        return ESPIPE;
+    }
+    if let Ok(Descriptor::Other(crate::ipc::Object::ProcessData(view))) = describe(descriptor) {
+        return super::linux_proc::seek(&view, offset, whence);
+    }
     let (process, handle, node) = match opened(descriptor) {
         Ok(found) => found,
         Err(error) => return error,
@@ -1193,6 +1274,67 @@ pub fn lseek(descriptor: u64, offset: u64, whence: u64) -> u64 {
 /// Bytes in the `struct stat` x86-64 Linux passes back.
 const STAT_SIZE: u64 = 144;
 
+pub(super) struct Metadata {
+    pub device: u64,
+    pub rdevice: u64,
+    pub inode: u64,
+    pub mode: u32,
+    pub links: u64,
+    pub size: u64,
+    pub blocks: u64,
+}
+
+impl Metadata {
+    pub(super) fn node(node: &Node) -> Result<Self, u64> {
+        let size = store::size(node).map_err(errno)?;
+        Ok(Self {
+            device: 1,
+            rdevice: 0,
+            inode: u64::from(node.inode()),
+            mode: if node.is_directory() {
+                0o040755
+            } else if node.is_symlink() {
+                0o120777
+            } else {
+                0o100644
+            },
+            links: if node.is_directory() { 2 } else { 1 },
+            size,
+            blocks: size.div_ceil(512),
+        })
+    }
+}
+
+pub(super) fn metadata_at(directory: u64, path: Option<&str>, flags: u64) -> Result<Metadata, u64> {
+    if let Some(path) = path.filter(|path| !path.is_empty()) {
+        let resolved = if flags & 0x100 != 0 {
+            super::linux_paths::resolve_no_follow(directory, path)?
+        } else {
+            super::linux_paths::resolve(directory, path)?
+        };
+        if let Some(result) = super::linux_proc::metadata(&resolved.path, flags & 0x100 != 0) {
+            return result;
+        }
+        if super::linux_random::known(&resolved.path) {
+            return Ok(super::linux_random::metadata());
+        }
+        return resolved.node().and_then(|node| Metadata::node(&node));
+    }
+    if path.is_some() && flags & 0x1000 == 0 {
+        return Err(ENOENT);
+    }
+    if path.is_some() && is_cwd(directory) {
+        return super::linux_paths::cwd(&*process()?).and_then(|node| Metadata::node(&node));
+    }
+    if let Some(result) = super::linux_proc::descriptor_metadata(directory) {
+        return result;
+    }
+    if let Some(info) = super::linux_random::descriptor_metadata(directory) {
+        return Ok(info);
+    }
+    opened(directory).and_then(|(_, _, node)| Metadata::node(&node))
+}
+
 /// Fill one in.
 ///
 /// The shape is the ABI's, not a choice: a program reads `st_size` at offset 48
@@ -1200,28 +1342,32 @@ const STAT_SIZE: u64 = 144;
 /// has no answer for are zero, which is what a program reading them will see
 /// and is better than a plausible invention -- a fabricated modification time
 /// makes `make` rebuild nothing.
-fn fill_stat(node: &Node, out: u64) -> u64 {
-    let Some((pointer, _)) = crate::arch::syscall::user_range(out, STAT_SIZE, STAT_SIZE) else {
+fn fill_metadata(info: &Metadata, out: u64) -> u64 {
+    let Ok(process) = process() else {
+        return error::EBADF;
+    };
+    let Some((pointer, _)) =
+        crate::arch::syscall::user_range_for(&process, out, STAT_SIZE, STAT_SIZE, true)
+    else {
         return error::EFAULT;
     };
-    let size = store::size(node).unwrap_or(0);
-
-    /// `S_IFDIR | 0755` and `S_IFREG | 0644`.
-    const DIRECTORY: u32 = 0o040_000 | 0o755;
-    const FILE: u32 = 0o100_000 | 0o644;
 
     let mut fields = [0u8; STAT_SIZE as usize];
+    // The Linux root lives on the one mounted NexusFS volume. Dynamic loaders
+    // use (st_dev, st_ino) to recognise a library opened through another name;
+    // zero for every inode incorrectly identifies all libraries as one file.
+    fields[0..8].copy_from_slice(&info.device.to_le_bytes());
+    fields[8..16].copy_from_slice(&info.inode.to_le_bytes());
     // st_nlink at 16: one, and for a directory two, because `.` counts. A
     // program that walks a tree by subtracting two from the link count would
     // otherwise conclude every directory has an impossible number of children.
-    let links: u64 = if node.is_directory() { 2 } else { 1 };
-    fields[16..24].copy_from_slice(&links.to_le_bytes());
-    let mode = if node.is_directory() { DIRECTORY } else { FILE };
-    fields[24..28].copy_from_slice(&mode.to_le_bytes());
-    fields[48..56].copy_from_slice(&size.to_le_bytes());
+    fields[16..24].copy_from_slice(&info.links.to_le_bytes());
+    fields[24..28].copy_from_slice(&info.mode.to_le_bytes());
+    fields[40..48].copy_from_slice(&info.rdevice.to_le_bytes());
+    fields[48..56].copy_from_slice(&info.size.to_le_bytes());
     // st_blksize, which is what a program sizes its read buffer by.
     fields[56..64].copy_from_slice(&4096u64.to_le_bytes());
-    fields[64..72].copy_from_slice(&size.div_ceil(512).to_le_bytes());
+    fields[64..72].copy_from_slice(&info.blocks.to_le_bytes());
 
     // SAFETY: the range was checked to lie inside the user half and is exactly
     // the size of what is being written into it.
@@ -1233,27 +1379,66 @@ fn fill_stat(node: &Node, out: u64) -> u64 {
 
 /// `fstat(fd, statbuf)`.
 pub fn fstat(descriptor: u64, out: u64) -> u64 {
-    match opened(descriptor) {
-        Ok((_, _, node)) => fill_stat(&node, out),
+    match metadata_at(descriptor, None, 0) {
+        Ok(info) => fill_metadata(&info, out),
         Err(error) => error,
     }
 }
 
+/// Linux i386 stat64 has 96 bytes, including unaligned 64-bit size at 44.
+/// The fixed-width statx ABI is separate and may be shared with x86-64.
+pub(super) fn stat64_i386(directory: u64, path: Option<u64>, out: u64, flags: u64) -> u64 {
+    if flags & !(0x1000 | 0x100 | 0x800) != 0 {
+        return error::EINVAL;
+    }
+    let path = match path.map(path_of).transpose() {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    let info = match metadata_at(directory, path.as_deref(), flags) {
+        Ok(info) => info,
+        Err(error) => return error,
+    };
+    let Ok(process) = process() else {
+        return error::EBADF;
+    };
+    let Some((pointer, _)) = crate::arch::syscall::user_range_for(&process, out, 96, 96, true)
+    else {
+        return error::EFAULT;
+    };
+    let mut bytes = [0u8; 96];
+    bytes[0..8].copy_from_slice(&info.device.to_le_bytes());
+    bytes[12..16].copy_from_slice(&(info.inode as u32).to_le_bytes());
+    bytes[16..20].copy_from_slice(&info.mode.to_le_bytes());
+    bytes[20..24].copy_from_slice(&(info.links as u32).to_le_bytes());
+    bytes[32..40].copy_from_slice(&info.rdevice.to_le_bytes());
+    bytes[44..52].copy_from_slice(&info.size.to_le_bytes());
+    bytes[52..56].copy_from_slice(&4096u32.to_le_bytes());
+    bytes[56..64].copy_from_slice(&info.blocks.to_le_bytes());
+    bytes[88..96].copy_from_slice(&info.inode.to_le_bytes());
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer as *mut u8, bytes.len());
+    }
+    0
+}
+
 /// `newfstatat(dirfd, path, statbuf, flags)`, which is also `stat` and `lstat`.
 ///
-/// There are no symbolic links in this store, so `lstat` and `stat` cannot
-/// differ and `AT_SYMLINK_NOFOLLOW` changes nothing. That is a fact about the
-/// filesystem rather than a corner cut.
-pub fn newfstatat(directory: u64, pointer: u64, out: u64) -> u64 {
-    if !is_cwd(directory) {
+/// Ordinary store nodes have no symbolic links. Proc executable links are
+/// handled separately, including AT_SYMLINK_NOFOLLOW.
+pub fn newfstatat(directory: u64, pointer: u64, out: u64, flags: u64) -> u64 {
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_NO_AUTOMOUNT: u64 = 0x800;
+    if flags & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT) != 0 {
         return error::EINVAL;
     }
     let path = match path_of(pointer) {
         Ok(path) => path,
         Err(error) => return error,
     };
-    match walk(&path) {
-        Ok(node) => fill_stat(&node, out),
+    match metadata_at(directory, Some(&path), flags) {
+        Ok(info) => fill_metadata(&info, out),
         Err(error) => error,
     }
 }
@@ -1264,14 +1449,11 @@ pub fn newfstatat(directory: u64, pointer: u64, out: u64) -> u64 {
 /// machine and no permission bits in the store, so a file that is there is
 /// readable and writable, and saying otherwise would be inventing a refusal.
 pub fn faccessat(directory: u64, pointer: u64) -> u64 {
-    if !is_cwd(directory) {
-        return error::EINVAL;
-    }
     let path = match path_of(pointer) {
         Ok(path) => path,
         Err(error) => return error,
     };
-    match walk(&path) {
+    match metadata_at(directory, Some(&path), 0) {
         Ok(_) => 0,
         Err(error) => error,
     }
@@ -1279,23 +1461,9 @@ pub fn faccessat(directory: u64, pointer: u64) -> u64 {
 
 /// `getcwd(buffer, size)`.
 ///
-/// Always `/`. Returns the length including the terminator, which is what Linux
-/// returns and not what a reading of the manual page would suggest.
+/// Returns the current namespace path and the length including its terminator.
 pub fn getcwd(buffer: u64, size: u64) -> u64 {
-    const CWD: &[u8] = b"/\0";
-    if size < CWD.len() as u64 {
-        return (-34i64) as u64; // ERANGE
-    }
-    let Some((pointer, _)) =
-        crate::arch::syscall::user_range(buffer, CWD.len() as u64, CWD.len() as u64)
-    else {
-        return error::EFAULT;
-    };
-    // SAFETY: the range was checked and is exactly two bytes long.
-    unsafe {
-        core::ptr::copy_nonoverlapping(CWD.as_ptr(), pointer as *mut u8, CWD.len());
-    }
-    CWD.len() as u64
+    super::linux_paths::getcwd(buffer, size)
 }
 
 /// `getdents64(fd, buffer, count)`.
@@ -1316,7 +1484,8 @@ pub fn getdents64(descriptor: u64, buffer: u64, count: u64) -> u64 {
     if room == 0 {
         return error::EINVAL;
     }
-    let Some((pointer, length)) = crate::arch::syscall::user_range(buffer, room, MAX_TRANSFER)
+    let Some((pointer, length)) =
+        crate::arch::syscall::user_range_for(&process, buffer, room, MAX_TRANSFER, true)
     else {
         return error::EFAULT;
     };
@@ -1350,7 +1519,9 @@ pub fn getdents64(descriptor: u64, buffer: u64, count: u64) -> u64 {
         /// `DT_DIR` and `DT_REG`.
         const IS_DIRECTORY: u8 = 4;
         const IS_FILE: u8 = 8;
-        one[18] = if entry.kind == crate::fs::nexusfs::Kind::Directory {
+        one[18] = if entry.kind == crate::fs::nexusfs::Kind::Symlink {
+            10
+        } else if entry.kind == crate::fs::nexusfs::Kind::Directory {
             IS_DIRECTORY
         } else {
             IS_FILE
@@ -1382,37 +1553,55 @@ pub fn getdents64(descriptor: u64, buffer: u64, count: u64) -> u64 {
 
 /// `mkdirat(dirfd, path, mode)`.
 pub fn mkdirat(directory: u64, pointer: u64) -> u64 {
-    if !is_cwd(directory) {
-        return error::EINVAL;
-    }
     let path = match path_of(pointer) {
         Ok(path) => path,
         Err(error) => return error,
     };
-    let (parent, name) = match split(&path) {
-        Ok(split) => split,
+    let resolved = match super::linux_paths::resolve_entry(directory, &path) {
+        Ok(resolved) => resolved,
         Err(error) => return error,
     };
-    match store::create_child(&parent, &name, true) {
+    if resolved.node.is_some() || resolved.special {
+        return EEXIST;
+    }
+    let (parent, name) = match resolved.entry(&path) {
+        Ok(entry) => entry,
+        Err(error) => return error,
+    };
+    match store::create_child(parent, name, true) {
         Ok(_) => 0,
         Err(error) => errno(error),
     }
 }
 
 /// `unlinkat(dirfd, path, flags)`, which is also `unlink` and `rmdir`.
-pub fn unlinkat(directory: u64, pointer: u64) -> u64 {
-    if !is_cwd(directory) {
+pub fn unlinkat(directory: u64, pointer: u64, flags: u64) -> u64 {
+    if flags & !0x200 != 0 {
         return error::EINVAL;
     }
     let path = match path_of(pointer) {
         Ok(path) => path,
         Err(error) => return error,
     };
-    let (parent, name) = match split(&path) {
-        Ok(split) => split,
+    let resolved = match super::linux_paths::resolve_entry(directory, &path) {
+        Ok(resolved) => resolved,
         Err(error) => return error,
     };
-    match store::remove_child(&parent, &name) {
+    let (parent, name) = match resolved.entry(&path) {
+        Ok(entry) => entry,
+        Err(error) => return error,
+    };
+    let node = match resolved.node() {
+        Ok(node) => node,
+        Err(error) => return error,
+    };
+    if node.is_directory() && flags & 0x200 == 0 {
+        return EISDIR;
+    }
+    if !node.is_directory() && flags & 0x200 != 0 {
+        return ENOTDIR;
+    }
+    match store::remove_child(parent, name) {
         Ok(()) => 0,
         Err(error) => errno(error),
     }

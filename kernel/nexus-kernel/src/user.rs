@@ -1554,6 +1554,13 @@ fn install_linux_runtime() {
     };
 
     let mut installed = 0usize;
+    if let Err(reason) = crate::compat::linux_files::prepare_root() {
+        kprintln!(
+            "[linux] cannot prepare temporary directory: error {}",
+            reason as i64
+        );
+        return;
+    }
     for line in list.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -1567,19 +1574,15 @@ fn install_linux_runtime() {
         if crate::compat::linux_files::exists(to) {
             continue;
         }
-        let bytes = match volume.read_file(from.trim()) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                kprintln!("[linux] {LIST}: cannot read {from}: {error}");
-                continue;
-            }
-        };
-        match crate::compat::linux_files::install(to, &bytes) {
-            Ok(()) => {
-                kprintln!("[linux] installed {} bytes at {to}", bytes.len());
+        match crate::compat::linux_files::install_from_fat(&volume, from.trim(), to) {
+            Ok(bytes) => {
+                kprintln!("[linux] installed {bytes} bytes at {to}");
                 installed += 1;
             }
-            Err(reason) => {
+            Err(fs::fat32::CopyError::Read(error)) => {
+                kprintln!("[linux] {LIST}: cannot read {from}: {error}");
+            }
+            Err(fs::fat32::CopyError::Write(reason)) => {
                 kprintln!("[linux] cannot install {to}: error {}", reason as i64);
             }
         }
@@ -1671,19 +1674,30 @@ pub unsafe fn start_from_disk_as(
         return Err(UserError::Image(nexus_abi::elf::ElfError::WrongType));
     }
 
-    let movable = personality != Personality::Linux32
-        && nexus_abi::elf::kind(&image).map_err(UserError::Image)? == nexus_abi::elf::Kind::Movable;
-    if movable && personality != Personality::Linux {
+    let movable = if personality == Personality::Linux32 {
+        nexus_abi::elf::elf32::kind(&image)
+    } else {
+        nexus_abi::elf::kind(&image)
+    }
+    .map_err(UserError::Image)?
+        == nexus_abi::elf::Kind::Movable;
+    if movable && personality == Personality::Nexus {
         // This system's own programs are linked at an address. One that was not
         // would need relocating, and nothing in this system relocates its own.
         return Err(UserError::Image(nexus_abi::elf::ElfError::WrongBias));
     }
-    let bias = if movable { LINUX_EXECUTABLE_BASE } else { 0 };
+    let bias = if !movable {
+        0
+    } else if personality == Personality::Linux32 {
+        0x0800_0000
+    } else {
+        LINUX_EXECUTABLE_BASE
+    };
 
     // SAFETY: the heap and the page allocator are running, and `space` was
     // created a moment ago so nothing else is mapping into it.
     let loaded = if personality == Personality::Linux32 {
-        unsafe { load32_into(&image, &space) }
+        unsafe { load32_into(&image, bias, &space) }
     } else {
         unsafe { load_into(&image, bias, &space) }
     }
@@ -1703,7 +1717,9 @@ pub unsafe fn start_from_disk_as(
     // deliberately the whole of it: relocation, symbol lookup and library search
     // are the linker's work, and a kernel that did any of them would be a kernel
     // that had to understand symbol versioning.
-    let interpreter = match if personality == Personality::Linux {
+    let interpreter = match if personality == Personality::Linux32 {
+        nexus_abi::elf::elf32::interpreter(&image).map_err(UserError::Image)?
+    } else if personality == Personality::Linux {
         nexus_abi::elf::interpreter(&image).map_err(UserError::Image)?
     } else {
         None
@@ -1713,8 +1729,12 @@ pub unsafe fn start_from_disk_as(
                 UserError::NoInterpreter(alloc::string::String::from(needed), reason)
             })?;
             // SAFETY: as above.
-            let loaded = unsafe { load_into(&bytes, LINUX_INTERPRETER_BASE, &space) }
-                .map_err(UserError::BadInterpreter)?;
+            let loaded = if personality == Personality::Linux32 {
+                unsafe { load32_into(&bytes, 0x7000_0000, &space) }
+            } else {
+                unsafe { load_into(&bytes, LINUX_INTERPRETER_BASE, &space) }
+            }
+            .map_err(UserError::BadInterpreter)?;
             kprintln!(
                 "[linux] {name} needs {needed}: {} bytes loaded at {:#x}, entry {:#x}",
                 bytes.len(),
@@ -1782,8 +1802,11 @@ pub unsafe fn start_from_disk_as(
     // in the two worlds. A Nexus program is handed one number below the top; a
     // program built for Linux expects a whole structure there, and expects it
     // before its first instruction runs.
-    let stack_pointer = match personality {
-        Personality::Nexus => DISK_STACK_TOP - INITIAL_STACK_OFFSET,
+    let initial_stack = match personality {
+        Personality::Nexus => InitialStack {
+            pointer: DISK_STACK_TOP - INITIAL_STACK_OFFSET,
+            ..InitialStack::default()
+        },
         // SAFETY: the stack pages were just mapped into `space`, this kernel is
         // the only thing writing them until the process runs, and everything
         // written lies inside them.
@@ -1802,8 +1825,12 @@ pub unsafe fn start_from_disk_as(
             )?
         },
         // SAFETY: as above.
-        Personality::Linux32 => unsafe { system_v_stack32(&space, stack_pages, path, &loaded)? },
+        Personality::Linux32 => unsafe {
+            system_v_stack32(&space, stack_pages, path, &loaded, interpreter.as_ref())?
+        },
     };
+    initial_stack.record(&process, path);
+    let stack_pointer = initial_stack.pointer;
 
     // A dynamically linked program is entered at its *interpreter*, not at its
     // own entry point. Its own is in the auxiliary vector as `AT_ENTRY`, and
@@ -1935,7 +1962,7 @@ pub unsafe fn load_program_into(
     image: &[u8],
     arguments: &[alloc::string::String],
     environment: &[alloc::string::String],
-) -> Result<(u64, u64), UserError> {
+) -> Result<(u64, InitialStack), UserError> {
     let movable =
         nexus_abi::elf::kind(image).map_err(UserError::Image)? == nexus_abi::elf::Kind::Movable;
     let bias = if movable { LINUX_EXECUTABLE_BASE } else { 0 };
@@ -2004,12 +2031,14 @@ pub unsafe fn load_program_into(
 /// As [`load_into`].
 unsafe fn load32_into(
     image: &[u8],
+    bias: u64,
     space: &Arc<address_space::AddressSpace>,
 ) -> Result<nexus_abi::elf::LoadedImage, nexus_abi::elf::ElfError> {
     // SAFETY: the closure returns a block reachable through the direct map.
     let loaded = unsafe {
-        nexus_abi::elf::elf32::load(
+        nexus_abi::elf::elf32::load_at(
             image,
+            bias,
             |pages| memory::allocate_block(order_for_pages(pages)),
             layout::phys_to_virt,
         )
@@ -2027,10 +2056,8 @@ unsafe fn load32_into(
 /// program that reads them with thirty-two bit loads would otherwise find the
 /// top half of one word where the next should be.
 ///
-/// There is no interpreter and no `AT_BASE`: an i386 program that needs one
-/// needs an i386 interpreter, and there is none on this machine. A static
-/// program is what runs here, which is what the loader refuses to pretend
-/// otherwise about.
+/// AT_BASE identifies the optional i386 interpreter. AT_ENTRY continues to
+/// identify the executable that the interpreter must relocate and enter.
 ///
 /// # Safety
 ///
@@ -2040,7 +2067,8 @@ unsafe fn system_v_stack32(
     pages: usize,
     path: &str,
     program: &nexus_abi::elf::LoadedImage,
-) -> Result<u64, UserError> {
+    interpreter: Option<&nexus_abi::elf::LoadedImage>,
+) -> Result<InitialStack, UserError> {
     /// The auxiliary vector types a thirty-two bit program reads, which are the
     /// same numbers -- only the words they are carried in are narrower.
     mod at {
@@ -2048,6 +2076,7 @@ unsafe fn system_v_stack32(
         pub const PHENT: u32 = 4;
         pub const PHNUM: u32 = 5;
         pub const PAGESZ: u32 = 6;
+        pub const BASE: u32 = 7;
         pub const ENTRY: u32 = 9;
         pub const UID: u32 = 11;
         pub const EUID: u32 = 12;
@@ -2101,11 +2130,12 @@ unsafe fn system_v_stack32(
     path_bytes.push(0);
     let name_at = place(&path_bytes)?;
 
-    let vector: [(u32, u32); 13] = [
+    let vector: [(u32, u32); 14] = [
         (at::PHDR, program.program_headers as u32),
         (at::PHENT, u32::from(program.program_header_size)),
         (at::PHNUM, u32::from(program.program_header_count)),
         (at::PAGESZ, layout::PAGE_SIZE as u32),
+        (at::BASE, interpreter.map_or(0, |image| image.bias) as u32),
         (at::ENTRY, program.entry_point as u32),
         (at::UID, 0),
         (at::EUID, 0),
@@ -2152,7 +2182,57 @@ unsafe fn system_v_stack32(
         program.entry_point,
         environment_at.len()
     );
-    Ok(vector_at)
+    Ok(InitialStack {
+        pointer: vector_at,
+        arguments: (
+            u64::from(name_at),
+            u64::from(name_at) + path_bytes.len() as u64,
+        ),
+        environment: (u64::from(environment_at[0]), u64::from(name_at)),
+    })
+}
+
+/// Actual string ranges written by the loader, used by process introspection.
+#[derive(Default)]
+pub struct InitialStack {
+    pub pointer: u64,
+    pub arguments: (u64, u64),
+    pub environment: (u64, u64),
+}
+
+impl InitialStack {
+    pub fn record(&self, process: &crate::process::Process, path: &str) {
+        let resolved = crate::compat::linux_proc::link(path).and_then(Result::ok);
+        let path = resolved.as_deref().unwrap_or(path);
+        // A FAT-launched image has no Linux pathname. Do not invent one; the
+        // absolute Linux-root launch records and pins its actual executable.
+        let file = if path.starts_with('/') {
+            crate::compat::linux_files::walk(path).ok()
+        } else {
+            None
+        };
+        self.record_image(process, path, file);
+    }
+
+    pub fn record_image(
+        &self,
+        process: &crate::process::Process,
+        path: &str,
+        file: Option<alloc::sync::Arc<crate::fs::store::Node>>,
+    ) {
+        let previous = core::mem::replace(
+            &mut *process.image.lock(),
+            crate::process::Image {
+                path: alloc::string::String::from(path),
+                file,
+                arguments: self.arguments,
+                environment: self.environment,
+            },
+        );
+        // An unlinked previous executable can be reclaimed on last close.
+        // That filesystem work must happen outside the image's irq lock.
+        drop(previous);
+    }
 }
 
 /// Where a program's stack goes and what is to be on it.
@@ -2221,7 +2301,7 @@ unsafe fn system_v_stack(
     stack: Stack<'_>,
     program: &nexus_abi::elf::LoadedImage,
     interpreter: Option<&nexus_abi::elf::LoadedImage>,
-) -> Result<u64, UserError> {
+) -> Result<InitialStack, UserError> {
     let Stack {
         top,
         pages,
@@ -2442,7 +2522,13 @@ unsafe fn system_v_stack(
         environment_at.len()
     );
 
-    Ok(vector_at)
+    let argument_start = argument_at[0];
+    let environment_start = environment_at[0];
+    Ok(InitialStack {
+        pointer: vector_at,
+        arguments: (argument_start, name_at),
+        environment: (environment_start, argument_start),
+    })
 }
 
 /// Whether the first-run setup has been completed on this machine.
@@ -2562,18 +2648,23 @@ pub unsafe fn enter32(entry: u64, stack_top: u64) -> ! {
     unsafe {
         core::arch::asm!(
             "cli",
+            "mov ax, {data}",
+            "mov ds, ax",
+            "mov es, ax",
+            "xor edx, edx",
             "swapgs",
             "push {ss}",
-            "push {rsp}",
+            "push rsi",
             "push {flags}",
             "push {cs}",
-            "push {rip}",
+            "push rdi",
             "iretq",
-            ss = in(reg) u64::from(gdt::USER_DATA_SELECTOR),
-            rsp = in(reg) stack_top,
-            flags = in(reg) USER_FLAGS,
-            cs = in(reg) u64::from(gdt::USER_CODE32_SELECTOR),
-            rip = in(reg) entry,
+            ss = const gdt::USER_DATA_SELECTOR,
+            in("rsi") stack_top,
+            flags = const USER_FLAGS,
+            cs = const gdt::USER_CODE32_SELECTOR,
+            in("rdi") entry,
+            data = const gdt::USER_DATA_SELECTOR,
             options(noreturn),
         )
     }
@@ -2605,16 +2696,27 @@ pub unsafe fn enter32(entry: u64, stack_top: u64) -> ! {
 /// `rip` must be in its user half and executable. The caller must have set this
 /// processor's `rsp0` and syscall stack.
 pub unsafe fn resume(frame: &crate::arch::syscall::Frame) -> ! {
+    let compat = crate::sched::current_process()
+        .is_some_and(|process| process.personality == crate::process::Personality::Linux32);
     // What `iretq` pops, laid out in the order it pops it. Built here as a
     // value rather than pushed, because pushing needs a spare register and
     // every register is about to become the user's.
     let iret: [u64; 5] = [
         frame.rip,
-        u64::from(gdt::USER_CODE64_SELECTOR),
+        u64::from(if compat {
+            gdt::USER_CODE32_SELECTOR
+        } else {
+            gdt::USER_CODE64_SELECTOR
+        }),
         frame.rflags,
         frame.rsp,
         u64::from(gdt::USER_DATA_SELECTOR),
     ];
+    let mut registers = *frame;
+    // int 0x80 saves ECX in r10; syscall saves its return IP in RCX.
+    if compat {
+        registers.rip = frame.r10;
+    }
 
     // SAFETY: upheld by the caller. The sequence below never touches memory
     // through `gs` after the `swapgs`, and never returns, so nothing can
@@ -2625,6 +2727,9 @@ pub unsafe fn resume(frame: &crate::arch::syscall::Frame) -> ! {
             // `swapgs` would arrive in ring 0 with the user's `GS` installed,
             // and the entry guard would swap the wrong way round.
             "cli",
+            "mov ax, {data}",
+            "mov ds, ax",
+            "mov es, ax",
             // The stack becomes the five words above. Nothing returns from
             // here, so the kernel stack this was standing on is not needed
             // again -- the next entry from ring 3 lands on `rsp0`, which the
@@ -2649,7 +2754,8 @@ pub unsafe fn resume(frame: &crate::arch::syscall::Frame) -> ! {
             "mov rsi, [rdi + 80]",
             "mov rdi, [rdi + 88]",
             "iretq",
-            in("rdi") core::ptr::from_ref(frame),
+            data = const gdt::USER_DATA_SELECTOR,
+            in("rdi") core::ptr::from_ref(&registers),
             in("rsi") iret.as_ptr(),
             options(noreturn),
         )

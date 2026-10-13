@@ -286,11 +286,10 @@ impl Default for Look {
     fn default() -> Self {
         Self {
             style: Style::Gradient,
-            // The colours this system has had since its first frame. Kept as
-            // the default so that a machine with no `look.*` settings looks
-            // exactly as it did before there were any.
-            top: Colour::new(0x0B, 0x14, 0x28),
-            bottom: Colour::new(0x04, 0x08, 0x14),
+            // Soft violet and blue for the default desktop. Saved look.*
+            // settings still take precedence over these starting colours.
+            top: Colour::new(0x4A, 0x59, 0x92),
+            bottom: Colour::new(0xA6, 0xC5, 0xD8),
             accent: Colour::new(0x38, 0x8B, 0xE8),
             // Off by default, so a machine nobody has changed looks exactly as
             // it did before there was a choice. Turning it on is a decision
