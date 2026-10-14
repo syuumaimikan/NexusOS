@@ -192,10 +192,13 @@ Both libc widths now also pass actual chdir/fchdir/getcwd, relative directory-FD
 file operations, parent traversal and directory rename identity tests. x86-64
 relative execve retains cwd and records the actual executable independently of
 argv[0]. Persistent symlinks and native /dev/urandom also pass real libc tests.
-The official Steam bootstrap gets past chdir, data-link and random-source
-failures, then stops while initialising update-UI IPC. FIFO, flock, permissions,
-socket options and i386 signals remain incomplete. Current logs and native
-filesystem limitations are in [the runtime evidence](posix-runtime.md).
+The official Steam bootstrap passes its 32-bit glibc loader and reaches update
+status UI initialisation. It then exits because `clone` without `CLONE_VM`
+(`fork`) is refused with `ENOSYS`; the bootstrap also logs missing
+`/proc/self/cmdline`, `flock`, socket options and other i386 calls. This is a
+diagnostic launch, not a working installation or sign-in. Run
+`scripts/diagnose-steam.ps1` for the current serial evidence. Native filesystem
+limitations are in [the runtime evidence](posix-runtime.md).
 
 ### Thirty-two bit programs
 
@@ -380,7 +383,7 @@ interfaces it needs.
 | Shaders | **A SPIR-V module is read and executed, and its pixels reach the screen** | A module from a real compiler rather than from this repository; images, samplers, buffers, push constants, matrices, function calls; compiling a module instead of interpreting it | `glslang`'s output for a non-trivial shader runs and matches a reference image |
 | Vulkan | **Upstream SwiftShader CPU ICD compiles SPIR-V and submits a compute dispatch** | Vulkan loader discovery, WSI/swapchain, broader graphics tests, conformance and hardware driver | The Vulkan loader discovers the ICD, `vulkaninfo` succeeds and `vkcube` presents; then conformance |
 | Physical RTX 5060 | **Native PCI identity, pinned bootstrap/RM/microcode verification, unpublished contiguous/scatter buffers and three-level GSP radix tables implemented; QEMU disk/USB tests pass** | GSP firmware boot/authentication and RPC, DMA/IOMMU mapping, WPR, VRAM/virtual address spaces, fences, interrupts, command submission and native Vulkan integration | NexusOS boots on the physical card and GPU-generated pixels reach the display |
-| Steam installation | **Official ELF32 bootstrap loads and enters initialisation; fails before client sign-in** | System V IPC, i386 signals, `/proc`, permissions, shell/bootstrap scripts and complete graphics/audio/network integration | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
+| Steam installation | **Official ELF32 bootstrap loads through i386 glibc; reaches update-status UI setup, then exits at unsupported `fork`** | `fork`/`wait`, i386 signals, `/proc`, permissions, shell/bootstrap scripts and complete graphics/audio/network integration | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
 
 ## Can Mesa not just be used?
 

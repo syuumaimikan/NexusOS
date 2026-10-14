@@ -28,6 +28,16 @@ foreach ($Required in @('g32ld.lx', 'gnu320.lx')) {
     if (-not (Test-Path (Join-Path $Programs $Required))) { throw 'Stage the i386 GNU runtime with build.ps1 -WithGlibc32Runtime first' }
 }
 $SteamRoot = Join-Path $Repo 'build/runtime/steam'
+$Manifest = Join-Path $Programs 'linux.lst'
+$ManifestText = [IO.File]::ReadAllText($Manifest)
+foreach ($RequiredMapping in @(
+    'BIN/G32LD.LX /lib/ld-linux.so.2',
+    'BIN/GNU320.LX /lib/i386-linux-gnu/libc.so.6'
+)) {
+    if (-not [regex]::IsMatch($ManifestText, '(?m)^' + [regex]::Escape($RequiredMapping) + '\s*$')) {
+        throw "The staged Linux runtime is missing '$RequiredMapping'; rebuild with -WithGlibc32Runtime -SkipDiskImage"
+    }
+}
 $Entries = @(
     @('steam', 'steam32.lx', '/usr/lib/steam/ubuntu12_32/steam'),
     @('crashhandler.so', 'smcrash.lx', '/usr/lib/steam/ubuntu12_32/crashhandler.so'),
@@ -36,7 +46,6 @@ $Entries = @(
     @('copyright.txt', 'smnotice.txt', '/usr/share/steam-diagnostic/copyright'),
     @('manifest.json', 'smmeta.txt', '/usr/share/steam-diagnostic/manifest.json')
 )
-$Manifest = Join-Path $Programs 'linux.lst'
 $Text = [IO.File]::ReadAllText($Manifest).TrimEnd() + "`n"
 foreach ($Entry in $Entries) {
     Copy-Item -LiteralPath (Join-Path $SteamRoot $Entry[0]) -Destination (Join-Path $Programs $Entry[1])
@@ -51,9 +60,11 @@ try {
     if ($LASTEXITCODE) { throw 'Steam diagnostic init build failed' }
     Publish-Program -Elf (Join-Path $Repo 'target/x86_64-nexus-user/debug/nexus-steam-diagnostic') -ProgramDir $Programs -Name 'init.elf' | Out-Null
     Publish-Esp -BootEfi (Join-Path $Repo 'build/esp/EFI/BOOT/BOOTX64.EFI') -KernelElf (Join-Path $Repo 'target/x86_64-nexus/debug/nexus-kernel') -EspDir $Esp | Out-Null
-    & (Join-Path $PSScriptRoot 'make-disk.ps1') -Output (Join-Path $Run 'nexus-disk.img') -ProgramDir $Programs -SizeMiB 256 -FatMiB 96
+    & (Join-Path $PSScriptRoot 'make-disk.ps1') -Output (Join-Path $Run 'nexus-disk.img') -ProgramDir $Programs -SizeMiB 512 -FatMiB 256
 } finally { Pop-Location }
-function Get-NexusDiskSizes { return @{SizeMiB=256; FatMiB=96} }
+# The i386 GNU runtime plus Steam diagnostic payload exceeds 96 MiB. Give this
+# disposable image enough FAT32 space for staged files.
+function Get-NexusDiskSizes { return @{SizeMiB=512; FatMiB=256} }
 $Qemu = (Get-Command qemu-system-x86_64).Source
 $Share = Join-Path (Split-Path $Qemu -Parent) 'share'
 $Code = Join-Path $Run 'code.fd'
