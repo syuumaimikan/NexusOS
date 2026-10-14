@@ -305,3 +305,69 @@ fn radix_rejects_bad_geometry_addresses_and_sink_failures() {
         Err(Error::Truncated)
     );
 }
+
+fn ivrs_fixture(entries: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![0u8; 48 + 24 + entries.len()];
+    bytes[..4].copy_from_slice(b"IVRS");
+    let length = bytes.len() as u32;
+    put32(&mut bytes, 4, length);
+    bytes[8] = 2;
+    bytes[48] = 0x10;
+    put16(&mut bytes, 50, (24 + entries.len()) as u16);
+    put16(&mut bytes, 52, 0x30);
+    put16(&mut bytes, 54, 0x40);
+    put64(&mut bytes, 56, 0xfed80000);
+    bytes[72..].copy_from_slice(entries);
+    bytes[9] = 0u8.wrapping_sub(bytes.iter().fold(0u8, |sum, &b| sum.wrapping_add(b)));
+    bytes
+}
+#[test]
+fn amdvi_firmware_scopes_ranges_aliases_and_checksum_are_checked() {
+    let bytes = ivrs_fixture(&[3, 0, 1, 0, 4, 0xff, 1, 0, 0x42, 0, 2, 0, 0, 0, 3, 0]);
+    let table = amdvi::Ivrs::parse(&bytes).unwrap();
+    let unit = table.units().next().unwrap();
+    assert_eq!(unit.requester(0x108), Ok(Some(0x108)));
+    assert_eq!(unit.requester(0x200), Ok(Some(0x300)));
+    assert_eq!(unit.requester(0x201), Ok(None));
+    for length in 0..bytes.len() {
+        assert!(amdvi::Ivrs::parse(&bytes[..length]).is_err());
+    }
+    let mut bad = bytes.clone();
+    bad[49] ^= 1;
+    assert!(amdvi::Ivrs::parse(&bad).is_err());
+    for entries in [
+        &[3, 0, 1, 0][..],
+        &[4, 0, 1, 0][..],
+        &[0x42, 0, 1, 0][..],
+        &[0xf0, 0, 1, 0][..],
+    ] {
+        assert!(amdvi::Ivrs::parse(&ivrs_fixture(entries)).is_err());
+    }
+}
+#[test]
+fn amdvi_paging_permissions_widths_and_commands_match_protocol() {
+    assert_eq!(
+        amdvi::device_entry(0x1000, 7).unwrap(),
+        [amdvi::RW | 0x1603, 7, 0, 0]
+    );
+    assert_eq!(
+        amdvi::pointer(0x2000, 0, amdvi::READ),
+        Ok(amdvi::READ | 0x2001)
+    );
+    for address in [0, 1, 0x1001, 1u64 << 52, u64::MAX] {
+        assert!(amdvi::pointer(address, 0, amdvi::RW).is_err());
+    }
+    assert!(amdvi::pointer(0x1000, 4, amdvi::RW).is_err());
+    assert!(amdvi::pointer(0x1000, 0, 0).is_err());
+    assert!(amdvi::pointer(0x1000, 0, 1).is_err());
+    assert_eq!(amdvi::invalidate_device(0x1234), [0x2000000000001234, 0]);
+    assert_eq!(
+        amdvi::invalidate_domain(7),
+        [0x3000000700000000, 0x7ffffffffffff001]
+    );
+    assert_eq!(
+        amdvi::completion(0x1008, 0x55),
+        Ok([0x1000000000001009, 0x55])
+    );
+    assert!(amdvi::completion(0x1001, 0).is_err());
+}

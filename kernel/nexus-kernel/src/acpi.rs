@@ -209,6 +209,8 @@ pub struct Fadt {
 
 /// What the kernel learned from ACPI.
 pub struct AcpiInfo {
+    /// Checksum-validated AMD DMA-remapping table, when firmware supplies one.
+    pub ivrs: Option<&'static [u8]>,
     /// Physical address of the local APIC register window.
     pub local_apic_address: u64,
     /// Processors the firmware reported.
@@ -351,6 +353,7 @@ pub unsafe fn init(rsdp_address: u64) -> Result<AcpiInfo, AcpiError> {
     let entries = &root_table.bytes[SDT_HEADER_LEN..];
     let mut madt: Option<Table> = None;
     let mut fadt: Option<Fadt> = None;
+    let mut ivrs = None;
 
     for chunk in entries.chunks_exact(pointer_width) {
         let address = if pointer_width == 8 {
@@ -372,14 +375,14 @@ pub unsafe fn init(rsdp_address: u64) -> Result<AcpiInfo, AcpiError> {
             madt = Some(table);
         } else if &table.signature == b"FACP" && fadt.is_none() {
             fadt = parse_fadt(&table);
-        }
-        if madt.is_some() && fadt.is_some() {
-            break;
+        } else if &table.signature == b"IVRS" && ivrs.is_none() {
+            ivrs = Some(table.bytes);
         }
     }
 
     let madt = madt.ok_or(AcpiError::NoMadt)?;
     let mut info = parse_madt(&madt);
+    info.ivrs = ivrs;
     // SAFETY: the DSDT address came from a checksum-validated FADT, and the
     // direct map covers firmware memory.
     info.s5 = fadt.and_then(|fadt| unsafe { read_s5(fadt.dsdt) });
@@ -616,6 +619,7 @@ fn parse_madt(madt: &Table) -> AcpiInfo {
     }
 
     AcpiInfo {
+        ivrs: None,
         local_apic_address,
         processors,
         io_apics,

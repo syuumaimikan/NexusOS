@@ -208,6 +208,7 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // SAFETY: called once, before anything drives a device.
     let devices = unsafe { drivers::pci::enumerate() };
     drivers::pci::report(&devices);
+    drivers::amdvi::discover(acpi_info.as_ref());
     // Native Blackwell discovery reads identity only; firmware scanout is kept
     // until the native GPU command and memory drivers can take over.
     // SAFETY: enumeration finished and no driver has claimed these BARs.
@@ -288,6 +289,8 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // Pinned NVIDIA bootstrap files may be on the disk or a physical USB
     // boot medium. Preparation keeps firmware scanout and submits no work.
     drivers::nvidia::prepare_firmware();
+    #[cfg(feature = "amdvi-dma-test")]
+    drivers::amdvi::self_test(&devices);
 
     // The display comes up only now, after the heap: translated strings are
     // built at runtime by substituting into templates, so drawing anything

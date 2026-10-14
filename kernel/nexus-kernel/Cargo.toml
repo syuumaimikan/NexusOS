@@ -43,6 +43,7 @@ deep-selftest = []
 # Does not impersonate a card or touch any NVIDIA engines.
 nvidia-bootstrap-test = []
 nvidia-gsp-test = ["nvidia-bootstrap-test"]
+amdvi-dma-test = []
 
 # Fault-injection builds, used by scripts/test-faults.ps1 to verify that the
 # exception path actually works. They are features rather than test code

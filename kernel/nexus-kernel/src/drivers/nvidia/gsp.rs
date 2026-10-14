@@ -214,6 +214,7 @@ impl RadixImage {
 }
 
 pub struct Prepared {
+    dma_domain: crate::drivers::amdvi::Domain,
     image: RadixImage,
     ucodes: RadixImage,
     signature: Pages,
@@ -229,16 +230,52 @@ impl Prepared {
         drop(rm);
         let ucodes = read_file(volume, "UCODES.BIN", gsp::UCODES_SIZE, gsp::UCODES_SHA)?;
         gsp::check_ucodes(&ucodes).map_err(Error::Image)?;
-        let prepared = Self {
+        let mut prepared = Self {
+            dma_domain: crate::drivers::amdvi::Domain::new().map_err(|_| Error::Memory)?,
             image: RadixImage::new(image)?,
             ucodes: RadixImage::new(ucodes)?,
             signature,
         };
         prepared.image.validate()?;
         prepared.ucodes.validate()?;
+        // Build the endpoint's AMD-Vi translations with read-only firmware
+        // pages. The unit remains disabled; these addresses are not published.
+        for frame in prepared
+            .image
+            .data
+            .frames
+            .iter()
+            .chain(&prepared.image.tables.frames)
+            .chain(&prepared.ucodes.data.frames)
+            .chain(&prepared.ucodes.tables.frames)
+            .chain(&prepared.signature.frames)
+        {
+            // SAFETY: Prepared owns all frames and its domain is unpublished.
+            unsafe {
+                prepared
+                    .dma_domain
+                    .map(*frame, *frame, nexus_nvidia::amdvi::READ)
+            }
+            .map_err(|_| Error::Memory)?;
+            if prepared
+                .dma_domain
+                .resolve(*frame, nexus_nvidia::amdvi::READ)
+                != Some(*frame)
+                || prepared
+                    .dma_domain
+                    .resolve(*frame, nexus_nvidia::amdvi::WRITE)
+                    .is_some()
+            {
+                return Err(Error::Memory);
+            }
+        }
         Ok(prepared)
     }
     pub fn report(&self) {
+        kprintln!(
+            "[nv  ] unpublished AMD-Vi firmware domain root={:#x}; IOMMU not activated",
+            self.dma_domain.root()
+        );
         kprintln!(
             "[nv  ] real {} GSP-RM image={} bytes radix root={:#x}; ucodes={} bytes radix root={:#x}; signature={} bytes",
             nexus_nvidia::VERSION,
