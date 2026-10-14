@@ -1472,6 +1472,10 @@ const DISK_STACK_PAGES: usize = 4;
 /// which of the two worlds it came from.
 const LINUX_STACK_PAGES: usize = 32;
 
+/// The i386 glibc startup and `clone3` path can use more than 128 KiB of stack
+/// before the first application thread begins; keep that range mapped too.
+const LINUX32_STACK_PAGES: usize = 128;
+
 /// Where a thirty-two bit program's stack goes.
 ///
 /// Just under three gigabytes, which is where Linux puts one on i386 and is as
@@ -2058,7 +2062,7 @@ pub unsafe fn load_program_into32(
         None => None,
     };
 
-    for page in 1..=LINUX_STACK_PAGES {
+    for page in 1..=LINUX32_STACK_PAGES {
         let frame = zeroed_frame()?;
         // SAFETY: allocated frame and bounded i386 stack address.
         unsafe {
@@ -2075,7 +2079,7 @@ pub unsafe fn load_program_into32(
     let stack = unsafe {
         system_v_stack32(
             space,
-            LINUX_STACK_PAGES,
+            LINUX32_STACK_PAGES,
             path,
             arguments,
             environment,
@@ -2196,6 +2200,13 @@ unsafe fn system_v_stack32(
     } else {
         arguments
     };
+    let mut argument_at = alloc::vec::Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let mut bytes = alloc::vec::Vec::from(argument.as_bytes());
+        bytes.push(0);
+        argument_at.push(place(&bytes)?);
+    }
+
     let mut environment_at = alloc::vec::Vec::new();
     if environment.is_empty() {
         for variable in ENVIRONMENT {
@@ -2209,13 +2220,6 @@ unsafe fn system_v_stack32(
             bytes.push(0);
             environment_at.push(place(&bytes)?);
         }
-    }
-
-    let mut argument_at = alloc::vec::Vec::with_capacity(arguments.len());
-    for argument in arguments {
-        let mut bytes = alloc::vec::Vec::from(argument.as_bytes());
-        bytes.push(0);
-        argument_at.push(place(&bytes)?);
     }
 
     let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
@@ -2282,10 +2286,29 @@ unsafe fn system_v_stack32(
     Ok(InitialStack {
         pointer: vector_at,
         arguments: (
-            u64::from(name_at),
-            u64::from(name_at) + path_bytes.len() as u64,
+            u64::from(argument_at.first().copied().unwrap_or(name_at)),
+            argument_at.last().map_or(u64::from(name_at), |last| {
+                u64::from(*last)
+                    + arguments
+                        .last()
+                        .map_or(1, |argument| argument.len() as u64 + 1)
+            }),
         ),
-        environment: (u64::from(environment_at[0]), u64::from(name_at)),
+        environment: (
+            u64::from(environment_at.first().copied().unwrap_or(name_at)),
+            environment_at.last().map_or(u64::from(name_at), |last| {
+                u64::from(*last)
+                    + if environment.is_empty() {
+                        ENVIRONMENT
+                            .last()
+                            .map_or(1, |variable| variable.len() as u64 + 1)
+                    } else {
+                        environment
+                            .last()
+                            .map_or(1, |variable| variable.len() as u64 + 1)
+                    }
+            }),
+        ),
     })
 }
 

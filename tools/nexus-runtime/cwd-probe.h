@@ -86,8 +86,14 @@ static int cwd_probe(void) {
     pthread_t thread;
     void *result = NULL;
     char *parent = "..";
-    if (!check(pthread_create(&thread, NULL, cwd_worker, parent) == 0 &&
-        pthread_join(thread, &result) == 0 && result == parent, 276)) return 0;
+    int thread_created = pthread_create(&thread, NULL, cwd_worker, parent);
+    if (thread_created != 0) {
+        printf(PROBE_NAME ": pthread_create returned %d (errno=%d)\n", thread_created, errno);
+    }
+    if (!check(thread_created == 0, 276)) return 0;
+    int joined = pthread_join(thread, &result);
+    if (!check(joined == 0, 289)) return 0;
+    if (!check(result == parent, 290)) return 0;
     snprintf(expected, sizeof(expected), "%s/a", moved);
     if (!check(getcwd(output, sizeof(output)) && !strcmp(output, expected) && fchdir(directory) == 0, 277)) return 0;
 #endif

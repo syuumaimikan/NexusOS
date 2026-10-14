@@ -123,7 +123,7 @@ The test boots a unique 256 MiB disposable disk, replaces only its init with a
 completion-checking probe, and keeps logs and screenshots in
 `build/runtime-test-<GUID>/`. The normal disk, ESP and settings are untouched.
 
-The current combined run is
+The current combined graphics run is
 `build/runtime-test-5394c5fd42f0449197ef5894d49767a7/serial.log`.
 Musl, x86-64/i386 GNU libc, Mesa and Vulkan pass together. With `-WithUIControls -WithWayland`,
 independent screenshots also check maximise/restore/minimise, Dock restore and
@@ -203,6 +203,9 @@ i386 loader and libraries also execute on the custom kernel. Use
 to boot all three i386 probes on a fresh disposable disk.
 
 The i386 ELF loader supports fixed executables and PIE, PT_INTERP and AT_BASE.
+It maps a 512 KiB initial stack, matching the deeper stack use of the Debian
+i386 glibc startup and its `clone3` calls. `/proc/self/cmdline` and `environ`
+refer to separate contiguous argv/environment strings, including in-place edits.
 The compatibility layer translates packed stat64, iovecs, legacy timespecs,
 time64, clone register order and CLONE_SETTLS user_desc. Each thread carries
 three TLS descriptors, FS/GS selectors and bases across scheduling and CPU
@@ -366,7 +369,8 @@ an already unlinked directory FD is refused (ENOENT); private filesystem
 contexts for clone without CLONE_FS are absent. Permission bits and mount
 namespaces are absent. Native rename still refuses
 an existing destination, including flags=0; replacement/exchange/whiteout
-semantics are not implemented. i386 execve remains unsupported.
+semantics are not implemented. i386 execve supports the tested ELF32 static
+and dynamic images; broader ABI and application coverage remains incomplete.
 
 Reference semantics: [working-directory buffers and removed directories](https://man7.org/linux/man-pages/man3/getcwd.3.html)
 and [directory-relative opening](https://man7.org/linux/man-pages/man2/open.2.html).
@@ -485,9 +489,10 @@ the refused process-fork request appear before that same update-UI failure:
 The decoded current diagnostic identifies two level-6/option-1 requests and
 clone flags `0x1200011`; the explicitly reported fatal operation is fork:
 `build/steam-diagnostic-74cdfb2d63334a68a125ca01f3b60afd/serial.log`.
-Native private address-space snapshots are now implemented and tested as a
-prerequisite, but Linux child creation/reaping is still missing. See
-[native fork work and its remaining requirements](fork.md).
+Native private address-space snapshots and Linux fork/wait are implemented and
+tested, as is i386 execve. The bootstrap still reaches unsupported FIFO, flock,
+permission, signal, socket-option and application-specific requests. See
+[native fork implementation and its remaining requirements](fork.md).
 FIFO, flock, permissions, i386 signals, further process/network and desktop
 services remain incomplete. None of these diagnostics proves sign-in.
 
@@ -497,6 +502,16 @@ It does not start GSP, allocate VRAM or submit GPU work. Firmware framebuffer
 scanout and QEMU virtio display are not proof of RTX acceleration. The exact
 source revision and fetch digest are recorded in `fetch-nvidia.py`.
 See [physical RTX 5060 implementation status](rtx-5060.md).
+
+The later Steam run passes the pinned i386 loader, forks, starts static
+BusyBox `/bin/sh`, and execs the actual Steam ELF. It stops when Steam issues
+`clone(flags=0x800600)`, which Linux rejects because `CLONE_SIGHAND` is set
+without `CLONE_VM` and `CLONE_THREAD`. The independent real-glibc i386 pthread
+probe now passes create/join and GS TLS through valid `clone3` requests. Steam
+still does not reach sign-in; its request and other runtime dependencies remain
+unimplemented or incompatible. See [Steam compatibility gates](steam-graphics.md).
+The focused i386 runtime run also passes on the current checkout:
+`build/runtime-test-e430c221b3314a648b617567035e34db/serial.log`.
 
 ## Launch and maintenance verification (2026-10-14)
 

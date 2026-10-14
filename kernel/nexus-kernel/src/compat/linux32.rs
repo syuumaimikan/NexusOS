@@ -577,7 +577,7 @@ fn clone3(arguments: u64, size: u64, frame: &Frame) -> u64 {
     if size < SMALLEST {
         return error::EINVAL;
     }
-    let Some((at, _)) = crate::arch::syscall::user_range(arguments, SMALLEST, 4) else {
+    let Some((at, _)) = crate::arch::syscall::user_range(arguments, SMALLEST, SMALLEST) else {
         return error::EFAULT;
     };
     let field = |offset: usize| unsafe {

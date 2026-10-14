@@ -50,11 +50,18 @@ try {
     Publish-Esp -BootEfi (Join-Path $Repo 'build/esp/EFI/BOOT/BOOTX64.EFI') -KernelElf (Join-Path $Repo 'target/x86_64-nexus/debug/nexus-kernel') -EspDir $Esp | Out-Null
     # This focused runtime test requires only a small FAT partition and store.
     $RuntimeFatMiB = 40
-    if ($WithMesa -or $WithVulkan) { $RuntimeFatMiB = 96 }
-    & (Join-Path $PSScriptRoot 'make-disk.ps1') -Output (Join-Path $Run 'nexus-disk.img') -ProgramDir $Programs -SizeMiB 256 -FatMiB $RuntimeFatMiB
+    $RuntimeDiskMiB = 256
+    if ($WithMesa -or $WithVulkan -or $WithGlibc32) { $RuntimeFatMiB = 96 }
+    if ($WithGlibc32) {
+        # The complete i386 runtime and its focused probes exceed the ordinary
+        # FAT partition used by this runtime test.
+        $RuntimeFatMiB = 192
+        $RuntimeDiskMiB = 384
+    }
+    & (Join-Path $PSScriptRoot 'make-disk.ps1') -Output (Join-Path $Run 'nexus-disk.img') -ProgramDir $Programs -SizeMiB $RuntimeDiskMiB -FatMiB $RuntimeFatMiB
 } finally { Pop-Location }
 # Make the normal disk-size assertion describe this test's intentionally small disk.
-function Get-NexusDiskSizes { return @{SizeMiB=256; FatMiB=$RuntimeFatMiB} }
+function Get-NexusDiskSizes { return @{SizeMiB=$RuntimeDiskMiB; FatMiB=$RuntimeFatMiB} }
 $Qemu = (Get-Command qemu-system-x86_64).Source
 $Share = Join-Path (Split-Path $Qemu -Parent) 'share'
 $Code = Join-Path $Run 'code.fd'
