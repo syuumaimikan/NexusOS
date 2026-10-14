@@ -218,6 +218,7 @@ pub struct Prepared {
     image: RadixImage,
     ucodes: RadixImage,
     signature: Pages,
+    arguments: Option<super::arguments::Prepared>,
 }
 impl Prepared {
     fn from_volume(volume: &Volume) -> Result<Self, Error> {
@@ -235,6 +236,7 @@ impl Prepared {
             image: RadixImage::new(image)?,
             ucodes: RadixImage::new(ucodes)?,
             signature,
+            arguments: None,
         };
         prepared.image.validate()?;
         prepared.ucodes.validate()?;
@@ -271,7 +273,42 @@ impl Prepared {
         }
         Ok(prepared)
     }
+    fn firmware(&self, bootstrap: &super::bootstrap::Prepared) -> nexus_nvidia::boot::Firmware {
+        nexus_nvidia::boot::Firmware {
+            rm: nexus_nvidia::boot::Buffer {
+                address: self.image.tables.frames[0],
+                size: self.image.data.length as u64,
+            },
+            bootloader: bootstrap.boot.buffer(),
+            signature: nexus_nvidia::boot::Buffer {
+                address: self.signature.frames[0],
+                size: self.signature.length as u64,
+            },
+            code_offset: bootstrap.code_offset as u64,
+            data_offset: bootstrap.data_offset as u64,
+            manifest_offset: bootstrap.manifest_offset as u64,
+        }
+    }
+    fn ucodes_buffer(&self) -> nexus_nvidia::boot::Buffer {
+        nexus_nvidia::boot::Buffer {
+            address: self.ucodes.tables.frames[0],
+            size: self.ucodes.data.length as u64,
+        }
+    }
+    pub(super) fn with_boot(
+        mut self,
+        bootstrap: super::bootstrap::Prepared,
+    ) -> Result<Self, Error> {
+        let firmware = self.firmware(&bootstrap);
+        let arguments = super::arguments::Prepared::new(bootstrap, firmware, self.ucodes_buffer())?;
+        arguments.map_into(&mut self.dma_domain)?;
+        self.arguments = Some(arguments);
+        Ok(self)
+    }
     pub fn report(&self) {
+        if let Some(arguments) = &self.arguments {
+            arguments.report();
+        }
         kprintln!(
             "[nv  ] unpublished AMD-Vi firmware domain root={:#x}; IOMMU not activated",
             self.dma_domain.root()
@@ -286,7 +323,7 @@ impl Prepared {
             self.signature.length
         );
         kprintln!(
-            "[nv  ] GSP pages/tables are CPU-owned: IOMMU mapping, WPR layout, hardware authentication and GSP boot pending"
+            "[nv  ] GSP pages/tables are CPU-owned: IOMMU activation, authenticated WPR layout and GSP boot pending"
         );
     }
 }
@@ -364,7 +401,13 @@ pub fn self_test() {
     let before = memory::stats().map(|stats| stats.free_frames);
     let result = (|| {
         let before = memory::stats().ok_or(Error::Memory)?.free_frames;
+        let bootstrap = super::bootstrap::prepare()?;
         let prepared = prepare()?;
+        super::arguments::Prepared::allocation_refusal(
+            prepared.firmware(&bootstrap),
+            prepared.ucodes_buffer(),
+        )?;
+        let prepared = prepared.with_boot(bootstrap)?;
         prepared.report();
         drop(prepared);
         if memory::stats().ok_or(Error::Memory)?.free_frames != before {
@@ -393,7 +436,7 @@ pub fn self_test() {
     }
     match result {
         Ok(()) => kprintln!(
-            "[test] NVIDIA GSP preparation PASS: real pinned RM/ucodes, bounded firmware sections, scatter pages, three-level radix tables, zero padding, reclamation and partial-allocation rollback; no GPU execution"
+            "[test] NVIDIA GSP preparation PASS: real pinned RM/ucodes, bounded firmware sections, scatter pages, three-level radix, native boot ABI, RPC queues, seven logs, DMA permissions, zero padding, reclamation and partial-allocation rollback; no GPU execution"
         ),
         Err(error) => kprintln!("[test] NVIDIA GSP preparation FAILED: {:?}", error),
     }

@@ -8,6 +8,7 @@
 
 use super::pci::{self, BaseAddress, Device};
 use crate::{kprintln, memory};
+mod arguments;
 pub mod bootstrap;
 mod gsp;
 #[derive(Clone, Copy)]
@@ -34,22 +35,28 @@ pub fn prepare_firmware() {
             adapter.bar0
         );
         match bootstrap::prepare() {
-            Ok(prepared) => {
-                prepared.report();
-                *PREPARED.lock() = Some(prepared);
-            }
+            Ok(bootstrap) => match gsp::prepare() {
+                Ok(gsp) => match gsp.with_boot(bootstrap) {
+                    Ok(prepared) => {
+                        prepared.report();
+                        *GSP_PREPARED.lock() = Some(prepared);
+                    }
+                    Err(error) => kprintln!(
+                        "[nv  ] GSP arguments not prepared: {}; firmware display retained",
+                        error
+                    ),
+                },
+                Err(error) => {
+                    bootstrap.report();
+                    *PREPARED.lock() = Some(bootstrap);
+                    kprintln!(
+                        "[nv  ] GSP image not prepared: {}; firmware display retained",
+                        error
+                    );
+                }
+            },
             Err(error) => kprintln!(
                 "[nv  ] bootstrap not prepared: {}; firmware display retained",
-                error
-            ),
-        }
-        match gsp::prepare() {
-            Ok(prepared) => {
-                prepared.report();
-                *GSP_PREPARED.lock() = Some(prepared);
-            }
-            Err(error) => kprintln!(
-                "[nv  ] GSP image not prepared: {}; firmware display retained",
                 error
             ),
         }

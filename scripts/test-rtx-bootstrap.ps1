@@ -73,7 +73,8 @@ try {
     Write-Host 'PASS: native production bootstrap parsing, pinned hashes, contiguous copies, zero padding, reclamation and partial-allocation rollback'
     if ($WithGspFirmware) {
         if (-not $Good.Contains('[test] NVIDIA bootstrap PASS:')) { throw 'Bootstrap check missing before GSP check' }
-        Write-Host 'PASS: native real GSP-RM/ucodes, scatter copies, three-level radix, padding and frame rollback'
+        if (-not $Good.Contains('[nv  ] GB206 boot ABI ready:') -or -not $Good.Contains('native boot ABI, RPC queues, seven logs, DMA permissions')) { throw 'Native GSP argument/queue check missing' }
+        Write-Host 'PASS: native real GSP-RM/ucodes, radix, initial boot ABI, RPC queues, seven logs, DMA permissions and frame rollback'
         $GspFile = Join-Path $Programs 'NVFW/GSPRM.BIN'
         $GspStream = [IO.File]::Open($GspFile,'Open','ReadWrite','None')
         try {

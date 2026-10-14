@@ -71,6 +71,11 @@ fn fmc() -> Vec<u8> {
 #[test]
 fn bootstrap_manifest_code_and_data_are_checked_before_use() {
     let bytes = boot();
+    let mut different = bytes.clone();
+    put32(&mut different, 24 + 4, 256);
+    let parsed = Bootloader::parse(&different).unwrap();
+    assert_eq!(parsed.boot_manifest_offset, 256);
+    assert_eq!(parsed.manifest.offset, 0);
     let parsed = Bootloader::parse(&bytes).unwrap();
     assert_eq!(parsed.manifest.bytes(parsed.image).unwrap().len(), 256);
     assert_eq!(parsed.code.offset, 512);

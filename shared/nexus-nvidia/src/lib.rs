@@ -7,6 +7,7 @@
 pub mod gsp;
 pub mod radix;
 pub mod amdvi;
+pub mod boot;
 
 pub const VERSION: &str = "615.78.08";
 pub const SOURCE_REVISION: &str = "ca2d03e6fafd4d4b56b383497d931c25b283bfcf";
@@ -89,6 +90,8 @@ pub struct Bootloader<'a> {
     pub image: &'a [u8],
     pub descriptor: &'a [u8],
     pub manifest: Span,
+    /// WPR metadata uses descriptor.manifestOffset, distinct from the monitor.
+    pub boot_manifest_offset: usize,
     pub code: Span,
     pub data: Span,
 }
@@ -153,6 +156,7 @@ impl<'a> Bootloader<'a> {
             image: &bytes[image_at..],
             descriptor,
             manifest,
+            boot_manifest_offset: spans[0].offset,
             code,
             data,
         })

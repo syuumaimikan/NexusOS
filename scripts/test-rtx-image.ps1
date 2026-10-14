@@ -36,6 +36,7 @@ try {
             if ($Log.Contains('[test] NVIDIA bootstrap PASS:') -and
                 (-not $WithGspFirmware -or $Log.Contains('[test] NVIDIA GSP preparation PASS:'))) {
                 if ($Log.Contains('[blk ] virtio')) { throw 'Unexpected virtio storage in USB image test' }
+                if ($WithGspFirmware -and (-not $Log.Contains('[nv  ] GB206 boot ABI ready:') -or -not $Log.Contains('native boot ABI, RPC queues, seven logs, DMA permissions'))) { throw 'GSP arguments missing from diagnostic image' }
                 Write-Host "PASS: UEFI USB boot, pinned bootstrap and requested GSP preparation checks; $Serial"
                 return
             }
