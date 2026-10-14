@@ -464,10 +464,8 @@ impl Canvas {
 
     /// Draw a glyph with every pixel drawn as a `scale` by `scale` block.
     ///
-    /// Nearest-neighbour, which for a bitmap face is not a compromise: the
-    /// glyphs *are* pixels, and doubling them is what the face would look like
-    /// on a display with half the resolution. Smoothing them would invent
-    /// detail the face does not have.
+    /// Smooth text resamples coverage at output pixel centres. With smoothing
+    /// disabled, pixel faces retain their exact nearest-neighbour blocks.
     ///
     /// There is one face and one size in this system, which was fine while
     /// everything it drew was a label in a small window. A screen two thousand
@@ -484,6 +482,40 @@ impl Canvas {
     ) -> u32 {
         let scale = scale.max(1);
         let glyph = font::glyph_of(self.face, character);
+        // Filter the coverage mask at output pixel centres. Repeating one
+        // alpha value over a whole block made enlarged smooth text stair-step.
+        if self.antialias && scale > 1 {
+            let width = glyph.advance.saturating_mul(scale);
+            let height = font::CELL_HEIGHT.saturating_mul(scale);
+            let ink = |column: i64, row: i64| -> u32 {
+                if column < 0
+                    || column >= glyph.advance as i64
+                    || row < 0
+                    || row >= font::CELL_HEIGHT as i64
+                {
+                    0
+                } else {
+                    glyph.alpha(column as u32, row as u32) as u32
+                }
+            };
+            for down in 0..height.min(self.height.saturating_sub(y)) {
+                let sy = ((down as u64 * 256 + 128) / scale as u64) as i64 - 128;
+                let row = sy.div_euclid(256);
+                let fy = sy.rem_euclid(256) as u32;
+                for across in 0..width.min(self.width.saturating_sub(x)) {
+                    let sx = ((across as u64 * 256 + 128) / scale as u64) as i64 - 128;
+                    let column = sx.div_euclid(256);
+                    let fx = sx.rem_euclid(256) as u32;
+                    let top = ink(column, row) * (256 - fx) + ink(column + 1, row) * fx;
+                    let bottom = ink(column, row + 1) * (256 - fx) + ink(column + 1, row + 1) * fx;
+                    let alpha = ((top * (256 - fy) + bottom * fy + 32768) / 65536) as u8;
+                    if alpha != 0 {
+                        self.blend(x + across, y + down, colour, alpha);
+                    }
+                }
+            }
+            return width;
+        }
         for row in 0..font::CELL_HEIGHT {
             for column in 0..glyph.advance {
                 let alpha = glyph.alpha(column, row);
@@ -559,6 +591,46 @@ pub const LINE_HEIGHT: u32 = font::CELL_HEIGHT;
 /// trade being made knowingly rather than by accident.
 pub const TITLE_BAR: u32 = 32;
 
+/// Sample a resized packed image at output pixel centres. The callback keeps
+/// shared/volatile memory access with its owner; no aliased slice is created.
+pub fn resample_pixel(
+    sw: u32,
+    sh: u32,
+    dw: u32,
+    dh: u32,
+    x: u32,
+    y: u32,
+    mut read: impl FnMut(u32, u32) -> u32,
+) -> u32 {
+    if [sw, sh, dw, dh]
+        .iter()
+        .any(|&size| size == 0 || size > 16384)
+        || x >= dw
+        || y >= dh
+    {
+        return 0;
+    }
+    let sx = ((x as u64 * 2 + 1) * sw as u64 * 128 / dw as u64) as i64 - 128;
+    let sy = ((y as u64 * 2 + 1) * sh as u64 * 128 / dh as u64) as i64 - 128;
+    let column = sx.div_euclid(256);
+    let row = sy.div_euclid(256);
+    let fx = sx.rem_euclid(256) as u32;
+    let fy = sy.rem_euclid(256) as u32;
+    let x0 = column.clamp(0, sw as i64 - 1) as u32;
+    let x1 = (column + 1).clamp(0, sw as i64 - 1) as u32;
+    let y0 = row.clamp(0, sh as i64 - 1) as u32;
+    let y1 = (row + 1).clamp(0, sh as i64 - 1) as u32;
+    let samples = [read(x0, y0), read(x1, y0), read(x0, y1), read(x1, y1)];
+    let mut pixel = 0;
+    for shift in [0, 8, 16, 24] {
+        let top = ((samples[0] >> shift) & 255) * (256 - fx) + ((samples[1] >> shift) & 255) * fx;
+        let bottom =
+            ((samples[2] >> shift) & 255) * (256 - fx) + ((samples[3] >> shift) & 255) * fx;
+        pixel |= ((top * (256 - fy) + bottom * fy + 32768) / 65536) << shift;
+    }
+    pixel
+}
+
 /// A stack of things laid out one under another.
 ///
 /// The whole of the layout this has. It is not a constraint solver and does not
@@ -619,16 +691,16 @@ fn corner_coverage(x: u32, y: u32, radius: u32) -> u8 {
     if x > radius || y > radius {
         return 0;
     }
-    const SAMPLES: u32 = 4;
+    const SAMPLES: u32 = 8;
     let scale = SAMPLES * 2;
-    let limit = (radius * scale) * (radius * scale);
+    let limit = (radius as u64 * scale as u64).pow(2);
     let mut inside = 0;
     for down in 0..SAMPLES {
         for across in 0..SAMPLES {
-            // Sixteen sample centres, represented in eighth-pixel units.
+            // Sixty-four sample centres, represented in sixteenth-pixel units.
             let sample_x = (x - 1) * scale + across * 2 + 1;
             let sample_y = (y - 1) * scale + down * 2 + 1;
-            if sample_x * sample_x + sample_y * sample_y <= limit {
+            if sample_x as u64 * sample_x as u64 + sample_y as u64 * sample_y as u64 <= limit {
                 inside += 1;
             }
         }
@@ -636,7 +708,7 @@ fn corner_coverage(x: u32, y: u32, radius: u32) -> u8 {
     (inside * 255 / (SAMPLES * SAMPLES)) as u8
 }
 
-/// Sixteen-sample coverage for a rounded rectangle, including off-shape pixels.
+/// Sixty-four-sample coverage for a rounded rectangle, including off-shape pixels.
 /// Shared by client panels and compositor decorations for matching edges.
 #[must_use]
 pub fn rounded_coverage(x: u32, y: u32, width: u32, height: u32, radius: u32) -> u8 {
@@ -795,6 +867,64 @@ mod tests {
     fn a_pixel_outside_the_radius_is_never_covered() {
         assert_eq!(corner_coverage(9, 1, 8), 0);
         assert_eq!(corner_coverage(1, 9, 8), 0);
+    }
+
+    #[test]
+    fn large_corner_math_and_scaled_glyphs_preserve_bounds() {
+        assert_eq!(corner_coverage(1, 1, 4096), 255);
+        assert_eq!(corner_coverage(4096, 4096, 4096), 0);
+        let mut pixels = [0x12345678u32; 32 * 52 + 2];
+        let end = pixels.len() - 1;
+        pixels[1..end].fill(0);
+        let mut canvas = unsafe { Canvas::packed(pixels.as_mut_ptr().add(1) as usize, 32, 52) };
+        canvas.set_text_style(font::Face::Smooth, true);
+        canvas.glyph_scaled(0, 0, 'A', Colour(0xffffff), 3);
+        assert!(
+            pixels[1..end]
+                .iter()
+                .any(|&pixel| pixel > 0 && pixel < 0xffffff)
+        );
+        assert_eq!(pixels[0], 0x12345678);
+        assert_eq!(pixels[end], 0x12345678);
+        canvas.glyph_scaled(31, 51, 'A', Colour(0xffffff), 3);
+        assert_eq!(pixels[0], 0x12345678);
+        assert_eq!(pixels[end], 0x12345678);
+    }
+
+    #[test]
+    fn image_resampling_preserves_centres_edges_and_refuses_bad_shapes() {
+        let pixels = [0xff000000, 0xffff0000, 0xff00ff00, 0xff0000ff];
+        for y in 0..2 {
+            for x in 0..2 {
+                assert_eq!(
+                    resample_pixel(2, 2, 2, 2, x, y, |sx, sy| pixels[(sy * 2 + sx) as usize]),
+                    pixels[(y * 2 + x) as usize]
+                );
+            }
+        }
+        assert_eq!(
+            resample_pixel(2, 2, 1, 1, 0, 0, |sx, sy| pixels[(sy * 2 + sx) as usize]),
+            0xff404040
+        );
+        for y in 0..19 {
+            for x in 0..11 {
+                assert_eq!(
+                    resample_pixel(4, 7, 11, 19, x, y, |sx, sy| {
+                        assert!(sx < 4 && sy < 7);
+                        0xa5137bef
+                    }),
+                    0xa5137bef
+                );
+            }
+        }
+        assert_eq!(
+            resample_pixel(0, 2, 2, 2, 0, 0, |_, _| panic!("invalid source read")),
+            0
+        );
+        assert_eq!(
+            resample_pixel(2, 2, 2, 2, 2, 0, |_, _| panic!("invalid destination read")),
+            0
+        );
     }
 
     /// A quarter-circle of radius r has area pi*r*r/4. Summing the coverage of

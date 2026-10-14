@@ -78,6 +78,24 @@ try {
     Wait-DesktopMarker 'launch: asked for term'
     Wait-DesktopMarker 'compositor: started a terminal, and lent it the filesystem and the network'
     Save-DesktopFrame 'terminal'
+    Send-DesktopKey 'meta_l-f'
+    Wait-DesktopMarker 'wm: maximized focused window'
+    Save-DesktopFrame 'wm-maximized'
+    Send-DesktopKey 'meta_l-f'
+    Wait-DesktopMarker 'wm: restored window size'
+    Send-DesktopKey 'meta_l-shift-right'
+    Wait-DesktopMarker 'wm: moved focused window'
+    Send-DesktopKey 'meta_l-shift-l'
+    Wait-DesktopMarker 'wm: resized focused window'
+    Send-DesktopKey 'meta_l-m'
+    Wait-DesktopMarker 'wm: minimized focused window'
+    Send-DesktopKey 'meta_l-shift-m'
+    Wait-DesktopMarker 'wm: restored hidden windows'
+    Send-DesktopKey 'meta_l-t'
+    Wait-DesktopMarker 'wm: tiled visible windows'
+    Wait-DesktopMarker 'compositor: resized frame presented for client 0: 942x516'
+    Wait-DesktopMarker 'compositor: resized frame presented for client 1: 942x516'
+    Save-DesktopFrame 'wm-tiled'
     Send-DesktopKey 'meta_l-shift-q'
     Wait-DesktopMarker 'compositor: Super+Shift+Q requested closing'
     Wait-DesktopMarker 'term: accepted decoration close'
@@ -97,7 +115,7 @@ try {
     $Writer.WriteLine('quit')
     if (-not $Runner.WaitForExit(15000)) { throw 'Runner did not stop after monitor quit' }
     if ($Runner.ExitCode -ne 0) { throw "run.ps1 failed (exit $($Runner.ExitCode)); see $Evidence" }
-    Write-Host "PASS: native 4x MSAA, blur, Super shortcuts, filtered launch, window switching and appearance; $Evidence"
+    Write-Host "PASS: native AA, blur, button-free decorations, WM maximize/restore/move/resize/minimize/tiling, launch, switching and appearance; $Evidence"
 } finally {
     if ($null -ne $Writer) {
         if (-not $Runner.HasExited) { try { $Writer.WriteLine('quit') } catch { } }

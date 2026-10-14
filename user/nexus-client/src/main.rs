@@ -163,7 +163,7 @@ extern "C" fn main() -> ! {
         // answer is what keeps this from drawing over a frame that has not
         // been composited yet: with no reply this would race the compositor
         // for the buffer, and tearing is what that looks like.
-        if nexus_user::send(COMPOSITOR, b"damaged", &[]).is_err() {
+        if present(width,height).is_err() {
             failed("client: FAILED: could not say it had drawn");
             finish();
         }
@@ -295,11 +295,21 @@ fn live(mut width: u32, mut height: u32, tint: u32, surface: &mut Handle) {
         if redraw {
             frame = frame.wrapping_add(1);
             draw(width, height, tint, frame);
-            if nexus_user::send(COMPOSITOR, b"damaged", &[]).is_err() {
+            if present(width,height).is_err() {
                 return;
             }
         }
     }
+}
+
+// Complete-frame dimensions let the compositor distinguish a resized frame
+// from an older queued submission without releasing the buffer before blit.
+fn present(width:u32,height:u32)->Result<(),nexus_user::Error> {
+    let mut message=[0u8;23];
+    message[..7].copy_from_slice(b"damaged");
+    message[15..19].copy_from_slice(&width.to_le_bytes());
+    message[19..23].copy_from_slice(&height.to_le_bytes());
+    nexus_user::send(COMPOSITOR,&message,&[]).map(|_|())
 }
 
 /// Note a key that was sent to this program.

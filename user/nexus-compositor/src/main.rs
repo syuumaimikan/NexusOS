@@ -108,6 +108,7 @@
 #![no_main]
 
 extern crate alloc;
+mod wm;
 
 /// Where this program's allocations come from.
 ///
@@ -990,6 +991,10 @@ struct Tile {
     frames: u32,
     /// Release the submitted shared buffer only after this batch is composited.
     acknowledge: bool,
+    /// A replacement surface needs a new full-size client frame before its
+    /// presentation can be reported as complete.
+    resized: bool,
+    resize_ready: bool,
     /// Keys forwarded to it, likewise.
     keys: u32,
     /// Put away, and reachable only by its tab.
@@ -1763,6 +1768,8 @@ fn start_program(
         live: true,
         frames: 0,
         acknowledge: false,
+        resized: false,
+        resize_ready: false,
         keys: 0,
         minimised: false,
         restored: None,
@@ -1997,6 +2004,11 @@ fn serve(
                     Some(Typed::Linux) => wanted = Some(Launched::Window(What::Linux)),
                     Some(Typed::Terminal) => wanted = Some(Launched::Window(What::Terminal)),
                     Some(Typed::Settings) => wanted = Some(Launched::Window(What::Settings)),
+                    Some(Typed::Wm(action)) => {
+                        wm::apply(action,screen,tiles,&mut focus,&mut order);
+                        announce(shell,tiles,focus,&mut reported);
+                        pending=pending.union(everything(screen));
+                    }
                     Some(Typed::Focus) => {
                         raise(&mut order, focus);
                         announce(shell, tiles, focus, &mut reported);
@@ -2203,6 +2215,11 @@ fn serve(
                         // below. Releasing it here permits the client to draw
                         // over it before the compositor has consumed its frame.
                         tile.acknowledge = true;
+                        if tile.resized && message[..received.bytes].starts_with(wire::DAMAGED)
+                            && received.bytes>=23 && read_u32(&message,7)==0 && read_u32(&message,11)==0
+                            && read_u32(&message,15)==tile.width && read_u32(&message,19)==tile.height {
+                            tile.resize_ready=true;
+                        }
                         // That window and no other, and -- when the client
                         // said so -- only the part of it that changed. This is
                         // what damage tracking exists for: a client redrawing
@@ -2409,6 +2426,10 @@ fn serve(
         // frames are released without reading them so clients can keep running.
         for (index, tile) in tiles.iter_mut().enumerate() {
             if let Some(tile) = tile.as_mut() {
+                if tile.resize_ready && !asleep && !tile.minimised {
+                    nexus_user::log(&alloc::format!("compositor: resized frame presented for client {index}: {}x{}",tile.width,tile.height)).ok();
+                    tile.resize_ready=false;tile.resized=false;
+                }
                 if core::mem::take(&mut tile.acknowledge)
                     && nexus_user::send(tile.channel, b"shown", &[]).is_err()
                 {
@@ -2572,6 +2593,7 @@ enum What {
 
 /// What reading from the keyboard turned out to be.
 enum Typed {
+    Wm(wm::Action),
     Focus,
     Terminal,
     Settings,
@@ -3455,6 +3477,7 @@ fn read_key(
     // the focused client.
     if message[0] == key::SUPER {
         let chord = read_u32(&message, 1);
+        if let Some(action)=wm::chord(chord) {return Some(Typed::Wm(action));}
         match chord & 0xffff {
             0x20 => {
                 nexus_user::log("compositor: Super+Space opens the command bar").ok();
@@ -3719,54 +3742,6 @@ fn read_pointer(
                 continue;
             }
 
-            if tile.title_contains(cursor.x, cursor.y)
-                && cursor.x >= tile.x + 10
-                && cursor.x < tile.x + 58
-            {
-                let control = (cursor.x - tile.x - 10) / 16;
-                cursor.held = true;
-                cursor.dragging = None;
-                match control {
-                    0 => {
-                        nexus_user::send(tile.channel, b"close", &[]).ok();
-                        nexus_user::log("compositor: decoration requested closing").ok();
-                    }
-                    1 => {
-                        tile.minimised = true;
-                        nexus_user::log("compositor: decoration minimised the window").ok();
-                    }
-                    _ => {
-                        if let Some((x, y, width, height)) = tile.restored {
-                            if resize(index, tile, width, height).is_ok()
-                                && tile.width == width
-                                && tile.height == height
-                            {
-                                tile.x = x;
-                                tile.y = y;
-                                tile.restored = None;
-                                nexus_user::log("compositor: decoration restored the window").ok();
-                            }
-                        } else {
-                            let previous = (tile.x, tile.y, tile.width, tile.height);
-                            let width = screen.width.saturating_sub(32);
-                            let height = screen.usable_height().saturating_sub(32);
-                            if resize(index, tile, width, height).is_ok()
-                                && tile.width == width
-                                && tile.height == height
-                            {
-                                tile.restored = Some(previous);
-                                tile.x = screen.x + 16;
-                                tile.y = screen.y + 16;
-                                nexus_user::log("compositor: decoration maximised the window").ok();
-                            }
-                        }
-                    }
-                }
-                raise(order, index);
-                *focus = index;
-                return Some(everything(screen));
-            }
-
             if tile.grip_contains(cursor.x, cursor.y) {
                 cursor.dragging = Some(Drag {
                     tile: index,
@@ -3826,7 +3801,7 @@ fn read_pointer(
                     let moved_x = clamp(wanted_x, screen.x, screen.x + screen.width - tile.width);
                     let moved_y = clamp(
                         wanted_y,
-                        screen.y,
+                        screen.y+wm::TOP_RESERVED,
                         screen.taskbar_y().saturating_sub(tile.height),
                     );
                     if moved_x != tile.x || moved_y != tile.y {
@@ -3920,18 +3895,18 @@ fn resize(index: usize, tile: &mut Tile, width: u32, height: u32) -> Result<(), 
         return Ok(());
     }
 
-    // What still fits, row by row. The two are packed to different widths, so
-    // there is no copying them as one run.
-    let keep_width = width.min(tile.width) as usize;
-    let keep_height = height.min(tile.height) as usize;
-    for row in 0..keep_height {
-        let from = tile.mapped_at + row * tile.width as usize * 4;
+    // Keep a complete filtered preview until the client submits its new size.
+    // Copying only the old overlap left black strips on a growing window.
+    for row in 0..height as usize {
         let to = staging + row * width as usize * 4;
-        for column in 0..keep_width {
-            // SAFETY: both surfaces are mapped and writable here, and the
-            // offsets are inside the smaller of the two in each direction.
+        for column in 0..width as usize {
+            let pixel=nexus_ui::resample_pixel(tile.width,tile.height,width,height,column as u32,row as u32,|x,y| {
+                // SAFETY: sampled coordinates are bounded to the old surface.
+                unsafe {core::ptr::read_volatile((tile.mapped_at+(y as usize*tile.width as usize+x as usize)*4) as *const u32)}
+            });
+            // SAFETY: the new surface is mapped, exclusively initialized here,
+            // and these coordinates are bounded to its requested dimensions.
             unsafe {
-                let pixel = core::ptr::read_volatile((from + column * 4) as *const u32);
                 core::ptr::write_volatile((to + column * 4) as *mut u32, pixel);
             }
         }
@@ -3978,6 +3953,8 @@ fn resize(index: usize, tile: &mut Tile, width: u32, height: u32) -> Result<(), 
     tile.surface = fresh;
     tile.width = width;
     tile.height = height;
+    tile.resized=true;
+    tile.resize_ready=false;
     Ok(())
 }
 
@@ -4281,25 +4258,10 @@ fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
             paint_pixel(screen, tile.x + x, tile.y + y, colour, coverage);
         }
     }
-    for (index, colour) in [0x00ee6a63, 0x00e8bb4e, 0x005cc88a].iter().enumerate() {
-        for y in 0..11u32 {
-            for x in 0..11u32 {
-                if 12 + index as u32 * 16 + x < tile.width {
-                    paint_pixel(
-                        screen,
-                        tile.x + 12 + index as u32 * 16 + x,
-                        tile.y + 10 + y,
-                        if focused { *colour } else { 0x009ba7ba },
-                        nexus_ui::rounded_coverage(x, y, 11, 11, 5),
-                    );
-                }
-            }
-        }
-    }
     // Render the title to a tiny packed canvas, then copy through the same
     // clipped path as decorations so damage never overwrites another window.
     let width = nexus_ui::measure(tile.title);
-    if width + 140 <= tile.width {
+    if width + 28 <= tile.width {
         let mut pixels = alloc::vec![colour; width as usize * 16];
         let mut canvas =
             unsafe { nexus_ui::Canvas::packed(pixels.as_mut_ptr() as usize, width, 16) };
