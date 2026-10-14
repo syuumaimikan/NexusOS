@@ -112,7 +112,7 @@ static WHICH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new
 
 extern "C" fn main() -> ! {
     // Before anything allocates, and NexusUI allocates.
-    if !nexus_user::heap::init(nexus_user::heap::DEFAULT_SIZE) {
+    if !nexus_user::heap::init(1024 * 1024) {
         failed("client: FAILED: could not get a heap");
         finish();
     }
@@ -398,6 +398,7 @@ fn draw(width: u32, height: u32, tint: u32, frame: u32) {
         if let Some(pixels) = nexus_ui::raster3d::cube(&mut view, frame) {
             if frame == 0 && pixels > 0 {
                 nexus_user::log("client: software 3D cube rendered into compositor surface").ok();
+                nexus_user::log("client: 4x MSAA resolved with per-sample depth").ok();
             }
         }
     }

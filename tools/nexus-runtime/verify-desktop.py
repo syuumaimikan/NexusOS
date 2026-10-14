@@ -19,10 +19,16 @@ def load(path):
     return width, height, pixel
 
 
+if len(sys.argv) == 3 and sys.argv[1] == '--pointer':
+    _, _, pixel = load(Path(sys.argv[2]))
+    sys.exit(0 if pixel(1400, 500) == (242, 246, 255) and pixel(1401, 502) == (18, 26, 42) else 1)
+
 root = Path(sys.argv[1])
 frames = {name: load(root / (name + '.ppm')) for name in ('desktop', 'maximised', 'restored', 'minimised', 'dock-restored', 'closed')}
-for width, height, _ in frames.values():
+for width, height, pixel in frames.values():
     assert (width, height) == (1920, 1200), 'Unexpected test display geometry'
+    assert pixel(1400, 500) == (242, 246, 255), 'Pointer did not reach the capture position on an idle desktop'
+    assert pixel(1401, 502) == (18, 26, 42), 'Pointer interior is stale or incomplete'
 normal = frames['desktop'][2]
 green = (92, 200, 138)
 inactive = (155, 167, 186)

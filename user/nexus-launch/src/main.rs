@@ -12,6 +12,9 @@
 //! no directory; it cannot read `BIN/` and would not know what is in it if it
 //! could.
 //!
+//! Existing window names/slots are supplied by the compositor. A selection
+//! sends a checked activation request; it never receives window handles.
+//!
 //! What it does is send four bytes to the compositor saying which of a fixed
 //! set of things somebody chose. The compositor decides whether to do it, which
 //! program that means, and what to lend it — exactly as it already does when
@@ -230,11 +233,12 @@ extern "C" fn main() -> ! {
 
 /// The window.
 struct Launcher {
+    windows: Vec<OpenWindow>,
     /// What has been typed.
     typed: String,
     /// Which of the matches is under the cursor.
     at: usize,
-    /// Which entries match, as indices into [`ENTRIES`], best first.
+    /// Matching app indices followed by window indices, best first.
     matching: Vec<usize>,
     /// Still open.
     open: bool,
@@ -246,6 +250,7 @@ struct Launcher {
 impl Launcher {
     fn new() -> Self {
         let mut launcher = Self {
+            windows: Vec::new(),
             typed: String::new(),
             at: 0,
             matching: Vec::new(),
@@ -282,6 +287,21 @@ impl Launcher {
             scored.push((rank, index));
         }
 
+        for (index, window) in self.windows.iter().enumerate() {
+            let name = window.name.to_lowercase();
+            let rank = if wanted.is_empty() {
+                1
+            } else if name.starts_with(&wanted) {
+                0
+            } else if name.contains(&wanted) {
+                1
+            } else if is_subsequence(&wanted, &name) {
+                2
+            } else {
+                continue;
+            };
+            scored.push((rank, ENTRIES.len() + index));
+        }
         scored.sort_by_key(|(rank, index)| (*rank, *index));
         self.matching = scored.into_iter().map(|(_, index)| index).collect();
         // The cursor cannot point past the end of a list that has just got
@@ -292,6 +312,23 @@ impl Launcher {
 
     /// Ask for whatever is under the cursor, and close.
     fn choose(&mut self) -> bool {
+        if let Some(window) = self
+            .matching
+            .get(self.at)
+            .and_then(|index| index.checked_sub(ENTRIES.len()))
+            .and_then(|index| self.windows.get(index))
+        {
+            let mut request = [0u8; 8];
+            request[..4].copy_from_slice(b"pick");
+            request[4..].copy_from_slice(&window.slot.to_le_bytes());
+            if nexus_user::send(COMPOSITOR, &request, &[]).is_err() {
+                failed("launch: FAILED: window switch could not be sent");
+            } else {
+                nexus_user::log("launch: asked to switch to an open window").ok();
+            }
+            self.open = false;
+            return true;
+        }
         let Some(entry) = self.matching.get(self.at).and_then(|at| ENTRIES.get(*at)) else {
             return false;
         };
@@ -323,8 +360,15 @@ impl Launcher {
     }
 }
 
-/// Whether every character of `wanted` appears in `name`, in order.
+/// A compositor-supplied window name and slot, without window capabilities.
+struct OpenWindow {
+    slot: u32,
+    name: String,
+    away: bool,
+}
+
 ///
+/// Whether every character of `wanted` appears in `name`, in order.
 /// What makes `tl` find "Terminal". Compares by `char` rather than by byte, so
 /// a Japanese name is matched a character at a time rather than a third of a
 /// character at a time.
@@ -336,49 +380,74 @@ fn is_subsequence(wanted: &str, name: &str) -> bool {
 }
 
 impl App for Launcher {
+    fn message(&mut self, bytes: &[u8]) -> bool {
+        if bytes == b"wclr" {
+            self.windows.clear();
+            self.narrow();
+            return true;
+        }
+        if bytes.len() >= 9 && bytes.starts_with(b"wrow") {
+            let slot = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+            if slot >= 8 {
+                return false;
+            }
+            let Ok(name) = core::str::from_utf8(&bytes[9..]) else {
+                return false;
+            };
+            self.windows.retain(|window| window.slot != slot);
+            self.windows.push(OpenWindow {
+                slot,
+                name: String::from(name),
+                away: bytes[8] != 0,
+            });
+            self.narrow();
+            return true;
+        }
+        false
+    }
     fn draw(&mut self, canvas: &mut Canvas) {
-        canvas.set_text_style(
-            nexus_ui::font::Face::parse(Some(self.look.font.name())),
-            self.look.smooth,
-        );
-        let top = Colour(self.look.top.packed());
-        let bottom = Colour(self.look.bottom.packed());
+        canvas.set_layer(true);
+        canvas.set_text_style(nexus_ui::font::Face::Smooth, true);
         let accent = Colour(self.look.accent.packed());
-        let ink = Colour::rgb(0xE6, 0xEC, 0xF5);
-        let quiet = Colour::rgb(0x8A, 0x9A, 0xB4);
-        let grave = Colour::rgb(0xE0, 0x90, 0x80);
+        let ink = Colour(0x00333c57);
+        let quiet = Colour(0x006c7490);
+        let grave = Colour(0x00b34e68);
 
-        canvas.gradient(canvas.bounds(), top, bottom);
-        let area = canvas.bounds().inset(PAD);
-
-        // The line being typed, with a block for a cursor. A caret drawn as a
-        // thin line would be a caret nobody can see at this size.
-        let field = Rect::new(area.x, area.y, area.width, nexus_ui::LINE_HEIGHT + PAD);
-        canvas.panel(
-            field,
-            5,
-            Colour(
-                self.look
-                    .top
-                    .towards(nexus_look::Colour::new(0, 0, 0), 40)
-                    .packed(),
-            ),
-            accent,
+        canvas.fill(canvas.bounds(), Colour(0xb8f6f4ff));
+        // The compositor owns the first 32 rows for its title decoration.
+        let bounds = canvas.bounds();
+        let area = Rect::new(
+            PAD,
+            32 + PAD,
+            bounds.width.saturating_sub(PAD * 2),
+            bounds.height.saturating_sub(32 + PAD * 2),
         );
-        let baseline = field.y + PAD / 2;
-        let width = canvas.text(field.x + PAD / 2, baseline, &self.typed, ink);
+        let field = Rect::new(area.x, area.y, area.width, 42);
+        canvas.fill_rounded(field, 12, Colour(0xd8ffffff));
+        canvas.fill_rounded(Rect::new(field.x + 12, field.y + 12, 13, 13), 6, quiet);
+        canvas.fill_rounded(
+            Rect::new(field.x + 14, field.y + 14, 9, 9),
+            4,
+            Colour(0x00f7f6ff),
+        );
+        canvas.fill(Rect::new(field.x + 24, field.y + 24, 5, 2), quiet);
+        let baseline = field.y + 13;
+        // Keep the caret inside the field even after a long query.
+        let mut visible = self.typed.as_str();
+        while nexus_ui::measure(visible) > field.width.saturating_sub(58) {
+            let Some(letter) = visible.chars().next() else {
+                break;
+            };
+            visible = &visible[letter.len_utf8()..];
+        }
+        let width = canvas.text(field.x + 38, baseline, visible, ink);
         canvas.fill(
-            Rect::new(
-                field.x + PAD / 2 + width + 1,
-                baseline,
-                8,
-                nexus_ui::LINE_HEIGHT,
-            ),
+            Rect::new(field.x + 38 + width + 1, baseline, 2, nexus_ui::LINE_HEIGHT),
             accent,
         );
         if self.typed.is_empty() {
             canvas.text(
-                field.x + PAD / 2 + 12,
+                field.x + 44,
                 baseline,
                 nexus_i18n::text("launch.hint"),
                 quiet,
@@ -386,32 +455,45 @@ impl App for Launcher {
         }
 
         // The matches, one per row, with the one under the cursor picked out.
-        let row = nexus_ui::LINE_HEIGHT + 8;
+        let row = 38;
         let mut y = field.y + field.height + PAD;
-        for (place, index) in self.matching.iter().enumerate() {
-            if y + row > area.y + area.height {
+        let rows = area.height.saturating_sub(field.height + PAD + 28) / row;
+        let start = self.at.saturating_sub(rows.saturating_sub(1) as usize);
+        for (place, index) in self.matching.iter().enumerate().skip(start) {
+            if y + row > area.y + area.height.saturating_sub(28) {
                 break;
             }
-            let Some(entry) = ENTRIES.get(*index) else {
+            let (name, dangerous, detail) = if let Some(entry) = ENTRIES.get(*index) {
+                (nexus_i18n::text(entry.key), entry.grave, "")
+            } else if let Some(window) = self.windows.get(index.saturating_sub(ENTRIES.len())) {
+                (
+                    window.name.as_str(),
+                    false,
+                    if window.away {
+                        "Restore window"
+                    } else {
+                        "Open window"
+                    },
+                )
+            } else {
                 continue;
             };
             let here = Rect::new(area.x, y, area.width, row);
             if place == self.at {
-                canvas.fill_rounded(here, 4, accent);
+                canvas.fill_rounded(here, 10, Colour(0x00e2ddfa));
             }
-            let colour = if place == self.at {
-                Colour::rgb(0x08, 0x10, 0x20)
-            } else if entry.grave {
-                grave
-            } else {
-                ink
-            };
+            let colour = if dangerous { grave } else { ink };
+            canvas.fill_rounded(Rect::new(here.x + 8, here.y + 7, 24, 24), 7, accent);
             canvas.text(
-                here.x + PAD / 2,
-                here.y + 4,
-                nexus_i18n::text(entry.key),
-                colour,
+                here.x + 15,
+                here.y + 11,
+                if dangerous { "!" } else { ">" },
+                Colour(0x00ffffff),
             );
+            canvas.text(here.x + 44, here.y + 11, name, colour);
+            if !detail.is_empty() && here.width > 300 {
+                canvas.text(here.x + here.width - 136, here.y + 11, detail, quiet);
+            }
             y += row;
         }
 
@@ -435,6 +517,9 @@ impl App for Launcher {
     fn key(&mut self, key: Key) -> bool {
         match key {
             Key::Character(letter) => {
+                if self.typed.chars().count() >= 128 {
+                    return false;
+                }
                 self.typed.push(letter);
                 self.narrow();
                 true

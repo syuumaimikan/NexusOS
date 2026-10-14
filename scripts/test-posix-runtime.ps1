@@ -203,9 +203,18 @@ try {
             }
             function Capture-Desktop([string]$Name) {
                 Move-DesktopPoint 1400 500
-                Start-Sleep -Milliseconds 200
                 $DesktopPpm = Join-Path $Run "$Name.ppm"
-                Invoke-Screendump -Writer $Writer -Path $DesktopPpm
+                # Input delivery/rendering can lag the HMP writes during the
+                # startup animation or resize. Wait for the actual pointer in
+                # a captured frame rather than accepting an arbitrary delay.
+                $PointerDeadline = [DateTime]::UtcNow.AddSeconds(20)
+                do {
+                    Invoke-Screendump -Writer $Writer -Path $DesktopPpm
+                    & python (Join-Path $Repo 'tools/nexus-runtime/verify-desktop.py') --pointer $DesktopPpm
+                    if ($LASTEXITCODE -eq 0) { break }
+                    if ([DateTime]::UtcNow -ge $PointerDeadline) { throw "Pointer did not settle at the capture position: $DesktopPpm" }
+                    Start-Sleep -Milliseconds 250
+                } while ($true)
                 Convert-PpmToPng -PpmPath $DesktopPpm -PngPath (Join-Path $Run "$Name.png")
             }
             Capture-Desktop 'desktop'

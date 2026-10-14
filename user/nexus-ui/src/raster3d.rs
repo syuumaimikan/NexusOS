@@ -95,6 +95,127 @@ impl DepthBuffer {
     }
 }
 
+/// Four independently depth-tested samples per pixel. Resolve averages sample
+/// colours only after all faces, avoiding dark seams and order-dependent edges.
+/// This is CPU MSAA; it does not require Vulkan or a hardware GPU driver.
+pub struct MsaaBuffer {
+    width: u32,
+    height: u32,
+    depths: Vec<[u16; 4]>,
+    colours: Vec<[u32; 4]>,
+}
+
+impl MsaaBuffer {
+    /// Capture an opaque canvas as the background for uncovered samples.
+    /// Memory is bounded to one million pixels (24 bytes each), and fallible.
+    pub fn new(canvas: &Canvas) -> Option<Self> {
+        let width = canvas.width();
+        let height = canvas.height();
+        let count = width.checked_mul(height)? as usize;
+        if width == 0 || height == 0 || width > 4096 || height > 4096 || count > 1024 * 1024 {
+            return None;
+        }
+        let mut depths = Vec::new();
+        let mut colours = Vec::new();
+        depths.try_reserve_exact(count).ok()?;
+        colours.try_reserve_exact(count).ok()?;
+        depths.resize(count, [0; 4]);
+        for y in 0..height {
+            for x in 0..width {
+                colours.push([canvas.get(x, y)?.0 & 0xffffff; 4]);
+            }
+        }
+        Some(Self {
+            width,
+            height,
+            depths,
+            colours,
+        })
+    }
+
+    /// Positive inverse depth, either winding, and top-left shared-edge rules.
+    /// Sample positions are quarter/three-quarter pixel centres on both axes.
+    /// Returns samples that passed depth, not a pixel coverage approximation.
+    pub fn triangle(&mut self, mut v: [Vertex; 3], colour: Colour) -> usize {
+        if v.iter().any(|vertex| vertex.depth == 0) {
+            return 0;
+        }
+        let edge = |a: Vertex, b: Vertex, x: i64, y: i64| {
+            (4 * i64::from(b.x) - 4 * i64::from(a.x)) * (y - 4 * i64::from(a.y))
+                - (4 * i64::from(b.y) - 4 * i64::from(a.y)) * (x - 4 * i64::from(a.x))
+        };
+        let mut area = edge(v[0], v[1], 4 * i64::from(v[2].x), 4 * i64::from(v[2].y));
+        if area == 0 {
+            return 0;
+        }
+        if area < 0 {
+            v.swap(1, 2);
+            area = -area;
+        }
+        let left = i32::from(v.iter().map(|vertex| vertex.x).min().unwrap()).max(0);
+        let right =
+            i32::from(v.iter().map(|vertex| vertex.x).max().unwrap()).min(self.width as i32);
+        let top = i32::from(v.iter().map(|vertex| vertex.y).min().unwrap()).max(0);
+        let bottom =
+            i32::from(v.iter().map(|vertex| vertex.y).max().unwrap()).min(self.height as i32);
+        let edges = [(v[1], v[2]), (v[2], v[0]), (v[0], v[1])];
+        let mut drawn = 0;
+        for y in top..bottom {
+            for x in left..right {
+                let index = y as usize * self.width as usize + x as usize;
+                for (sample, (sx, sy)) in [(1, 1), (3, 1), (1, 3), (3, 3)].into_iter().enumerate() {
+                    let weights = edges
+                        .map(|(a, b)| edge(a, b, 4 * i64::from(x) + sx, 4 * i64::from(y) + sy));
+                    if weights
+                        .iter()
+                        .zip(edges)
+                        .any(|(&weight, (a, b))| weight < 0 || (weight == 0 && !top_left(a, b)))
+                    {
+                        continue;
+                    }
+                    let depth = ((weights[0] * i64::from(v[0].depth)
+                        + weights[1] * i64::from(v[1].depth)
+                        + weights[2] * i64::from(v[2].depth))
+                        / area) as u16;
+                    if depth > self.depths[index][sample] {
+                        self.depths[index][sample] = depth;
+                        self.colours[index][sample] = colour.0 & 0xffffff;
+                        drawn += 1;
+                    }
+                }
+            }
+        }
+        drawn
+    }
+
+    /// Present only covered pixels, respecting canvas stride and dimensions.
+    pub fn resolve(&self, canvas: &mut Canvas) -> usize {
+        if canvas.width() != self.width || canvas.height() != self.height {
+            return 0;
+        }
+        let mut written = 0;
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let index = (y * self.width + x) as usize;
+                if self.depths[index].iter().all(|&depth| depth == 0) {
+                    continue;
+                }
+                let mut pixel = 0;
+                for shift in [0, 8, 16] {
+                    let sum: u32 = self.colours[index]
+                        .iter()
+                        .map(|colour| (colour >> shift) & 255)
+                        .sum();
+                    pixel |= (sum / 4) << shift;
+                }
+                canvas.set(x, y, Colour(pixel));
+                written += 1;
+            }
+        }
+        written
+    }
+}
+
 fn edge(a: Vertex, b: Vertex, x: i64, y: i64) -> i64 {
     (2 * i64::from(b.x) - 2 * i64::from(a.x)) * (y - 2 * i64::from(a.y))
         - (2 * i64::from(b.y) - 2 * i64::from(a.y)) * (x - 2 * i64::from(a.x))
@@ -110,7 +231,7 @@ pub fn cube(canvas: &mut Canvas, phase: u32) -> Option<usize> {
     const SIN: [i32; 16] = [
         0, 98, 181, 237, 256, 237, 181, 98, 0, -98, -181, -237, -256, -237, -181, -98,
     ];
-    let mut depth = DepthBuffer::new(canvas.width(), canvas.height())?;
+    let mut depth = MsaaBuffer::new(canvas)?;
     let s = SIN[(phase % 16) as usize];
     let c = SIN[((phase % 16 + 4) % 16) as usize];
     let centre = [(canvas.width() / 2) as i16, (canvas.height() / 2) as i16];
@@ -138,7 +259,6 @@ pub fn cube(canvas: &mut Canvas, phase: u32) -> Option<usize> {
             1,
         )?;
     }
-    let mut written = 0;
     for (corners, colour) in [
         ([0, 1, 3, 2], Colour::rgb(70, 160, 240)),
         ([4, 6, 7, 5], Colour::rgb(220, 100, 80)),
@@ -147,8 +267,7 @@ pub fn cube(canvas: &mut Canvas, phase: u32) -> Option<usize> {
         ([0, 2, 6, 4], Colour::rgb(180, 110, 220)),
         ([1, 5, 7, 3], Colour::rgb(240, 185, 70)),
     ] {
-        written += depth.triangle(
-            canvas,
+        depth.triangle(
             [
                 vertices[corners[0]],
                 vertices[corners[1]],
@@ -156,8 +275,7 @@ pub fn cube(canvas: &mut Canvas, phase: u32) -> Option<usize> {
             ],
             colour,
         );
-        written += depth.triangle(
-            canvas,
+        depth.triangle(
             [
                 vertices[corners[0]],
                 vertices[corners[2]],
@@ -166,7 +284,7 @@ pub fn cube(canvas: &mut Canvas, phase: u32) -> Option<usize> {
             colour,
         );
     }
-    Some(written)
+    Some(depth.resolve(canvas))
 }
 
 /// Perspective projection of camera-space coordinates. Positive Z faces forward.
@@ -191,6 +309,77 @@ mod tests {
     const BLUE: Colour = Colour(0x0000ff);
     fn vertex(x: i16, y: i16, depth: u16) -> Vertex {
         Vertex { x, y, depth }
+    }
+
+    #[test]
+    fn msaa_diagonal_resolves_covered_and_background_samples() {
+        let mut pixels = [BLUE.0; 64];
+        let mut canvas = unsafe { Canvas::packed(pixels.as_mut_ptr() as usize, 8, 8) };
+        let mut msaa = MsaaBuffer::new(&canvas).unwrap();
+        assert!(msaa.triangle([vertex(0, 0, 10), vertex(4, 0, 10), vertex(0, 4, 10)], RED) > 0);
+        assert!(msaa.resolve(&mut canvas) > 0);
+        assert_eq!(pixels[1 * 8 + 1], RED.0);
+        assert_eq!(pixels[2 * 8 + 1], 0x3f00bf); // One red and three blue samples.
+        assert_eq!(pixels[7 * 8 + 7], BLUE.0);
+    }
+
+    #[test]
+    fn msaa_shared_edges_have_no_gaps_or_double_coverage() {
+        let mut pixels = [0u32; 64];
+        let mut canvas = unsafe { Canvas::packed(pixels.as_mut_ptr() as usize, 8, 8) };
+        let mut msaa = MsaaBuffer::new(&canvas).unwrap();
+        let first = msaa.triangle([vertex(1, 1, 10), vertex(7, 1, 10), vertex(7, 7, 10)], RED);
+        let second = msaa.triangle([vertex(1, 1, 20), vertex(7, 7, 20), vertex(1, 7, 20)], RED);
+        // A higher second depth exposes double-covered samples rather than
+        // hiding them with an equal-depth rejection.
+        assert_eq!(first + second, 36 * 4);
+        assert_eq!(msaa.resolve(&mut canvas), 36);
+        assert_eq!(pixels.iter().filter(|&&pixel| pixel == RED.0).count(), 36);
+    }
+
+    #[test]
+    fn msaa_depth_and_winding_are_order_independent_at_edges() {
+        let mut outcomes = Vec::new();
+        for reverse in [false, true] {
+            let mut pixels = [0u32; 64];
+            let mut canvas = unsafe { Canvas::packed(pixels.as_mut_ptr() as usize, 8, 8) };
+            let mut msaa = MsaaBuffer::new(&canvas).unwrap();
+            let mut faces = [
+                (
+                    [vertex(-2, -2, 10), vertex(7, 0, 10), vertex(0, 7, 10)],
+                    BLUE,
+                ),
+                ([vertex(0, 0, 30), vertex(4, 0, 30), vertex(0, 4, 30)], RED),
+            ];
+            if reverse {
+                faces.reverse();
+            }
+            for (mut vertices, colour) in faces {
+                if reverse {
+                    vertices.swap(0, 1);
+                }
+                msaa.triangle(vertices, colour);
+            }
+            msaa.resolve(&mut canvas);
+            outcomes.push(pixels);
+        }
+        assert_eq!(outcomes[0], outcomes[1]);
+        assert_eq!(outcomes[0][2 * 8 + 1], 0x3f00bf);
+    }
+
+    #[test]
+    fn msaa_resolve_respects_strided_surfaces_and_rejects_other_dimensions() {
+        let mut pixels = [0x12345678u32; 32];
+        let mut canvas = unsafe { Canvas::strided(pixels.as_mut_ptr() as usize, 4, 4, 8) };
+        let mut msaa = MsaaBuffer::new(&canvas).unwrap();
+        assert_eq!(msaa.triangle([vertex(0, 0, 10); 3], RED), 0);
+        msaa.triangle([vertex(0, 0, 10), vertex(4, 0, 10), vertex(0, 4, 10)], RED);
+        let mut other = unsafe { Canvas::packed(pixels.as_mut_ptr() as usize, 2, 2) };
+        assert_eq!(msaa.resolve(&mut other), 0);
+        assert!(msaa.resolve(&mut canvas) > 0);
+        for row in 0..4 {
+            assert_eq!(&pixels[row * 8 + 4..row * 8 + 8], &[0x12345678; 4]);
+        }
     }
 
     #[test]

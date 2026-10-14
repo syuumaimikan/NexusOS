@@ -237,14 +237,14 @@ impl Settings {
                 nexus_look::key::STYLE,
                 "settings.style",
                 styles,
-                "gradient"
+                "landscape"
             )),
-            Item::Row(Row::typed(nexus_look::key::TOP, "settings.top", "0b1428").into_colour()),
+            Item::Row(Row::typed(nexus_look::key::TOP, "settings.top", "d9e5f8").into_colour()),
             Item::Row(
-                Row::typed(nexus_look::key::BOTTOM, "settings.bottom", "040814").into_colour()
+                Row::typed(nexus_look::key::BOTTOM, "settings.bottom", "dbc9ee").into_colour()
             ),
             Item::Row(
-                Row::typed(nexus_look::key::ACCENT, "settings.accent", "388be8").into_colour()
+                Row::typed(nexus_look::key::ACCENT, "settings.accent", "7c72d9").into_colour()
             ),
             Item::Row(Row::choice(
                 nexus_look::key::FONT,
@@ -253,13 +253,13 @@ impl Settings {
                     .iter()
                     .map(|font| font.name().to_string())
                     .collect(),
-                "crisp"
+                "smooth"
             )),
             Item::Row(Row::choice(
                 nexus_look::key::SMOOTH,
                 "settings.smooth",
                 alloc::vec!["no".to_string(), "yes".to_string()],
-                "no"
+                "yes"
             )),
             // A name rather than a list. The pictures on a machine are not
             // something this window can enumerate -- it is lent the settings
@@ -415,6 +415,7 @@ impl Settings {
 
 impl App for Settings {
     fn draw(&mut self, canvas: &mut Canvas) {
+        canvas.set_layer(true);
         // Both together, and from the settings file: the face and whether its
         // edges are blended are what a person chose, and a window that ignored
         // them would be a window that looks like it came from somewhere else.
@@ -422,26 +423,82 @@ impl App for Settings {
             nexus_ui::font::Face::parse(Some(self.look.font.name())),
             self.look.smooth,
         );
-        let top = Colour(self.look.top.packed());
-        let bottom = Colour(self.look.bottom.packed());
         let accent = Colour(self.look.accent.packed());
-        let ink = Colour::rgb(0xE6, 0xEC, 0xF5);
-        let quiet = Colour::rgb(0x8A, 0x9A, 0xB4);
+        let ink = Colour(0x00333c57);
+        let quiet = Colour(0x006c7490);
 
-        canvas.gradient(canvas.bounds(), top, bottom);
+        canvas.fill(canvas.bounds(), Colour(0xcaf6f4ff));
 
-        let area = canvas.bounds().inset(PAD);
-        let mut column = nexus_ui::Column::new(area, 4);
+        let bounds = canvas.bounds();
+        let outer = Rect::new(
+            PAD,
+            32 + PAD,
+            bounds.width.saturating_sub(PAD * 2),
+            bounds.height.saturating_sub(32 + PAD * 2),
+        );
+        let section = self.items[..=self.cursor]
+            .iter()
+            .rposition(|item| matches!(item, Item::Heading(_)))
+            .unwrap_or(0);
+        let end = self
+            .items
+            .iter()
+            .enumerate()
+            .skip(section + 1)
+            .find(|(_, item)| matches!(item, Item::Heading(_)))
+            .map_or(self.items.len(), |(index, _)| index);
+        let sidebar = if bounds.width >= 600 {
+            118
+        } else if bounds.width >= 420 {
+            88
+        } else {
+            0
+        };
+        if sidebar != 0 {
+            canvas.fill_rounded(
+                Rect::new(outer.x, outer.y, sidebar, outer.height),
+                12,
+                Colour(0x55ffffff),
+            );
+            let mut y = outer.y + 10;
+            for (index, item) in self.items.iter().enumerate() {
+                if let Item::Heading(label) = item {
+                    if index == section {
+                        canvas.fill_rounded(
+                            Rect::new(outer.x + 6, y, sidebar - 12, 32),
+                            8,
+                            Colour(0x00e2ddfa),
+                        );
+                    }
+                    canvas.text(outer.x + 12, y + 8, nexus_i18n::text(label), ink);
+                    y += 40;
+                }
+            }
+        }
+        let indent = if sidebar == 0 { 0 } else { sidebar + PAD };
+        let area = Rect::new(
+            outer.x + indent,
+            outer.y,
+            outer.width.saturating_sub(indent),
+            outer.height,
+        );
+        let body = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(44));
+        let mut column = nexus_ui::Column::new(body, 4);
 
         let title = column.row(nexus_ui::LINE_HEIGHT + 6);
         canvas.text(
             title.x,
             title.y + 3,
-            nexus_i18n::text("settings.title"),
+            match &self.items[section] {
+                Item::Heading(label) => nexus_i18n::text(label),
+                _ => nexus_i18n::text("settings.title"),
+            },
             ink,
         );
 
-        for index in 0..self.items.len() {
+        let visible = (column.remaining() / (nexus_ui::LINE_HEIGHT + 4)).max(1) as usize;
+        let start = (section + 1).max(self.cursor.saturating_sub(visible - 1));
+        for index in start..end {
             let line = column.line();
             if line.width == 0 {
                 break;
@@ -459,7 +516,7 @@ impl App for Settings {
                         canvas.fill_rounded(
                             Rect::new(line.x, line.y, line.width, line.height),
                             4,
-                            blend(bottom, accent, 64),
+                            Colour(0x00e2ddfa),
                         );
                     }
                     canvas.text(line.x + 8, line.y, nexus_i18n::text(row.label), ink);
@@ -470,7 +527,7 @@ impl App for Settings {
                     };
                     // `text` returns how far it advanced, not where it
                     // stopped, so anything drawn after it has to add the two.
-                    let value_at = line.x + VALUE_AT;
+                    let value_at = line.x + VALUE_AT.min(line.width / 2);
                     let after = value_at + canvas.text(value_at, line.y, &value, ink);
 
                     if row.colour {
@@ -710,16 +767,6 @@ fn write_text(directory: Handle, name: &str, text: &str) -> Result<(), String> {
     }
     nexus_user::close(file).ok();
     Ok(())
-}
-
-/// Part of the way from one colour to another; `amount` is 0..=255.
-fn blend(from: Colour, to: Colour, amount: u32) -> Colour {
-    let mix = |shift: u32| {
-        let one = (from.0 >> shift) & 0xFF;
-        let other = (to.0 >> shift) & 0xFF;
-        (one * (255 - amount) + other * amount) / 255
-    };
-    Colour(mix(16) << 16 | mix(8) << 8 | mix(0))
 }
 
 /// Whether anything has gone wrong, for the status this program exits with.

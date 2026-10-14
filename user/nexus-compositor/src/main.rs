@@ -271,6 +271,7 @@ mod key {
     pub const TAB: u8 = 5;
     /// A function key, numbered from one.
     pub const FUNCTION: u8 = 6;
+    pub const SUPER: u8 = 9;
     /// Not a key: the interface language changed, and this is what to.
     ///
     /// Passed to the desktop, which draws text, and to nobody else. It arrives
@@ -379,7 +380,9 @@ mod power {
 /// Where this program maps the framebuffer.
 const FRAMEBUFFER_AT: usize = 0x0000_0000_2000_0000;
 /// Where it maps the first client surface; the second goes a stride further on.
-const SURFACES_AT: usize = 0x0000_0000_3000_0000;
+// Eight windows plus desktop/wallpaper must remain clear of the user heap at
+// 0x40000000. The old four-window range crossed it when the limit grew.
+const SURFACES_AT: usize = 0x0000_0000_5000_0000;
 /// Address space set aside per surface.
 ///
 /// Twice what one surface may be, because a resize has the old and the new
@@ -607,7 +610,7 @@ const SHELL: &[u8] = b"BIN/SHELL.ELF";
 /// megabyte of address space set aside for a surface and an entry in a wait
 /// set: a compositor that grew both without a bound would be a compositor a
 /// client could exhaust by asking for windows.
-const CLIENTS: usize = 4;
+const CLIENTS: usize = 8;
 /// How many are started at boot.
 ///
 /// The rest are empty until somebody presses the button on the desktop. Two,
@@ -656,13 +659,57 @@ const MIN_SIZE: u32 = 48;
 /// business, and matching the kernel's gradient exactly would mean knowing how
 /// the kernel draws -- which is the coupling this whole arrangement removes.
 const BACKGROUND: u32 = 0x0009_1428;
+const BLUR_RADIUS: u32 = 8;
+
+fn glass_window(tile: &Tile) -> bool {
+    matches!(tile.title, "Command bar" | "Appearance")
+}
+
+struct Backdrop {
+    area: Region,
+    pixels: alloc::vec::Vec<u32>,
+}
+
+impl Backdrop {
+    fn capture(screen: &Screen, area: Region) -> Option<Self> {
+        let area = area.halo(screen);
+        let width = (area.right - area.left) as usize;
+        let height = (area.bottom - area.top) as usize;
+        let count = width.checked_mul(height)?;
+        if count == 0 || count > 1024 * 1024 {
+            return None;
+        }
+        let mut pixels = alloc::vec::Vec::new();
+        pixels.try_reserve_exact(count).ok()?;
+        for y in area.top..area.bottom {
+            for x in area.left..area.right {
+                let at = FRAMEBUFFER_AT + (y as usize * screen.stride as usize + x as usize) * 4;
+                pixels.push(unsafe { core::ptr::read_volatile(at as *const u32) });
+            }
+        }
+        if !nexus_ui::glass::blur(&mut pixels, width, height, BLUR_RADIUS as usize) {
+            return None;
+        }
+        static REPORTED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !REPORTED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            nexus_user::log("compositor: backdrop blur active (CPU)").ok();
+        }
+        Some(Self { area, pixels })
+    }
+
+    fn pixel(&self, x: u32, y: u32) -> u32 {
+        self.pixels[((y - self.area.top) * (self.area.right - self.area.left) + x - self.area.left)
+            as usize]
+    }
+}
 
 /// A rectangle of the display, in screen coordinates.
 ///
 /// Held as edges rather than as a position and a size, because every operation
 /// on it is a comparison of edges and an origin-plus-extent form spends its
 /// life adding the two back together.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Region {
     left: u32,
     top: u32,
@@ -671,6 +718,29 @@ struct Region {
 }
 
 impl Region {
+    fn intersects(self, other: Self) -> bool {
+        !self.is_empty()
+            && !other.is_empty()
+            && self.left < other.right
+            && other.left < self.right
+            && self.top < other.bottom
+            && other.top < self.bottom
+    }
+
+    fn halo(self, screen: &Screen) -> Self {
+        Self {
+            left: self.left.saturating_sub(BLUR_RADIUS),
+            top: self.top.saturating_sub(BLUR_RADIUS),
+            right: self
+                .right
+                .saturating_add(BLUR_RADIUS)
+                .min(screen.screen_width),
+            bottom: self
+                .bottom
+                .saturating_add(BLUR_RADIUS)
+                .min(screen.screen_height),
+        }
+    }
     /// Nothing.
     const fn nothing() -> Self {
         Self {
@@ -977,7 +1047,9 @@ pub extern "C" fn _start() -> ! {
 
 extern "C" fn main() -> ! {
     // Before anything allocates, which here is only the report at the end.
-    if !nexus_user::heap::init(nexus_user::heap::DEFAULT_SIZE) {
+    // Backdrop snapshots and the blur's scratch buffer are bounded separately;
+    // they need more than the small default application heap.
+    if !nexus_user::heap::init(16 * 1024 * 1024) {
         failed("compositor: FAILED: could not get a heap");
         finish();
     }
@@ -1699,6 +1771,8 @@ fn start_program(
             BROWSER => "Web",
             TERMINAL => "Terminal",
             EDITOR => "Editor",
+            LAUNCHER => "Command bar",
+            SETTINGS_WINDOW => "Appearance",
             _ => "Nexus",
         },
     })
@@ -1777,6 +1851,7 @@ fn serve(
     let mut moved = 0u32;
     let mut forwarded = 0u32;
     let mut ended = 0usize;
+    let mut requested_window = None;
     // Which client keys go to. A compositor without this would have to send
     // every key to everyone, which is not routing -- it is broadcasting, and it
     // is how a password ends up in a program that was only ever on screen.
@@ -1905,7 +1980,12 @@ fn serve(
                         // people do, and two launchers reading the same keys
                         // would be a mess neither of them could see.
                         if let Some(slot) = launcher {
-                            if matches!(tiles.get(slot), Some(Some(tile)) if tile.live) {
+                            if let Some(tile) = tiles
+                                .get_mut(slot)
+                                .and_then(Option::as_mut)
+                                .filter(|tile| tile.live)
+                            {
+                                tile.minimised = false;
                                 raise(&mut order, slot);
                                 focus = slot;
                                 pending = pending.union(everything(screen));
@@ -1915,6 +1995,13 @@ fn serve(
                         wanted = Some(Launched::Window(What::Launcher));
                     }
                     Some(Typed::Linux) => wanted = Some(Launched::Window(What::Linux)),
+                    Some(Typed::Terminal) => wanted = Some(Launched::Window(What::Terminal)),
+                    Some(Typed::Settings) => wanted = Some(Launched::Window(What::Settings)),
+                    Some(Typed::Focus) => {
+                        raise(&mut order, focus);
+                        announce(shell, tiles, focus, &mut reported);
+                        pending = pending.union(everything(screen));
+                    }
                     Some(Typed::WaylandServer) => {
                         wanted = Some(Launched::Window(What::WaylandServer));
                     }
@@ -2086,7 +2173,9 @@ fn serve(
                         // a launcher that could put windows away would be a
                         // second desktop.
                         let asked = &message[..received.bytes.min(message.len())];
-                        if let Some(what) = launched(asked) {
+                        if asked.len() == 8 && asked.starts_with(b"pick") {
+                            requested_window = Some(read_u32(asked, 4) as usize);
+                        } else if let Some(what) = launched(asked) {
                             // Said out loud. "compositor: somebody asked for the
                             // launcher" is already logged when it opens, and
                             // what it then asked *for* was the one step in the
@@ -2147,6 +2236,22 @@ fn serve(
         // enough for anybody to see them.
         // What the launcher asked for, now that the loop over ready keys is
         // done and the tile array is nobody's to index.
+        if let Some(index) = requested_window.take() {
+            if Some(index) != launcher {
+                if let Some(tile) = tiles
+                    .get_mut(index)
+                    .and_then(Option::as_mut)
+                    .filter(|tile| tile.live)
+                {
+                    tile.minimised = false;
+                    focus = index;
+                    raise(&mut order, index);
+                    announce(shell, tiles, focus, &mut reported);
+                    pending = pending.union(everything(screen));
+                    nexus_user::log("compositor: command bar switched to an existing window").ok();
+                }
+            }
+        }
         if let Some(asked) = wanted.take() {
             match asked {
                 Launched::Window(what) => {
@@ -2467,6 +2572,9 @@ enum What {
 
 /// What reading from the keyboard turned out to be.
 enum Typed {
+    Focus,
+    Terminal,
+    Settings,
     /// Nothing a client has to see: a language change, a focus move, a key for
     /// a window that has gone.
     Nothing,
@@ -2647,6 +2755,33 @@ fn announce(
     }
     *last = states;
 
+    // The palette gets names and slot identifiers, never handles to windows.
+    // This list follows process exit/minimise as well as window creation.
+    for (launcher_index, launcher) in tiles.iter().enumerate().filter_map(|(index, tile)| {
+        tile.as_ref()
+            .filter(|tile| tile.live && tile.title == "Command bar")
+            .map(|tile| (index, tile))
+    }) {
+        nexus_user::send(launcher.channel, b"wclr", &[]).ok();
+        for (index, tile) in tiles.iter().enumerate().filter_map(|(index, tile)| {
+            tile.as_ref()
+                .filter(|tile| tile.live)
+                .map(|tile| (index, tile))
+        }) {
+            if index == launcher_index {
+                continue;
+            }
+            let mut message = [0u8; 41];
+            message[..4].copy_from_slice(b"wrow");
+            message[4..8].copy_from_slice(&(index as u32).to_le_bytes());
+            message[8] = u8::from(tile.minimised);
+            let name = tile.title.as_bytes();
+            let length = name.len().min(32);
+            message[9..9 + length].copy_from_slice(&name[..length]);
+            nexus_user::send(launcher.channel, &message[..9 + length], &[]).ok();
+        }
+    }
+
     let Some(shell) = shell else { return };
     let mut message = [0u8; desk::WINDOWS.len() + CLIENTS];
     message[..desk::WINDOWS.len()].copy_from_slice(desk::WINDOWS);
@@ -2792,7 +2927,7 @@ fn open_window(
     // because a gap where a tab was is a strip that reshuffles under the
     // pointer. But *only* looking for an unused slot made the window limit a
     // limit on how many windows a session could ever open rather than on how
-    // many it could have at once -- four, and then nothing would start. Found
+    // many it could have at once, and then nothing would start. Found
     // by the launcher, which is the fifth window somebody opens on a machine
     // that boots with three.
     let slot = match tiles.iter().position(Option::is_none) {
@@ -3221,9 +3356,8 @@ fn open_window(
             // launcher is a thing somebody is looking straight at for two
             // seconds, and having it appear wherever the next free slot happens
             // to put it would mean hunting for it every time.
-            let wide = (screen.width / 2).clamp(MIN_SIZE, screen.width.saturating_sub(GAP * 2));
-            let tall = (screen.usable_height() * 2 / 3)
-                .clamp(MIN_SIZE, screen.usable_height().saturating_sub(GAP * 2));
+            let wide = 620u32.clamp(MIN_SIZE, screen.width.saturating_sub(GAP * 2));
+            let tall = 360u32.clamp(MIN_SIZE, screen.usable_height().saturating_sub(GAP * 2));
             start_program(
                 LAUNCHER,
                 Placement {
@@ -3317,7 +3451,52 @@ fn read_key(
         return None;
     }
 
-    // Not a key at all: the kernel saying what the interface language is now.
+    // Super chords are desktop actions; ordinary typed text stays private to
+    // the focused client.
+    if message[0] == key::SUPER {
+        let chord = read_u32(&message, 1);
+        match chord & 0xffff {
+            0x20 => {
+                nexus_user::log("compositor: Super+Space opens the command bar").ok();
+                return Some(Typed::Launch);
+            }
+            0x100 => {
+                nexus_user::log("compositor: Super+Enter opens a terminal").ok();
+                return Some(Typed::Terminal);
+            }
+            0x63 => return Some(Typed::Settings),
+            0x71 if chord & 0x10000 != 0 => {
+                if let Some(tile) = tiles
+                    .get(*focus)
+                    .and_then(Option::as_ref)
+                    .filter(|tile| tile.live && !tile.minimised)
+                {
+                    nexus_user::send(tile.channel, b"close", &[]).ok();
+                    nexus_user::log("compositor: Super+Shift+Q requested closing").ok();
+                }
+                return Some(Typed::Nothing);
+            }
+            0x110..=0x113 => {
+                let backwards = matches!(chord & 0xffff, 0x110 | 0x112);
+                for step in 1..=CLIENTS {
+                    let candidate = if backwards {
+                        (*focus + CLIENTS - step) % CLIENTS
+                    } else {
+                        (*focus + step) % CLIENTS
+                    };
+                    if matches!(tiles.get(candidate), Some(Some(tile)) if tile.live && !tile.minimised)
+                    {
+                        *focus = candidate;
+                        nexus_user::log("compositor: Super+arrow moved focus").ok();
+                        return Some(Typed::Focus);
+                    }
+                }
+                return Some(Typed::Nothing);
+            }
+            _ => return Some(Typed::Nothing),
+        }
+    }
+    // Not a key: the kernel saying which interface language is now selected.
     // It goes to the desktop, which draws words, and to nobody else -- a client
     // drawing a gradient has nothing to do with it, and forwarding it as though
     // it were a keystroke would put a byte nobody expects into every window.
@@ -3446,6 +3625,9 @@ fn read_pointer(
     let dx = read_i32(&message, 0);
     let dy = read_i32(&message, 4);
     let buttons = read_u32(&message, 8);
+    let previous_pointer = cursor.drawn.map_or(Region::nothing(), |(x, y)| {
+        Region::of(x, y, CURSOR as u32, CURSOR as u32)
+    });
 
     // Clamped to the rectangle this program owns. A pointer that could leave it
     // would be drawn over the kernel's panel, which this program does not own
@@ -3466,9 +3648,12 @@ fn read_pointer(
 
     let pressed = buttons & pointer::LEFT != 0;
     let put_away = buttons & pointer::RIGHT != 0;
-    // Nothing, until something is found to have changed. A bare movement is by
-    // far the commonest thing a mouse sends and it changes no window at all.
-    let mut damage = Region::nothing();
+    // Pointer movement still damages its old and new positions, even when no
+    // client is drawing. Otherwise an idle desktop leaves a stale pointer and
+    // a later partial repaint strands its old pixels outside the damage.
+    let pointer_damage =
+        previous_pointer.union(Region::of(cursor.x, cursor.y, CURSOR as u32, CURSOR as u32));
+    let mut damage = pointer_damage;
 
     // The right button on a title bar puts a window away. Checked before the
     // left button's business, because the two are different acts and a window
@@ -3498,13 +3683,18 @@ fn read_pointer(
     //
     // Checked before the windows are: windows are clamped above the strip, so
     // nothing else can be there.
-    if pressed && !cursor.held && cursor.y >= screen.taskbar_y() {
+    let in_top_bar = cursor.y >= screen.y + 8 && cursor.y < screen.y + 30;
+    if pressed && !cursor.held && (cursor.y >= screen.taskbar_y() + 22 || in_top_bar) {
         cursor.held = true;
         if let Some(shell) = shell {
             let mut message = [0u8; desk::CLICK.len() + 8];
             message[..desk::CLICK.len()].copy_from_slice(desk::CLICK);
             let local_x = cursor.x - screen.x;
-            let local_y = cursor.y - screen.taskbar_y();
+            let local_y = if in_top_bar {
+                cursor.y - screen.y - 8
+            } else {
+                cursor.y - screen.taskbar_y()
+            };
             message[3..7].copy_from_slice(&local_x.to_le_bytes());
             message[7..11].copy_from_slice(&local_y.to_le_bytes());
             if nexus_user::send(shell.channel, &message, &[]).is_ok() {
@@ -3513,7 +3703,7 @@ fn read_pointer(
         }
         // Nothing yet: what a press in the strip changes is decided by the
         // desktop, and arrives as a command.
-        return Some(Region::nothing());
+        return Some(pointer_damage);
     }
 
     if pressed && !cursor.held {
@@ -3872,7 +4062,48 @@ fn repaint(
     // covers are freshly painted before it is drawn again. Without that, the
     // saved pixels underneath it would be saved from a framebuffer that already
     // had a pointer in it, and the pointer would smear.
-    let damage = damage.union(Region::of(cursor.x, cursor.y, CURSOR as u32, CURSOR as u32));
+    let mut damage = damage.union(Region::of(cursor.x, cursor.y, CURSOR as u32, CURSOR as u32));
+    // The desktop owns one surface, projected to two places. Its former top
+    // strip is now the screen's top bar, so its damage must follow it too.
+    if shell.is_some()
+        && damage.intersects(Region::of(screen.x, screen.taskbar_y(), screen.width, 22))
+    {
+        damage = damage.union(Region::of(screen.x, screen.y + 8, screen.width, 22));
+    }
+    // Refresh the entire lower scene and sampling halo of every affected
+    // glass pane before capturing it. Iterate to a fixed point when panes
+    // overlap; sampling last frame's glass would accumulate blur on every key.
+    let mut panes = alloc::vec::Vec::new();
+    for tile in tiles
+        .iter()
+        .flatten()
+        .filter(|tile| tile.live && !tile.minimised && glass_window(tile))
+    {
+        panes.push(Region::of(tile.x, tile.y, tile.width, tile.height).halo(screen));
+    }
+    if shell.is_some() {
+        panes.push(Region::of(screen.x, screen.y + 8, screen.width, 22).halo(screen));
+        panes.push(
+            Region::of(
+                screen.x,
+                screen.taskbar_y() + 22,
+                screen.width,
+                TASKBAR - 22,
+            )
+            .halo(screen),
+        );
+    }
+    loop {
+        let previous = damage;
+        for pane in &panes {
+            if damage.intersects(*pane) {
+                damage = damage.union(*pane);
+            }
+        }
+        if damage == previous {
+            break;
+        }
+    }
     // Shadows and the pointer can extend past the last display pixel. Both
     // memory writes and the GPU transfer rectangle must use clipped bounds.
     let damage = Region {
@@ -3919,7 +4150,7 @@ fn repaint(
             continue;
         }
         shadow(screen, tile);
-        composite(screen, tile, true, false);
+        composite(screen, tile, true, glass_window(tile));
         title_bar(screen, tile, index == focus);
         grip(screen, tile, index == focus);
         outline(screen, tile, index == focus);
@@ -3930,7 +4161,18 @@ fn repaint(
     // what is drawn in there, and the moment it did it would be a compositor
     // deciding what a dock looks like.
     match shell {
-        Some(shell) => composite(screen, shell, false, true),
+        Some(shell) => {
+            composite_slice(screen, shell, false, true, 0, 22, screen.y + 8);
+            composite_slice(
+                screen,
+                shell,
+                false,
+                true,
+                22,
+                shell.height.saturating_sub(22),
+                shell.y + 22,
+            );
+        }
         // Nothing has it. Filled rather than left as it was, because the strip
         // is reserved space and the last thing drawn in it is not the truth
         // about a machine whose desktop has ended.
@@ -4028,26 +4270,27 @@ fn fill(screen: &Screen, x: u32, y: u32, width: u32, height: u32, colour: u32) {
 /// that cannot be picked up without picking up whatever is inside it.
 fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
     let colour = if focused { 0x00edf0f7 } else { 0x00dbe1ec };
-    for y in 0..TITLE.min(tile.height) {
-        for x in 0..tile.width {
-            if rounded_inside(x, y, tile.width, tile.height) {
-                fill(screen, tile.x + x, tile.y + y, 1, 1, colour);
-            }
+    let (left, top, right, bottom) = clip::current();
+    for y in top.saturating_sub(tile.y).min(TITLE.min(tile.height))
+        ..bottom.saturating_sub(tile.y).min(TITLE.min(tile.height))
+    {
+        for x in left.saturating_sub(tile.x).min(tile.width)
+            ..right.saturating_sub(tile.x).min(tile.width)
+        {
+            let coverage = nexus_ui::rounded_coverage(x, y, tile.width, tile.height, 14);
+            paint_pixel(screen, tile.x + x, tile.y + y, colour, coverage);
         }
     }
     for (index, colour) in [0x00ee6a63, 0x00e8bb4e, 0x005cc88a].iter().enumerate() {
         for y in 0..11u32 {
             for x in 0..11u32 {
-                let dx = x as i32 - 5;
-                let dy = y as i32 - 5;
-                if dx * dx + dy * dy <= 26 && 12 + index as u32 * 16 + x < tile.width {
-                    fill(
+                if 12 + index as u32 * 16 + x < tile.width {
+                    paint_pixel(
                         screen,
                         tile.x + 12 + index as u32 * 16 + x,
                         tile.y + 10 + y,
-                        1,
-                        1,
                         if focused { *colour } else { 0x009ba7ba },
+                        nexus_ui::rounded_coverage(x, y, 11, 11, 5),
                     );
                 }
             }
@@ -4090,34 +4333,79 @@ fn read_i32(buffer: &[u8], offset: usize) -> i32 {
 /// focus ring could claim focus it does not have.
 fn outline(screen: &Screen, tile: &Tile, focused: bool) {
     let colour = if focused { 0x00c3cddd } else { 0x00a3afc2 };
-    for y in 0..tile.height {
-        for x in 0..tile.width {
-            if rounded_inside(x, y, tile.width, tile.height)
-                && (x == 0
-                    || y == 0
-                    || x + 1 == tile.width
-                    || y + 1 == tile.height
-                    || !rounded_inside(
-                        x.saturating_sub(1),
-                        y.saturating_sub(1),
-                        tile.width.saturating_sub(2),
-                        tile.height.saturating_sub(2),
-                    ))
-            {
-                fill(screen, tile.x + x, tile.y + y, 1, 1, colour);
+    let (left, top, right, bottom) = clip::current();
+    let x0 = left.saturating_sub(tile.x).min(tile.width);
+    let x1 = right.saturating_sub(tile.x).min(tile.width);
+    let border = 14.min(tile.width / 2).min(tile.height / 2).max(1);
+    for y in
+        top.saturating_sub(tile.y).min(tile.height)..bottom.saturating_sub(tile.y).min(tile.height)
+    {
+        let paint = |x| {
+            let outer = nexus_ui::rounded_coverage(x, y, tile.width, tile.height, 14);
+            let inner = if x == 0 || y == 0 {
+                0
+            } else {
+                nexus_ui::rounded_coverage(
+                    x - 1,
+                    y - 1,
+                    tile.width.saturating_sub(2),
+                    tile.height.saturating_sub(2),
+                    13,
+                )
+            };
+            paint_pixel(
+                screen,
+                tile.x + x,
+                tile.y + y,
+                colour,
+                outer.saturating_sub(inner),
+            );
+        };
+        if y >= border && y + border < tile.height {
+            // Only the two edge bands can contribute. Do not evaluate every
+            // interior pixel when a small pointer damage crosses a large window.
+            for x in x0..x1.min(border) {
+                paint(x);
+            }
+            for x in x0.max(tile.width - border)..x1 {
+                paint(x);
+            }
+        } else {
+            for x in x0..x1 {
+                paint(x);
             }
         }
     }
 }
 
-fn rounded_inside(x: u32, y: u32, width: u32, height: u32) -> bool {
-    let radius = 8.min(width / 2).min(height / 2);
-    if radius == 0 {
-        return true;
+fn paint_pixel(screen: &Screen, x: u32, y: u32, colour: u32, coverage: u8) {
+    if coverage == 0 {
+        return;
     }
-    let dx = radius.saturating_sub(1 + x.min(width.saturating_sub(1 + x)));
-    let dy = radius.saturating_sub(1 + y.min(height.saturating_sub(1 + y)));
-    dx * dx + dy * dy <= radius * radius
+    if coverage == 255 {
+        fill(screen, x, y, 1, 1, colour);
+        return;
+    }
+    let (left, top, right, bottom) = clip::current();
+    if x < left
+        || x >= right
+        || y < top
+        || y >= bottom
+        || x >= screen.screen_width
+        || y >= screen.screen_height
+    {
+        return;
+    }
+    let at = FRAMEBUFFER_AT + (y as usize * screen.stride as usize + x as usize) * 4;
+    let under = unsafe { core::ptr::read_volatile(at as *const u32) };
+    fill(
+        screen,
+        x,
+        y,
+        1,
+        1,
+        mix_pixel(under, colour, u32::from(coverage)),
+    );
 }
 
 fn mix_pixel(a: u32, b: u32, opacity: u32) -> u32 {
@@ -4188,33 +4476,72 @@ fn process_key(index: usize) -> u64 {
 /// not: the display's scanlines are as long as the hardware says, which is not
 /// always as long as the picture.
 fn composite(screen: &Screen, tile: &Tile, rounded: bool, glass: bool) {
+    composite_slice(screen, tile, rounded, glass, 0, tile.height, tile.y);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn composite_slice(
+    screen: &Screen,
+    tile: &Tile,
+    rounded: bool,
+    glass: bool,
+    source_y: u32,
+    height: u32,
+    destination_y: u32,
+) {
     // The same clip, applied to the copy. What is not damaged is not copied,
     // which is where nearly all of the saving is: a window is tens of thousands
     // of pixels and the thing that changed is usually one of them.
     let (left, top, right, bottom) = clip::current();
     let x0 = tile.x.max(left);
-    let y0 = tile.y.max(top);
-    let x1 = (tile.x + tile.width).min(right);
-    let y1 = (tile.y + tile.height).min(bottom);
+    let y0 = destination_y.max(top);
+    let x1 = (tile.x + tile.width).min(right).min(screen.screen_width);
+    let y1 = (destination_y + height)
+        .min(bottom)
+        .min(screen.screen_height);
     if x1 <= x0 || y1 <= y0 {
         return;
     }
 
+    let backdrop = if glass {
+        Backdrop::capture(
+            screen,
+            Region {
+                left: x0,
+                top: y0,
+                right: x1,
+                bottom: y1,
+            },
+        )
+    } else {
+        None
+    };
     for row in y0..y1 {
         let source = tile.mapped_at
-            + (((row - tile.y) as usize * tile.width as usize) + (x0 - tile.x) as usize) * 4;
+            + (((row - destination_y + source_y) as usize * tile.width as usize)
+                + (x0 - tile.x) as usize)
+                * 4;
         let destination =
             FRAMEBUFFER_AT + ((row as usize * screen.stride as usize) + x0 as usize) * 4;
 
         for column in 0..(x1 - x0) as usize {
-            if rounded
-                && !rounded_inside(
+            let local_y = row - destination_y + source_y;
+            // Decorations own this band; blend their edge only once.
+            if rounded && local_y < TITLE {
+                continue;
+            }
+            let coverage = if rounded {
+                nexus_ui::rounded_coverage(
                     x0 - tile.x + column as u32,
-                    row - tile.y,
+                    local_y,
                     tile.width,
                     tile.height,
+                    14,
                 )
-            {
+            } else {
+                255
+            };
+            if coverage == 0 {
                 continue;
             }
             // SAFETY: both mappings are live and writable, the source offset is
@@ -4228,9 +4555,22 @@ fn composite(screen: &Screen, tile: &Tile, rounded: bool, glass: bool) {
                 }
                 let target = (destination + column * 4) as *mut u32;
                 let result = if glass && pixel >> 24 != 0 {
-                    mix_pixel(core::ptr::read_volatile(target), pixel, pixel >> 24)
+                    let under = backdrop.as_ref().map_or_else(
+                        || core::ptr::read_volatile(target),
+                        |backdrop| backdrop.pixel(x0 + column as u32, row),
+                    );
+                    mix_pixel(under, pixel, pixel >> 24)
                 } else {
                     pixel
+                };
+                let result = if coverage == 255 {
+                    result
+                } else {
+                    mix_pixel(
+                        core::ptr::read_volatile(target),
+                        result,
+                        u32::from(coverage),
+                    )
                 };
                 core::ptr::write_volatile(target, result);
             }

@@ -38,6 +38,7 @@
 
 extern crate alloc;
 
+pub mod glass;
 pub mod raster3d;
 
 use alloc::vec::Vec;
@@ -134,6 +135,7 @@ pub struct Canvas {
     /// labels in different faces would be a window nobody asked for.
     face: font::Face,
     antialias: bool,
+    layer: bool,
     /// Pixels per row. Equal to the width for a packed surface, and not equal
     /// for a framebuffer whose scanlines the hardware padded.
     stride: u32,
@@ -153,8 +155,9 @@ impl Canvas {
             width,
             height,
             stride: width,
-            face: font::Face::Crisp,
-            antialias: false,
+            face: font::Face::Smooth,
+            antialias: true,
+            layer: false,
         }
     }
 
@@ -170,8 +173,9 @@ impl Canvas {
             width,
             height,
             stride,
-            face: font::Face::Crisp,
-            antialias: false,
+            face: font::Face::Smooth,
+            antialias: true,
+            layer: false,
         }
     }
 
@@ -186,6 +190,13 @@ impl Canvas {
     pub const fn set_text_style(&mut self, face: font::Face, antialias: bool) {
         self.face = face;
         self.antialias = antialias;
+    }
+
+    /// Draw a transparent overlay. Zero clears it; RGB colours are opaque and
+    /// explicit ARGB colours retain their coverage, including rounded/text edges.
+    /// Other canvases retain the ordinary opaque framebuffer pixel format.
+    pub const fn set_layer(&mut self, enabled: bool) {
+        self.layer = enabled;
     }
 
     /// What the text style is now.
@@ -224,7 +235,12 @@ impl Canvas {
         // SAFETY: the constructor's contract says this range is mapped and
         // writable, and the bounds check above keeps the offset inside it.
         unsafe {
-            core::ptr::write_volatile((self.base + offset) as *mut u32, colour.0);
+            let pixel = if self.layer && colour.0 != 0 && colour.0 >> 24 == 0 {
+                colour.0 | 0xff00_0000
+            } else {
+                colour.0
+            };
+            core::ptr::write_volatile((self.base + offset) as *mut u32, pixel);
         }
     }
 
@@ -251,6 +267,12 @@ impl Canvas {
     /// `alpha` is how much of the new colour to use, 0 to 255. Fully opaque
     /// skips the read, because the common case should not pay for the rare one.
     pub fn blend(&mut self, x: u32, y: u32, colour: Colour, alpha: u8) {
+        if self.layer {
+            if let Some(under) = self.get(x, y) {
+                self.set(x, y, Colour(glass::over(under.0, colour.0, alpha)));
+            }
+            return;
+        }
         match alpha {
             0 => {}
             255 => self.set(x, y, colour),
@@ -280,13 +302,13 @@ impl Canvas {
     pub fn fill_rounded(&mut self, rect: Rect, radius: u32, colour: Colour) {
         let radius = radius.min(rect.width / 2).min(rect.height / 2);
         if radius == 0 {
-            self.fill(rect, colour);
+            self.paint_rect(rect, colour);
             return;
         }
 
         // The middle band and the two side bands are square, so they are filled
         // outright; only the four corner squares need sampling.
-        self.fill(
+        self.paint_rect(
             Rect::new(
                 rect.x + radius,
                 rect.y,
@@ -295,11 +317,11 @@ impl Canvas {
             ),
             colour,
         );
-        self.fill(
+        self.paint_rect(
             Rect::new(rect.x, rect.y + radius, radius, rect.height - radius * 2),
             colour,
         );
-        self.fill(
+        self.paint_rect(
             Rect::new(
                 rect.x + rect.width - radius,
                 rect.y + radius,
@@ -337,6 +359,19 @@ impl Canvas {
                     let alpha = corner_coverage(from_x, from_y, radius);
                     self.blend(corner_x + across, corner_y + down, colour, alpha);
                 }
+            }
+        }
+    }
+
+    /// Compose the fully covered bands just like the sampled rounded edges.
+    fn paint_rect(&mut self, rect: Rect, colour: Colour) {
+        if !self.layer {
+            self.fill(rect, colour);
+            return;
+        }
+        for row in 0..rect.height {
+            for column in 0..rect.width {
+                self.blend(rect.x + column, rect.y + row, colour, 255);
             }
         }
     }
@@ -585,19 +620,44 @@ fn corner_coverage(x: u32, y: u32, radius: u32) -> u8 {
         return 0;
     }
     const SAMPLES: u32 = 4;
-    let limit = (radius * SAMPLES) * (radius * SAMPLES);
+    let scale = SAMPLES * 2;
+    let limit = (radius * scale) * (radius * scale);
     let mut inside = 0;
     for down in 0..SAMPLES {
         for across in 0..SAMPLES {
-            // The centre of each sub-pixel, in quarter-pixel units.
-            let sample_x = (x - 1) * SAMPLES + across * 2 / 2 + 1;
-            let sample_y = (y - 1) * SAMPLES + down * 2 / 2 + 1;
+            // Sixteen sample centres, represented in eighth-pixel units.
+            let sample_x = (x - 1) * scale + across * 2 + 1;
+            let sample_y = (y - 1) * scale + down * 2 + 1;
             if sample_x * sample_x + sample_y * sample_y <= limit {
                 inside += 1;
             }
         }
     }
     (inside * 255 / (SAMPLES * SAMPLES)) as u8
+}
+
+/// Sixteen-sample coverage for a rounded rectangle, including off-shape pixels.
+/// Shared by client panels and compositor decorations for matching edges.
+#[must_use]
+pub fn rounded_coverage(x: u32, y: u32, width: u32, height: u32, radius: u32) -> u8 {
+    if x >= width || y >= height {
+        return 0;
+    }
+    let radius = radius.min(width / 2).min(height / 2).min(4096);
+    if radius == 0 || (x >= radius && x < width - radius) || (y >= radius && y < height - radius) {
+        return 255;
+    }
+    let dx = if x < radius {
+        radius - x
+    } else {
+        x - (width - radius) + 1
+    };
+    let dy = if y < radius {
+        radius - y
+    } else {
+        y - (height - radius) + 1
+    };
+    corner_coverage(dx, dy, radius)
 }
 
 /// Break text into lines that fit a width.
@@ -665,6 +725,21 @@ pub fn wrap(text: &str, width: u32) -> Vec<&str> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn layered_rounded_panels_compose_bands_and_edges_consistently() {
+        let mut pixels = [0xcaf6f4ffu32; 32 * 32];
+        let mut canvas = unsafe { Canvas::packed(pixels.as_mut_ptr() as usize, 32, 32) };
+        canvas.set_layer(true);
+        canvas.fill_rounded(Rect::new(0, 0, 32, 32), 8, Colour(0x55ffffff));
+        assert_eq!(
+            pixels[16 * 32 + 16],
+            glass::over(0xcaf6f4ff, 0x55ffffff, 255)
+        );
+        assert_eq!(pixels[7 * 32 + 7], pixels[16 * 32 + 16]);
+        assert_eq!(pixels[0], 0xcaf6f4ff);
+        assert!(pixels[3 * 32 + 3] >> 24 >= 0xca);
+    }
+
     /// The corner is a quarter-circle, so the pixel at the very tip of the
     /// curve is mostly outside it and the one against the straight edge is
     /// wholly inside. Getting this backwards draws a notch instead of a corner,
@@ -677,7 +752,7 @@ mod tests {
         // Hard against the middle of the shape: wholly inside.
         assert_eq!(corner_coverage(1, 1, RADIUS), 255);
         // On the curve itself, somewhere in between.
-        let edge = corner_coverage(RADIUS, 1, RADIUS);
+        let edge = corner_coverage(RADIUS, 4, RADIUS);
         assert!(edge > 0 && edge < 255, "edge coverage was {edge}");
     }
 
@@ -695,6 +770,25 @@ mod tests {
                 last = here;
             }
         }
+    }
+
+    #[test]
+    fn rounded_edges_are_symmetric_and_have_partial_coverage() {
+        let mut partial = 0;
+        for y in 0..24 {
+            for x in 0..40 {
+                let coverage = rounded_coverage(x, y, 40, 24, 10);
+                assert_eq!(coverage, rounded_coverage(39 - x, y, 40, 24, 10));
+                assert_eq!(coverage, rounded_coverage(x, 23 - y, 40, 24, 10));
+                if coverage > 0 && coverage < 255 {
+                    partial += 1;
+                }
+            }
+        }
+        assert!(partial > 0);
+        assert_eq!(rounded_coverage(20, 12, 40, 24, 10), 255);
+        assert_eq!(rounded_coverage(40, 12, 40, 24, 10), 0);
+        assert_eq!(rounded_coverage(0, 0, 0, 0, 10), 0);
     }
 
     #[test]

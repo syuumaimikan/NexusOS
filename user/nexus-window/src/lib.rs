@@ -220,6 +220,13 @@ pub trait App {
         true
     }
 
+    /// A compositor extension with no transferred handles. Ordinary apps
+    /// ignore it; the command bar can consume window metadata.
+    fn message(&mut self, bytes: &[u8]) -> bool {
+        let _ = bytes;
+        false
+    }
+
     /// How long to wait before being woken anyway, in milliseconds.
     ///
     /// `None` — the default — means wait until something happens, which is what
@@ -686,7 +693,9 @@ impl Window {
 
         match Key::of(bytes) {
             Some(key) if app.key(key) => Heard::Changed,
-            _ => Heard::Nothing,
+            Some(_) => Heard::Nothing,
+            None if received.handles == 0 && app.message(bytes) => Heard::Changed,
+            None => Heard::Nothing,
         }
     }
 }

@@ -25,7 +25,12 @@ function Start-NexusQemu {
     })
     $options = @{ FilePath = $Executable; ArgumentList = $quoted; PassThru = $true; WindowStyle = 'Hidden' }
     if ($ErrorLog) { $options.RedirectStandardError = $ErrorLog }
-    return Start-Process @options
+    $process = Start-Process @options
+    # Keep a real process handle while it is alive. On Windows PowerShell 5.1,
+    # a PassThru object that only cached the PID can later give null ExitCode,
+    # turning a normal monitor 'quit' into a spurious run.ps1 failure.
+    $null = $process.Handle
+    return $process
 }
 
 # The disk NexusOS drives, made by make-disk.ps1. Data only: it carries a GPT

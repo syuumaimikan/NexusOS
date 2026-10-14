@@ -27,6 +27,20 @@ function Region-Hash([string]$Image, [long]$Start, [int]$Count) {
 }
 $busy = $null
 try {
+    . (Join-Path $PSScriptRoot 'qemu.ps1')
+    $exitProcess = Start-NexusQemu -Executable (Get-Command powershell).Source `
+        -Arguments @('-NoProfile', '-Command', 'Start-Sleep -Milliseconds 250; exit 0')
+    try {
+        Require ($exitProcess.WaitForExit(10000)) 'Process helper did not observe normal exit'
+        Require ($null -ne $exitProcess.ExitCode -and $exitProcess.ExitCode -eq 0) 'Normal exit code was lost'
+    } finally { $exitProcess.Dispose() }
+    $failedProcess = Start-NexusQemu -Executable (Get-Command powershell).Source `
+        -Arguments @('-NoProfile', '-Command', 'Start-Sleep -Milliseconds 250; exit 7')
+    try {
+        Require ($failedProcess.WaitForExit(10000)) 'Process helper did not observe failed exit'
+        Require ($failedProcess.ExitCode -eq 7) 'Failure exit code was lost'
+    } finally { $failedProcess.Dispose() }
+    Write-Host 'PASS: Windows process helper retains normal and failed exit codes'
     $programs = Join-Path $fixture 'programs'
     New-Item -ItemType Directory -Path $programs | Out-Null
     Set-Content -LiteralPath (Join-Path $programs 'init.elf') -Value 'first program'

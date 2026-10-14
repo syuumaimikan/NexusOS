@@ -132,8 +132,10 @@ pub enum Style {
     /// One colour.
     Plain,
     /// Top to bottom.
-    #[default]
     Gradient,
+    /// Soft overlapping hills with a light edge and shaded depth.
+    #[default]
+    Landscape,
     /// A gradient with points of light on it, drifting.
     Stars,
     /// Rings spreading from the middle, breathing.
@@ -151,7 +153,8 @@ impl Style {
             Some("stars") => Self::Stars,
             Some("rings") => Self::Rings,
             Some("grid") => Self::Grid,
-            _ => Self::Gradient,
+            Some("gradient") => Self::Gradient,
+            _ => Self::Landscape,
         }
     }
 
@@ -161,6 +164,7 @@ impl Style {
         match self {
             Self::Plain => "plain",
             Self::Gradient => "gradient",
+            Self::Landscape => "landscape",
             Self::Stars => "stars",
             Self::Rings => "rings",
             Self::Grid => "grid",
@@ -168,7 +172,8 @@ impl Style {
     }
 
     /// Every style there is, for something that lists them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
+        Self::Landscape,
         Self::Plain,
         Self::Gradient,
         Self::Stars,
@@ -285,17 +290,15 @@ pub struct Look {
 impl Default for Look {
     fn default() -> Self {
         Self {
-            style: Style::Gradient,
+            style: Style::Landscape,
             // Soft violet and blue for the default desktop. Saved look.*
             // settings still take precedence over these starting colours.
-            top: Colour::new(0x4A, 0x59, 0x92),
-            bottom: Colour::new(0xA6, 0xC5, 0xD8),
-            accent: Colour::new(0x38, 0x8B, 0xE8),
-            // Off by default, so a machine nobody has changed looks exactly as
-            // it did before there was a choice. Turning it on is a decision
-            // somebody makes, not one made for them by an upgrade.
-            font: Font::Crisp,
-            smooth: false,
+            top: Colour::new(0xD9, 0xE5, 0xF8),
+            bottom: Colour::new(0xDB, 0xC9, 0xEE),
+            accent: Colour::new(0x7C, 0x72, 0xD9),
+            // Smooth by default; explicit saved choices still apply.
+            font: Font::Smooth,
+            smooth: true,
             // Nothing, so a machine nobody has changed looks exactly as it did
             // before a picture could be chosen.
             picture: String::new(),
@@ -455,8 +458,8 @@ mod tests {
             assert_eq!(Style::parse(Some(style.name())), style);
         }
         // Anything else is the default rather than a failure.
-        assert_eq!(Style::parse(None), Style::Gradient);
-        assert_eq!(Style::parse(Some("something else")), Style::Gradient);
+        assert_eq!(Style::parse(None), Style::Landscape);
+        assert_eq!(Style::parse(Some("something else")), Style::Landscape);
     }
 
     #[test]
@@ -501,8 +504,8 @@ mod tests {
     }
 
     #[test]
-    fn smoothing_is_off_unless_it_says_yes() {
-        assert!(!Look::default().smooth);
+    fn smoothing_defaults_on_and_explicit_choices_still_apply() {
+        assert!(Look::default().smooth);
         assert!(
             Look::parse(
                 "look.smooth = yes
@@ -543,14 +546,14 @@ mod tests {
     #[test]
     fn the_face_and_the_smoothing_are_separate_settings() {
         let look = Look::parse(
-            "look.font = smooth
+            "look.font = smooth\nlook.smooth = no
 ",
         );
         assert_eq!(look.font, Font::Smooth);
         assert!(!look.smooth, "choosing a face must not turn blending on");
 
         let look = Look::parse(
-            "look.smooth = yes
+            "look.font = crisp\nlook.smooth = yes
 ",
         );
         assert_eq!(look.font, Font::Crisp);

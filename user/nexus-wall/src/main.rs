@@ -817,6 +817,43 @@ fn draw(
 
     match look.style {
         Style::Plain => canvas.fill(canvas.bounds(), top),
+        Style::Landscape => {
+            // Resolution-independent pastel hills. Each foreground layer has
+            // its own crest highlight and depth shading; saved colours tint
+            // the scene rather than being ignored by this pattern.
+            for y in 0..height {
+                let ny = i64::from(y) * 1024 / i64::from(height.max(1));
+                let base = top.blend(bottom, (ny * 255 / 1024) as u8);
+                for x in 0..width {
+                    let nx = i64::from(x) * 1024 / i64::from(width.max(1));
+                    let mut colour = base;
+                    for (centre, crest, curve, tint) in [
+                        (180i64, 300i64, 1600i64, 0x00c5cbed),
+                        (880, 370, 1500, 0x00bdcff0),
+                        (100, 590, 1200, 0x00dfc5ea),
+                        (760, 650, 1200, 0x00bbbfeb),
+                        (340, 870, 1500, 0x00eac9dd),
+                    ] {
+                        let dx = nx - centre;
+                        let edge = crest + dx * dx / curve;
+                        let depth = ny - edge;
+                        if depth < 0 {
+                            continue;
+                        }
+                        let tint = nexus_ui::Colour(tint).blend(base, 35);
+                        let shade = (depth.min(320) * 45 / 320) as u8;
+                        colour = tint.blend(nexus_ui::Colour(0x008b8bb9), shade);
+                        if depth < 12 {
+                            colour = colour.blend(
+                                nexus_ui::Colour(0x00f5f5ff),
+                                ((12 - depth) * 90 / 12) as u8,
+                            );
+                        }
+                    }
+                    canvas.set(x, y, colour);
+                }
+            }
+        }
         Style::Gradient => {
             // Smooth colour fields are rendered directly so the desktop has
             // no image download or resolution-dependent wallpaper asset.

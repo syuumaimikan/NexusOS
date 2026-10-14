@@ -145,6 +145,12 @@ pub enum Key {
     /// number pad, which is why they were dropped until something needed to
     /// scroll: without the prefix, "page down" and "3" are the same byte.
     Move(Movement),
+    /// A key held with Super. Text uses its unshifted ASCII code; Enter is
+    /// 0x100 and movement keys are 0x110 + Movement. Shift is kept separately.
+    Super {
+        code: u16,
+        shift: bool,
+    },
     /// A key this decoder does not name, kept so nothing is silently lost.
     Unknown(u8),
 }
@@ -168,6 +174,8 @@ struct Modifiers {
     shift: bool,
     control: bool,
     alt: bool,
+    /// Independent left/right Super bits, so releasing one keeps the other.
+    super_keys: u8,
     caps_lock: bool,
     /// The previous byte was 0xE0, so this one is from the extended set.
     extended: bool,
@@ -177,6 +185,7 @@ static MODIFIERS: IrqSpinLock<Modifiers> = IrqSpinLock::new(Modifiers {
     shift: false,
     control: false,
     alt: false,
+    super_keys: 0,
     caps_lock: false,
     extended: false,
 });
@@ -272,6 +281,15 @@ pub fn next_key() -> Option<Key> {
     // reported on press only, because a key that produced a character on the
     // way down would otherwise produce it again on the way up.
     match code {
+        0x5B | 0x5C if extended => {
+            let bit = 1 << (code - 0x5B);
+            if released {
+                modifiers.super_keys &= !bit;
+            } else {
+                modifiers.super_keys |= bit;
+            }
+            return None;
+        }
         0x2A | 0x36 => {
             modifiers.shift = !released;
             return None;
@@ -349,6 +367,18 @@ pub fn next_key() -> Option<Key> {
     };
 
     DECODED.fetch_add(1, Ordering::Relaxed);
+    if modifiers.super_keys != 0 {
+        let code = match key {
+            Key::Character(_) => u16::from(UNSHIFTED[code as usize]),
+            Key::Enter => 0x100,
+            Key::Move(direction) => 0x110 + direction as u16,
+            _ => return None,
+        };
+        return Some(Key::Super {
+            code,
+            shift: modifiers.shift,
+        });
+    }
     Some(key)
 }
 

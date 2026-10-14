@@ -904,6 +904,7 @@ fn clicked(desktop: &mut Desktop, x: u32, y: u32) -> Option<bool> {
 /// Draw the whole strip.
 fn draw(desktop: &Desktop) {
     let mut canvas = unsafe { Canvas::packed(SURFACE_AT, desktop.width, desktop.height) };
+    canvas.set_layer(true);
     canvas.set_text_style(nexus_ui::font::Face::Smooth, true);
     // Zero is transparent only for the desktop overlay. All app surfaces
     // retain their original opaque pixel format.
@@ -919,7 +920,7 @@ fn draw(desktop: &Desktop) {
     canvas.fill_rounded(
         Rect::new(8, 0, desktop.width.saturating_sub(16), 22),
         9,
-        Colour(0xbde8edf5),
+        Colour(0xa6f5f5ff),
     );
     canvas.text(20, 3, "Nexus", ink);
     if !desktop.clock.is_empty() {
@@ -934,7 +935,7 @@ fn draw(desktop: &Desktop) {
         canvas.text_centred(area, nexus_i18n::text(label), muted);
     }
     let dock = Rect::new(desktop.dock_left(), 22, desktop.dock_width(), 68);
-    canvas.fill_rounded(dock, 18, Colour(0xcbe8edf5));
+    canvas.fill_rounded(dock, 18, Colour(0xaef5f3ff));
     canvas.fill_rounded(
         Rect::new(dock.x + 8, dock.y, dock.width.saturating_sub(16), 1),
         0,

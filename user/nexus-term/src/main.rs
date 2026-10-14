@@ -391,6 +391,10 @@ impl Terminal {
                 continue;
             }
 
+            if bytes == b"close" {
+                nexus_user::log("term: accepted decoration close").ok();
+                break;
+            }
             if received.bytes >= key::SIZE && self.key(bytes) {
                 stale = true;
             }

@@ -90,6 +90,8 @@ pub mod wire {
     pub const FUNCTION: u8 = 6;
     /// A key that moves rather than types, with which way as its number.
     pub const MOVE: u8 = 8;
+    /// Super chord: unshifted code in bits 0..15, Shift in bit 16.
+    pub const SUPER: u8 = 9;
     /// Not a key: the interface language, as an index into the locale table.
     ///
     /// Sent when routing begins and again whenever it changes, so that a
@@ -120,6 +122,7 @@ fn route(key: Key) {
         Key::Tab => (wire::TAB, 0),
         Key::Function(number) => (wire::FUNCTION, u32::from(number)),
         Key::Move(movement) => (wire::MOVE, movement as u32),
+        Key::Super { code, shift } => (wire::SUPER, u32::from(code) | (u32::from(shift) << 16)),
         // Nothing downstream can do anything with a scancode the kernel could
         // not name, and passing it on would be passing on a problem.
         Key::Unknown(_) => return,
@@ -166,7 +169,7 @@ fn handle(key: Key) {
         // Passed on and not acted on here. What "down" means is a question
         // about whatever has the keyboard -- a page, a list, a field -- and the
         // kernel's own panel is not scrollable.
-        Key::Move(_) => {}
+        Key::Move(_) | Key::Super { .. } => {}
         Key::Unknown(code) => {
             kprintln!("[input] unrecognised scancode {code:#04x}");
         }
