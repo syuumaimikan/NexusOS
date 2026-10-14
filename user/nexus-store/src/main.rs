@@ -59,7 +59,7 @@ const SURFACE_AT: usize = 0x0000_0000_2C00_0000;
 
 /// How much heap: a package, the files inside it, and the copies an install
 /// keeps in case it has to put them back.
-const HEAP: usize = 4 * 1024 * 1024;
+const HEAP: usize = 8 * 1024 * 1024;
 
 /// The directory packages live in, inside the filesystem this was handed.
 const PACKAGES: &str = "PKG";
@@ -343,24 +343,14 @@ impl Store {
         let (name, release) = (row.name.clone(), row.release);
         self.say(&nexus_i18n::format("store.installing", &[("name", &name)]));
 
-        match nexus_install::install(root, &path) {
+        let outcome = if release.is_some() {
+            nexus_install::install_recorded(root, root, &path)
+        } else {
+            nexus_install::install(root, &path)
+        };
+        match outcome {
             Ok(report) => {
                 nexus_user::log(&format!("store: installed {name} from {path}")).ok();
-                // The record, so that the updater and this window agree about
-                // what is on the machine. Only when a version was actually
-                // stated: a package with no release is installed but not
-                // recorded, because there is nothing to record.
-                if let Some(release) = release {
-                    self.installed.set(&name, release);
-                    if let Some(settings) = self.settings {
-                        if let Err(why) =
-                            write_text(settings, INSTALLED_NAME, &self.installed.to_text())
-                        {
-                            self.complain(&why);
-                            return true;
-                        }
-                    }
-                }
                 self.reread();
                 self.say(&report);
             }
@@ -625,41 +615,6 @@ fn read_record(directory: Handle, name: &str) -> Result<Option<String>, String> 
             }
         }
     }
-}
-
-/// Replace a text file with this content.
-fn write_text(directory: Handle, name: &str, text: &str) -> Result<(), String> {
-    // Removed first: the filesystem has no truncate, so a shorter file written
-    // over a longer one would keep the old ending.
-    //
-    // No longer a race. `remove` used to refuse while anybody held the file
-    // open, and several programs here read this one on a clock, so this failed
-    // at random and had to be retried. It unlinks now -- the name goes at once
-    // and the blocks go when the last handle closes -- so the retry that was
-    // here has gone with the reason for it.
-    match nexus_user::remove(directory, name) {
-        Ok(()) | Err(nexus_user::Error::NotFound) => {}
-        Err(error) => return Err(format!("{name}: {error}")),
-    }
-
-    let file = nexus_user::create(directory, name, Kind::File)
-        .map_err(|error| format!("{name}: {error}"))?;
-    let contents = text.as_bytes();
-    let mut written = 0;
-    while written < contents.len() {
-        match nexus_user::write_at(file, written as u64, &contents[written..]) {
-            Ok(0) | Err(_) => {
-                nexus_user::close(file).ok();
-                return Err(nexus_i18n::format(
-                    "file.stopped",
-                    &[("name", &name), ("bytes", &written)],
-                ));
-            }
-            Ok(count) => written += count,
-        }
-    }
-    nexus_user::close(file).ok();
-    Ok(())
 }
 
 /// Part of the way from one colour to another; `amount` is 0..=255.

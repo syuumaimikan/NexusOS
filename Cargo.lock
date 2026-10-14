@@ -227,7 +227,9 @@ dependencies = [
 name = "nexus-install"
 version = "0.1.0"
 dependencies = [
+ "nexus-api",
  "nexus-pkg",
+ "nexus-update",
  "nexus-user",
 ]
 

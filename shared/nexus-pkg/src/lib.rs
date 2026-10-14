@@ -30,6 +30,9 @@
 
 extern crate alloc;
 
+pub mod manifest;
+pub mod transaction;
+
 pub mod sha256;
 
 pub use sha256::{digest, digests_equal, Hasher, DIGEST};
@@ -145,15 +148,29 @@ impl Entry {
             .iter()
             .position(|byte| *byte == 0)
             .ok_or(Error::BadName)?;
-        if end == 0 {
+        if end == 0 || self.path[end..].iter().any(|byte| *byte != 0) {
             return Err(Error::BadName);
         }
         let text = core::str::from_utf8(&self.path[..end]).map_err(|_| Error::BadName)?;
-        if text.starts_with('/') || text.contains("..") || text.contains(':') {
-            return Err(Error::BadName);
-        }
+        validate_path(text)?;
         Ok(text)
     }
+}
+
+/// A canonical relative package path, independent of the host's separators.
+pub fn validate_path(path: &str) -> Result<(), Error> {
+    if path.is_empty()
+        || path.len() >= MAX_PATH
+        || path
+            .chars()
+            .any(|c| c.is_control() || c == '\\' || c == ':')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(Error::BadName);
+    }
+    Ok(())
 }
 
 /// A package, read in place.
@@ -574,6 +591,17 @@ mod tests {
     fn an_absolute_path_is_refused() {
         let bytes = build("evil", "1", &[("/BIN/INIT.ELF", b"gotcha")]).unwrap();
         assert!(matches!(Package::open(&bytes), Err(Error::BadName)));
+    }
+
+    #[test]
+    fn noncanonical_paths_and_hidden_nul_suffixes_are_refused() {
+        for path in ["a//b", "a/./b", "a/../b", "a/", "a\\b", "a\0hidden", "a\nb"] {
+            let bytes = build("bad", "1", &[(path, b"x")]).unwrap();
+            assert!(
+                matches!(Package::open(&bytes), Err(Error::BadName)),
+                "{path:?}"
+            );
+        }
     }
 
     #[test]

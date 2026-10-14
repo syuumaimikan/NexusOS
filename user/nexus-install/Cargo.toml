@@ -17,6 +17,13 @@ name = "nexus-install"
 path = "src/main.rs"
 test = false
 
+[[bin]]
+name = "nexus-npkg"
+path = "src/npkg.rs"
+test = false
+
 [dependencies]
 nexus-user = { path = "../nexus-user" }
 nexus-pkg = { path = "../../shared/nexus-pkg" }
+nexus-api = { path = "../nexus-api" }
+nexus-update = { path = "../../shared/nexus-update" }

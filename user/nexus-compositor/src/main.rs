@@ -2185,21 +2185,11 @@ fn serve(
                         // a launcher that could put windows away would be a
                         // second desktop.
                         let asked = &message[..received.bytes.min(message.len())];
-                        if asked.len() == 8 && asked.starts_with(b"pick") {
-                            requested_window = Some(read_u32(asked, 4) as usize);
-                        } else if let Some(what) = launched(asked) {
-                            // Said out loud. "compositor: somebody asked for the
-                            // launcher" is already logged when it opens, and
-                            // what it then asked *for* was the one step in the
-                            // chain that produced no line at all -- so a request
-                            // that arrived and was not acted on looked exactly
-                            // like one that never arrived.
-                            nexus_user::log(&alloc::format!(
-                                "compositor: the launcher asked for {}",
-                                core::str::from_utf8(&asked[..4]).unwrap_or("<not text>")
-                            ))
-                            .ok();
-                            wanted = Some(what);
+                        if launcher_request(asked, &mut wanted, &mut requested_window) {
+                            // Keep the client alive until this request is safely
+                            // in the compositor's event loop. Otherwise process
+                            // exit can race the channel message and discard it.
+                            nexus_user::send(tile.channel, b"accepted", &[]).ok();
                         } else {
                             // Anything else is a frame, which it does draw.
                             tile.frames += 1;
@@ -2229,9 +2219,36 @@ fn serve(
                         let drawn = damaged_region(tile, &message[..received.bytes]);
                         pending = pending.union(drawn);
                     }
-                    Err(_) => stop_listening(set, tile, index),
+                    Err(_error) => {
+                        stop_listening(set, tile, index);
+                    }
                 }
             } else {
+                // A launcher may have queued both a frame and its final
+                // operation before exiting. Drain ready messages before
+                // removing its channel watch; processing only one frame in
+                // this batch would otherwise discard the operation.
+                if Some(index) == launcher {
+                    let mut drained = 0;
+                    // The kernel bounds an inbox at 64 messages.
+                    for _ in 0..64 {
+                        let mut ready = [0u64; 64];
+                        let Ok(count) = nexus_user::wait_any_until(set, &mut ready, 0) else { break; };
+                        if !ready[..count].contains(&channel_key(index)) { break; }
+                        let mut message = [0u8; 32];
+                        let mut none = [Handle(0); 1];
+                        let Ok(received) = nexus_user::receive(tile.channel, &mut message, &mut none) else { break; };
+                        if launcher_request(&message[..received.bytes.min(message.len())], &mut wanted, &mut requested_window) {
+                            drained += 1;
+                        }
+                    }
+                    if drained > 0 {
+                        nexus_user::log(&alloc::format!("compositor: handled {drained} queued launcher request(s) after exit")).ok();
+                    }
+                    // A replacement window may reuse this slot; it must not
+                    // inherit the retired launcher's control protocol.
+                    launcher = None;
+                }
                 // It has ended. Its window goes, because a dead client's last
                 // frame left on screen is a lie about what is running.
                 if tile.live {
@@ -2633,6 +2650,23 @@ enum Asked {
     Stopping,
     /// It asked for the screen to go out until somebody touches the machine.
     Sleeping,
+}
+
+/// Consume control messages in both the ordinary frame path and exit drain.
+fn launcher_request(asked: &[u8], wanted: &mut Option<Launched>, picked: &mut Option<usize>) -> bool {
+    if asked.len() == 8 && asked.starts_with(b"pick") {
+        *picked = Some(read_u32(asked, 4) as usize);
+        true
+    } else if let Some(what) = launched(asked) {
+        nexus_user::log(&alloc::format!(
+            "compositor: the launcher asked for {}",
+            core::str::from_utf8(&asked[..4]).unwrap_or("<not text>")
+        )).ok();
+        *wanted = Some(what);
+        true
+    } else {
+        false
+    }
 }
 
 /// What the launcher asked for, if it asked for anything.

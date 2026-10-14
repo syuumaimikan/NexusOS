@@ -285,6 +285,10 @@ $InstallElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-insta
 $StagedInstall = Publish-Program -Elf $InstallElf -ProgramDir $ProgramDir -Name 'inst.elf'
 $installSize = [math]::Round((Get-Item $StagedInstall).Length / 1KB, 1)
 
+$NpkgElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-npkg"
+$StagedNpkg = Publish-Program -Elf $NpkgElf -ProgramDir $ProgramDir -Name 'npkg.elf'
+$npkgSize = [math]::Round((Get-Item $StagedNpkg).Length / 1KB, 1)
+
 $IdleElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-idle"
 $StagedIdle = Publish-Program -Elf $IdleElf -ProgramDir $ProgramDir -Name 'idle.elf'
 $idleSize = [math]::Round((Get-Item $StagedIdle).Length / 1KB, 1)
@@ -688,6 +692,7 @@ Write-Host "  compositor : $compositorSize KiB  -> BIN\COMP.ELF on the disk"
 Write-Host "  client     : $clientSize KiB  -> BIN\CLIENT.ELF on the disk"
 Write-Host "  shell      : $shellSize KiB  -> BIN\SHELL.ELF on the disk"
 Write-Host "  installer  : $installSize KiB  -> BIN\INST.ELF on the disk"
+Write-Host "  npkg       : $npkgSize KiB  -> BIN\NPKG.ELF on the disk"
 Write-Host "  finder     : $findSize KiB  -> BIN\FIND.ELF on the disk"
 Write-Host "  setup      : $setupSize KiB  -> BIN\SETUP.ELF on the disk"
 Write-Host "  updater    : $updateSize KiB  -> BIN\UPDT.ELF on the disk"

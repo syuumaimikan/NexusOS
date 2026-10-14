@@ -11,7 +11,7 @@
 //! # Usage
 //!
 //! ```text
-//! nexus-pack <output.nexus> <key> <name> <release> <path=file> [...]
+//! nexus-pack <output.nexus> <key> <name> <release> [--manifest=file] <path=file> [...]
 //! ```
 //!
 //! where `path` is where the file goes when the package is installed, `file` is
@@ -55,6 +55,32 @@ fn main() -> ExitCode {
     // eventually try to install.
     let mut contents: Vec<(String, Vec<u8>)> = Vec::new();
     for argument in &arguments[4..] {
+        if let Some(source) = argument.strip_prefix("--manifest=") {
+            let metadata = match nexus_pkg::manifest::path(name) {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("nexus-pack: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let bytes = match std::fs::read(source) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    eprintln!("nexus-pack: cannot read manifest: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if core::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| nexus_pkg::manifest::parse(s).ok())
+                .is_none()
+            {
+                eprintln!("nexus-pack: invalid application manifest");
+                return ExitCode::FAILURE;
+            }
+            contents.push((metadata, bytes));
+            continue;
+        }
         let Some((path, source)) = argument.split_once('=') else {
             eprintln!("nexus-pack: '{argument}' is not <path=file>");
             return ExitCode::FAILURE;
@@ -90,7 +116,11 @@ fn main() -> ExitCode {
     // and check the signature with the public key rather than assuming it. A
     // tool that wrote a package it could not itself verify would be a tool that
     // ships something unusable and finds out on the other side.
-    match nexus_pkg::Package::open(&package).and_then(|opened| opened.verify_signed_by(&public)) {
+    match nexus_pkg::Package::open(&package).and_then(|opened| {
+        opened.verify_signed_by(&public)?;
+        opened.application()?;
+        Ok(())
+    }) {
         Ok(()) => {}
         Err(error) => {
             eprintln!("nexus-pack: what it built does not verify: {error}");

@@ -242,6 +242,8 @@ struct Launcher {
     matching: Vec<usize>,
     /// Still open.
     open: bool,
+    /// A request has been sent and the compositor has not confirmed it yet.
+    awaiting_acceptance: bool,
     /// What the machine looks like. Read once: this window is open for a few
     /// seconds and a person does not change the accent while using it.
     look: nexus_look::Look,
@@ -255,6 +257,7 @@ impl Launcher {
             at: 0,
             matching: Vec::new(),
             open: true,
+            awaiting_acceptance: false,
             look: nexus_look::Look::default(),
         };
         launcher.narrow();
@@ -310,7 +313,8 @@ impl Launcher {
         self.at = self.at.min(self.matching.len().saturating_sub(1));
     }
 
-    /// Ask for whatever is under the cursor, and close.
+    /// Ask for whatever is under the cursor. The compositor closes this
+    /// window with an acknowledgement after it has consumed the request.
     fn choose(&mut self) -> bool {
         if let Some(window) = self
             .matching
@@ -326,7 +330,7 @@ impl Launcher {
             } else {
                 nexus_user::log("launch: asked to switch to an open window").ok();
             }
-            self.open = false;
+            self.awaiting_acceptance = true;
             return true;
         }
         let Some(entry) = self.matching.get(self.at).and_then(|at| ENTRIES.get(*at)) else {
@@ -345,7 +349,7 @@ impl Launcher {
         }
         // Closed either way. A launcher that stayed open after choosing would
         // be a launcher sitting on top of the thing it had just started.
-        self.open = false;
+        self.awaiting_acceptance = true;
         true
     }
 
@@ -381,6 +385,10 @@ fn is_subsequence(wanted: &str, name: &str) -> bool {
 
 impl App for Launcher {
     fn message(&mut self, bytes: &[u8]) -> bool {
+        if bytes == b"accepted" && self.awaiting_acceptance {
+            self.open = false;
+            return true;
+        }
         if bytes == b"wclr" {
             self.windows.clear();
             self.narrow();

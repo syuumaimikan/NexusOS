@@ -955,7 +955,12 @@ impl Terminal {
                 match nexus_user::open(directory, name) {
                     Ok(handle) => {
                         let mut probe = [0u8; 64];
-                        let is_directory = nexus_user::list(handle, &mut probe).is_ok();
+                        // TooBig also proves this is a directory: this probe
+                        // tests node kind, not whether its whole listing fits.
+                        let is_directory = matches!(
+                            nexus_user::list(handle, &mut probe),
+                            Ok(_) | Err(nexus_user::Error::TooBig)
+                        );
                         nexus_user::close(handle).ok();
                         if !is_directory {
                             self.trouble(nexus_i18n::text("term.notadirectory"));
@@ -1168,6 +1173,30 @@ impl Terminal {
             .arguments(arguments)
             .output(output)
             .input(input);
+        // Package management explicitly needs the installation root and the
+        // current source directory. Ordinary tools retain their read-only
+        // working-directory capability.
+        if program.eq_ignore_ascii_case("BIN/NPKG.ELF") {
+            let Some(root) = self.root else {
+                nexus_user::close(output).ok();
+                nexus_user::close(input).ok();
+                self.trouble(nexus_i18n::text("term.nofiles"));
+                return None;
+            };
+            let copy = match nexus_user::duplicate(
+                root,
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER,
+            ) {
+                Ok(copy) => copy,
+                Err(error) => {
+                    nexus_user::close(output).ok();
+                    nexus_user::close(input).ok();
+                    self.trouble(&format!("npkg: {error}"));
+                    return None;
+                }
+            };
+            spawn = spawn.lend(copy);
+        }
         if let Some(directory) = self.directory() {
             if let Ok(copy) = nexus_user::duplicate(
                 directory,
@@ -2084,7 +2113,7 @@ impl Terminal {
 
     /// How many rows of text fit.
     fn rows(&self) -> usize {
-        (self.height.saturating_sub(PAD * 2+nexus_ui::TITLE_BAR) / nexus_ui::LINE_HEIGHT) as usize
+        (self.height.saturating_sub(PAD * 2 + nexus_ui::TITLE_BAR) / nexus_ui::LINE_HEIGHT) as usize
     }
 
     /// How many characters fit across.
@@ -2155,7 +2184,7 @@ impl Terminal {
         let fits = self.rows();
         let last = rows.len().saturating_sub(self.scrolled);
         let first = last.saturating_sub(fits);
-        let mut y = PAD+nexus_ui::TITLE_BAR;
+        let mut y = PAD + nexus_ui::TITLE_BAR;
         for (text, colour) in &rows[first..last] {
             canvas.text(PAD, y, text, *colour);
             y += nexus_ui::LINE_HEIGHT;
@@ -2165,7 +2194,12 @@ impl Terminal {
         // and does not say so looks like a window that has lost the end.
         if self.scrolled > 0 {
             let text = nexus_i18n::format("term.scrolled", &[("lines", &self.scrolled)]);
-            let strip = Rect::new(0, nexus_ui::TITLE_BAR, self.width, nexus_ui::LINE_HEIGHT + 2);
+            let strip = Rect::new(
+                0,
+                nexus_ui::TITLE_BAR,
+                self.width,
+                nexus_ui::LINE_HEIGHT + 2,
+            );
             canvas.fill(strip, note.blend(ground, 200));
             canvas.text_centred(strip, &text, ground);
         }

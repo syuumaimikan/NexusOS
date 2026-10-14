@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Opens the package window from the desktop and installs something with it.
+    Opens the package window through the WM launcher and installs something.
 
 .DESCRIPTION
     The installing machinery has been on this system for some time and had
@@ -88,13 +88,6 @@ try {
         $writer.AutoFlush = $true
         Start-Sleep -Milliseconds 800
 
-        function Move-Pointer {
-            param([int]$Dx, [int]$Dy, [int]$Steps, [int]$Pause = 35)
-            foreach ($step in 1..$Steps) {
-                $writer.WriteLine("mouse_move $Dx $Dy")
-                Start-Sleep -Milliseconds $Pause
-            }
-        }
         function Send-Keys {
             param([string[]]$Keys, [int]$Pause = 160)
             foreach ($key in $Keys) {
@@ -103,14 +96,13 @@ try {
             }
         }
 
-        # The fifth button along the strip.
-        Write-Host '==> Pressing the packages button on the strip' -ForegroundColor Cyan
-        Move-Pointer -Dx -60 -Dy 60 -Steps 40 -Pause 20
-        Move-Pointer -Dx 0 -Dy -3 -Steps 5
-        Move-Pointer -Dx 41 -Dy 0 -Steps 8
-        $writer.WriteLine('mouse_button 1')
-        Start-Sleep -Milliseconds 250
-        $writer.WriteLine('mouse_button 0')
+        # The WM launcher works regardless of dock position or screen layout.
+        Write-Host '==> Opening packages through the WM launcher' -ForegroundColor Cyan
+        Send-Keys @('meta_l-spc')
+        if (-not (Wait-For -Text 'launch: a window for starting things by name' -Seconds 60)) {
+            throw 'the launcher never started'
+        }
+        Send-Keys @('p', 'k', 'g', 'ret')
 
         if (-not (Wait-For -Text 'store: the packages this machine has' -Seconds 90)) {
             throw 'the package window never started'

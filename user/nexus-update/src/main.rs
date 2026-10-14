@@ -70,13 +70,12 @@ const PARENT: Handle = Handle(1);
 
 /// How much heap: several packages, their files, and the copies a rollback
 /// keeps.
-const HEAP: usize = 2 * 1024 * 1024;
+const HEAP: usize = 8 * 1024 * 1024;
 
 /// The directory updates arrive in.
 const PACKAGES: &str = "PKG";
 
 /// What the settings directory holds, beyond the settings themselves.
-const INSTALLED_NAME: &str = "installed.txt";
 const AVAILABLE_NAME: &str = "updates.txt";
 const SETTINGS_NAME: &str = "settings.txt";
 
@@ -149,7 +148,7 @@ struct Candidate {
 
 /// Look at everything available, and act on it.
 fn run(root: Handle, settings_directory: Handle, automatic: bool) -> Result<String, String> {
-    let mut installed = read_installed(settings_directory);
+    let installed = nexus_install::installed(root)?;
     nexus_user::log(&format!(
         "update: {} package(s) on record, installing {}",
         installed.len(),
@@ -195,7 +194,7 @@ fn run(root: Handle, settings_directory: Handle, automatic: bool) -> Result<Stri
     // could trust.
     let mut refused = turned_down;
     for candidate in &worth_doing {
-        match nexus_install::install(root, &candidate.file) {
+        match nexus_install::install_recorded(root, root, &candidate.file) {
             Ok(line) => {
                 nexus_user::log(&line).ok();
                 nexus_user::log(&format!(
@@ -204,7 +203,6 @@ fn run(root: Handle, settings_directory: Handle, automatic: bool) -> Result<Stri
                     candidate.version.to_text()
                 ))
                 .ok();
-                installed.set(&candidate.name, candidate.version);
                 done += 1;
             }
             // A package the machine was right to turn down. Counted, said, and
@@ -219,13 +217,11 @@ fn run(root: Handle, settings_directory: Handle, automatic: bool) -> Result<Stri
             // because carrying on would be installing the rest of an update
             // whose first half is missing.
             Err(Trouble::Broken(why)) => {
-                write_installed(settings_directory, &installed)?;
                 return Err(format!("{}: {why}", candidate.file));
             }
         }
     }
 
-    write_installed(settings_directory, &installed)?;
     write_available(settings_directory, &candidates, automatic, done);
     remember_when(settings_directory);
 
@@ -287,7 +283,7 @@ fn look(root: Handle, installed: &Installed) -> Result<(Vec<Candidate>, usize), 
         // forged package that showed up in "2 updates available" and then
         // refused to install would be a machine lying to whoever read the
         // number.
-        if let Err(error) = package.verify() {
+        if let Err(error) = package.verify_signed_by(&nexus_install::TRUSTED_KEY) {
             turned_down += 1;
             nexus_user::log(&format!("update: refused {path}: {error}")).ok();
             continue;
@@ -348,19 +344,6 @@ fn look(root: Handle, installed: &Installed) -> Result<(Vec<Candidate>, usize), 
         }
     }
     Ok((chosen, turned_down))
-}
-
-/// What is installed on this machine now.
-fn read_installed(directory: Handle) -> Installed {
-    match read_text(directory, INSTALLED_NAME) {
-        Some(text) => Installed::parse(&text),
-        None => Installed::new(),
-    }
-}
-
-/// Write it back.
-fn write_installed(directory: Handle, installed: &Installed) -> Result<(), String> {
-    write_text(directory, INSTALLED_NAME, &installed.to_text())
 }
 
 /// Write down what this run found, for whoever shows it.

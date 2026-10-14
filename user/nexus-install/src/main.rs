@@ -30,7 +30,7 @@ static ALLOCATOR: nexus_user::heap::Allocator = nexus_user::heap::Allocator;
 const PARENT: Handle = Handle(1);
 
 /// How much heap: a package, its files, and the copies kept for a rollback.
-const HEAP: usize = 512 * 1024;
+const HEAP: usize = 8 * 1024 * 1024;
 
 #[unsafe(naked)]
 #[no_mangle]
