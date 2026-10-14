@@ -802,6 +802,19 @@ pub fn forget(process: u64) {
     POSITIONS.lock().retain(|(owner, _), _| *owner != process);
 }
 
+/// Copy the per-descriptor cursors when a process forks. The descriptor objects
+/// themselves are duplicated by `HandleTable::fork_clone`.
+pub fn inherit(parent: u64, child: u64) {
+    let mut positions = POSITIONS.lock();
+    let inherited: Vec<_> = positions
+        .iter()
+        .filter_map(|((owner, descriptor), offset)| {
+            (*owner == parent).then_some(((child, *descriptor), *offset))
+        })
+        .collect();
+    positions.extend(inherited);
+}
+
 /// How many descriptors are being tracked, for the monitor.
 #[must_use]
 pub fn open_count() -> usize {
@@ -1625,7 +1638,7 @@ pub fn getrandom(buffer: u64, count: u64) -> u64 {
     let mut bytes = alloc::vec![0u8; length];
     if !crate::random::bytes(&mut bytes) {
         return (-11i64) as u64; // EAGAIN, which is what Linux says when the
-                                // pool is not ready
+        // pool is not ready
     }
     // SAFETY: the range was checked to lie inside the user half and is exactly
     // as long as what is written into it.

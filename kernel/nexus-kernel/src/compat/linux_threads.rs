@@ -169,13 +169,10 @@ pub fn clone(
 ) -> u64 {
     use flag as f;
 
-    // Without `CLONE_VM` this is `fork`, and the note at the top of the file
-    // says why that is a refusal and not a thread.
+    // Without `CLONE_VM` this creates an independent process. It is routed to
+    // the process layer rather than being mistaken for a shared-memory thread.
     if flags & f::VM == 0 {
-        crate::kprintln!(
-            "[linux] clone without CLONE_VM flags={flags:#x} stack={stack:#x} parent_tid={parent_tid:#x} child_tid={child_tid:#x} is fork, which is not translated; answering ENOSYS"
-        );
-        return error::ENOSYS;
+        return super::linux_fork::fork(flags, stack, parent_tid, child_tid, tls, frame);
     }
     // A thread of the same group, sharing descriptors. A `clone` with `VM` but
     // not `THREAD` is a process sharing an address space -- something that
@@ -183,7 +180,9 @@ pub fn clone(
     // than treated as a thread, because the two differ in what `exit_group`
     // does to them.
     if flags & f::THREAD == 0 {
-        crate::kprintln!("[linux] clone with CLONE_VM but not CLONE_THREAD is not translated");
+        crate::kprintln!(
+            "[linux] clone with CLONE_VM but not CLONE_THREAD flags={flags:#x} stack={stack:#x}; shared-process clone is not translated"
+        );
         return error::ENOSYS;
     }
     // Linux requires these of a `CLONE_THREAD` and refuses without them, so a
@@ -320,6 +319,11 @@ pub fn set_tid_address(address: u64) -> u64 {
         CLEARED.lock().insert(thread, address);
     }
     thread
+}
+
+/// Register a fork child’s clear-child-tid word before it becomes runnable.
+pub fn register_clear_tid(thread: u64, address: u64) {
+    CLEARED.lock().insert(thread, address);
 }
 
 /// `futex(address, operation, expected, timeout, ...)`.

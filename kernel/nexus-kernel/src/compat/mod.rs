@@ -16,6 +16,7 @@ pub mod linux_display;
 pub mod linux_eventfd;
 pub mod linux_exec;
 pub mod linux_files;
+pub mod linux_fork;
 pub mod linux_memory;
 pub mod linux_more;
 pub mod linux_paths;

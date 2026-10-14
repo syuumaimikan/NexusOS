@@ -649,6 +649,19 @@ impl HandleTable {
         table
     }
 
+    /// Copy a descriptor table for a forked process, retaining object
+    /// references and handle numbers while giving the child independent close
+    /// operations. Open-file offsets live alongside the table and are copied by
+    /// the Linux compatibility layer.
+    #[must_use]
+    pub fn fork_clone(&self) -> Self {
+        let entries = self.entries.lock().clone();
+        Self {
+            entries: IrqSpinLock::new(entries),
+            next: AtomicU32::new(self.next.load(Ordering::Relaxed)),
+        }
+    }
+
     /// Add `object` with `rights`, returning the handle.
     pub fn insert(&self, object: Object, rights: Rights) -> u32 {
         let id = self.next.fetch_add(1, Ordering::Relaxed);

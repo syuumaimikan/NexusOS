@@ -57,6 +57,9 @@ mod call {
     pub const UNLINKAT: u64 = 301;
     pub const LSEEK: u64 = 19;
     pub const GETPID: u64 = 20;
+    pub const WAIT4: u64 = 114;
+    pub const EXECVE: u64 = 11;
+    pub const EXECVEAT: u64 = 358;
     pub const ACCESS: u64 = 33;
     pub const MKDIR: u64 = 39;
     pub const RMDIR: u64 = 40;
@@ -375,6 +378,16 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             crate::sched::current_process().map_or(error::ENOSYS, |process| process.id.0)
         }
+        call::EXECVE => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_exec::execve32(argument0, argument1, argument2, frame)
+        }
+        call::EXECVEAT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_exec::execveat32(
+                argument0, argument1, argument2, argument3, argument4, frame,
+            )
+        }
         call::SET_TID_ADDRESS => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             super::linux_threads::set_tid_address(argument0)
@@ -405,6 +418,14 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
             super::linux_threads::clone(
                 argument0, argument1, argument2, argument4, argument3, frame,
             )
+        }
+        435 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            clone3(argument0, argument1, frame)
+        }
+        call::WAIT4 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_fork::wait4(argument0, argument1, argument2, argument3, true)
         }
         240 | 422 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -527,6 +548,38 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
             error::ENOSYS
         }
     }
+}
+
+/// i386's `clone3` uses the same 64-byte Linux structure as x86-64, while the
+/// call itself arrives with two arguments in 32-bit registers. Keep the child
+/// frame untouched so both return paths resume through `int 0x80`.
+fn clone3(arguments: u64, size: u64, frame: &Frame) -> u64 {
+    const SMALLEST: u64 = 64;
+    if size < SMALLEST {
+        return error::EINVAL;
+    }
+    let Some((at, _)) = crate::arch::syscall::user_range(arguments, SMALLEST, 4) else {
+        return error::EFAULT;
+    };
+    let field = |offset: usize| unsafe {
+        core::ptr::read_unaligned((at as *const u8).add(offset) as *const u64)
+    };
+    let flags = field(0);
+    let child_tid = field(16);
+    let parent_tid = field(24);
+    let exit_signal = field(32) & 0xFF;
+    let stack = field(40);
+    let stack_size = field(48);
+    let tls = field(56);
+    let top = if stack == 0 {
+        0
+    } else {
+        match stack.checked_add(stack_size) {
+            Some(top) if top < nexus_abi::layout::USER_SPACE_END => top,
+            _ => return error::EINVAL,
+        }
+    };
+    super::linux_threads::clone(flags | exit_signal, top, parent_tid, child_tid, tls, frame)
 }
 
 fn clock32(which: u64, address: u64) -> u64 {
@@ -766,7 +819,9 @@ fn socketcall(operation: u64, arguments: u64) -> u64 {
         10 if d & !0x40 == 0 => socket::receive(a, b, c, d),
         18 if d == 0 => socket::accept(a, b, c, 0),
         14 | 15 => {
-            crate::kprintln!("[linux32] socketcall option op={operation} fd={a} level={b} option={c} length_arg={e}; not implemented");
+            crate::kprintln!(
+                "[linux32] socketcall option op={operation} fd={a} level={b} option={c} length_arg={e}; not implemented"
+            );
             error::ENOSYS
         }
         _ => error::ENOSYS,

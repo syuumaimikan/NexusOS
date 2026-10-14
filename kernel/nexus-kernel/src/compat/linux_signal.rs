@@ -190,6 +190,20 @@ struct Signals {
     handling: Vec<u64>,
 }
 
+impl Clone for Signals {
+    fn clone(&self) -> Self {
+        Self {
+            actions: self.actions,
+            // Pending signals and active signal frames are per-process runtime
+            // events. The dispositions and blocked mask are inherited by fork.
+            pending: 0,
+            blocked: self.blocked,
+            trampoline: self.trampoline,
+            handling: Vec::new(),
+        }
+    }
+}
+
 impl Signals {
     fn new() -> Self {
         Self {
@@ -222,6 +236,14 @@ pub fn statistics() -> (u64, u64) {
 /// Forget a process's signal state. Called when it ends.
 pub fn forget(process: u64) {
     STATE.lock().remove(&process);
+}
+
+/// Inherit signal dispositions and the calling thread's blocked mask.
+pub fn inherit(parent: u64, child: u64) {
+    let state = STATE.lock().get(&parent).cloned();
+    if let Some(state) = state {
+        STATE.lock().insert(child, state);
+    }
 }
 
 /// The bit for a signal, or `None` if there is no such signal.

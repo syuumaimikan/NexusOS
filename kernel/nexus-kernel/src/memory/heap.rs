@@ -14,8 +14,8 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 
 use nexus_abi::layout;
-use nexus_mm::heap::Heap;
 use nexus_mm::PAGE_SIZE;
+use nexus_mm::heap::Heap;
 
 use super::paging;
 use crate::kprintln;
@@ -155,7 +155,10 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 // simply grows again.
                 drop(heap);
                 // SAFETY: the heap window is reserved for the heap alone.
-                if unsafe { grow(GROWTH_BYTES) }.is_err() {
+                let required = (layout.size() as u64)
+                    .saturating_add(layout.align() as u64)
+                    .max(GROWTH_BYTES);
+                if unsafe { grow(required) }.is_err() {
                     return ptr::null_mut();
                 }
                 match HEAP.lock().allocate(layout) {

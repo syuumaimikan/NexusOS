@@ -1826,7 +1826,15 @@ pub unsafe fn start_from_disk_as(
         },
         // SAFETY: as above.
         Personality::Linux32 => unsafe {
-            system_v_stack32(&space, stack_pages, path, &loaded, interpreter.as_ref())?
+            system_v_stack32(
+                &space,
+                stack_pages,
+                path,
+                &[],
+                &[],
+                &loaded,
+                interpreter.as_ref(),
+            )?
         },
     };
     initial_stack.record(&process, path);
@@ -2020,6 +2028,67 @@ pub unsafe fn load_program_into(
     Ok((entry, stack))
 }
 
+/// Replace the current program with an i386 Linux executable.
+///
+/// # Safety
+///
+/// As [`load_program_into`]. The calling process must have Linux32 personality.
+pub unsafe fn load_program_into32(
+    space: &Arc<address_space::AddressSpace>,
+    path: &str,
+    image: &[u8],
+    arguments: &[alloc::string::String],
+    environment: &[alloc::string::String],
+) -> Result<(u64, InitialStack), UserError> {
+    let movable = nexus_abi::elf::elf32::kind(image).map_err(UserError::Image)?
+        == nexus_abi::elf::Kind::Movable;
+    let bias = if movable { 0x0800_0000 } else { 0 };
+    // SAFETY: the caller promises an empty user half and no running siblings.
+    let loaded = unsafe { load32_into(image, bias, space) }.map_err(UserError::Image)?;
+    let interpreter = match nexus_abi::elf::elf32::interpreter(image).map_err(UserError::Image)? {
+        Some(needed) => {
+            let bytes = crate::compat::linux_files::read_file(needed).map_err(|reason| {
+                UserError::NoInterpreter(alloc::string::String::from(needed), reason)
+            })?;
+            // SAFETY: same empty address space as above.
+            let loaded = unsafe { load32_into(&bytes, 0x7000_0000, space) }
+                .map_err(UserError::BadInterpreter)?;
+            Some(loaded)
+        }
+        None => None,
+    };
+
+    for page in 1..=LINUX_STACK_PAGES {
+        let frame = zeroed_frame()?;
+        // SAFETY: allocated frame and bounded i386 stack address.
+        unsafe {
+            space
+                .map(
+                    LINUX32_STACK_TOP - layout::PAGE_SIZE * page as u64,
+                    frame,
+                    paging::USER | paging::WRITABLE | paging::NO_EXECUTE,
+                )
+                .map_err(UserError::Map)?;
+        }
+    }
+    // SAFETY: the new stack is mapped and nothing else writes it yet.
+    let stack = unsafe {
+        system_v_stack32(
+            space,
+            LINUX_STACK_PAGES,
+            path,
+            arguments,
+            environment,
+            &loaded,
+            interpreter.as_ref(),
+        )?
+    };
+    let entry = interpreter
+        .as_ref()
+        .map_or(loaded.entry_point, |interpreter| interpreter.entry_point);
+    Ok((entry, stack))
+}
+
 /// Load a thirty-two bit image, and map every page of it.
 ///
 /// The same shape as [`load_into`] with the other parser behind it. It is a
@@ -2066,6 +2135,8 @@ unsafe fn system_v_stack32(
     space: &Arc<address_space::AddressSpace>,
     pages: usize,
     path: &str,
+    arguments: &[alloc::string::String],
+    environment: &[alloc::string::String],
     program: &nexus_abi::elf::LoadedImage,
     interpreter: Option<&nexus_abi::elf::LoadedImage>,
 ) -> Result<InitialStack, UserError> {
@@ -2119,11 +2190,32 @@ unsafe fn system_v_stack32(
     }
     let random_at = place(&seed)?;
 
+    let default_arguments = [alloc::string::String::from(path)];
+    let arguments = if arguments.is_empty() {
+        &default_arguments
+    } else {
+        arguments
+    };
     let mut environment_at = alloc::vec::Vec::new();
-    for variable in ENVIRONMENT {
-        let mut bytes = alloc::vec::Vec::from(variable.as_bytes());
+    if environment.is_empty() {
+        for variable in ENVIRONMENT {
+            let mut bytes = alloc::vec::Vec::from(variable.as_bytes());
+            bytes.push(0);
+            environment_at.push(place(&bytes)?);
+        }
+    } else {
+        for variable in environment {
+            let mut bytes = alloc::vec::Vec::from(variable.as_bytes());
+            bytes.push(0);
+            environment_at.push(place(&bytes)?);
+        }
+    }
+
+    let mut argument_at = alloc::vec::Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let mut bytes = alloc::vec::Vec::from(argument.as_bytes());
         bytes.push(0);
-        environment_at.push(place(&bytes)?);
+        argument_at.push(place(&bytes)?);
     }
 
     let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
@@ -2147,17 +2239,22 @@ unsafe fn system_v_stack32(
         (at::EXECFN, name_at),
     ];
 
-    // argc, one argument pointer and its null; the environment and its null;
+    // argc, argument pointers and their null; the environment and its null;
     // then the pairs and the `AT_NULL` -- in four-byte words this time.
-    let words = 1 + 1 + 1 + environment_at.len() as u64 + 1 + (vector.len() as u64 + 1) * 2;
+    let words = 1
+        + argument_at.len() as u64
+        + 1
+        + environment_at.len() as u64
+        + 1
+        + (vector.len() as u64 + 1) * 2;
     let vector_at = ((top - ROOM) - words * 4) & !15;
     if vector_at < bottom {
         return Err(UserError::OutOfMemory);
     }
 
     let mut words_out: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(words as usize);
-    words_out.push(1); // argc
-    words_out.push(name_at); // argv[0]
+    words_out.push(argument_at.len() as u32); // argc
+    words_out.extend_from_slice(&argument_at);
     words_out.push(0);
     words_out.extend_from_slice(&environment_at);
     words_out.push(0);

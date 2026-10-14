@@ -23,11 +23,14 @@ Register-NexusDisposableRun -Directory $Run
 New-Item -ItemType Directory -Force $Programs | Out-Null
 & python (Join-Path $Repo 'tools/nexus-runtime/fetch-steam.py')
 if ($LASTEXITCODE) { throw 'Official Steam bootstrap fetch failed' }
+& python (Join-Path $Repo 'tools/nexus-runtime/fetch-busybox.py')
+if ($LASTEXITCODE) { throw 'Pinned i386 shell fetch failed' }
 Copy-Item (Join-Path $Repo 'build/programs/*') $Programs -Recurse
 foreach ($Required in @('g32ld.lx', 'gnu320.lx')) {
     if (-not (Test-Path (Join-Path $Programs $Required))) { throw 'Stage the i386 GNU runtime with build.ps1 -WithGlibc32Runtime first' }
 }
 $SteamRoot = Join-Path $Repo 'build/runtime/steam'
+$BusyboxRoot = Join-Path $Repo 'build/runtime/busybox'
 $Manifest = Join-Path $Programs 'linux.lst'
 $ManifestText = [IO.File]::ReadAllText($Manifest)
 foreach ($RequiredMapping in @(
@@ -44,11 +47,14 @@ $Entries = @(
     @('libgcc_s.so.1', 'smgcc.lx', '/lib/i386-linux-gnu/libgcc_s.so.1'),
     @('libstdc++.so.6', 'smcpp.lx', '/lib/i386-linux-gnu/libstdc++.so.6'),
     @('copyright.txt', 'smnotice.txt', '/usr/share/steam-diagnostic/copyright'),
-    @('manifest.json', 'smmeta.txt', '/usr/share/steam-diagnostic/manifest.json')
+    @('manifest.json', 'smmeta.txt', '/usr/share/steam-diagnostic/manifest.json'),
+    @((Join-Path $BusyboxRoot 'busybox'), 'busybox.lx', '/bin/sh'),
+    @((Join-Path $BusyboxRoot 'copyright.txt'), 'bbnotice.txt', '/usr/share/doc/busybox-static/copyright')
 )
 $Text = [IO.File]::ReadAllText($Manifest).TrimEnd() + "`n"
 foreach ($Entry in $Entries) {
-    Copy-Item -LiteralPath (Join-Path $SteamRoot $Entry[0]) -Destination (Join-Path $Programs $Entry[1])
+    $Source = if ([IO.Path]::IsPathRooted($Entry[0])) { $Entry[0] } else { Join-Path $SteamRoot $Entry[0] }
+    Copy-Item -LiteralPath $Source -Destination (Join-Path $Programs $Entry[1])
     $Text += "BIN/$($Entry[1].ToUpperInvariant()) $($Entry[2])`n"
 }
 [IO.File]::WriteAllText($Manifest, $Text, [Text.UTF8Encoding]::new($false))
@@ -72,7 +78,7 @@ $Vars = Join-Path $Run 'vars.fd'
 Copy-Item (Join-Path $Share 'edk2-x86_64-code.fd') $Code
 Copy-Item (Join-Path $Share 'edk2-i386-vars.fd') $Vars
 $Serial = Join-Path $Run 'serial.log'
-$SteamQemuArgs = Get-NexusQemuArgs -BuildDir $Run -EspDir $Esp -FirmwareCode $Code -FirmwareVars $Vars -SerialLog $Serial -MonitorPort (Get-FreeMonitorPort) -HostHttpPort (Get-FreeMonitorPort -From 35000 -To 36000) -Headless
+$SteamQemuArgs = Get-NexusQemuArgs -BuildDir $Run -EspDir $Esp -FirmwareCode $Code -FirmwareVars $Vars -SerialLog $Serial -MonitorPort (Get-FreeMonitorPort) -HostHttpPort (Get-FreeMonitorPort -From 35000 -To 36000) -Memory '2G' -Headless
 $Process = Start-NexusQemu -Executable $Qemu -Arguments $SteamQemuArgs -ErrorLog (Join-Path $Run 'qemu-error.log')
 try {
     $Deadline = [DateTime]::UtcNow.AddSeconds($Timeout)
@@ -86,6 +92,9 @@ try {
         }
         if ($Log -match 'steam-diagnostic: loader refused|steam-diagnostic: bootstrap did not complete|KERNEL PANIC|the system has been halted') {
             throw "Steam diagnostic stopped: $Serial"
+        }
+        if ($Log -match 'Failed to create thread \(error 0x') {
+            throw "Steam bootstrap reached the still-unsupported i386 shared-thread path: $Serial"
         }
     }
     throw "Steam diagnostic did not finish: $Serial"

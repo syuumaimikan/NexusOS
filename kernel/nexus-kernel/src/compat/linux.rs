@@ -68,6 +68,7 @@ mod call {
     pub const PREAD64: u64 = 17;
     pub const WRITEV: u64 = 20;
     pub const GETPID: u64 = 39;
+    pub const WAIT4: u64 = 61;
     pub const EXIT: u64 = 60;
     pub const UNAME: u64 = 63;
     pub const GETUID: u64 = 102;
@@ -530,6 +531,10 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
             threads::clone(
                 argument0, argument1, argument2, _argument3, _argument4, frame,
             )
+        }
+        call::WAIT4 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_fork::wait4(argument0, argument1, argument2, _argument3, false)
         }
         call::FUTEX => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

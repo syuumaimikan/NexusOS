@@ -82,19 +82,29 @@ pub fn statistics() -> u64 {
 /// Two levels of pointer, both from ring 3, both checked: the array itself and
 /// every string in it. A program that handed over an array with no terminator
 /// gets `E2BIG` rather than a kernel walking its address space.
-fn strings_at(array: u64) -> Result<Vec<String>, u64> {
+fn strings_at(array: u64, pointer_bytes: u64) -> Result<Vec<String>, u64> {
+    if !matches!(pointer_bytes, 4 | 8) {
+        return Err(error::EINVAL);
+    }
     let mut out = Vec::new();
     if array == 0 {
         return Ok(out);
     }
     for index in 0..MAX_STRINGS {
-        let Some((at, _)) = crate::arch::syscall::user_range(array + (index as u64) * 8, 8, 8)
+        let offset = (index as u64) * pointer_bytes;
+        let Some((at, _)) =
+            crate::arch::syscall::user_range(array + offset, pointer_bytes, pointer_bytes)
         else {
             return Err(error::EFAULT);
         };
-        // SAFETY: eight bytes inside the user half, read as the pointer the
-        // array is made of.
-        let pointer = unsafe { core::ptr::read_unaligned(at as *const u64) };
+        // SAFETY: the ABI's four/eight-byte pointer is in the checked range.
+        let pointer = unsafe {
+            if pointer_bytes == 4 {
+                core::ptr::read_unaligned(at as *const u32) as u64
+            } else {
+                core::ptr::read_unaligned(at as *const u64)
+            }
+        };
         if pointer == 0 {
             return Ok(out);
         }
@@ -126,10 +136,6 @@ fn string_at(pointer: u64) -> Result<String, u64> {
 /// system-call path restores the *new* program's registers instead of this
 /// one's, which is the same mechanism a signal handler is entered through.
 pub fn execve(path: u64, argv: u64, envp: u64, frame: &mut Frame) -> u64 {
-    let Some(process) = crate::sched::current_process() else {
-        return error::ENOSYS;
-    };
-
     // Everything is read out of the old address space before any of it is taken
     // away. After the teardown there is no `path` to read and no `argv` to walk:
     // they were in the memory that has just gone.
@@ -137,22 +143,108 @@ pub fn execve(path: u64, argv: u64, envp: u64, frame: &mut Frame) -> u64 {
         Ok(path) => path,
         Err(reason) => return reason,
     };
-    let arguments = match strings_at(argv) {
+    let arguments = match strings_at(argv, 8) {
         Ok(arguments) => arguments,
         Err(reason) => return reason,
     };
-    let environment = match strings_at(envp) {
+    let environment = match strings_at(envp, 8) {
         Ok(environment) => environment,
         Err(reason) => return reason,
     };
-    let resolved =
-        match super::linux_paths::resolve(super::linux_files::AT_FDCWD as u32 as u64, &path) {
-            Ok(resolved) => resolved,
-            Err(reason) => return reason,
-        };
+    execve_values(
+        super::linux_files::AT_FDCWD as u32 as u64,
+        path,
+        arguments,
+        environment,
+        frame,
+    )
+}
+
+/// The i386 form uses 32-bit pointers in both arrays.
+pub fn execve32(path: u64, argv: u64, envp: u64, frame: &mut Frame) -> u64 {
+    let path = match string_at(path) {
+        Ok(path) => path,
+        Err(reason) => {
+            crate::kprintln!("[linux32] execve path pointer failed: {reason}");
+            return reason;
+        }
+    };
+    crate::kprintln!("[linux32] execve {path}");
+    let arguments = match strings_at(argv, 4) {
+        Ok(arguments) => arguments,
+        Err(reason) => return reason,
+    };
+    let environment = match strings_at(envp, 4) {
+        Ok(environment) => environment,
+        Err(reason) => return reason,
+    };
+    execve_values(
+        super::linux_files::AT_FDCWD as u32 as u64,
+        path,
+        arguments,
+        environment,
+        frame,
+    )
+}
+
+/// i386 `execveat(dirfd, path, argv, envp, flags)`.
+pub fn execveat32(
+    dirfd: u64,
+    path: u64,
+    argv: u64,
+    envp: u64,
+    flags: u64,
+    frame: &mut Frame,
+) -> u64 {
+    // AT_EMPTY_PATH needs execution directly from an open descriptor. That
+    // path is not implemented yet; reject all flags instead of silently
+    // executing a different object.
+    if flags != 0 {
+        return error::EINVAL;
+    }
+    let path = match string_at(path) {
+        Ok(path) => path,
+        Err(reason) => {
+            crate::kprintln!("[linux32] execveat path pointer failed: {reason}");
+            return reason;
+        }
+    };
+    crate::kprintln!("[linux32] execveat {path} dirfd={dirfd}");
+    let arguments = match strings_at(argv, 4) {
+        Ok(arguments) => arguments,
+        Err(reason) => return reason,
+    };
+    let environment = match strings_at(envp, 4) {
+        Ok(environment) => environment,
+        Err(reason) => return reason,
+    };
+    execve_values(dirfd as u32 as u64, path, arguments, environment, frame)
+}
+
+fn execve_values(
+    dirfd: u64,
+    path: String,
+    arguments: Vec<String>,
+    environment: Vec<String>,
+    frame: &mut Frame,
+) -> u64 {
+    let Some(process) = crate::sched::current_process() else {
+        return error::ENOSYS;
+    };
+
+    let resolved = match super::linux_paths::resolve(dirfd, &path) {
+        Ok(resolved) => resolved,
+        Err(reason) => {
+            crate::kprintln!("[linux] exec of {path} could not resolve: {reason}");
+            return reason;
+        }
+    };
     let executable = match resolved.node() {
         Ok(node) => node,
-        Err(reason) => return reason,
+        Err(reason) => {
+            crate::kprintln!("[linux] exec of {path} could not open node: {reason}");
+            return reason;
+        }
     };
     if executable.is_directory() {
         return (-21i64) as u64;
@@ -162,7 +254,10 @@ pub fn execve(path: u64, argv: u64, envp: u64, frame: &mut Frame) -> u64 {
         .unwrap_or(resolved.path);
     let image = match crate::fs::store::read_node(&executable).map_err(super::linux_files::errno) {
         Ok(image) => image,
-        Err(reason) => return reason,
+        Err(reason) => {
+            crate::kprintln!("[linux] exec of {path} could not read image: {reason}");
+            return reason;
+        }
     };
 
     // One thread, for the reason at the top of the file.
@@ -195,13 +290,23 @@ pub fn execve(path: u64, argv: u64, envp: u64, frame: &mut Frame) -> u64 {
 
     // SAFETY: the space was just emptied and nothing is running in it.
     let started = unsafe {
-        crate::user::load_program_into(
-            &process.address_space,
-            &path,
-            &image,
-            &arguments,
-            &environment,
-        )
+        if process.personality == crate::process::Personality::Linux32 {
+            crate::user::load_program_into32(
+                &process.address_space,
+                &path,
+                &image,
+                &arguments,
+                &environment,
+            )
+        } else {
+            crate::user::load_program_into(
+                &process.address_space,
+                &path,
+                &image,
+                &arguments,
+                &environment,
+            )
+        }
     };
     let (entry, stack) = match started {
         Ok(started) => started,

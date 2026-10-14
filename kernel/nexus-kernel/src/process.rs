@@ -229,7 +229,7 @@ pub enum Personality {
 }
 
 /// The image actually installed by the loader, independently of its interpreter.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Image {
     pub path: String,
     pub file: Option<Arc<crate::fs::store::Node>>,
@@ -289,6 +289,37 @@ impl Process {
         address_space: Arc<AddressSpace>,
         personality: Personality,
     ) -> Arc<Self> {
+        let handles = match personality {
+            Personality::Nexus => HandleTable::new(),
+            Personality::Linux | Personality::Linux32 => {
+                HandleTable::starting_at(crate::compat::linux_files::FIRST_HANDLE)
+            }
+        };
+        Self::with_handles(name, address_space, personality, handles)
+    }
+
+    /// Make a child process with a private address space and inherited open
+    /// objects. The caller supplies an address space already isolated from the
+    /// parent's; cwd and image metadata are copied with the descriptor table.
+    #[must_use]
+    pub fn forked(parent: &Process, address_space: Arc<AddressSpace>) -> Arc<Self> {
+        let child = Self::with_handles(
+            &parent.name,
+            address_space,
+            parent.personality,
+            parent.handles.fork_clone(),
+        );
+        *child.working_directory.lock() = parent.working_directory.lock().clone();
+        *child.image.lock() = parent.image.lock().clone();
+        child
+    }
+
+    fn with_handles(
+        name: &str,
+        address_space: Arc<AddressSpace>,
+        personality: Personality,
+        handles: HandleTable,
+    ) -> Arc<Self> {
         CREATED.fetch_add(1, Ordering::Relaxed);
         let id = ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed));
         Arc::new(Self {
@@ -302,12 +333,7 @@ impl Process {
             // A Linux process's handles start at three, because its handles
             // are its file descriptors and nought, one and two are spoken for.
             // See `compat::linux_files`.
-            handles: match personality {
-                Personality::Nexus => HandleTable::new(),
-                Personality::Linux | Personality::Linux32 => {
-                    HandleTable::starting_at(crate::compat::linux_files::FIRST_HANDLE)
-                }
-            },
+            handles,
             completion: Arc::new(Completion {
                 id,
                 name: String::from(name),
@@ -337,6 +363,7 @@ impl Drop for Process {
         // that grows by one entry for every file every translated program has
         // ever opened, for as long as the machine is up.
         if matches!(self.personality, Personality::Linux | Personality::Linux32) {
+            crate::compat::linux_fork::forget_parent(self.id.0);
             crate::compat::linux_files::forget(self.id.0);
             crate::compat::linux_files::forget_memfds(self.id.0);
             crate::compat::linux_memory::forget(self.id.0);
