@@ -64,7 +64,7 @@ use crate::kprintln;
 use crate::sync::IrqSpinLock;
 
 use context::context_switch;
-use thread::{Priority, Thread, ThreadEntry, ThreadId, ThreadState, UserStart, TIME_SLICE_TICKS};
+use thread::{Priority, TIME_SLICE_TICKS, Thread, ThreadEntry, ThreadId, ThreadState, UserStart};
 
 /// Scheduler state shared by every processor.
 struct Scheduler {
@@ -510,6 +510,30 @@ pub fn current_process() -> Option<Arc<crate::process::Process>> {
         .threads
         .get(&current)
         .and_then(|thread| thread.process.clone())
+}
+
+/// Replace the calling thread's display name.
+pub fn set_current_thread_name(name: &str) -> bool {
+    let Some(current) = current_id() else {
+        return false;
+    };
+    let mut scheduler = SCHEDULER.lock();
+    let Some(thread) = scheduler.threads.get_mut(&current) else {
+        return false;
+    };
+    thread.name = alloc::string::String::from(name);
+    true
+}
+
+/// Read the calling thread's display name.
+#[must_use]
+pub fn current_thread_name() -> Option<alloc::string::String> {
+    let current = current_id()?;
+    SCHEDULER
+        .lock()
+        .threads
+        .get(&current)
+        .map(|thread| thread.name.clone())
 }
 
 /// Whether the calling thread's process has been asked to stop.

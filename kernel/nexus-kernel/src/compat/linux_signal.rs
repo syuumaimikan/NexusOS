@@ -327,8 +327,109 @@ pub fn sigaction(signal: u64, new: u64, old: u64, set_size: u64) -> u64 {
     0
 }
 
+/// i386 `rt_sigaction` has 32-bit handler/flags/restorer fields followed by an
+/// eight-byte signal mask (20 bytes total with i386's four-byte alignment).
+pub fn sigaction32(signal: u64, new: u64, old: u64, set_size: u64) -> u64 {
+    if set_size != 8 || bit(signal).is_none() {
+        return error::EINVAL;
+    }
+    if signal == number::KILL || signal == number::STOP {
+        return error::EINVAL;
+    }
+    let Some(process) = crate::sched::current_process() else {
+        return error::ENOSYS;
+    };
+    let mut state = STATE.lock();
+    let signals = state.entry(process.id.0).or_insert_with(Signals::new);
+    let index = (signal - 1) as usize;
+    if old != 0 {
+        let Some((at, _)) = crate::arch::syscall::user_range(old, 20, 4) else {
+            return error::EFAULT;
+        };
+        let was = signals.actions[index];
+        // SAFETY: the 20-byte i386 structure is inside the checked user range.
+        unsafe {
+            let words = at as *mut u32;
+            words.write_unaligned(was.handler as u32);
+            words.add(1).write_unaligned(was.flags as u32);
+            words.add(2).write_unaligned(was.restorer as u32);
+            (at as *mut u8)
+                .add(12)
+                .cast::<u64>()
+                .write_unaligned(was.mask);
+        }
+    }
+    if new != 0 {
+        let Some((at, _)) = crate::arch::syscall::user_range(new, 20, 4) else {
+            return error::EFAULT;
+        };
+        // SAFETY: all four fields lie inside the checked i386 structure.
+        let action = unsafe {
+            let words = at as *const u32;
+            Action {
+                handler: words.read_unaligned() as u64,
+                flags: words.add(1).read_unaligned() as u64,
+                restorer: words.add(2).read_unaligned() as u64,
+                mask: (at as *const u8).add(12).cast::<u64>().read_unaligned(),
+            }
+        };
+        if action.handler != disposition::DEFAULT
+            && action.handler != disposition::IGNORE
+            && action.handler >= nexus_abi::layout::USER_SPACE_END
+        {
+            return error::EFAULT;
+        }
+        signals.actions[index] = action;
+        if action.handler > disposition::IGNORE {
+            INSTALLED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    0
+}
+
 /// `rt_sigprocmask(how, new, old, sigsetsize)`.
 pub fn sigprocmask(how: u64, new: u64, old: u64, set_size: u64) -> u64 {
+    sigprocmask_width(how, new, old, set_size, 8)
+}
+
+/// i386 pointers are four-byte aligned even though the signal set is 64 bits.
+pub fn sigprocmask32(how: u64, new: u64, old: u64, set_size: u64) -> u64 {
+    sigprocmask_width(how, new, old, set_size, 4)
+}
+
+/// Legacy i386 `sigprocmask` uses a 32-bit signal set and has no size argument.
+pub fn sigprocmask_legacy32(how: u64, new: u64, old: u64) -> u64 {
+    const BLOCK: u64 = 0;
+    const UNBLOCK: u64 = 1;
+    const SETMASK: u64 = 2;
+    let Some(process) = crate::sched::current_process() else {
+        return error::ENOSYS;
+    };
+    let mut state = STATE.lock();
+    let signals = state.entry(process.id.0).or_insert_with(Signals::new);
+    if old != 0 {
+        let Some((at, _)) = crate::arch::syscall::user_range(old, 4, 4) else {
+            return error::EFAULT;
+        };
+        unsafe { core::ptr::write_unaligned(at as *mut u32, signals.blocked as u32) };
+    }
+    if new != 0 {
+        let Some((at, _)) = crate::arch::syscall::user_range(new, 4, 4) else {
+            return error::EFAULT;
+        };
+        let wanted = unsafe { core::ptr::read_unaligned(at as *const u32) } as u64;
+        let cannot = bit(number::KILL).unwrap_or(0) | bit(number::STOP).unwrap_or(0);
+        signals.blocked = match how {
+            BLOCK => signals.blocked | (wanted & !cannot),
+            UNBLOCK => signals.blocked & !wanted,
+            SETMASK => (signals.blocked & !(u32::MAX as u64)) | (wanted & !cannot),
+            _ => return error::EINVAL,
+        };
+    }
+    0
+}
+
+fn sigprocmask_width(how: u64, new: u64, old: u64, set_size: u64, alignment: u64) -> u64 {
     /// Add to the mask, take away from it, or replace it.
     const BLOCK: u64 = 0;
     const UNBLOCK: u64 = 1;
@@ -344,14 +445,14 @@ pub fn sigprocmask(how: u64, new: u64, old: u64, set_size: u64) -> u64 {
     let signals = state.entry(process.id.0).or_insert_with(Signals::new);
 
     if old != 0 {
-        let Some((at, _)) = crate::arch::syscall::user_range(old, 8, 8) else {
+        let Some((at, _)) = crate::arch::syscall::user_range(old, 8, alignment) else {
             return error::EFAULT;
         };
         // SAFETY: eight bytes inside the user half.
         unsafe { core::ptr::write_unaligned(at as *mut u64, signals.blocked) };
     }
     if new != 0 {
-        let Some((at, _)) = crate::arch::syscall::user_range(new, 8, 8) else {
+        let Some((at, _)) = crate::arch::syscall::user_range(new, 8, alignment) else {
             return error::EFAULT;
         };
         // SAFETY: as above.

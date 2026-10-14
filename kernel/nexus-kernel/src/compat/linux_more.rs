@@ -399,9 +399,9 @@ fn sysinfo(out: u64) -> u64 {
     put(0, crate::arch::time::uptime_ms() / 1000); // uptime, seconds
     put(32, total); // totalram
     put(40, free); // freeram
-                   // `mem_unit`, at the end: the multiplier for every memory field above.
-                   // One, because the figures here are already bytes.
-                   // SAFETY: inside the range checked above.
+    // `mem_unit`, at the end: the multiplier for every memory field above.
+    // One, because the figures here are already bytes.
+    // SAFETY: inside the range checked above.
     unsafe { core::ptr::write_unaligned((at as *mut u8).add(80) as *mut u32, 1) };
     0
 }
@@ -433,11 +433,7 @@ fn madvise(_address: u64, _length: u64, advice: u64) -> u64 {
 /// how a lock-free algorithm silently stops being correct.
 fn membarrier(command: u64) -> u64 {
     const QUERY: u64 = 0;
-    if command == QUERY {
-        0
-    } else {
-        error::EINVAL
-    }
+    if command == QUERY { 0 } else { error::EINVAL }
 }
 
 /// `fsync(fd)` and `fdatasync(fd)`.
@@ -878,7 +874,8 @@ fn truncate(path: u64, length: u64) -> u64 {
 
 /// `prctl(option, argument, ...)`.
 ///
-/// Two options, and both are answered truthfully rather than accepted.
+/// Options implemented here have state behind them rather than returning
+/// success without doing the requested work.
 ///
 /// `PR_SET_NO_NEW_PRIVS` asks that no later `execve` may gain privileges. This
 /// system has no privilege to gain -- there is no setuid, no capability set,
@@ -886,16 +883,50 @@ fn truncate(path: u64, length: u64) -> u64 {
 /// correct rather than convenient. `PR_GET_NO_NEW_PRIVS` therefore answers one,
 /// and it would be incoherent to answer anything else.
 ///
-/// Everything else is `EINVAL`, which is what Linux says for an option it does
-/// not know. In particular **`PR_SET_NAME` is not accepted**: there is nowhere
-/// to keep a thread name, and a program that set one and read back something
-/// else would be worse served than one told plainly that it cannot.
-fn prctl(option: u64, _argument: u64) -> u64 {
+/// Unknown options return `EINVAL`, as Linux does.
+fn prctl(option: u64, argument: u64) -> u64 {
     const PR_SET_NO_NEW_PRIVS: u64 = 38;
     const PR_GET_NO_NEW_PRIVS: u64 = 39;
+    const PR_SET_NAME: u64 = 15;
+    const PR_GET_NAME: u64 = 16;
     match option {
         PR_SET_NO_NEW_PRIVS => 0,
         PR_GET_NO_NEW_PRIVS => 1,
+        PR_SET_NAME => {
+            let Some((at, _)) = user_range(argument, 16, 1) else {
+                return error::EFAULT;
+            };
+            let mut bytes = [0u8; 16];
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                // SAFETY: every byte is inside the checked user range.
+                *byte = unsafe { core::ptr::read_volatile((at as *const u8).add(index)) };
+            }
+            let length = bytes.iter().position(|byte| *byte == 0).unwrap_or(16);
+            let Ok(name) = core::str::from_utf8(&bytes[..length]) else {
+                return error::EINVAL;
+            };
+            if crate::sched::set_current_thread_name(name) {
+                0
+            } else {
+                error::ESRCH
+            }
+        }
+        PR_GET_NAME => {
+            let Some((at, _)) = user_range(argument, 16, 1) else {
+                return error::EFAULT;
+            };
+            let Some(name) = crate::sched::current_thread_name() else {
+                return error::ESRCH;
+            };
+            let bytes = name.as_bytes();
+            let length = bytes.len().min(15);
+            // SAFETY: the 16-byte destination was checked above.
+            unsafe {
+                core::ptr::write_bytes(at as *mut u8, 0, 16);
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), at as *mut u8, length);
+            }
+            0
+        }
         _ => error::EINVAL,
     }
 }
@@ -937,9 +968,9 @@ fn statfs_into(out: u64) -> u64 {
     fields[8..16].copy_from_slice(&BLOCK.to_le_bytes()); // f_bsize
     fields[16..24].copy_from_slice(&(total / BLOCK).to_le_bytes()); // f_blocks
     fields[24..32].copy_from_slice(&(free / BLOCK).to_le_bytes()); // f_bfree
-                                                                   // f_bavail: what an unprivileged program may use. The same as free, because
-                                                                   // this filesystem keeps no reserve and there is no privilege here to be
-                                                                   // outside of.
+    // f_bavail: what an unprivileged program may use. The same as free, because
+    // this filesystem keeps no reserve and there is no privilege here to be
+    // outside of.
     fields[32..40].copy_from_slice(&(free / BLOCK).to_le_bytes());
     // f_files and f_ffree are left zero rather than guessed. The volume knows
     // its inode counts, but reaching them from here would mean holding the

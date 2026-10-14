@@ -445,9 +445,17 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
                 super::linux_threads::futex(argument0, argument1, argument2, argument3, argument5)
             }
         }
+        174 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_signal::sigaction32(argument0, argument1, argument2, argument3)
+        }
         175 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            super::linux_signal::sigprocmask(argument0, argument1, argument2, argument3)
+            super::linux_signal::sigprocmask32(argument0, argument1, argument2, argument3)
+        }
+        126 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_signal::sigprocmask_legacy32(argument0, argument1, argument2)
         }
         168 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -531,6 +539,7 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
                 383 => Some(332),
                 118 => Some(74),
                 148 => Some(75),
+                172 => Some(157),
                 _ => None,
             };
             if let Some(mapped) = mapped {

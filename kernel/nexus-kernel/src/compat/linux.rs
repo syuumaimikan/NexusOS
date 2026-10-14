@@ -189,6 +189,8 @@ pub(super) mod error {
     pub const ENOTTY: u64 = (-25i64) as u64;
     /// An argument this call will not accept.
     pub const EINVAL: u64 = (-22i64) as u64;
+    /// No such process or thread.
+    pub const ESRCH: u64 = (-3i64) as u64;
 }
 
 /// `arch_prctl` subfunctions.

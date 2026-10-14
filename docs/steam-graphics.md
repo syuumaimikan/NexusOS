@@ -138,8 +138,10 @@ realtime deadlines, PI and requeue remain unsupported.
 `fork` takes a private snapshot of a single-threaded address space, copies the
 process's descriptor and signal state, and returns zero in the child. `wait4`
 collects its completion. Shared-memory `clone` flags are still refused unless
-they select the existing supported thread path; i386's `CLONE_VM` thread path
-is not yet implemented.
+they select the existing supported thread path. The i386 ABI reaches that same
+thread implementation, but Steam's observed request (`0x800600`) omits both
+`CLONE_VM` and `CLONE_THREAD` while setting `CLONE_SIGHAND`, so it correctly
+gets `EINVAL` under Linux's clone rules.
 
 ### Descriptors, pipes and readiness
 
@@ -198,8 +200,10 @@ relative execve retains cwd and records the actual executable independently of
 argv[0]. Persistent symlinks and native /dev/urandom also pass real libc tests.
 The official Steam bootstrap passes its 32-bit glibc loader, forks, executes a
 pinned static i386 `/bin/sh`, and replaces the child with the Steam ELF. It
-then fails to create Steam's shared i386 worker threads. `/proc/self/cmdline`,
-`flock`, socket options and other i386 calls are also incomplete. This is a
+then reports a worker-thread creation failure. The captured clone requests use
+flags `0x800600` and receive `EINVAL`; no valid shared-thread request follows.
+`/proc/self/cmdline`, `flock`, socket options and other i386 calls are also
+incomplete. This is a
 diagnostic launch, not a working installation or sign-in. Run
 `scripts/diagnose-steam.ps1` for the current serial evidence. Native filesystem
 limitations are in [the runtime evidence](posix-runtime.md).
@@ -380,14 +384,14 @@ interfaces it needs.
 | Stage | State | What is left | Acceptance evidence |
 | --- | --- | --- | --- |
 | Dynamic ELF execution | **Real musl and glibc 2.36 loaders, dlopen and TLS verified** | Broader GNU library/application coverage | Focused unmodified-libc probes start through glibc's loader and exit successfully |
-| Process/runtime services | **Focused real-musl tests pass; threads, futex, TLS, signals, pipes, readiness, Unix sockets, fork/wait and 32-bit execve have implementations** | i386 shared threads, kernel-raised signals, `O_CLOEXEC`, filesystem links and permissions, `AF_INET` sockets, broader futex operations and conformance | libc and threading test suites run in the guest without success-returning stubs |
+| Process/runtime services | **Focused real-musl tests pass; threads, futex, TLS, pipes, readiness, Unix sockets, fork/wait and 32-bit execve have implementations** | i386 signal-frame delivery, kernel-raised signals, `O_CLOEXEC`, filesystem links and permissions, `AF_INET` sockets, broader futex operations and conformance | libc and threading test suites run in the guest without success-returning stubs |
 | 32-bit execution | **Actual i386 glibc loader, allocation, stat64/statx, pthread GS TLS, futex/join and dlopen verified** | i386 signal actions/frames, complete process/socket interfaces, bootstrap dependencies and application coverage | The actual Steam bootstrap starts |
 | Linux desktop transport | **Upstream libwayland client presents, resizes, receives input and releases buffers** | An XKB keymap; pointer and touch; subsurfaces, popups and regions; several clients; protocol errors; then Xwayland | Current focused gate passes with the upstream library; broader desktop applications remain untested |
 | Software OpenGL | **Real Mesa OSMesa/softpipe depth and GLSL pixels pass, including Wayland presentation** | Broader API coverage/conformance; EGL/GLX/window-system integration; GPU acceleration | Current triangle, shader, resize and screenshot checks pass; full application compatibility remains untested |
 | Shaders | **A SPIR-V module is read and executed, and its pixels reach the screen** | A module from a real compiler rather than from this repository; images, samplers, buffers, push constants, matrices, function calls; compiling a module instead of interpreting it | `glslang`'s output for a non-trivial shader runs and matches a reference image |
 | Vulkan | **Upstream SwiftShader CPU ICD compiles SPIR-V and submits a compute dispatch** | Vulkan loader discovery, WSI/swapchain, broader graphics tests, conformance and hardware driver | The Vulkan loader discovers the ICD, `vulkaninfo` succeeds and `vkcube` presents; then conformance |
 | Physical RTX 5060 | **Native PCI identity, pinned bootstrap/RM/microcode verification, unpublished contiguous/scatter buffers and three-level GSP radix tables implemented; QEMU disk/USB tests pass** | GSP firmware boot/authentication and RPC, DMA/IOMMU mapping, WPR, VRAM/virtual address spaces, fences, interrupts, command submission and native Vulkan integration | NexusOS boots on the physical card and GPU-generated pixels reach the display |
-| Steam installation | **Official ELF32 bootstrap loads through i386 glibc, forks, runs `/bin/sh`, and execs Steam; then fails at shared i386 thread creation** | i386 shared threads, signals, `/proc`, permissions, shell/bootstrap scripts and complete graphics/audio/network integration | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
+| Steam installation | **Official ELF32 bootstrap loads through i386 glibc, forks, runs `/bin/sh`, and execs Steam; Steam then gives up after its clone requests receive `EINVAL`** | Valid Steam thread/process startup, signals, `/proc`, permissions, shell/bootstrap scripts and complete graphics/audio/network integration | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
 
 ## Can Mesa not just be used?
 
