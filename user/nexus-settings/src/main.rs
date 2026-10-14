@@ -133,6 +133,8 @@ struct Row {
     /// Whether it is a colour, which decides whether a swatch is drawn beside
     /// it. Nothing else about it is different: a colour is text in a file.
     colour: bool,
+    /// A displayed value that comes from detected hardware and cannot be edited.
+    fixed: Option<String>,
 }
 
 impl Row {
@@ -152,6 +154,7 @@ impl Row {
             choices,
             fallback,
             colour: false,
+            fixed: None,
         }
     }
 
@@ -162,6 +165,18 @@ impl Row {
             choices: Vec::new(),
             fallback,
             colour: false,
+            fixed: None,
+        }
+    }
+
+    fn info(label: &'static str, value: String) -> Self {
+        Self {
+            key: "",
+            label,
+            choices: Vec::new(),
+            fallback: "",
+            colour: false,
+            fixed: Some(value),
         }
     }
 
@@ -229,6 +244,25 @@ impl Settings {
             .iter()
             .map(|zone| zone.name.to_string())
             .collect();
+        let hardware_report =
+            directory.and_then(|handle| read_text(handle, "hardware.txt").ok().flatten());
+        let (wifi, bluetooth) = hardware_report
+            .as_deref()
+            .map(|report| {
+                (
+                    format_hardware_status(report_value(&report, "wifi")),
+                    format_hardware_status(report_value(&report, "bluetooth")),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    nexus_i18n::text("settings.device.unavailable").to_string(),
+                    nexus_i18n::text("settings.device.unavailable").to_string(),
+                )
+            });
+        if hardware_report.is_some() {
+            nexus_user::log("settings: detected device inventory loaded").ok();
+        }
 
         use nexus_config::key;
         let items = alloc::vec![
@@ -302,6 +336,9 @@ impl Settings {
                 alloc::vec!["dhcp".to_string(), "off".to_string()],
                 "dhcp"
             )),
+            Item::Heading("settings.devices"),
+            Item::Row(Row::info("settings.wifi", wifi)),
+            Item::Row(Row::info("settings.bluetooth", bluetooth)),
             Item::Heading("settings.you"),
             Item::Row(Row::typed(key::USER_NAME, "settings.name", "")),
         ];
@@ -352,7 +389,9 @@ impl Settings {
     /// What a row says now: what is being typed, or the file's value, or the
     /// fallback.
     fn shown(&self, row: &Row) -> String {
-        self.values.get(row.key).unwrap_or(row.fallback).to_string()
+        row.fixed
+            .clone()
+            .unwrap_or_else(|| self.values.get(row.key).unwrap_or(row.fallback).to_string())
     }
 
     /// Put a message at the bottom.
@@ -608,6 +647,9 @@ impl App for Settings {
                 if !row.choices.is_empty() {
                     return false;
                 }
+                if row.fixed.is_some() {
+                    return false;
+                }
                 // Editing starts from what is there, so that changing one digit
                 // of a colour does not mean typing all six.
                 let current = self.shown(row);
@@ -627,6 +669,9 @@ impl App for Settings {
                     if !row.choices.is_empty() {
                         return false;
                     }
+                    if row.fixed.is_some() {
+                        return false;
+                    }
                     let mut current = self.shown(row);
                     current.pop();
                     self.editing = Some(current);
@@ -640,6 +685,9 @@ impl App for Settings {
                 let Some(row) = self.row() else {
                     return false;
                 };
+                if row.fixed.is_some() {
+                    return false;
+                }
                 let (key, colour) = (row.key, row.colour);
                 if colour && nexus_look::Colour::parse(&typed).is_none() {
                     // Kept, not thrown away. Somebody who mistyped one digit of
@@ -705,6 +753,29 @@ impl Settings {
 ///
 /// A short read is an error for the same reason. Half a settings file parses
 /// perfectly well and is missing half the settings.
+fn report_value<'a>(report: &'a str, key: &str) -> Option<&'a str> {
+    report.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        (name == key).then_some(value)
+    })
+}
+
+fn format_hardware_status(value: Option<&str>) -> String {
+    let Some(value) = value else {
+        return nexus_i18n::text("settings.device.unavailable").to_string();
+    };
+    if value == "none" {
+        return nexus_i18n::text("settings.device.none").to_string();
+    }
+    let Some((device, id)) = value.split_once('|') else {
+        return nexus_i18n::text("settings.device.unavailable").to_string();
+    };
+    nexus_i18n::format(
+        "settings.device.present",
+        &[("device", &device), ("id", &id)],
+    )
+}
+
 fn read_text(directory: Handle, name: &str) -> Result<Option<String>, String> {
     let file = match nexus_user::open(directory, name) {
         Ok(file) => file,

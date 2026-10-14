@@ -104,7 +104,10 @@ try {
     Send-DesktopKey 'meta_l-shift-q'
     Send-DesktopKey 'meta_l-c'
     Wait-DesktopMarker 'compositor: started the settings, and lent them the settings'
+    Wait-DesktopMarker 'settings: detected device inventory loaded'
     Save-DesktopFrame 'appearance'
+    for ($Index = 0; $Index -lt 12; $Index++) { Send-DesktopKey 'down' }
+    Save-DesktopFrame 'detected-devices'
     Send-DesktopKey 'meta_l-shift-q'
     Send-DesktopKey 'meta_l-spc'
     foreach ($Key in @('n', 'e', 'x')) { Send-DesktopKey $Key }

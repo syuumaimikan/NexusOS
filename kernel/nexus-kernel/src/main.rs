@@ -18,6 +18,8 @@
 
 extern crate alloc;
 
+use alloc::string::String;
+
 mod acpi;
 mod arch;
 mod compat;
@@ -361,6 +363,7 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     display::progress(1, BOOT_STEPS);
 
     self_test();
+    publish_hardware_inventory(&devices);
     display::progress(2, BOOT_STEPS);
     inject_fault_if_requested();
 
@@ -375,6 +378,62 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     // else is runnable.
     kprintln!("[boot] boot thread retiring; the system is now scheduler-driven");
     sched::exit()
+}
+
+/// Make the PCI and USB radios found this boot visible to the settings window.
+/// The text is generated from bus descriptors, so it reports presence without
+/// claiming that a driver can scan or connect yet.
+fn publish_hardware_inventory(devices: &[drivers::pci::Device]) {
+    let wifi = devices
+        .iter()
+        .find(|device| device.vendor == 0x14c3 && device.device == 0x0616)
+        .map(|_| String::from("MediaTek RZ616|14c3:0616"))
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|device| device.class == 0x02 && device.subclass == 0x80)
+                .map(|device| {
+                    alloc::format!(
+                        "wireless PCI device|{:04x}:{:04x}",
+                        device.vendor,
+                        device.device
+                    )
+                })
+        })
+        .unwrap_or_else(|| String::from("none"));
+
+    let attached = drivers::usb::ATTACHED.lock();
+    let bluetooth = attached
+        .iter()
+        .find(|attached| {
+            attached.device.vendor == 0x0e8d && attached.device.product == 0x0616
+        })
+        .map(|_| String::from("MediaTek RZ616|0e8d:0616"))
+        .or_else(|| {
+            attached
+                .iter()
+                .find(|attached| {
+                    attached.device.class == 0xe0 && attached.device.subclass == 0x01
+                })
+                .map(|attached| {
+                    alloc::format!(
+                        "Bluetooth USB device|{:04x}:{:04x}",
+                        attached.device.vendor,
+                        attached.device.product
+                    )
+                })
+        })
+        .unwrap_or_else(|| String::from("none"));
+    drop(attached);
+
+    let report = alloc::format!("wifi={wifi}\nbluetooth={bluetooth}\n");
+    match fs::store::replace("system", "hardware.txt", report.as_bytes()) {
+        Ok(()) => {
+            kprintln!("[hw  ] Wi-Fi: {wifi}");
+            kprintln!("[hw  ] Bluetooth: {bluetooth}");
+        }
+        Err(error) => kprintln!("[hw  ] could not save the device inventory: {error}"),
+    }
 }
 
 /// How many steps of bring-up the line under the logo is divided into.
