@@ -5,14 +5,16 @@ launch: asked for unpk
 compositor: the launcher asked for unpk
 compositor: started the unpacker, and lent it the downloads folder to read, a folder to write, and the Linux root to look in
 unpack: DEMO.DEB is the Debian package demo-linux-app 1.2-3; 2 file(s), 540 bytes into DEMO.DEB/
-unpack: usr/bin/demo asks for /lib64/ld-linux-x86-64.so.2: which is not in the Linux root
-unpack: 1 of them name a loader that is not in the Linux root; those files are unpacked and are not runnable
-unpack: DEMO.DEB/ holds 2 file(s), 1 of which need a loader that is not here
+unpack: usr/bin/demo asks for /lib64/ld-linux-x86-64.so.2: which is here, so it may run
+unpack: DEMO.DEB/ holds 2 file(s), 0 of which need a loader that is not here
 ```
 
 `build/unpack-test.log`, in the order it was written, with the `[user]` prefix
-taken off each line. Driven the way a person would: open the launcher, type
-"dow", press return. `scripts/test-unpack.ps1` is that, automated.
+taken off each line. This run used an image with the optional GNU libc runtime
+staged, so the loader was present. Without that runtime, the same check reports
+that it is absent. `scripts/test-unpack.ps1` verifies either state and checks
+that the summary agrees with the lookup. Driven the way a person would: open
+the launcher, type "dow", press return.
 
 ## The sentence that was true and stopped being true
 
@@ -21,22 +23,22 @@ An earlier version of the fifth line above said the loader was one
 programs "are dynamically linked against a C library this system has none of".
 
 The unpacker was not checking. It said that about *every* `PT_INTERP` it saw,
-because when it was written nothing on this machine could load one, so the
-assumption and the fact agreed. Then another agent installed a dynamic loader at
-`/lib/ld-nexus-x86-64.so.1`, and the sentence went on being printed with the
+because when it was written the Linux root had no GNU loader, so the assumption
+and the fact agreed. Then the root gained an optional GNU runtime, including
+`/lib64/ld-linux-x86-64.so.2`, and the sentence went on being printed with the
 same confidence and was no longer true.
 
-**A sentence that was right once is the hardest kind of wrong to notice**, and
-nothing would have caught this: the test passed, the output read correctly, and
-the only thing that had changed was the world the sentence described.
+**A sentence that was right once is the hardest kind of wrong to notice.** The
+integration test accepts either runtime configuration, while requiring the
+reported lookup and summary to agree.
 
 So the unpacker is lent the Linux root, read only, and **looks**. Checked in
 all three directions by a temporary probe, because a function that always
 answered "no" would pass the test above perfectly:
 
 ```
-unpack: PROBE /lib/ld-nexus-x86-64.so.1: which is here, so it may run
-unpack: PROBE /lib64/ld-linux-x86-64.so.2: which is not in the Linux root
+unpack: PROBE /lib/ld-nexus-x86-64.so.1: which is not in the Linux root
+unpack: PROBE /lib64/ld-linux-x86-64.so.2: which is here, so it may run
 unpack: PROBE /lib/../lib/x: which is not in the Linux root
 ```
 
@@ -54,14 +56,12 @@ The request was to download a Linux installer in the browser and be able to
 install it. This is the half that can be done, and the last two lines above are
 the point of the whole exercise rather than an apology at the end of it.
 
-**Unpacking is real and it works.** Running what comes out does not, and the
-reason is not a missing feature — it is that a `.deb` full of programs built
-against a C library needs that C library, a dynamic loader it recognises, and
-usually a window system and a driver stack besides. There *is* a loader on this
-machine now, and it is not the one `demo.deb` asks for; being able to load
-something is not the same as being able to load glibc's. Each of those is larger than this operating
-system. See [linux-software.md](linux-software.md) for what the compatibility
-layer does and does not reach.
+**Unpacking is real and it works.** The unpacker does not execute software or
+resolve `.deb` dependencies. A loader being present is only one prerequisite;
+an application may also need libraries, system calls, a window system, and a
+driver stack. The optional GNU runtime supplies some libc components, but it
+is not a complete Debian environment. See [linux-software.md](linux-software.md)
+for what the compatibility layer does and does not reach.
 
 So the machine says which loader is missing, by name, instead of mapping the
 segments and jumping into a program that immediately reaches for a symbol table

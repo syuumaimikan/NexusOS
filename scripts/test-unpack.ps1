@@ -362,14 +362,28 @@ foreach ($expected in @(
         'compositor: started the unpacker, and lent it the downloads folder to read',
         'and the Linux root to look in',
         'is the Debian package demo-linux-app 1.2-3',
-        'usr/bin/demo asks for /lib64/ld-linux-x86-64.so.2',
-        'which is not in the Linux root'
+        'usr/bin/demo asks for /lib64/ld-linux-x86-64.so.2'
     )) {
     if ($output.Contains($expected)) {
         Write-Host "    ok   $expected" -ForegroundColor DarkGray
     } else {
         $failures += "never reported: $expected"
     }
+}
+
+# Optional runtime images differ. Check that the unpacker reports the actual
+# loader lookup and that its summary agrees, rather than requiring one image.
+$loaderPresent = $output.Contains('usr/bin/demo asks for /lib64/ld-linux-x86-64.so.2: which is here, so it may run')
+$loaderAbsent = $output.Contains('usr/bin/demo asks for /lib64/ld-linux-x86-64.so.2: which is not in the Linux root')
+if ($loaderPresent -eq $loaderAbsent) {
+    $failures += 'the Linux loader lookup did not report exactly one observed state'
+} elseif ($loaderPresent -and -not $output.Contains('0 of which need a loader that is not here')) {
+    $failures += 'the summary disagreed with the present Linux loader'
+} elseif ($loaderAbsent -and -not $output.Contains('1 of which need a loader that is not here')) {
+    $failures += 'the summary disagreed with the missing Linux loader'
+} else {
+    $state = if ($loaderPresent) { 'present' } else { 'absent' }
+    Write-Host "    ok   loader lookup and summary agree: $state" -ForegroundColor DarkGray
 }
 
 foreach ($bad in @('unpack: FAILED', 'unpack: PANIC', 'compositor: FAILED', 'KERNEL PANIC')) {
@@ -392,7 +406,7 @@ foreach ($line in ($output -split "`r?`n")) {
 
 Write-Host ''
 if ($failures.Count -eq 0) {
-    Write-Host 'The package was installed, and the machine said what it cannot run.' -ForegroundColor Green
+    Write-Host 'The package was unpacked, and the machine accurately reported its loader.' -ForegroundColor Green
     exit 0
 } else {
     foreach ($why in $failures) { Write-Host "    FAIL $why" -ForegroundColor Red }
