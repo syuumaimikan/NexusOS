@@ -36,7 +36,12 @@ checking key dispatch. Run `scripts/test-desktop.ps1` after staging and refreshi
 the FAT program partition. The native UI unit suite also checks large-radius
 arithmetic, glyph clipping, image interpolation and existing MSAA/blur behavior.
 
-The requested package manager support for Linux/Windows applications and native
-Wi-Fi/Bluetooth scanning/display are additional acceptance work. Installing a
-file alone does not prove its foreign application runtime works. Hardware
-inventory alone does not prove network scanning or pairing works.
+The signed native package manager installs Linux and Windows payloads, but its
+runtime support differs by format. The tested Linux ELF runs through the current
+compatibility layer; Windows PE files are stored and identified, while Win32
+execution is unavailable. See [package manager](packages.md).
+
+Settings now displays PCI/USB Wi-Fi, Bluetooth and graphics devices discovered
+at boot. The host's MediaTek RZ616 is identified by its bus IDs. Wi-Fi drivers,
+network scanning/association and Bluetooth drivers/pairing remain unfinished;
+the inventory reports presence and support status only.

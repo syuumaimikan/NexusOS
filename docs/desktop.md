@@ -16,6 +16,9 @@ It uses NexusOS's native compositor and applications.
   Up/Down choose, Escape dismisses. Long lists scroll to keep selection visible.
 - Appearance uses light translucent panels, a category sidebar, colour swatches
   and existing persistent settings. Its list scrolls on smaller windows.
+- The Detected devices section shows boot-time Wi-Fi, Bluetooth and graphics
+  identities with the current driver/acceleration status. QEMU captures show the
+  virtual graphics adapter; they do not verify physical RTX 5060 rendering.
 - Super+Space opens the command bar; Super+Enter opens a terminal; Super+C
   opens Appearance. Super+arrows cycle visible windows and Super+Shift+Q
   requests closing. Applications can decline a close request for unsaved work.
