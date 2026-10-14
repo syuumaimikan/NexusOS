@@ -33,6 +33,9 @@
     Implies WithGlibcRuntime.
 .PARAMETER WithVulkanRuntime
     Build and embed the upstream SwiftShader CPU Vulkan ICD and SPIR-V probe.
+.PARAMETER WithRtxFirmware
+    Prepare and stage pinned production GB202/GB206 GSP bootstrap material.
+    Full GSP-RM firmware, native GPU boot/submission and Vulkan remain required.
 #>
 [CmdletBinding()]
 param(
@@ -44,6 +47,7 @@ param(
     [switch]$WithGlibcRuntime,
     [switch]$WithGlibc32Runtime,
     [switch]$WithVulkanRuntime,
+    [switch]$WithRtxFirmware,
     [switch]$SkipDiskImage,
     # Build the kernel with its destructive filesystem checks on.
     #
@@ -62,6 +66,7 @@ if ($WithGlibc32Runtime) { $WithGlibcRuntime = $true }
 # the rest of what the machine is.
 . (Join-Path $PSScriptRoot 'qemu.ps1')
 . (Join-Path $PSScriptRoot 'runtime-stage.ps1')
+. (Join-Path $PSScriptRoot 'rtx-stage.ps1')
 . (Join-Path $PSScriptRoot 'maintenance.ps1')
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -129,6 +134,7 @@ try {
 }
 
 $ProgramDir = Join-Path $BuildDir 'programs'
+if ($WithRtxFirmware) { Publish-NvidiaBootstrap -ProgramDir $ProgramDir }
 $InitElf = Join-Path $RepoRoot "target\x86_64-nexus-user\$Profile\nexus-init"
 $StagedInit = Publish-Program -Elf $InitElf -ProgramDir $ProgramDir -Name 'init.elf'
 $initSize = [math]::Round((Get-Item $StagedInit).Length / 1KB, 1)

@@ -44,9 +44,16 @@ try {
     $programs = Join-Path $fixture 'programs'
     New-Item -ItemType Directory -Path $programs | Out-Null
     Set-Content -LiteralPath (Join-Path $programs 'init.elf') -Value 'first program'
+    New-Item -ItemType Directory -Path (Join-Path $programs 'NVFW') | Out-Null
+    Set-Content -LiteralPath (Join-Path $programs 'NVFW/FMC.BIN') -Value 'nested firmware payload'
     $disk = Join-Path $fixture 'nexus-disk.img'
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'make-disk.ps1') -Output $disk -ProgramDir $programs -SizeMiB 96 -FatMiB 40
     Require ($LASTEXITCODE -eq 0) 'Initial test image failed'
+    $imageBytes = [IO.File]::ReadAllBytes($disk)
+    $imageText = [Text.Encoding]::ASCII.GetString($imageBytes)
+    Require ($imageText.Contains('NVFW       ') -and $imageText.Contains('FMC     BIN') -and $imageText.Contains('nested firmware payload')) 'Nested program resources were omitted'
+    $imageBytes = $null
+    $imageText = $null
     $dataStart = 41MB
     $stream = [IO.File]::Open($disk, 'Open', 'ReadWrite', 'None')
     try {
@@ -89,6 +96,11 @@ try {
     }
     $busy = [IO.File]::Open((Join-Path $runs[2] 'nexus-disk.img'), 'Open', 'ReadWrite', 'None')
     $emptyRun = Join-Path $cleanupRoot ('runtime-test-' + [guid]::NewGuid().ToString('N'))
+    $rtxRun = Join-Path $cleanupRoot ('rtx-bootstrap-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path (Join-Path $rtxRun 'programs') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $rtxRun 'serial.log') -Value 'retain firmware diagnostics'
+    Set-Content -LiteralPath (Join-Path $rtxRun 'programs/FMC.BIN') -Value 'generated'
+    @{ Version = 1; OwnerPid = 2147483647 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $rtxRun '.nexus-disposable.json')
     New-Item -ItemType Directory -Path $emptyRun | Out-Null
     @{ Version = 1; OwnerPid = 2147483647 } | ConvertTo-Json |
         Set-Content -LiteralPath (Join-Path $emptyRun '.nexus-disposable.json')
@@ -96,6 +108,8 @@ try {
     Require (Test-Path -LiteralPath (Join-Path $runs[0] 'nexus-disk.img')) 'WhatIf removed a file'
     Invoke-NexusCleanup -RootDirectory $cleanupRoot -Keep 0
     Require (-not (Test-Path -LiteralPath $emptyRun)) 'Empty disposable run record was retained'
+    Require (-not (Test-Path -LiteralPath (Join-Path $rtxRun 'programs'))) 'RTX disposable payload was retained'
+    Require (Test-Path -LiteralPath (Join-Path $rtxRun 'serial.log')) 'RTX evidence was deleted'
     Require (-not (Test-Path -LiteralPath (Join-Path $runs[0] 'programs'))) 'Old generated programs were retained'
     foreach ($name in @('serial.log', 'screenshot.png', 'notes.txt')) {
         Require (Test-Path -LiteralPath (Join-Path $runs[0] $name)) "Cleanup deleted $name"

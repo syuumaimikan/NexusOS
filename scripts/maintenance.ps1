@@ -34,7 +34,7 @@ function Register-NexusDisposableRun {
     param([string]$Directory)
     $root = Join-Path (Split-Path -Parent $PSScriptRoot) 'build'
     $full = Assert-NexusGeneratedPath -Path $Directory -Root $root
-    if ((Split-Path -Leaf $full) -notmatch '^(runtime-test|steam-diagnostic|linux-graphics)-[a-f0-9]{32}$') {
+    if ((Split-Path -Leaf $full) -notmatch '^(runtime-test|steam-diagnostic|linux-graphics|rtx-bootstrap)-[a-f0-9]{32}$') {
         throw "Not a disposable test directory: $full"
     }
     New-Item -ItemType Directory -Path $full -Force | Out-Null
@@ -49,10 +49,10 @@ function Invoke-NexusCleanup {
     if ($RootDirectory) { $root = Assert-NexusGeneratedPath -Path $RootDirectory -Root $root }
     if (-not (Test-Path -LiteralPath $root)) { return }
     $runs = @(Get-ChildItem -LiteralPath $root -Directory | Where-Object {
-        $_.Name -match '^(runtime-test|steam-diagnostic|linux-graphics)-[a-f0-9]{32}$' -and
+        $_.Name -match '^(runtime-test|steam-diagnostic|linux-graphics|rtx-bootstrap)-[a-f0-9]{32}$' -and
         (Test-Path -LiteralPath (Join-Path $_.FullName '.nexus-disposable.json'))
     })
-    foreach ($family in @('runtime-test', 'steam-diagnostic', 'linux-graphics')) {
+    foreach ($family in @('runtime-test', 'steam-diagnostic', 'linux-graphics', 'rtx-bootstrap')) {
         $rank = 0
         foreach ($run in @($runs | Where-Object { $_.Name.StartsWith($family + '-') } | Sort-Object CreationTimeUtc -Descending)) {
             $rank++
@@ -63,7 +63,7 @@ function Invoke-NexusCleanup {
                 if (Get-Process -Id $owner.OwnerPid -ErrorAction SilentlyContinue) { continue }
                 $payload = @(Get-ChildItem -LiteralPath $run.FullName -Force | Where-Object {
                     ($_.PSIsContainer -and $_.Name -in @('esp', 'programs')) -or
-                    (-not $_.PSIsContainer -and ($_.Name -in @('nexus-disk.img', 'code.fd', 'vars.fd') -or $_.Extension -eq '.ppm'))
+                    (-not $_.PSIsContainer -and ($_.Name -in @('nexus-disk.img', 'code.fd', 'vars.fd', 'edk2-x86_64-code.fd', 'edk2-vars.fd') -or $_.Extension -eq '.ppm'))
                 })
                 $targets = @($payload | ForEach-Object { Assert-NexusGeneratedPath -Path $_.FullName -Root $root })
                 # If QEMU still owns any image, leave the entire run alone.

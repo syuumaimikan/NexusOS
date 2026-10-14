@@ -23,6 +23,7 @@ members = [
     "shared/nexus-render3d",
     "shared/nexus-spirv",
     "shared/nexus-look",
+    "shared/nexus-nvidia",
     "shared/nexus-ime",
     "shared/nexus-dns",
     "shared/nexus-http",

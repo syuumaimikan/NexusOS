@@ -246,6 +246,7 @@ dependencies = [
  "nexus-look",
  "nexus-mm",
  "nexus-net",
+ "nexus-nvidia",
  "nexus-time",
 ]
 
@@ -324,6 +325,13 @@ dependencies = [
  "nexus-api",
  "nexus-lang",
  "nexus-user",
+]
+
+[[package]]
+name = "nexus-nvidia"
+version = "0.1.0"
+dependencies = [
+ "nexus-crypto",
 ]
 
 [[package]]

@@ -465,28 +465,29 @@ Add-File -Directory $rootCluster -Name 'CHAIN.BIN' -Content $long
 
 # Programs, under `BIN`. The kernel reads them from here; the firmware does not
 # look at them.
+function Copy-Tree {
+    param([string]$Path, [int]$Directory, [int]$Depth = 0)
+    if ($Depth -gt 64) { throw 'FAT source tree exceeds the directory depth limit' }
+    foreach ($item in Get-ChildItem -LiteralPath $Path | Sort-Object Name) {
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "FAT source tree contains a junction or symlink: $($item.FullName)"
+        }
+        if ($item.PSIsContainer) {
+            $child = New-Directory -Parent $Directory -Name $item.Name
+            Copy-Tree -Path $item.FullName -Directory $child -Depth ($Depth + 1)
+        } else {
+            Add-File -Directory $Directory -Name $item.Name `
+                -Content ([System.IO.File]::ReadAllBytes($item.FullName))
+        }
+    }
+}
 if ($ProgramDir -and (Test-Path $ProgramDir)) {
     $binDirectory = New-Directory -Parent $rootCluster -Name 'BIN'
-    foreach ($item in Get-ChildItem -Path $ProgramDir -File | Sort-Object Name) {
-        Add-File -Directory $binDirectory -Name $item.Name `
-            -Content ([System.IO.File]::ReadAllBytes($item.FullName))
-    }
+    Copy-Tree -Path $ProgramDir -Directory $binDirectory
 }
 
 # And the tree the firmware boots from, if one was given.
 if ($SourceDir -and (Test-Path $SourceDir)) {
-    function Copy-Tree {
-        param([string]$Path, [int]$Directory)
-        foreach ($item in Get-ChildItem -Path $Path | Sort-Object Name) {
-            if ($item.PSIsContainer) {
-                $child = New-Directory -Parent $Directory -Name $item.Name
-                Copy-Tree -Path $item.FullName -Directory $child
-            } else {
-                Add-File -Directory $Directory -Name $item.Name `
-                    -Content ([System.IO.File]::ReadAllBytes($item.FullName))
-            }
-        }
-    }
     Copy-Tree -Path $SourceDir -Directory $rootCluster
 }
 

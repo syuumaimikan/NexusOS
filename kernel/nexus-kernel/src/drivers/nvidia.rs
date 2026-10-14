@@ -8,6 +8,42 @@
 
 use super::pci::{self, BaseAddress, Device};
 use crate::{kprintln, memory};
+pub mod bootstrap;
+#[derive(Clone, Copy)]
+struct Adapter {
+    address: pci::Address,
+    bar0: u64,
+    chip: u32,
+}
+static DETECTED: crate::sync::IrqSpinLock<Option<Adapter>> = crate::sync::IrqSpinLock::new(None);
+static PREPARED: crate::sync::IrqSpinLock<Option<bootstrap::Prepared>> =
+    crate::sync::IrqSpinLock::new(None);
+
+/// Called after storage is available. Preserve scanout while preparing the
+/// pinned firmware; this does not report acceleration or enable DMA engines.
+pub fn prepare_firmware() {
+    let adapter = *DETECTED.lock();
+    if let Some(adapter) = adapter {
+        kprintln!(
+            "[nv  ] preparing bootstrap for {} chip={:#x} BAR0={:#x}",
+            adapter.address,
+            adapter.chip,
+            adapter.bar0
+        );
+        match bootstrap::prepare() {
+            Ok(prepared) => {
+                prepared.report();
+                *PREPARED.lock() = Some(prepared);
+            }
+            Err(error) => kprintln!(
+                "[nv  ] bootstrap not prepared: {}; firmware display retained",
+                error
+            ),
+        }
+    }
+    #[cfg(feature = "nvidia-bootstrap-test")]
+    bootstrap::self_test();
+}
 
 const NVIDIA: u16 = 0x10de;
 const RTX_5060: u16 = 0x2d05;
@@ -112,6 +148,16 @@ pub unsafe fn probe(devices: &[Device]) {
         kprintln!(
             "[nv  ] native discovery complete; GSP/VRAM/command submission are not initialised"
         );
+        // This first-stage port owns one selected adapter. Do not associate
+        // its bootstrap memory with whichever second card enumerates last.
+        let mut selected = DETECTED.lock();
+        if selected.is_none() {
+            *selected = Some(Adapter {
+                address: device.address,
+                bar0: base,
+                chip,
+            });
+        }
     }
     if !found {
         kprintln!("[nv  ] no physical NVIDIA display adapter found");

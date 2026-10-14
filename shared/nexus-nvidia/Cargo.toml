@@ -1,0 +1,8 @@
+[package]
+name = "nexus-nvidia"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nexus-crypto = { path = "../nexus-crypto" }

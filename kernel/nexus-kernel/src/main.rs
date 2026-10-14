@@ -285,6 +285,10 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
         Err(error) => kprintln!("[usb ] the USB controller would not start: {error}"),
     }
 
+    // Pinned NVIDIA bootstrap files may be on the disk or a physical USB
+    // boot medium. Preparation keeps firmware scanout and submits no work.
+    drivers::nvidia::prepare_firmware();
+
     // The display comes up only now, after the heap: translated strings are
     // built at runtime by substituting into templates, so drawing anything
     // localised allocates. Bringing the display up earlier cost a boot to an
