@@ -246,16 +246,18 @@ impl Settings {
             .collect();
         let hardware_report =
             directory.and_then(|handle| read_text(handle, "hardware.txt").ok().flatten());
-        let (wifi, bluetooth) = hardware_report
+        let (wifi, bluetooth, graphics) = hardware_report
             .as_deref()
             .map(|report| {
                 (
                     format_hardware_status(report_value(&report, "wifi")),
                     format_hardware_status(report_value(&report, "bluetooth")),
+                    format_hardware_status(report_value(&report, "graphics")),
                 )
             })
             .unwrap_or_else(|| {
                 (
+                    nexus_i18n::text("settings.device.unavailable").to_string(),
                     nexus_i18n::text("settings.device.unavailable").to_string(),
                     nexus_i18n::text("settings.device.unavailable").to_string(),
                 )
@@ -339,6 +341,7 @@ impl Settings {
             Item::Heading("settings.devices"),
             Item::Row(Row::info("settings.wifi", wifi)),
             Item::Row(Row::info("settings.bluetooth", bluetooth)),
+            Item::Row(Row::info("settings.graphics", graphics)),
             Item::Heading("settings.you"),
             Item::Row(Row::typed(key::USER_NAME, "settings.name", "")),
         ];

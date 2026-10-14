@@ -426,11 +426,30 @@ fn publish_hardware_inventory(devices: &[drivers::pci::Device]) {
         .unwrap_or_else(|| String::from("none"));
     drop(attached);
 
-    let report = alloc::format!("wifi={wifi}\nbluetooth={bluetooth}\n");
+    let graphics = devices
+        .iter()
+        .find(|device| device.vendor == 0x10de && device.device == 0x2d05)
+        .map(|_| String::from("GeForce RTX 5060|10de:2d05"))
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|device| device.class == 0x03)
+                .map(|device| {
+                    alloc::format!(
+                        "display adapter|{:04x}:{:04x}",
+                        device.vendor,
+                        device.device
+                    )
+                })
+        })
+        .unwrap_or_else(|| String::from("none"));
+
+    let report = alloc::format!("wifi={wifi}\nbluetooth={bluetooth}\ngraphics={graphics}\n");
     match fs::store::replace("system", "hardware.txt", report.as_bytes()) {
         Ok(()) => {
             kprintln!("[hw  ] Wi-Fi: {wifi}");
             kprintln!("[hw  ] Bluetooth: {bluetooth}");
+            kprintln!("[hw  ] Graphics: {graphics}; acceleration unavailable");
         }
         Err(error) => kprintln!("[hw  ] could not save the device inventory: {error}"),
     }
