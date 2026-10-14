@@ -74,6 +74,7 @@ try {
     if ($WithGspFirmware) {
         if (-not $Good.Contains('[test] NVIDIA bootstrap PASS:')) { throw 'Bootstrap check missing before GSP check' }
         if (-not $Good.Contains('[nv  ] GB206 boot ABI ready:') -or -not $Good.Contains('native boot ABI, RPC queues, seven logs, DMA permissions')) { throw 'Native GSP argument/queue check missing' }
+        if (-not $Good.Contains('[nv  ] FSP COT single-packet=868 bytes staged;')) { throw 'Native COT wire packet missing' }
         Write-Host 'PASS: native real GSP-RM/ucodes, radix, initial boot ABI, RPC queues, seven logs, DMA permissions and frame rollback'
         $GspFile = Join-Path $Programs 'NVFW/GSPRM.BIN'
         $GspStream = [IO.File]::Open($GspFile,'Open','ReadWrite','None')

@@ -63,6 +63,25 @@ FIELDS=[
     ('sizeof(msgqTxHeader)',32),
     ('__builtin_offsetof(msgqTxHeader,msgCount)',12),
     ('__builtin_offsetof(msgqTxHeader,entryOff)',16),
+    ('sizeof(MCTP_HEADER)',7),
+    ('sizeof(NVDM_PAYLOAD_COMMAND_RESPONSE)',12),
+    ('__builtin_offsetof(NVDM_PAYLOAD_COMMAND_RESPONSE,commandNvdmType)',4),
+    ('__builtin_offsetof(NVDM_PAYLOAD_COMMAND_RESPONSE,errorCode)',8),
+    ('NVDM_TYPE_COT',0x14),
+    ('NVDM_TYPE_FSP_RESPONSE',0x15),
+    ('FSP_EMEM_CHANNEL_RM_SIZE',1024),
+    ('MCTP_MSG_HEADER_TYPE_VENDOR_PCI',0x7e),
+    ('MCTP_MSG_HEADER_VENDOR_ID_NV',0x10de),
+    ('REF_NUM(MCTP_HEADER_VERSION,1) | REF_NUM(MCTP_HEADER_SOM,1) | REF_NUM(MCTP_HEADER_EOM,1)',0xc0000001),
+    ('REF_DEF(MCTP_MSG_HEADER_TYPE,_VENDOR_PCI) | REF_DEF(MCTP_MSG_HEADER_VENDOR_ID,_NV) | REF_NUM(MCTP_MSG_HEADER_NVDM_TYPE,NVDM_TYPE_COT)',0x1410de7e),
+    ('NV_PFSP_EMEMC(0)',0x8f2ac0),
+    ('NV_PFSP_EMEMD(0)',0x8f2ac4),
+    ('NV_PFSP_QUEUE_HEAD(0)',0x8f2c00),
+    ('NV_PFSP_QUEUE_TAIL(0)',0x8f2c04),
+    ('NV_PFSP_MSGQ_HEAD(0)',0x8f2c80),
+    ('NV_PFSP_MSGQ_TAIL(0)',0x8f2c84),
+    ('REF_NUM(NV_PFSP_EMEMC_AINCW,1)',1<<24),
+    ('REF_NUM(NV_PFSP_EMEMC_AINCR,1)',1<<25),
 ]
 
 
@@ -74,24 +93,30 @@ def main():
     probe=output/'probe.c'
     probe.write_text('\n'.join([
         '#include "nvtypes.h"',
+        '#include "nvmisc.h"',
         '#include "gsp/gsp_fw_wpr_meta.h"',
         '#include "gsp/gspifpub.h"',
         '#include "gpu/fsp/kern_fsp_cot_payload.h"',
         '#include "gpu/gsp/gsp_init_args.h"',
         '#include "libos_init_args.h"',
         '#include "msgq_priv.h"',
+        '#include "mctp_format.h"',
+        '#include "nvdm_format.h"',
+        '#include "fsp/fsp_emem_channels.h"',
+        '#include "fsp/nvdm_payload_cmd_response.h"',
+        '#include "published/hopper/gh100/dev_fsp_pri.h"',
         'const unsigned int shape[] = {'+', '.join(field for field,_ in FIELDS)+'};',
     ])+'\n')
     command=['clang','-S','-emit-llvm','-ffreestanding','-o',str(output/'probe.ll'),str(probe)]
     for include in ['src/common/sdk/nvidia/inc','src/common/inc', 'src/nvidia/arch/nvalloc/common/inc',
-                    'src/nvidia/inc/kernel','src/common/uproc/os/common/include', 'src/nvidia/inc/libraries/msgq']:
+                    'src/nvidia/inc/kernel','src/common/uproc/os/common/include', 'src/nvidia/inc/libraries/msgq', 'src/common/inc/swref']:
         command += ['-I',str(source/include)]
     subprocess.run(command,check=True,cwd=REPO)
     llvm=(output/'probe.ll').read_text()
     match=re.search(r'@shape\s*=.*?constant \[\d+ x i32\] \[([^\n]+)\]',llvm)
     if not match:
         raise RuntimeError('C ABI probe constants missing from LLVM output')
-    values=[int(value) for value in re.findall(r'i32 (\d+)',match[1])]
+    values=[int(value)&0xffffffff for value in re.findall(r'i32 (-?\d+)',match[1])]
     expected=[value for _,value in FIELDS]
     if values!=expected:
         raise ValueError('Pinned NVIDIA ABI mismatch: '+str(list(zip(FIELDS,values))))

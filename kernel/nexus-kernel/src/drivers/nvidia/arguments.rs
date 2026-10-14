@@ -17,6 +17,7 @@ pub(super) struct Prepared {
     rm_args: DmaImage,
     libos: DmaImage,
     cot: DmaImage,
+    cot_packet: [u8; nexus_nvidia::fsp::COT_PACKET_SIZE],
     logs: Vec<DmaImage>,
 }
 impl Prepared {
@@ -48,6 +49,7 @@ impl Prepared {
             rm_args: allocate(boot::PAGE)?,
             libos: allocate(boot::PAGE)?,
             cot: allocate(boot::COT_SIZE)?,
+            cot_packet: [0; nexus_nvidia::fsp::COT_PACKET_SIZE],
             logs: Vec::new(),
         };
         output
@@ -102,6 +104,8 @@ impl Prepared {
             )
             .map_err(Error::Image)?,
         );
+        output.cot_packet =
+            nexus_nvidia::fsp::cot_packet(output.cot.bytes()).map_err(Error::Image)?;
         output.validate()?;
         Ok(output)
     }
@@ -123,6 +127,8 @@ impl Prepared {
             return Err(Error::Memory);
         }
         if self.meta.bytes()[248..256] != [0; 8]
+            || self.cot_packet[..8] != [1, 0, 0, 0xc0, 0x7e, 0xde, 0x10, 0x14]
+            || self.cot_packet[8..] != *self.cot.bytes()
             || self.shared.bytes()[boot::PTE_COUNT * 8..boot::CMD_OFFSET]
                 .iter()
                 .any(|&byte| byte != 0)
@@ -190,6 +196,10 @@ impl Prepared {
             self.meta.buffer().address,
             self.fmc_args.buffer().address,
             self.cot.bytes().len()
+        );
+        crate::kprintln!(
+            "[nv  ] FSP COT single-packet={} bytes staged; no EMEM writes or FSP response observed",
+            self.cot_packet.len()
         );
         crate::kprintln!(
             "[nv  ] RPC shared={} bytes/{} PTEs, seven Libos logs, FRTS={} bytes; remote status remains zero, no GPU submission",
