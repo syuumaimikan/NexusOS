@@ -1,10 +1,10 @@
 //! AMD-Vi v1 DMA domains, command completion and fault records.
-//! Activation currently belongs to the explicit native DMA test. Discovery
-//! is read-only; no NVIDIA device is enabled or impersonated by this driver.
+//! Activation belongs to the explicit DMA diagnostic. Discovery
+//! is read-only; no NVIDIA device is impersonated by this driver.
 use crate::{acpi::AcpiInfo, kprintln, memory, sync::IrqSpinLock};
 use alloc::vec::Vec;
 #[cfg(feature = "amdvi-dma-test")]
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering, fence};
 use nexus_abi::layout;
 use nexus_nvidia::amdvi as abi;
 
@@ -46,7 +46,8 @@ pub fn discover(info: Option<&AcpiInfo>) {
                     unit.segment(),
                     unit.device(),
                     unit.base(),
-                    unit.capability(),control
+                    unit.capability(),
+                    control
                 );
             }
             *IVRS.lock() = Some(bytes);
@@ -189,10 +190,30 @@ const TAIL: usize = 0x2008;
 const EVENT_TAIL: usize = 0x2018;
 #[cfg(feature = "amdvi-dma-test")]
 const STATUS: usize = 0x2020;
+#[cfg(feature = "amdvi-dma-test")]
+static UNIT_OWNED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "amdvi-dma-test")]
+struct UnitLease;
+#[cfg(feature = "amdvi-dma-test")]
+impl UnitLease {
+    fn acquire() -> Result<Self, Error> {
+        UNIT_OWNED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::AlreadyActive)?;
+        Ok(Self)
+    }
+}
+#[cfg(feature = "amdvi-dma-test")]
+impl Drop for UnitLease {
+    fn drop(&mut self) {
+        UNIT_OWNED.store(false, Ordering::Release);
+    }
+}
 /// Controller state owns all published tables and command/event storage.
 /// Quarantine it (forget the owner) if stop fails; never free live DMA memory.
 #[cfg(feature = "amdvi-dma-test")]
-struct Controller {
+pub(super) struct Controller {
+    _lease: UnitLease,
     registers: usize,
     old: [u64; 7],
     device_table: Block,
@@ -213,7 +234,7 @@ impl Controller {
             core::ptr::write_volatile((self.registers + at) as *mut u64, value);
         }
     }
-    fn new(device: u16, domain: Domain) -> Result<Self, Error> {
+    pub(super) fn new(device: u16, domain: Domain) -> Result<Self, Error> {
         let bytes = (*IVRS.lock()).ok_or(Error::Absent)?;
         let table = abi::Ivrs::parse(bytes).map_err(|_| Error::Firmware)?;
         let mut selected = None;
@@ -229,6 +250,7 @@ impl Controller {
             }
         }
         let base = selected.ok_or(Error::Scope)?;
+        let lease = UnitLease::acquire()?;
         let registers =
             unsafe { memory::map_device_registers(base, 0x4000) }.ok_or(Error::Memory)? as usize;
         let read =
@@ -254,6 +276,7 @@ impl Controller {
             device_table.write(device as usize * 32 + word * 8, value);
         }
         Ok(Self {
+            _lease: lease,
             registers,
             old,
             device_table,
@@ -265,7 +288,17 @@ impl Controller {
             active: false,
         })
     }
-    fn start(&mut self, device: u16) -> Result<(), Error> {
+    /// The endpoint must be exclusively owned with bus mastering disabled and
+    /// drained; all mapped RAM must remain alive until confirmed stop.
+    pub(super) unsafe fn start(&mut self, device: u16) -> Result<(), Error> {
+        let endpoint = super::pci::Address {
+            bus: (device >> 8) as u8,
+            device: ((device >> 3) & 31) as u8,
+            function: (device & 7) as u8,
+        };
+        if unsafe { super::pci::read_config(endpoint, 4) } & 4 != 0 {
+            return Err(Error::AlreadyActive);
+        }
         self.domain.published = true;
         fence(Ordering::SeqCst);
         self.write(0, self.device_table.physical | 511);
@@ -321,7 +354,7 @@ impl Controller {
             .step_by(16)
             .any(|at| self.events.read(at) >> 60 == 2 && self.events.read(at) as u16 == requester)
     }
-    fn stop(&mut self) -> Result<(), Error> {
+    pub(super) fn stop(&mut self) -> Result<(), Error> {
         if !self.active {
             return Ok(());
         }
@@ -376,6 +409,38 @@ pub fn self_test(devices: &[super::pci::Device]) {
         let write = |at: usize, value: u64| unsafe {
             core::ptr::write_volatile((mapped + at) as *mut u64, value);
         };
+        // EDU is exclusively test-owned and has no active transfer at boot.
+        // Exercise actual PCI sizing/restoration before publishing DMA tables.
+        if read(0x98) & 1 != 0 {
+            return Err(Error::AlreadyActive);
+        }
+        let original_command = unsafe { pci::update_command(device.address, 0, 4) };
+        let saved_low = unsafe { pci::read_config(device.address, 0x10) };
+        let window = unsafe { device.probe_memory_bar0() }.map_err(|_| Error::Mapping)?;
+        if window.base != base
+            || window.size != 1024 * 1024
+            || unsafe { pci::read_config(device.address, 0x10) } != saved_low
+            || unsafe { pci::read_config(device.address, 4) } & 0xffff
+                != (original_command & !4) as u32
+        {
+            return Err(Error::Readback);
+        }
+        unsafe {
+            pci::update_command(device.address, 4, 0);
+        }
+        let refused = matches!(
+            unsafe { device.probe_memory_bar0() },
+            Err(pci::BarError::ActiveDma)
+        );
+        unsafe {
+            pci::write_config(device.address, 4, original_command as u32);
+        }
+        if !refused || unsafe { pci::read_config(device.address, 0x10) } != saved_low {
+            return Err(Error::Readback);
+        }
+        kprintln!(
+            "[test] PCI BAR0 PASS: actual EDU 1 MiB sizing, original BAR/command restored, active bus-master probe refused; no NVIDIA execution"
+        );
         let transfer = |source: u64, destination: u64, command: u64| -> Result<(), Error> {
             write(0x80, source);
             write(0x88, destination);
@@ -417,12 +482,34 @@ pub fn self_test(devices: &[super::pci::Device]) {
             | device.address.function as u16;
         let mut controller = Controller::new(requester, domain)?;
         let command = unsafe { pci::read_config(device.address, 4) } & 0xffff;
+        unsafe {
+            pci::update_command(device.address, 0, 4);
+        }
+        // A second owner must be refused without taking the existing unit or
+        // leaking the second unpublished domain's frames.
+        let lease_frames = memory::stats().ok_or(Error::Memory)?.free_frames;
+        if !matches!(
+            Controller::new(requester, Domain::new()?),
+            Err(Error::AlreadyActive)
+        ) || memory::stats().ok_or(Error::Memory)?.free_frames != lease_frames
+        {
+            return Err(Error::Mapping);
+        }
         let checked = (|| {
-            controller.start(requester)?;
+            unsafe {
+                controller.start(requester)?;
+            }
             unsafe {
                 device.enable();
             }
-            kprintln!("[dma ] EDU BAR={:#x}, id={:#x}, PCI command={:#x}, AMD control={:#x}, DTE base={:#x}",base,unsafe {core::ptr::read_volatile(mapped as *const u32)},unsafe {pci::read_config(device.address,4)},controller.read(CONTROL),controller.read(0));
+            kprintln!(
+                "[dma ] EDU BAR={:#x}, id={:#x}, PCI command={:#x}, AMD control={:#x}, DTE base={:#x}",
+                base,
+                unsafe { core::ptr::read_volatile(mapped as *const u32) },
+                unsafe { pci::read_config(device.address, 4) },
+                controller.read(CONTROL),
+                controller.read(0)
+            );
             transfer(SRC, 0x40000, 1)?;
             transfer(0x40000, DST, 3)?;
             if source != destination {
@@ -464,7 +551,7 @@ pub fn self_test(devices: &[super::pci::Device]) {
             Ok::<(), Error>(())
         })();
         unsafe {
-            pci::write_config(device.address, 4, command);
+            pci::update_command(device.address, 0, 4);
         }
         if read(0x98) & 1 != 0 || controller.stop().is_err() {
             core::mem::forget(controller);
@@ -474,6 +561,9 @@ pub fn self_test(devices: &[super::pci::Device]) {
         }
         drop(controller);
         drop(data);
+        unsafe {
+            pci::write_config(device.address, 4, command);
+        }
         checked?;
         if memory::stats().ok_or(Error::Memory)?.free_frames != before {
             return Err(Error::Memory);
@@ -481,7 +571,9 @@ pub fn self_test(devices: &[super::pci::Device]) {
         Ok::<(), Error>(())
     })();
     match result {
-        Ok(())=>kprintln!("[test] AMD-Vi DMA PASS: real IVRS, >4GiB nonidentity read/write DMA, exact bytes, unmapped/read-only faults, recovery, ring wrap, completion fences, controller stop and reclamation; no RTX execution"),
-        Err(error)=>kprintln!("[test] AMD-Vi DMA FAILED: {:?}",error),
+        Ok(()) => kprintln!(
+            "[test] AMD-Vi DMA PASS: real IVRS, >4GiB nonidentity read/write DMA, exact bytes, unmapped/read-only faults, recovery, ring wrap, completion fences, controller stop and reclamation; no RTX execution"
+        ),
+        Err(error) => kprintln!("[test] AMD-Vi DMA FAILED: {:?}", error),
     }
 }

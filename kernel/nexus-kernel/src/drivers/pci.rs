@@ -36,6 +36,9 @@ use crate::kprintln;
 const CONFIG_ADDRESS: u16 = 0x0CF8;
 /// The port the data is read from.
 const CONFIG_DATA: u16 = 0x0CFC;
+// CF8 selects one global register for all processors. Keep its selection and
+// data access atomic, and keep BAR sizing transactions under the same lock.
+static CONFIG_LOCK: crate::sync::IrqSpinLock<()> = crate::sync::IrqSpinLock::new(());
 
 /// Bit 31 of the address word: without it the access does not happen.
 const ENABLE: u32 = 1 << 31;
@@ -80,6 +83,10 @@ impl Address {
 /// will meet, but it is a port access, so it is `unsafe` for the same reason
 /// every port access is.
 pub unsafe fn read_config(address: Address, offset: u8) -> u32 {
+    let _guard = CONFIG_LOCK.lock();
+    unsafe { read_config_locked(address, offset) }
+}
+unsafe fn read_config_locked(address: Address, offset: u8) -> u32 {
     // SAFETY: the address word is well formed and the data port is the one the
     // specification names.
     unsafe {
@@ -94,12 +101,42 @@ pub unsafe fn read_config(address: Address, offset: u8) -> u32 {
 ///
 /// The caller must know what the register does. Writing a base address register
 /// moves a device's window; writing the command register can disable it.
+#[allow(dead_code)] // Used by owned-device diagnostics and forthcoming hardware drivers.
 pub unsafe fn write_config(address: Address, offset: u8, value: u32) {
+    let _guard = CONFIG_LOCK.lock();
+    unsafe {
+        write_config_locked(address, offset, value);
+    }
+}
+unsafe fn write_config_locked(address: Address, offset: u8, value: u32) {
     // SAFETY: upheld by the caller.
     unsafe {
         outl(CONFIG_ADDRESS, address.word(offset));
         outl(CONFIG_DATA, value);
     }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum BarError {
+    Header,
+    ActiveDma,
+    Decode,
+    Restore,
+    Geometry,
+}
+
+/// Atomically update only the command half, leaving W1C status untouched.
+///
+/// # Safety
+/// The caller owns the device and must uphold each changed command bit's rules.
+pub unsafe fn update_command(address: Address, set: u16, clear: u16) -> u16 {
+    let _guard = CONFIG_LOCK.lock();
+    let command = unsafe { read_config_locked(address, 4) } as u16;
+    unsafe {
+        write_config_locked(address, 4, ((command & !clear) | set) as u32);
+    }
+    command
 }
 
 /// A device found on the bus.
@@ -124,6 +161,60 @@ pub struct Device {
 }
 
 impl Device {
+    /// Size BAR0 while retaining its firmware address. Refuse live bus masters;
+    /// restore BARs before decoding, verify readback, and never write W1C status.
+    ///
+    /// # Safety
+    /// The caller exclusively owns this endpoint. All DMA must be stopped and
+    /// PCIe transactions drained. No CPU may access its BARs during this call.
+    #[allow(dead_code)] // Only an exclusively owned, quiesced device may be sized.
+    pub unsafe fn probe_memory_bar0(&self) -> Result<nexus_nvidia::pci::MemoryWindow, BarError> {
+        if self.header_type & 0x7f != 0 {
+            return Err(BarError::Header);
+        }
+        let _guard = CONFIG_LOCK.lock();
+        let read = |at| unsafe { read_config_locked(self.address, at) };
+        let write = |at, value| unsafe { write_config_locked(self.address, at, value) };
+        if read(0) != ((self.device as u32) << 16) | self.vendor as u32 {
+            return Err(BarError::Header);
+        }
+        let low = read(0x10);
+        let kind = (low >> 1) & 3;
+        if low & 1 != 0 || !matches!(kind, 0 | 2) {
+            return Err(BarError::Header);
+        }
+        let high = if kind == 2 { read(0x14) } else { 0 };
+        let command = read(4) & 0xffff;
+        if command & 4 != 0 {
+            return Err(BarError::ActiveDma);
+        }
+        write(4, command & !3);
+        if read(4) & 7 != 0 {
+            write(4, command);
+            return Err(BarError::Decode);
+        }
+        write(0x10, u32::MAX);
+        if kind == 2 {
+            write(0x14, u32::MAX);
+        }
+        let mask_low = read(0x10);
+        let mask_high = if kind == 2 { read(0x14) } else { 0 };
+        // No fallible geometry operation occurs while the BAR is changed.
+        if kind == 2 {
+            write(0x14, high);
+        }
+        write(0x10, low);
+        if read(0x10) != low || (kind == 2 && read(0x14) != high) {
+            // Decoding remains off if restoration cannot be verified.
+            return Err(BarError::Restore);
+        }
+        write(4, command);
+        if read(4) & 0xffff != command {
+            return Err(BarError::Restore);
+        }
+        nexus_nvidia::pci::MemoryWindow::decode(low, high, mask_low, mask_high)
+            .map_err(|_| BarError::Geometry)
+    }
     /// Read one of the six base address registers.
     ///
     /// The low bits are flags rather than address: bit 0 says whether the
@@ -249,8 +340,7 @@ impl Device {
         // SAFETY: upheld by the caller. The status half is write-one-to-clear,
         // so it is masked out rather than written back.
         unsafe {
-            let command = read_config(self.address, 0x04) & 0xFFFF;
-            write_config(self.address, 0x04, command | INTERRUPT_DISABLE);
+            update_command(self.address, INTERRUPT_DISABLE as u16, 0);
         }
     }
 
@@ -270,8 +360,7 @@ impl Device {
 
         // SAFETY: upheld by the caller. The status half is write-one-to-clear.
         unsafe {
-            let command = read_config(self.address, 0x04) & 0xFFFF;
-            write_config(self.address, 0x04, command & !INTERRUPT_DISABLE);
+            update_command(self.address, 0, INTERRUPT_DISABLE as u16);
         }
     }
 
@@ -283,11 +372,10 @@ impl Device {
         // SAFETY: upheld by the caller. The status half of the register is
         // write-one-to-clear, so it is masked out rather than written back.
         unsafe {
-            let command = read_config(self.address, 0x04) & 0xFFFF;
-            write_config(
+            update_command(
                 self.address,
-                0x04,
-                command | IO_SPACE | MEMORY_SPACE | BUS_MASTER,
+                (IO_SPACE | MEMORY_SPACE | BUS_MASTER) as u16,
+                0,
             );
         }
     }
