@@ -22,11 +22,9 @@
 //! # What is refused, and why
 //!
 //! **`fork`.** A `clone` without `CLONE_VM` is a request for a second process
-//! with a *copy* of this one's address space. Copying an address space means
-//! copy-on-write, which means a fault handler that knows about it, and this
-//! system has neither. Refused with `ENOSYS`, which is a real answer a real
-//! program handles -- rather than quietly making a thread, which would be two
-//! "processes" sharing one heap and would corrupt both.
+//! with a private copy of this one's address space. The compatibility layer
+//! takes an eager page snapshot, and refuses shared mappings or live sibling
+//! threads rather than copying them inconsistently. `wait4` collects children.
 //!
 //! **A thread in another process.** There is no such request in Linux and there
 //! is none here.

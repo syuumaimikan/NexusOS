@@ -415,9 +415,19 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
         }
         120 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            super::linux_threads::clone(
+            let result = super::linux_threads::clone(
                 argument0, argument1, argument2, argument4, argument3, frame,
-            )
+            );
+            crate::kprintln!(
+                "[linux32] clone flags={:#x} stack={:#x} parent_tid={:#x} tls={:#x} child_tid={:#x} -> {}",
+                argument0,
+                argument1,
+                argument2,
+                argument3,
+                argument4,
+                result as i64
+            );
+            result
         }
         435 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -579,7 +589,14 @@ fn clone3(arguments: u64, size: u64, frame: &Frame) -> u64 {
             _ => return error::EINVAL,
         }
     };
-    super::linux_threads::clone(flags | exit_signal, top, parent_tid, child_tid, tls, frame)
+    let result =
+        super::linux_threads::clone(flags | exit_signal, top, parent_tid, child_tid, tls, frame);
+    crate::kprintln!(
+        "[linux32] clone3 flags={:#x} stack={top:#x} parent_tid={parent_tid:#x} child_tid={child_tid:#x} tls={tls:#x} -> {}",
+        flags | exit_signal,
+        result as i64
+    );
+    result
 }
 
 fn clock32(which: u64, address: u64) -> u64 {

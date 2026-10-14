@@ -94,7 +94,7 @@ try {
             throw "Steam diagnostic stopped: $Serial"
         }
         if ($Log -match 'Failed to create thread \(error 0x') {
-            throw "Steam bootstrap reached the still-unsupported i386 shared-thread path: $Serial"
+            throw "Steam bootstrap reported a worker-thread creation failure: $Serial"
         }
     }
     throw "Steam diagnostic did not finish: $Serial"
