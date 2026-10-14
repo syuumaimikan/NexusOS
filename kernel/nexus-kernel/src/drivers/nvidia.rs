@@ -9,6 +9,7 @@
 use super::pci::{self, BaseAddress, Device};
 use crate::{kprintln, memory};
 pub mod bootstrap;
+mod gsp;
 #[derive(Clone, Copy)]
 struct Adapter {
     address: pci::Address,
@@ -17,6 +18,8 @@ struct Adapter {
 }
 static DETECTED: crate::sync::IrqSpinLock<Option<Adapter>> = crate::sync::IrqSpinLock::new(None);
 static PREPARED: crate::sync::IrqSpinLock<Option<bootstrap::Prepared>> =
+    crate::sync::IrqSpinLock::new(None);
+static GSP_PREPARED: crate::sync::IrqSpinLock<Option<gsp::Prepared>> =
     crate::sync::IrqSpinLock::new(None);
 
 /// Called after storage is available. Preserve scanout while preparing the
@@ -40,9 +43,21 @@ pub fn prepare_firmware() {
                 error
             ),
         }
+        match gsp::prepare() {
+            Ok(prepared) => {
+                prepared.report();
+                *GSP_PREPARED.lock() = Some(prepared);
+            }
+            Err(error) => kprintln!(
+                "[nv  ] GSP image not prepared: {}; firmware display retained",
+                error
+            ),
+        }
     }
     #[cfg(feature = "nvidia-bootstrap-test")]
     bootstrap::self_test();
+    #[cfg(feature = "nvidia-gsp-test")]
+    gsp::self_test();
 }
 
 const NVIDIA: u16 = 0x10de;
@@ -89,7 +104,11 @@ pub unsafe fn probe(devices: &[Device]) {
             })
         };
         if command & 2 == 0 || power.is_some_and(|state| state != 0) {
-            kprintln!("[nv  ] MMIO unavailable: memory decoding={}, power={:?}; retaining firmware display", command & 2 != 0, power);
+            kprintln!(
+                "[nv  ] MMIO unavailable: memory decoding={}, power={:?}; retaining firmware display",
+                command & 2 != 0,
+                power
+            );
             continue;
         }
         // Only BAR0 is interpreted. A 64-bit BAR consumes the next slot;

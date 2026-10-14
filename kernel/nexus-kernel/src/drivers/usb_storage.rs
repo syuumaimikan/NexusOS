@@ -488,9 +488,19 @@ pub fn verify(index: usize) {
         return;
     }
 
+    let mut buffer = [0u8; 512];
+    // A bootable diagnostic USB is an ordinary filesystem, not the raw
+    // fixture. Identify the fixture before any test write or failure claim.
+    if let Err(trouble) = read_block(index, 0, &mut buffer) {
+        kprintln!("[usb ] FAILED: could not identify test medium: {trouble}");
+        return;
+    }
+    if !buffer.starts_with(b"NEXUS USB SECTOR 000000") {
+        kprintln!("[usb ] drive {index} is not the raw test fixture; skipping write test");
+        return;
+    }
     // A block that is not the first. Zero is what a broken driver returns.
     const PROBE: u64 = 5;
-    let mut buffer = [0u8; 512];
     if let Err(trouble) = read_block(index, PROBE, &mut buffer) {
         kprintln!("[usb ] FAILED: could not read block {PROBE}: {trouble}");
         return;

@@ -4,6 +4,9 @@
 //! boot GSP, or constitute a Vulkan driver.
 #![no_std]
 
+pub mod gsp;
+pub mod radix;
+
 pub const VERSION: &str = "615.78.08";
 pub const SOURCE_REVISION: &str = "ca2d03e6fafd4d4b56b383497d931c25b283bfcf";
 pub const MAX_IMAGE: usize = 1024 * 1024;

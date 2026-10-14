@@ -155,3 +155,153 @@ fn fmc_is_a_firmware_container_and_never_an_executable() {
         None
     );
 }
+
+fn gsp_container() -> Vec<u8> {
+    let names = b"\0.fwimage\0.fwsignature_gb20x\0.fwversion\0.note.gnu.build-id\0.shstrtab\0";
+    let strings_at = 8302;
+    let table = (strings_at + names.len() + 7) & !7;
+    let mut bytes = vec![0u8; table + 6 * 64];
+    bytes[..8].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
+    put16(&mut bytes, 16, 1);
+    put16(&mut bytes, 18, 243);
+    put32(&mut bytes, 20, 1);
+    put64(&mut bytes, 40, table as u64);
+    for (at, value) in [(52, 64), (58, 64), (60, 6), (62, 5)] {
+        put16(&mut bytes, at, value);
+    }
+    for (index, (offset, size, kind)) in [
+        (64, 4096, 1),
+        (4160, 4096, 1),
+        (8256, 10, 1),
+        (8266, 36, 7),
+        (strings_at as u64, names.len() as u64, 3),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at = table + (index + 1) * 64;
+        let label: &[u8] = match index {
+            0 => b".fwimage",
+            1 => b".fwsignature_gb20x",
+            2 => b".fwversion",
+            3 => b".note.gnu.build-id",
+            _ => b".shstrtab",
+        };
+        let position = names
+            .windows(label.len())
+            .position(|window| window == label)
+            .unwrap();
+        put32(&mut bytes, at, position as u32);
+        put32(&mut bytes, at + 4, kind);
+        put64(&mut bytes, at + 24, offset);
+        put64(&mut bytes, at + 32, size);
+    }
+    bytes[strings_at..strings_at + names.len()].copy_from_slice(names);
+    bytes[8256..8266].copy_from_slice(b"615.78.08\0");
+    bytes
+}
+
+#[test]
+fn gsp_metadata_is_bounded_and_selects_only_blackwell_signature() {
+    let bytes = gsp_container();
+    let parsed = gsp::Gsp::parse(&bytes[..]).unwrap();
+    assert_eq!(
+        (
+            parsed.image.offset,
+            parsed.image.size,
+            parsed.signature.size
+        ),
+        (64, 4096, 4096)
+    );
+    for length in 0..bytes.len() {
+        assert!(gsp::Gsp::parse(&bytes[..length]).is_err());
+    }
+    let table = wide(&bytes, 40).unwrap();
+    for (at, value) in [
+        (40, u64::MAX),
+        (table + 64 + 24, u64::MAX),
+        (table + 128 + 24, 64),
+    ] {
+        let mut changed = bytes.clone();
+        put64(&mut changed, at, value);
+        assert!(gsp::Gsp::parse(&changed[..]).is_err());
+    }
+    let mut changed = bytes.clone();
+    changed[8256] = b'5';
+    assert_eq!(gsp::Gsp::parse(&changed[..]).err(), Some(Error::Version));
+    let mut changed = bytes.clone();
+    put32(&mut changed, table + 128, 1);
+    assert_eq!(gsp::Gsp::parse(&changed[..]).err(), Some(Error::Section));
+    assert_eq!(gsp::verify(&bytes[..], false), Err(Error::ReleaseMismatch));
+}
+
+#[test]
+fn radix_walk_recovers_noncontiguous_pages_across_leaf_boundary() {
+    use radix::{PAGE, Plan};
+    let plan = Plan::new(512 * PAGE + 13).unwrap();
+    assert_eq!((plan.data_pages(), plan.table_pages()), (513, 4));
+    let tables = [0x2000, 0x8000, 0xc000, 0x11000];
+    let data: Vec<u64> = (0..513)
+        .map(|index| 0x100000 + index * 3 * PAGE as u64)
+        .collect();
+    let mut bytes = vec![[0u8; PAGE]; 4];
+    plan.write(&tables, &data, |index, page| {
+        bytes[index] = *page;
+        Ok(())
+    })
+    .unwrap();
+    let entry = |page: usize, index: usize| {
+        u64::from_le_bytes(bytes[page][index * 8..index * 8 + 8].try_into().unwrap())
+    };
+    // Independently walk root -> middle -> leaf -> data, rather than compare
+    // the builder with another call to the same builder.
+    for (index, &expected) in data.iter().enumerate() {
+        let middle_address = entry(0, index / (512 * 512));
+        let middle = tables
+            .iter()
+            .position(|&address| address == middle_address)
+            .unwrap();
+        let leaf_address = entry(middle, (index / 512) % 512);
+        let leaf = tables
+            .iter()
+            .position(|&address| address == leaf_address)
+            .unwrap();
+        assert_eq!(entry(leaf, index % 512), expected);
+    }
+    assert!(bytes[0][8..].iter().all(|&b| b == 0));
+    assert!(bytes[1][16..].iter().all(|&b| b == 0));
+    assert!(bytes[3][8..].iter().all(|&b| b == 0));
+}
+
+#[test]
+fn radix_rejects_bad_geometry_addresses_and_sink_failures() {
+    use radix::{MAX_DATA, PAGE, Plan};
+    for size in [0, MAX_DATA + 1, usize::MAX] {
+        assert!(Plan::new(size).is_err());
+    }
+    assert_eq!(Plan::new(MAX_DATA).unwrap().data_pages(), MAX_DATA / PAGE);
+    let plan = Plan::new(1).unwrap();
+    let mut called = false;
+    for tables in [
+        [0, 8192, 12288],
+        [1, 8192, 12288],
+        [u64::MAX - 4095, 8192, 12288],
+    ] {
+        assert!(
+            plan.write(&tables, &[16384], |_, _| {
+                called = true;
+                Ok(())
+            })
+            .is_err()
+        );
+    }
+    assert!(!called);
+    assert!(
+        plan.write(&[4096, 8192, 12288], &[], |_, _| Ok(()))
+            .is_err()
+    );
+    assert_eq!(
+        plan.write(&[4096, 8192, 12288], &[16384], |_, _| Err(Error::Truncated)),
+        Err(Error::Truncated)
+    );
+}

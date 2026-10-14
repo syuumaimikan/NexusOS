@@ -241,6 +241,7 @@ version = "0.1.0"
 dependencies = [
  "nexus-abi",
  "nexus-config",
+ "nexus-crypto",
  "nexus-font",
  "nexus-i18n",
  "nexus-look",

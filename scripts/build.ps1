@@ -35,7 +35,10 @@
     Build and embed the upstream SwiftShader CPU Vulkan ICD and SPIR-V probe.
 .PARAMETER WithRtxFirmware
     Prepare and stage pinned production GB202/GB206 GSP bootstrap material.
-    Full GSP-RM firmware, native GPU boot/submission and Vulkan remain required.
+    Use WithGspFirmware for the matching RM image; GPU boot/submission and Vulkan remain required.
+.PARAMETER WithGspFirmware
+    Also stage pinned GSP-RM and external microcode (about 81 MiB).
+    Downloads a SHA256-checked 505 MiB NVIDIA package once; never executes it.
 #>
 [CmdletBinding()]
 param(
@@ -48,6 +51,7 @@ param(
     [switch]$WithGlibc32Runtime,
     [switch]$WithVulkanRuntime,
     [switch]$WithRtxFirmware,
+    [switch]$WithGspFirmware,
     [switch]$SkipDiskImage,
     # Build the kernel with its destructive filesystem checks on.
     #
@@ -60,6 +64,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($WithGlibc32Runtime) { $WithGlibcRuntime = $true }
+if ($WithGspFirmware) { $WithRtxFirmware = $true }
 
 . (Join-Path $PSScriptRoot 'stage.ps1')
 # For `Get-NexusDiskSizes`: how big the disk is belongs in one place, with
@@ -135,6 +140,7 @@ try {
 
 $ProgramDir = Join-Path $BuildDir 'programs'
 if ($WithRtxFirmware) { Publish-NvidiaBootstrap -ProgramDir $ProgramDir }
+if ($WithGspFirmware) { Publish-NvidiaGsp -ProgramDir $ProgramDir }
 $InitElf = Join-Path $RepoRoot "target\x86_64-nexus-user\$Profile\nexus-init"
 $StagedInit = Publish-Program -Elf $InitElf -ProgramDir $ProgramDir -Name 'init.elf'
 $initSize = [math]::Round((Get-Item $StagedInit).Length / 1KB, 1)

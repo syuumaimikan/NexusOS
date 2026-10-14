@@ -5,7 +5,7 @@
     Proves image boot and native USB firmware loading, not physical RTX rendering.
 #>
 [CmdletBinding()]
-param([int]$Timeout = 120)
+param([int]$Timeout = 240, [switch]$WithGspFirmware)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'maintenance.ps1')
 . (Join-Path $PSScriptRoot 'qemu.ps1')
@@ -32,10 +32,11 @@ try {
     while ([DateTime]::UtcNow -lt $Deadline -and -not $Guest.HasExited) {
         if (Test-Path -LiteralPath $Serial) {
             $Log = (Get-Content -LiteralPath $Serial -Raw) -replace "`0",''
-            if ($Log -match '(?m)^ EXCEPTION [0-9]+:|KERNEL PANIC|NVIDIA bootstrap FAILED:') { throw "USB image guest failed: $Serial" }
-            if ($Log.Contains('[test] NVIDIA bootstrap PASS:')) {
+            if ($Log -match '(?m)^ EXCEPTION [0-9]+:|KERNEL PANIC|NVIDIA bootstrap FAILED:|NVIDIA GSP preparation FAILED:') { throw "USB image guest failed: $Serial" }
+            if ($Log.Contains('[test] NVIDIA bootstrap PASS:') -and
+                (-not $WithGspFirmware -or $Log.Contains('[test] NVIDIA GSP preparation PASS:'))) {
                 if ($Log.Contains('[blk ] virtio')) { throw 'Unexpected virtio storage in USB image test' }
-                Write-Host "PASS: UEFI image boot and real pinned bootstrap read over native USB; $Serial"
+                Write-Host "PASS: UEFI USB boot, pinned bootstrap and requested GSP preparation checks; $Serial"
                 return
             }
         }

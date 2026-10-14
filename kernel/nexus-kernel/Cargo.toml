@@ -20,6 +20,7 @@ nexus-config = { path = "../../shared/nexus-config" }
 nexus-look = { path = "../../shared/nexus-look" }
 nexus-mm = { path = "../nexus-mm" }
 nexus-nvidia = { path = "../../shared/nexus-nvidia" }
+nexus-crypto = { path = "../../shared/nexus-crypto" }
 
 [features]
 # The filesystem's destructive exercises: make blocks, fill them, read them
@@ -41,6 +42,7 @@ deep-selftest = []
 # Checks real pinned bootstrap files and unpublished DMA buffers on a test disk.
 # Does not impersonate a card or touch any NVIDIA engines.
 nvidia-bootstrap-test = []
+nvidia-gsp-test = ["nvidia-bootstrap-test"]
 
 # Fault-injection builds, used by scripts/test-faults.ps1 to verify that the
 # exception path actually works. They are features rather than test code
