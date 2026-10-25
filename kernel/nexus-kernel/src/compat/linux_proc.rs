@@ -99,6 +99,7 @@ pub(super) fn open(path: &str, flags: u64) -> Option<u64> {
         Object::ProcessData(view),
         Rights::READ | Rights::CLOSE | Rights::TRANSFER,
     );
+    super::linux_more::remember_open_description(process.id.0, u64::from(handle));
     super::linux_more::remember_cloexec(process.id.0, u64::from(handle), flags & 0o2000000 != 0);
     Some(u64::from(handle))
 }

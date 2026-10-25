@@ -57,6 +57,7 @@ mod call {
     pub const UNLINKAT: u64 = 301;
     pub const LSEEK: u64 = 19;
     pub const GETPID: u64 = 20;
+    pub const KILL: u64 = 37;
     pub const WAIT4: u64 = 114;
     pub const EXECVE: u64 = 11;
     pub const EXECVEAT: u64 = 358;
@@ -378,6 +379,17 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             crate::sched::current_process().map_or(error::ENOSYS, |process| process.id.0)
         }
+        call::KILL => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let result = super::linux_signal::kill(argument0, argument1);
+            crate::kprintln!(
+                "[linux32] kill pid={} signal={} -> {}",
+                argument0,
+                argument1,
+                result as i64
+            );
+            result
+        }
         call::EXECVE => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             super::linux_exec::execve32(argument0, argument1, argument2, frame)
@@ -413,6 +425,26 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             thread_area(argument0, number == call::GET_THREAD_AREA)
         }
+        186 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_signal::sigaltstack(argument0, argument1, true)
+        }
+        116 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_more::sysinfo32(argument0)
+        }
+        311 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_threads::set_robust_list32(argument0, argument1)
+        }
+        312 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_threads::get_robust_list32(argument0, argument1, argument2)
+        }
+        270 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_signal::tgkill(argument0, argument1, argument2)
+        }
         120 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let result = super::linux_threads::clone(
@@ -425,6 +457,55 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
                 argument2,
                 argument3,
                 argument4,
+                result as i64
+            );
+            result
+        }
+        143 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_more::flock(argument0, argument1)
+        }
+        15 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_paths::chmodat(
+                super::linux_files::AT_FDCWD as u32 as u64,
+                argument0,
+                argument1,
+                0,
+            )
+        }
+        94 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_paths::chmod_descriptor(argument0)
+        }
+        306 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_paths::chmodat(argument0, argument1, argument2, 0)
+        }
+        439 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_paths::chmodat(argument0, argument1, argument2, argument3)
+        }
+        268 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let result = super::linux_more::statfs64_path(argument0, argument1, argument2);
+            crate::kprintln!(
+                "[linux32] statfs64 path={:#x} size={} output={:#x} -> {}",
+                argument0,
+                argument1,
+                argument2,
+                result as i64
+            );
+            result
+        }
+        269 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let result = super::linux_more::statfs64_descriptor(argument0, argument1, argument2);
+            crate::kprintln!(
+                "[linux32] fstatfs64 fd={} size={} output={:#x} -> {}",
+                argument0,
+                argument1,
+                argument2,
                 result as i64
             );
             result

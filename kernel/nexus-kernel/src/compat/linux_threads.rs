@@ -631,6 +631,20 @@ pub fn set_robust_list(head: u64, length: u64) -> u64 {
     0
 }
 
+/// i386 stores robust-list links and its futex offset in four-byte words.
+pub fn set_robust_list32(head: u64, length: u64) -> u64 {
+    if length != 12 {
+        return error::EINVAL;
+    }
+    if crate::arch::syscall::user_range(head, length, length).is_none() {
+        return error::EFAULT;
+    }
+    ROBUST_LISTS
+        .lock()
+        .insert(crate::arch::percpu::current_thread(), head);
+    0
+}
+
 /// `get_robust_list`, so that what was set can be read back.
 pub fn get_robust_list(out_head: u64, out_length: u64) -> u64 {
     let head = ROBUST_LISTS
@@ -648,6 +662,36 @@ pub fn get_robust_list(out_head: u64, out_length: u64) -> u64 {
     unsafe {
         core::ptr::write_unaligned(pointer as *mut u64, head);
         core::ptr::write_unaligned(length as *mut u64, 24);
+    }
+    0
+}
+
+/// i386's `get_robust_list` writes a pointer and size_t in four-byte words.
+pub fn get_robust_list32(pid: u64, out_head: u64, out_length: u64) -> u64 {
+    let Some(process) = crate::sched::current_process() else {
+        return error::ESRCH;
+    };
+    if pid != 0 && pid != process.id.0 {
+        return error::ESRCH;
+    }
+    let head = ROBUST_LISTS
+        .lock()
+        .get(&crate::arch::percpu::current_thread())
+        .copied()
+        .unwrap_or(0);
+    let Some((head_out, _)) = crate::arch::syscall::user_range_for(&process, out_head, 4, 4, true)
+    else {
+        return error::EFAULT;
+    };
+    let Some((length_out, _)) =
+        crate::arch::syscall::user_range_for(&process, out_length, 4, 4, true)
+    else {
+        return error::EFAULT;
+    };
+    // SAFETY: both i386 output words were checked writable above.
+    unsafe {
+        core::ptr::write_unaligned(head_out as *mut u32, head as u32);
+        core::ptr::write_unaligned(length_out as *mut u32, 12);
     }
     0
 }

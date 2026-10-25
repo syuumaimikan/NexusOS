@@ -648,8 +648,8 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
         // The rest of the family, refused by name so the log says which one a
         // program wanted rather than a number.
         call::SIGALTSTACK => {
-            REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            signal::not_translated("sigaltstack")
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            signal::sigaltstack(argument0, argument1, false)
         }
         call::RT_SIGSUSPEND => {
             REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

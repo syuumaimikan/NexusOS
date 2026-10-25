@@ -173,11 +173,12 @@ object, and connecting the two is real work.
 
 `scripts/test-linux.ps1`
 
-`rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `kill`, `tgkill`. A handler
-runs on the program's own stack below the red zone, returns through a trampoline
-the kernel puts in the program's address space when its C library has not
-supplied one, and the interrupted call returns what it was going to return.
-Blocking, unblocking and ignoring all behave.
+`rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `kill`, `tgkill`. On x86-64,
+a handler runs on the program's own stack below the red zone, returns through a
+trampoline the kernel puts in the program's address space when its C library has
+not supplied one, and the interrupted call returns what it was going to return.
+The i386 layer can configure `sigaltstack` and check `tgkill(..., 0)`, but i386
+signal-frame delivery and directed signals to sibling threads remain missing.
 
 Delivery happens on the way out of a system call and nowhere else, so a program
 that spins without making one cannot be signalled. There are no kernel-raised
@@ -197,16 +198,22 @@ than one thread is refused rather than raced.
 Both libc widths now also pass actual chdir/fchdir/getcwd, relative directory-FD
 file operations, parent traversal and directory rename identity tests. x86-64
 relative execve retains cwd and records the actual executable independently of
-argv[0]. Persistent symlinks and native /dev/urandom also pass real libc tests.
-The official Steam bootstrap passes its 32-bit glibc loader, forks, executes a
-pinned static i386 `/bin/sh`, and replaces the child with the Steam ELF. It
-then reports a worker-thread creation failure. The captured clone requests use
-flags `0x800600` and receive `EINVAL`; no valid shared-thread request follows.
-`/proc/self/cmdline`, `flock`, socket options and other i386 calls are also
-incomplete. This is a
-diagnostic launch, not a working installation or sign-in. Run
-`scripts/diagnose-steam.ps1` for the current serial evidence. Native filesystem
-limitations are in [the runtime evidence](posix-runtime.md).
+argv[0]. Persistent symlinks and native `/dev/urandom` also pass real libc
+tests. The Steam diagnostic stages Valve's actual i386 ELF, the real glibc
+loader, a static i386 shell, and the system's PEM root bundle at
+`/etc/ssl/certs/ca-certificates.crt`. This removed Steam's earlier “unable to
+load trusted SSL root certificates” error. `flock`, `statfs64` (including
+Steam's `statvfs64` query), `sigaltstack`, robust-list setup, i386 `sysinfo`,
+and process-existence `kill(pid, 0)` now pass targeted libc probes. The
+bootstrap starts valid `clone3` worker threads and reaches “Verifying
+installation...” in the latest QEMU run, then exits with status
+`4294967294` after Steam reports an illegal worker-thread termination. The
+diagnostic still does not run the full shell installer, install the client, or
+verify sign-in. Other observed missing calls include i386 `ugetrlimit`, `rseq`,
+`mknodat`, `setresuid32` and `getppid`; shared-VM clone and i386 signal delivery
+also remain incomplete. See the current serial log at
+`build/steam-diagnostic-7f742494ef5d4d1e995b02659631e91a/serial.log` and the
+[native runtime evidence](posix-runtime.md).
 
 ### Thirty-two bit programs
 

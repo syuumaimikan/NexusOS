@@ -219,6 +219,15 @@ impl Signals {
 /// Every translated process's signal state.
 static STATE: IrqSpinLock<BTreeMap<u64, Signals>> = IrqSpinLock::new(BTreeMap::new());
 
+/// Alternate signal stacks are per thread, as they are in Linux.
+static ALT_STACKS: IrqSpinLock<BTreeMap<(u64, u64), AltStack>> = IrqSpinLock::new(BTreeMap::new());
+
+#[derive(Clone, Copy)]
+struct AltStack {
+    pointer: u64,
+    size: u64,
+}
+
 /// Handlers installed, and signals delivered.
 static INSTALLED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static DELIVERED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -236,6 +245,7 @@ pub fn statistics() -> (u64, u64) {
 /// Forget a process's signal state. Called when it ends.
 pub fn forget(process: u64) {
     STATE.lock().remove(&process);
+    ALT_STACKS.lock().retain(|(owner, _), _| *owner != process);
 }
 
 /// Inherit signal dispositions and the calling thread's blocked mask.
@@ -478,9 +488,24 @@ fn sigprocmask_width(how: u64, new: u64, old: u64, set_size: u64, alignment: u64
 /// signalling itself — which is what `raise`, `abort` and `pthread_kill` are —
 /// works.
 pub fn kill(target: u64, signal: u64) -> u64 {
-    let Some(process) = crate::sched::current_process() else {
+    let Some(caller) = crate::sched::current_process() else {
         return error::ENOSYS;
     };
+    // Process groups are not modelled yet, so pid zero names the caller only.
+    let target = if target == 0 { caller.id.0 } else { target };
+    let Some(process) = (if target == caller.id.0 {
+        Some(caller.clone())
+    } else {
+        crate::sched::process_by_id(target)
+    }) else {
+        return error::ESRCH;
+    };
+    if !matches!(
+        process.personality,
+        crate::process::Personality::Linux | crate::process::Personality::Linux32
+    ) {
+        return (-1i64) as u64; // EPERM
+    }
     // Zero is "is this process there", which it is.
     if signal == 0 {
         return 0;
@@ -488,10 +513,6 @@ pub fn kill(target: u64, signal: u64) -> u64 {
     let Some(bit) = bit(signal) else {
         return error::EINVAL;
     };
-    if target != process.id.0 && target != 0 {
-        crate::kprintln!("[linux] a signal to another process is not translated; answering EPERM");
-        return (-1i64) as u64; // EPERM
-    }
     // `SIGKILL` on itself is the program asking to stop, and it is answered by
     // stopping rather than by a handler that cannot exist.
     if signal == number::KILL {
@@ -499,9 +520,157 @@ pub fn kill(target: u64, signal: u64) -> u64 {
         crate::sched::wake_process_threads(process.id);
         return 0;
     }
+    if process.personality == crate::process::Personality::Linux32 && target != caller.id.0 {
+        // The i386 signal frame layout is not implemented. A pending signal
+        // must not be delivered through the x86-64 frame builder.
+        return error::ENOSYS;
+    }
     let mut state = STATE.lock();
     let signals = state.entry(process.id.0).or_insert_with(Signals::new);
     signals.pending |= bit;
+    drop(state);
+    crate::sched::wake_process_threads(process.id);
+    0
+}
+
+/// i386 `tgkill(tgid, tid, signal)`. Signal zero is a thread-existence check;
+/// signals to the current thread can use the existing return-to-user delivery
+/// path. Cross-thread directed delivery needs per-thread signal frames and is
+/// therefore refused until that ABI is implemented.
+pub fn tgkill(tgid: u64, tid: u64, signal: u64) -> u64 {
+    let Some(process) = crate::sched::current_process() else {
+        return error::ESRCH;
+    };
+    if process.id.0 != tgid {
+        return error::ESRCH;
+    }
+    if !crate::sched::live_threads_of_process(tgid).contains(&tid) {
+        return error::ESRCH;
+    }
+    if signal == 0 {
+        return 0;
+    }
+    if crate::sched::current_id().is_some_and(|current| current.0 == tid) {
+        return kill(tgid, signal);
+    }
+    crate::kprintln!(
+        "[linux32] tgkill to a sibling thread requires per-thread signal delivery; answering ENOSYS"
+    );
+    error::ENOSYS
+}
+
+/// `sigaltstack` with either Linux's 64-bit or i386 twelve-byte descriptor.
+/// The configuration is retained per thread; i386 signal-frame delivery is a
+/// separate ABI path and remains deliberately unimplemented.
+pub fn sigaltstack(new: u64, old: u64, i386: bool) -> u64 {
+    const SS_DISABLE: u64 = 2;
+    const MINIMUM: u64 = 2048;
+    let Some(process) = crate::sched::current_process() else {
+        return error::EBADF;
+    };
+    let Some(thread) = crate::sched::current_id() else {
+        return error::ESRCH;
+    };
+    let owner = (process.id.0, thread.0);
+    let current = ALT_STACKS.lock().get(&owner).copied();
+    let structure_size = if i386 { 12 } else { 24 };
+    let alignment = if i386 { 4 } else { 8 };
+
+    // Validate the output before changing state so a bad old-stack pointer
+    // leaves the installed stack untouched.
+    let output = if old == 0 {
+        None
+    } else {
+        if !old.is_multiple_of(alignment) {
+            return error::EFAULT;
+        }
+        match crate::arch::syscall::user_range_for(
+            &process,
+            old,
+            structure_size,
+            structure_size,
+            true,
+        ) {
+            Some((at, _)) => Some(at),
+            None => return error::EFAULT,
+        }
+    };
+    let replacement = if new == 0 {
+        None
+    } else {
+        if !new.is_multiple_of(alignment) {
+            return error::EFAULT;
+        }
+        let Some((at, _)) = crate::arch::syscall::user_range(new, structure_size, structure_size)
+        else {
+            return error::EFAULT;
+        };
+        // SAFETY: the full architecture-specific structure was checked above.
+        let (pointer, flags, size) = unsafe {
+            if i386 {
+                let words = at as *const u32;
+                (
+                    words.read_unaligned() as u64,
+                    words.add(1).read_unaligned() as i32 as i64 as u64,
+                    words.add(2).read_unaligned() as u64,
+                )
+            } else {
+                let words = at as *const u64;
+                (
+                    words.read_unaligned(),
+                    (at as *const i32).add(2).read_unaligned() as i64 as u64,
+                    words.add(2).read_unaligned(),
+                )
+            }
+        };
+        if flags == SS_DISABLE {
+            Some(None)
+        } else {
+            if flags != 0 {
+                return error::EINVAL;
+            }
+            if size < MINIMUM {
+                return error::ENOMEM;
+            }
+            let Some(end) = pointer.checked_add(size) else {
+                return error::ENOMEM;
+            };
+            if pointer < nexus_abi::layout::PAGE_SIZE || end > nexus_abi::layout::USER_SPACE_END {
+                return error::ENOMEM;
+            }
+            if crate::arch::syscall::user_range_for(&process, pointer, size, size, true).is_none() {
+                return error::EFAULT;
+            }
+            Some(Some(AltStack { pointer, size }))
+        }
+    };
+
+    if let Some(at) = output {
+        let (pointer, flags, size) =
+            current.map_or((0, SS_DISABLE, 0), |stack| (stack.pointer, 0, stack.size));
+        // SAFETY: `output` was checked for the complete structure and alignment.
+        unsafe {
+            if i386 {
+                let words = at as *mut u32;
+                words.write_unaligned(pointer as u32);
+                words.add(1).write_unaligned(flags as u32);
+                words.add(2).write_unaligned(size as u32);
+            } else {
+                let words = at as *mut u64;
+                words.write_unaligned(pointer);
+                (at as *mut i32).add(2).write_unaligned(flags as i32);
+                words.add(2).write_unaligned(size);
+            }
+        }
+    }
+    if let Some(replacement) = replacement {
+        let mut stacks = ALT_STACKS.lock();
+        if let Some(stack) = replacement {
+            stacks.insert(owner, stack);
+        } else {
+            stacks.remove(&owner);
+        }
+    }
     0
 }
 

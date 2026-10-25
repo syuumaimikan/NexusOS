@@ -48,6 +48,7 @@ $Entries = @(
     @('libstdc++.so.6', 'smcpp.lx', '/lib/i386-linux-gnu/libstdc++.so.6'),
     @('copyright.txt', 'smnotice.txt', '/usr/share/steam-diagnostic/copyright'),
     @('manifest.json', 'smmeta.txt', '/usr/share/steam-diagnostic/manifest.json'),
+    @((Join-Path $Repo 'roots/mozilla-ca-bundle.pem'), 'steamca.lx', '/etc/ssl/certs/ca-certificates.crt'),
     @((Join-Path $BusyboxRoot 'busybox'), 'busybox.lx', '/bin/sh'),
     @((Join-Path $BusyboxRoot 'copyright.txt'), 'bbnotice.txt', '/usr/share/doc/busybox-static/copyright')
 )

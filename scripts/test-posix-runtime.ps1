@@ -139,6 +139,15 @@ try {
                 throw "Missing basic/thread/dynamic proc evidence '$ProcRuntime $ProcResult': $Serial"
             }
         }
+        foreach ($RuntimeABIResult in @('flock shared/exclusive conflicts dup lifetime and proc descriptors', 'statfs and fstatfs filesystem identity and capacity', 'sigaltstack install query disable and minimum size')) {
+            $RuntimeABIMarker = "${ProcRuntime}: PASS $RuntimeABIResult"
+            if ([regex]::Matches($SemaphoreGuestLog, [regex]::Escape($RuntimeABIMarker)).Count -ne 3) {
+                throw "Missing basic/thread/dynamic Linux ABI evidence '$ProcRuntime $RuntimeABIResult': $Serial"
+            }
+        }
+    }
+    if ($WithGlibc32 -and [regex]::Matches($SemaphoreGuestLog, 'glibc32-probe: PASS i386 sysinfo and robust-list ABI layouts').Count -ne 3) {
+        throw "Missing three i386 sysinfo/robust-list variants: $Serial"
     }
     foreach ($ExecRuntime in @('musl-probe', $(if ($WithGlibc) { 'glibc-probe' }))) {
         if ($ExecRuntime -and -not $SemaphoreGuestLog.Contains("${ExecRuntime}: PASS relative execve retains cwd and actual executable identity")) {

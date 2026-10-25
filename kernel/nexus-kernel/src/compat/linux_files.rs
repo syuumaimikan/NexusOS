@@ -269,6 +269,24 @@ pub(super) enum Descriptor {
     Other(crate::ipc::Object),
 }
 
+/// Stable file identity for Linux's inode-scoped advisory locks. Anonymous
+/// memfds return `None` and use their open-description identity instead.
+pub(super) fn flock_identity(descriptor: u64) -> Result<Option<(u64, u64)>, u64> {
+    match describe(descriptor)? {
+        Descriptor::File(node, _) => Ok(Some((1, u64::from(node.inode())))),
+        Descriptor::Other(crate::ipc::Object::ProcessData(view)) => Ok(Some((
+            2,
+            view.owner.0 * 4 + if view.environment { 2 } else { 1 },
+        ))),
+        Descriptor::Other(crate::ipc::Object::Console(console))
+            if console.stream == EMPTY_MEMFD =>
+        {
+            Ok(None)
+        }
+        _ => Err(error::EBADF),
+    }
+}
+
 /// Work out what a descriptor is.
 ///
 /// # Errors
@@ -357,6 +375,11 @@ pub fn dup(descriptor: u64) -> u64 {
                     // is, rather than at the beginning.
                     let at = position(&process, handle);
                     set_position(&process, copy, at);
+                    super::linux_more::duplicate_description(
+                        process.id.0,
+                        u64::from(handle),
+                        u64::from(copy),
+                    );
                     u64::from(copy)
                 }
                 Err(_) => error::EBADF,
@@ -422,6 +445,11 @@ pub fn dup2(from: u64, to: u64) -> u64 {
                     POSITIONS.lock().remove(&(process.id.0, to as u32));
                     let was = position(&process, handle);
                     set_position(&process, to as u32, was);
+                    super::linux_more::duplicate_description(
+                        process.id.0,
+                        u64::from(handle),
+                        u64::from(at),
+                    );
                     u64::from(at)
                 }
                 Err(_) => error::EBADF,
@@ -558,6 +586,7 @@ pub fn memfd_create(name: u64, flags: u64) -> u64 {
         }),
         crate::ipc::Rights::READ | crate::ipc::Rights::WRITE | crate::ipc::Rights::CLOSE,
     );
+    super::linux_more::remember_open_description(process.id.0, u64::from(descriptor));
     EMPTY.lock().insert((process.id.0, descriptor));
     u64::from(descriptor)
 }
@@ -950,6 +979,7 @@ pub fn openat(directory: u64, pointer: u64, flags: u64) -> u64 {
     let handle = process
         .handles
         .insert(crate::ipc::Object::Node(node.clone()), rights);
+    super::linux_more::remember_open_description(process.id.0, u64::from(handle));
 
     // Appending starts at the end, which is what `O_APPEND` means for the very
     // first write as much as for the ones after it.

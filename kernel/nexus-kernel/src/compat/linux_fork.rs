@@ -100,6 +100,7 @@ pub fn fork(
     }
 
     super::linux_files::inherit(parent.id.0, child_id);
+    super::linux_more::inherit_descriptors(parent.id.0, child_id);
     super::linux_signal::inherit(parent.id.0, child_id);
     {
         let mut children = CHILDREN.lock();

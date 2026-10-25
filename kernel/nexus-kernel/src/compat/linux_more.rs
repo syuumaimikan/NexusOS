@@ -41,7 +41,7 @@
 
 use super::linux::error;
 use super::linux_files;
-use crate::arch::syscall::user_range;
+use crate::arch::syscall::{user_range, user_range_for};
 
 /// Two answers this file needs that `linux::error` does not carry.
 ///
@@ -87,6 +87,11 @@ pub fn translate(number: u64, frame: &crate::arch::syscall::Frame) -> Option<u64
         call::PRCTL => prctl(a, b),
         call::STATFS => statfs(a, b),
         call::FSTATFS => statfs_into(b),
+        call::FLOCK => flock(a, b),
+        call::CHMOD => super::linux_paths::chmodat((-100i64) as u64, a, b, 0),
+        call::FCHMOD => super::linux_paths::chmod_descriptor(a),
+        call::FCHMODAT => super::linux_paths::chmodat(a, b, c, 0),
+        call::FCHMODAT2 => super::linux_paths::chmodat(a, b, c, d),
         call::SELECT => select(a, b, c, d, frame.r8, Timeout::Microseconds),
         call::PSELECT6 => select(a, b, c, d, frame.r8, Timeout::Nanoseconds),
         call::RENAME => renameat2((-100i64) as u64, a, (-100i64) as u64, b, 0),
@@ -94,6 +99,54 @@ pub fn translate(number: u64, frame: &crate::arch::syscall::Frame) -> Option<u64
         call::RENAMEAT2 => renameat2(a, b, c, d, frame.r8),
         _ => return None,
     })
+}
+
+/// i386 `statfs64(path, size, buffer)`, used by GNU libc's `statvfs64`.
+pub fn statfs64_path(path: u64, size: u64, output: u64) -> u64 {
+    let path = match linux_files::path_of(path) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    if let Err(error) = linux_files::walk(&path) {
+        return error;
+    }
+    statfs64_write(size, output)
+}
+
+/// i386 `fstatfs64(fd, size, buffer)` for files and proc process-data files.
+pub fn statfs64_descriptor(descriptor: u64, size: u64, output: u64) -> u64 {
+    // `fstatfs` is defined for every valid descriptor, including pipes and
+    // console streams. This runtime currently has one backing filesystem, so
+    // the device's filesystem metadata is the same for every open object.
+    if let Err(error) = linux_files::describe(descriptor) {
+        return error;
+    }
+    statfs64_write(size, output)
+}
+
+fn statfs64_write(size: u64, output: u64) -> u64 {
+    const SIZE: u64 = 84;
+    const BLOCK: u64 = 4096;
+    if size < SIZE {
+        return error::EINVAL;
+    }
+    let Some((at, _)) = user_range(output, SIZE, SIZE) else {
+        return error::EFAULT;
+    };
+    let Some((total, free)) = crate::fs::store::space() else {
+        return also::EAGAIN;
+    };
+    let mut fields = [0u8; SIZE as usize];
+    fields[0..4].copy_from_slice(&0x4E58_5553u32.to_le_bytes()); // f_type
+    fields[4..8].copy_from_slice(&(BLOCK as u32).to_le_bytes()); // f_bsize
+    fields[8..16].copy_from_slice(&(total / BLOCK).to_le_bytes()); // f_blocks
+    fields[16..24].copy_from_slice(&(free / BLOCK).to_le_bytes()); // f_bfree
+    fields[24..32].copy_from_slice(&(free / BLOCK).to_le_bytes()); // f_bavail
+    fields[56..60].copy_from_slice(&255u32.to_le_bytes()); // f_namelen
+    fields[60..64].copy_from_slice(&(BLOCK as u32).to_le_bytes()); // f_frsize
+    // SAFETY: the output is checked writable for exactly the ABI structure.
+    unsafe { core::ptr::copy_nonoverlapping(fields.as_ptr(), at as *mut u8, fields.len()) };
+    0
 }
 
 /// The numbers this file answers. x86-64's, like the table it extends.
@@ -122,6 +175,11 @@ mod call {
     pub const PRCTL: u64 = 157;
     pub const STATFS: u64 = 137;
     pub const FSTATFS: u64 = 138;
+    pub const FLOCK: u64 = 73;
+    pub const CHMOD: u64 = 90;
+    pub const FCHMOD: u64 = 91;
+    pub const FCHMODAT: u64 = 268;
+    pub const FCHMODAT2: u64 = 452;
     pub const SELECT: u64 = 23;
     pub const PSELECT6: u64 = 270;
     pub const RENAME: u64 = 82;
@@ -158,6 +216,18 @@ enum Timeout {
 static FLAGS: crate::sync::IrqSpinLock<alloc::collections::BTreeMap<(u64, u64), Descriptor>> =
     crate::sync::IrqSpinLock::new(alloc::collections::BTreeMap::new());
 
+/// Identity of each open file description. `dup` and `fork` preserve this
+/// token, while opening the same inode again receives a distinct token.
+static OPEN_DESCRIPTIONS: crate::sync::IrqSpinLock<alloc::collections::BTreeMap<(u64, u64), u64>> =
+    crate::sync::IrqSpinLock::new(alloc::collections::BTreeMap::new());
+static NEXT_OPEN_DESCRIPTION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Inode-scoped `flock` state. The token models Linux's open-file description,
+/// so duplicate descriptors share one lock and independent opens conflict.
+static FLOCKS: crate::sync::IrqSpinLock<
+    alloc::collections::BTreeMap<(u64, u64), alloc::vec::Vec<(u64, bool)>>,
+> = crate::sync::IrqSpinLock::new(alloc::collections::BTreeMap::new());
+
 /// What is remembered about one open descriptor.
 #[derive(Debug, Clone, Copy, Default)]
 struct Descriptor {
@@ -172,6 +242,15 @@ struct Descriptor {
 /// Called from `Process::drop` beside the other `forget`s.
 pub fn forget(process: u64) {
     FLAGS.lock().retain(|(owner, _), _| *owner != process);
+    let mut descriptions = OPEN_DESCRIPTIONS.lock();
+    let retired: alloc::vec::Vec<_> = descriptions
+        .iter()
+        .filter_map(|((owner, _), token)| (*owner == process).then_some(*token))
+        .collect();
+    descriptions.retain(|(owner, _), _| *owner != process);
+    for token in retired {
+        retire_description(&descriptions, token);
+    }
 }
 
 pub(super) fn remember_cloexec(process: u64, descriptor: u64, on: bool) {
@@ -184,6 +263,122 @@ pub(super) fn remember_cloexec(process: u64, descriptor: u64, on: bool) {
 
 pub(super) fn forget_descriptor(process: u64, descriptor: u64) {
     FLAGS.lock().remove(&(process, descriptor));
+    let mut descriptions = OPEN_DESCRIPTIONS.lock();
+    if let Some(token) = descriptions.remove(&(process, descriptor)) {
+        retire_description(&descriptions, token);
+    }
+}
+
+/// Register a new descriptor created by `open`, `memfd_create` or `/proc`.
+pub(super) fn remember_open_description(process: u64, descriptor: u64) {
+    let mut descriptions = OPEN_DESCRIPTIONS.lock();
+    if let Some(previous) = descriptions.remove(&(process, descriptor)) {
+        retire_description(&descriptions, previous);
+    }
+    descriptions.insert((process, descriptor), next_open_description());
+}
+
+/// Preserve the source open-file description when a descriptor is duplicated.
+pub(super) fn duplicate_description(process: u64, source: u64, target: u64) {
+    let mut descriptions = OPEN_DESCRIPTIONS.lock();
+    let token = *descriptions
+        .entry((process, source))
+        .or_insert_with(next_open_description);
+    let previous = descriptions.insert((process, target), token);
+    if let Some(previous) = previous.filter(|previous| *previous != token) {
+        retire_description(&descriptions, previous);
+    }
+}
+
+/// Forked descriptors refer to the same open-file descriptions as their parent.
+pub(super) fn inherit_descriptors(parent: u64, child: u64) {
+    let mut descriptions = OPEN_DESCRIPTIONS.lock();
+    let inherited: alloc::vec::Vec<_> = descriptions
+        .iter()
+        .filter_map(|((owner, descriptor), token)| {
+            (*owner == parent).then_some(((child, *descriptor), *token))
+        })
+        .collect();
+    descriptions.extend(inherited);
+}
+
+fn next_open_description() -> u64 {
+    loop {
+        let token = NEXT_OPEN_DESCRIPTION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if token != 0 {
+            return token;
+        }
+    }
+}
+
+fn retire_description(descriptions: &alloc::collections::BTreeMap<(u64, u64), u64>, token: u64) {
+    if descriptions.values().any(|present| *present == token) {
+        return;
+    }
+    let mut locks = FLOCKS.lock();
+    for held in locks.values_mut() {
+        held.retain(|(owner, _)| *owner != token);
+    }
+    locks.retain(|_, held| !held.is_empty());
+}
+
+/// Linux `flock`: shared/exclusive advisory locks bound to an open description.
+pub fn flock(descriptor: u64, operation: u64) -> u64 {
+    const LOCK_SH: u64 = 1;
+    const LOCK_EX: u64 = 2;
+    const LOCK_NB: u64 = 4;
+    const LOCK_UN: u64 = 8;
+    const EWOULDBLOCK: u64 = (-11i64) as u64;
+
+    let nonblocking = operation & LOCK_NB != 0;
+    let command = operation & !LOCK_NB;
+    if !matches!(command, LOCK_SH | LOCK_EX | LOCK_UN) {
+        return error::EINVAL;
+    }
+    let Some(process) = crate::sched::current_process() else {
+        return error::EBADF;
+    };
+    let file = match linux_files::flock_identity(descriptor) {
+        Ok(file) => file,
+        Err(error) => return error,
+    };
+    let token = {
+        let mut descriptions = OPEN_DESCRIPTIONS.lock();
+        *descriptions
+            .entry((process.id.0, descriptor))
+            .or_insert_with(next_open_description)
+    };
+    // Each memfd is anonymous; its open-description token is its unique file
+    // identity, while dup/fork still refer to that same identity.
+    let file = file.unwrap_or((3, token));
+
+    loop {
+        let mut locks = FLOCKS.lock();
+        if command == LOCK_UN {
+            if let Some(held) = locks.get_mut(&file) {
+                held.retain(|(owner, _)| *owner != token);
+                if held.is_empty() {
+                    locks.remove(&file);
+                }
+            }
+            return 0;
+        }
+        let exclusive = command == LOCK_EX;
+        let held = locks.entry(file).or_default();
+        let conflict = held
+            .iter()
+            .any(|(owner, locked_exclusive)| *owner != token && (exclusive || *locked_exclusive));
+        if !conflict {
+            held.retain(|(owner, _)| *owner != token);
+            held.push((token, exclusive));
+            return 0;
+        }
+        drop(locks);
+        if nonblocking {
+            return EWOULDBLOCK;
+        }
+        crate::sched::yield_now();
+    }
 }
 
 fn whose() -> Option<u64> {
@@ -403,6 +598,34 @@ fn sysinfo(out: u64) -> u64 {
     // One, because the figures here are already bytes.
     // SAFETY: inside the range checked above.
     unsafe { core::ptr::write_unaligned((at as *mut u8).add(80) as *mut u32, 1) };
+    0
+}
+
+/// Linux's i386 `struct sysinfo` uses 32-bit longs and is exactly 64 bytes.
+pub fn sysinfo32(out: u64) -> u64 {
+    const SIZE: u64 = 64;
+    let Some(process) = crate::sched::current_process() else {
+        return error::ESRCH;
+    };
+    let Some((at, _)) = user_range_for(&process, out, SIZE, SIZE, true) else {
+        return error::EFAULT;
+    };
+    let Some(memory) = crate::memory::stats() else {
+        return also::EIO;
+    };
+    // Use 4 KiB units so memory totals fit the 32-bit ABI on typical machines.
+    let total = memory.managed_frames.min(u64::from(u32::MAX));
+    let free = memory.free_frames.min(total);
+    let uptime = (crate::arch::time::uptime_ms() / 1000).min(i32::MAX as u64) as i32;
+    // Zero load, swap, process counts and high memory; these facilities do not
+    // exist yet. The reported RAM counts are actual allocator frame counts.
+    let mut bytes = [0u8; SIZE as usize];
+    bytes[0..4].copy_from_slice(&uptime.to_ne_bytes());
+    bytes[16..20].copy_from_slice(&(total as u32).to_ne_bytes());
+    bytes[20..24].copy_from_slice(&(free as u32).to_ne_bytes());
+    bytes[52..56].copy_from_slice(&(nexus_mm::PAGE_SIZE as u32).to_ne_bytes());
+    // SAFETY: the complete output is mapped writable in the current process.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), at as *mut u8, bytes.len()) };
     0
 }
 

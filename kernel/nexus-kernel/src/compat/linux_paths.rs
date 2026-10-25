@@ -97,6 +97,42 @@ pub(super) fn resolve_entry(directory: u64, path: &str) -> Result<Resolved, u64>
     resolve_with(directory, path, false, false)
 }
 
+/// Permission bits are not stored by NexusFS and this kernel has no user or
+/// privilege boundary, so chmod's requested mode has no effect. Still resolve
+/// the target and validate the descriptor exactly as Linux requires.
+pub(super) fn chmodat(directory: u64, pointer: u64, _mode: u64, flags: u64) -> u64 {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return error::EINVAL;
+    }
+    let path = match linux_files::path_of(pointer) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    if path.is_empty() && flags & AT_EMPTY_PATH != 0 {
+        return chmod_descriptor(directory);
+    }
+    let resolver = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        resolve_no_follow
+    } else {
+        resolve
+    };
+    match resolver(directory, &path).and_then(|resolved| resolved.node().map(|_| ())) {
+        Ok(()) => 0,
+        Err(error) => error,
+    }
+}
+
+pub(super) fn chmod_descriptor(descriptor: u64) -> u64 {
+    match linux_files::describe(descriptor) {
+        Ok(linux_files::Descriptor::File(_, _))
+        | Ok(linux_files::Descriptor::Other(Object::ProcessData(_))) => 0,
+        Ok(_) => error::EBADF,
+        Err(error) => error,
+    }
+}
+
 fn resolve_with(
     directory: u64,
     path: &str,

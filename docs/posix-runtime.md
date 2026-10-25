@@ -503,15 +503,21 @@ scanout and QEMU virtio display are not proof of RTX acceleration. The exact
 source revision and fetch digest are recorded in `fetch-nvidia.py`.
 See [physical RTX 5060 implementation status](rtx-5060.md).
 
-The later Steam run passes the pinned i386 loader, forks, starts static
-BusyBox `/bin/sh`, and execs the actual Steam ELF. It stops when Steam issues
-`clone(flags=0x800600)`, which Linux rejects because `CLONE_SIGHAND` is set
-without `CLONE_VM` and `CLONE_THREAD`. The independent real-glibc i386 pthread
-probe now passes create/join and GS TLS through valid `clone3` requests. Steam
-still does not reach sign-in; its request and other runtime dependencies remain
-unimplemented or incompatible. See [Steam compatibility gates](steam-graphics.md).
-The focused i386 runtime run also passes on the current checkout:
-`build/runtime-test-e430c221b3314a648b617567035e34db/serial.log`.
+Earlier Steam runs showed an invalid `clone(flags=0x800600)` request, which
+correctly receives `EINVAL` because `CLONE_SIGHAND` requires `CLONE_VM` and
+`CLONE_THREAD`. The latest run also starts valid `clone3` workers, installs the
+system PEM roots into `/etc/ssl/certs/ca-certificates.crt`, and passes its
+`statvfs64` query. It reaches “Verifying installation...” before Steam exits
+with `4294967294` after an illegal worker-thread termination. This still does
+not prove an installed client or sign-in. The current serial evidence is
+`build/steam-diagnostic-7f742494ef5d4d1e995b02659631e91a/serial.log`.
+
+The latest `scripts/test-posix-runtime.ps1 -WithGlibc32 -Timeout 360` run passes
+all musl, x86-64 glibc and i386 glibc configurations, including flock lifetime
+and conflicts, `statfs`/`fstatfs` on files and console descriptors, alternate
+signal-stack install/query/disable, i386 `sysinfo`, robust-list layouts, and
+`kill(pid, 0)` validation:
+`build/runtime-test-4688f294083c487faaea24b06393d174/serial.log`.
 
 ## Launch and maintenance verification (2026-10-14)
 

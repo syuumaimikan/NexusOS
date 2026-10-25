@@ -608,6 +608,25 @@ pub fn live_threads_of_process(process: u64) -> alloc::vec::Vec<u64> {
         .collect()
 }
 
+/// Resolve a process identifier through a live user thread.
+///
+/// Processes are owned by their threads rather than by a second global table;
+/// cloning the `Arc` lets a caller signal or inspect the process after dropping
+/// the scheduler lock.
+#[must_use]
+pub fn process_by_id(process: u64) -> Option<Arc<crate::process::Process>> {
+    SCHEDULER.lock().threads.values().find_map(|thread| {
+        if matches!(thread.state, ThreadState::Exiting | ThreadState::Finished) {
+            return None;
+        }
+        thread
+            .process
+            .as_ref()
+            .filter(|owner| owner.id.0 == process)
+            .cloned()
+    })
+}
+
 /// Wake every thread of `process`, so each can notice it has been asked to stop.
 ///
 /// Returns how many were woken. Waking a thread that is not blocked is a
