@@ -15,7 +15,16 @@ static int i386_kernel_abi_probe(void) {
     errno = 0;
     if (!check(syscall(SYS_kill, 0x7ffffffe, 0) == -1 && errno == ESRCH, 337)) return 0;
 
-    puts(PROBE_NAME ": PASS i386 sysinfo and robust-list ABI layouts");
+    uint32_t limits[2] = {0};
+    if (!check(syscall(SYS_ugetrlimit, RLIMIT_NOFILE, limits) == 0 &&
+        limits[0] == 1024 && limits[1] == 1024, 338)) return 0;
+    limits[0] = limits[1] = 0;
+    if (!check(syscall(SYS_ugetrlimit, RLIMIT_CORE, limits) == 0 &&
+        limits[0] == 0x7fffffff && limits[1] == 0x7fffffff, 339)) return 0;
+    if (!check(syscall(SYS_ugetrlimit, RLIMIT_STACK, limits) == 0 &&
+        limits[0] == 8 * 1024 * 1024 && limits[1] == 8 * 1024 * 1024, 342)) return 0;
+
+    puts(PROBE_NAME ": PASS i386 sysinfo, robust-list and rlimit ABI");
     return 1;
 }
 #else

@@ -515,9 +515,16 @@ not prove an installed client or sign-in. The current serial evidence is
 The latest `scripts/test-posix-runtime.ps1 -WithGlibc32 -Timeout 360` run passes
 all musl, x86-64 glibc and i386 glibc configurations, including flock lifetime
 and conflicts, `statfs`/`fstatfs` on files and console descriptors, alternate
-signal-stack install/query/disable, i386 `sysinfo`, robust-list layouts, and
-`kill(pid, 0)` validation:
-`build/runtime-test-4688f294083c487faaea24b06393d174/serial.log`.
+signal-stack install/query/disable, i386 `sysinfo`, robust-list layouts,
+32-bit `ugetrlimit` values for `RLIMIT_NOFILE`, `RLIMIT_CORE` and
+`RLIMIT_STACK`, and `kill(pid, 0)` validation. The real i386 glibc pthread test
+also passes with the reported 8 MiB stack limit:
+`build/runtime-test-4f73bcde83994a3dabb50b3add94ee74/serial.log`.
+
+The same kernel then reran the Steam bootstrap diagnostic. It still reaches
+“Verifying installation...” and exits with `4294967294`; the new i386 resource
+limit support does not yet resolve Steam's worker-thread termination:
+`build/steam-diagnostic-bcad4c92d6d94cfd8c2e6662cb55ca45/serial.log`.
 
 ## Launch and maintenance verification (2026-10-14)
 

@@ -105,6 +105,7 @@ mod call {
     pub const NANOSLEEP: u64 = 162;
     pub const CLOCK_NANOSLEEP: u64 = 267;
     pub const CLOCK_NANOSLEEP64: u64 = 407;
+    pub const UGETRLIMIT: u64 = 191;
 }
 
 /// Calls translated, and calls refused.
@@ -411,6 +412,10 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
         call::GETUID | call::GETGID | call::GETEUID | call::GETEGID | 199..=202 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             0
+        }
+        call::UGETRLIMIT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::linux_more::getrlimit32(argument0, argument1)
         }
         call::SCHED_YIELD => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

@@ -23,6 +23,7 @@
 #include <linux/futex.h>
 #include <sys/sysmacros.h>
 #include <sys/sysinfo.h>
+#include <sys/resource.h>
 #ifdef __GLIBC__
 #include <gnu/libc-version.h>
 #endif
@@ -132,7 +133,6 @@ int main(int argc, char **argv, char **environment) {
     if (!flock_probe()) return 195;
     if (!statfs_probe()) return 196;
     if (!signal_stack_probe()) return 197;
-    if (!i386_kernel_abi_probe()) return 198;
     if (!cwd_probe()) return 191;
     if (!symlink_probe()) return 192;
     if (!random_probe()) return 193;
@@ -333,6 +333,7 @@ int main(int argc, char **argv, char **environment) {
     int eventfd_result = eventfd_checks();
     if (eventfd_result != 0) return eventfd_result;
 #endif
+    if (!i386_kernel_abi_probe()) return 198;
     puts(PROBE_NAME ": PASS allocation files positional-read clock sleep");
 #if !defined(__i386__) && !defined(PROBE_THREADS) && !defined(PROBE_DYNAMIC)
     return proc_exec_start(argv[0]);

@@ -532,12 +532,40 @@ fn write_limit(pointer: u64, soft: u64, hard: u64) -> u64 {
 /// `getrlimit(resource, out)`.
 fn getrlimit(resource: u64, out: u64) -> u64 {
     const NOFILE: u64 = 7;
-    let (soft, hard) = if resource == NOFILE {
-        (NOFILE_LIMIT, NOFILE_LIMIT)
-    } else {
-        (INFINITY, INFINITY)
+    const STACK: u64 = 3;
+    const STACK_LIMIT: u64 = 8 * 1024 * 1024;
+    let (soft, hard) = match resource {
+        NOFILE => (NOFILE_LIMIT, NOFILE_LIMIT),
+        STACK => (STACK_LIMIT, STACK_LIMIT),
+        _ => (INFINITY, INFINITY),
     };
     write_limit(out, soft, hard)
+}
+
+/// i386 `ugetrlimit` writes two 32-bit `rlim_t` values, not the 64-bit
+/// structure used by the x86-64 call. The i386 infinity sentinel is 2^31-1.
+pub fn getrlimit32(resource: u64, out: u64) -> u64 {
+    const NOFILE: u64 = 7;
+    const STACK: u64 = 3;
+    const STACK_LIMIT: u32 = 8 * 1024 * 1024;
+    const INFINITY32: u32 = 0x7fff_ffff;
+    let (soft, hard) = match resource {
+        NOFILE => (NOFILE_LIMIT as u32, NOFILE_LIMIT as u32),
+        STACK => (STACK_LIMIT, STACK_LIMIT),
+        _ => (INFINITY32, INFINITY32),
+    };
+    let Some(process) = crate::sched::current_process() else {
+        return error::ESRCH;
+    };
+    let Some((at, _)) = user_range_for(&process, out, 8, 8, true) else {
+        return error::EFAULT;
+    };
+    // SAFETY: the caller's writable eight-byte result was checked above.
+    unsafe {
+        core::ptr::write_unaligned(at as *mut u32, soft);
+        core::ptr::write_unaligned((at as *mut u32).add(1), hard);
+    }
+    0
 }
 
 /// `prlimit64(pid, resource, new, old)`.

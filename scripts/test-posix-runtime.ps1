@@ -146,8 +146,8 @@ try {
             }
         }
     }
-    if ($WithGlibc32 -and [regex]::Matches($SemaphoreGuestLog, 'glibc32-probe: PASS i386 sysinfo and robust-list ABI layouts').Count -ne 3) {
-        throw "Missing three i386 sysinfo/robust-list variants: $Serial"
+    if ($WithGlibc32 -and [regex]::Matches($SemaphoreGuestLog, 'glibc32-probe: PASS i386 sysinfo, robust-list and rlimit ABI').Count -ne 3) {
+        throw "Missing three i386 ABI probe variants: $Serial"
     }
     foreach ($ExecRuntime in @('musl-probe', $(if ($WithGlibc) { 'glibc-probe' }))) {
         if ($ExecRuntime -and -not $SemaphoreGuestLog.Contains("${ExecRuntime}: PASS relative execve retains cwd and actual executable identity")) {

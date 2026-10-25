@@ -209,10 +209,11 @@ bootstrap starts valid `clone3` worker threads and reaches “Verifying
 installation...” in the latest QEMU run, then exits with status
 `4294967294` after Steam reports an illegal worker-thread termination. The
 diagnostic still does not run the full shell installer, install the client, or
-verify sign-in. Other observed missing calls include i386 `ugetrlimit`, `rseq`,
-`mknodat`, `setresuid32` and `getppid`; shared-VM clone and i386 signal delivery
-also remain incomplete. See the current serial log at
-`build/steam-diagnostic-7f742494ef5d4d1e995b02659631e91a/serial.log` and the
+verify sign-in. i386 `ugetrlimit` now reports the 32-bit ABI values, including
+the 8 MiB stack limit used by glibc thread startup. Other observed missing calls
+include `rseq`, `mknodat`, `setresuid32` and `getppid`; shared-VM clone and i386
+signal delivery also remain incomplete. See the current serial log at
+`build/steam-diagnostic-bcad4c92d6d94cfd8c2e6662cb55ca45/serial.log` and the
 [native runtime evidence](posix-runtime.md).
 
 ### Thirty-two bit programs
