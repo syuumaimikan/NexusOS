@@ -747,6 +747,33 @@ fn record_address(interface: &Interface) {
         Ok(()) => kprintln!("[net ] wrote system/network.txt"),
         Err(error) => kprintln!("[net ] could not write system/network.txt: {error}"),
     }
+
+    let resolver = format!(
+        "nameserver {}.{}.{}.{}\n",
+        interface.dns[0], interface.dns[1], interface.dns[2], interface.dns[3],
+    );
+    let result = (|| {
+        let root = crate::fs::store::directory("linux")?;
+        let etc = match crate::fs::store::open_child(&root, "etc") {
+            Ok(node) if node.is_directory() => node,
+            Ok(_) => return Err(crate::fs::store::StoreError::Fs(
+                crate::fs::nexusfs::FsError::WrongKind,
+            )),
+            Err(crate::fs::store::StoreError::Fs(crate::fs::nexusfs::FsError::NotFound)) => {
+                crate::fs::store::create_child(&root, "etc", true)?
+            }
+            Err(error) => return Err(error),
+        };
+        if crate::fs::store::open_child(&etc, "resolv.conf").is_ok() {
+            crate::fs::store::remove_child(&etc, "resolv.conf")?;
+        }
+        let file = crate::fs::store::create_child(&etc, "resolv.conf", false)?;
+        crate::fs::store::write_node(&file, resolver.as_bytes())
+    })();
+    match result {
+        Ok(()) => kprintln!("[net ] wrote Linux /etc/resolv.conf"),
+        Err(error) => kprintln!("[net ] could not write Linux /etc/resolv.conf: {error}"),
+    }
 }
 
 /// How many bits of a mask are set, which is how a mask is written down.

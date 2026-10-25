@@ -547,6 +547,10 @@ diagnostic still reports “Steam needs to be online to update”; successful
 Steam update traffic has not been demonstrated (`build/steam-diagnostic-2b38ab23fe89420694c31c98d2d687cc/serial.log`).
 TCP/UDP readiness is now exposed to `poll`/`epoll` with periodic rechecks while
 the network stack lacks direct wait notifications; more complete socket options still need work. The
+DHCP client now also writes its leased DNS server to the Linux root's
+`/etc/resolv.conf`, as well as recording `system/network.txt`. The Steam
+diagnostic still does not demonstrate a successful update after that change
+(`build/steam-diagnostic-86acb9d8d88843dfaaf0ee5c87f85bec/serial.log`). The
 latest full `-WithGlibc32` runtime run also timed out in its second threaded
 probe; its failure evidence is `build/runtime-test-62105cfb45274910be733c5555e87c40/serial.log`.
 
