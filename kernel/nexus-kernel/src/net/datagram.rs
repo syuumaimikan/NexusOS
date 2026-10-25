@@ -179,6 +179,15 @@ pub fn take(port: u16) -> Option<Option<(Ipv4, u16, Vec<u8>)>> {
     Some(holder.arrived.pop_front())
 }
 
+/// Whether a bound port has a datagram waiting to be read.
+#[must_use]
+pub fn readable(port: u16) -> bool {
+    BOUND
+        .lock()
+        .iter()
+        .any(|holder| holder.port == port && !holder.arrived.is_empty())
+}
+
 /// A datagram arrived for one of this machine's ports.
 ///
 /// Returns whether anybody wanted it, so that the caller can go on to whatever

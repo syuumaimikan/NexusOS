@@ -215,7 +215,33 @@ pub(super) fn ready_now(descriptor: u64) -> i16 {
         // "readable" when somebody is waiting to be accepted, which is the
         // convention every program that polls a listener relies on.
         Ok(Descriptor::Other(crate::ipc::Object::Socket(socket))) => {
-            if let Some(listener) = socket.listener() {
+            if let Some(internet) = socket.internet_state() {
+                match *internet.state.lock() {
+                    crate::socket::InternetState::Tcp(id) => {
+                        let mut bits = 0;
+                        if crate::net::stream::queued(id) > 0 {
+                            bits |= event::IN;
+                        }
+                        match crate::net::stream::state(id) {
+                            Some(crate::net::stream::State::Established) => bits |= event::OUT,
+                            Some(crate::net::stream::State::CloseWait | crate::net::stream::State::Closed) => {
+                                bits |= event::IN | event::HUP;
+                            }
+                            _ => {}
+                        }
+                        bits
+                    }
+                    crate::socket::InternetState::Udp { port: Some(port), .. } => {
+                        event::OUT
+                            | if crate::net::datagram::readable(port) {
+                                event::IN
+                            } else {
+                                0
+                            }
+                    }
+                    _ => 0,
+                }
+            } else if let Some(listener) = socket.listener() {
                 if listener.ready() {
                     event::IN
                 } else {
@@ -266,6 +292,26 @@ fn watchable(descriptor: u64) -> Option<Watched> {
         }
         _ => None,
     }
+}
+
+fn is_internet_socket(descriptor: u64) -> bool {
+    matches!(
+        describe(descriptor),
+        Ok(Descriptor::Other(crate::ipc::Object::Socket(socket)))
+            if socket.internet_state().is_some()
+    )
+}
+
+fn recheck_deadline(deadline: Option<u64>, has_internet: bool) -> Option<u64> {
+    if !has_internet {
+        return deadline;
+    }
+    let rate = crate::arch::time::frequency_hz();
+    if rate == 0 {
+        return deadline;
+    }
+    let next = crate::arch::time::ticks().saturating_add((rate / 200).max(1));
+    Some(deadline.map_or(next, |deadline| deadline.min(next)))
 }
 
 /// Turn a timeout in milliseconds into a tick deadline.
@@ -398,13 +444,23 @@ pub fn poll(fds: u64, count: u64, timeout: i64) -> u64 {
             .filter(|(descriptor, _)| *descriptor != u64::MAX)
             .filter_map(|(descriptor, _)| watchable(*descriptor))
             .collect();
+        let has_internet = watching
+            .iter()
+            .any(|(descriptor, _)| *descriptor != u64::MAX && is_internet_socket(*descriptor));
         WAITED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if !sleep_on(&members, deadline, || {
+        if !sleep_on(&members, recheck_deadline(deadline, has_internet), || {
             watching.iter().any(|(descriptor, asked)| {
                 *descriptor != u64::MAX
                     && ready_now(*descriptor) & (asked | event::ERR | event::HUP | event::NVAL) != 0
             })
         }) {
+            if members.is_empty() && has_internet {
+                // Network state does not yet publish WaitSet notifications.
+                // Recheck periodically so poll can observe packets arriving on
+                // another CPU while retaining its normal timeout behavior.
+                crate::sched::sleep_ms(5);
+                continue;
+            }
             // Nothing here can ever become ready, and nothing is ready now. A
             // caller that waited would wait for ever, so it is told nothing
             // happened -- which is the truth.
@@ -596,8 +652,11 @@ pub fn wait(set: u64, events: u64, most: u64, timeout: i64) -> u64 {
             .iter()
             .filter_map(|(descriptor, _)| watchable(u64::from(*descriptor)))
             .collect();
+        let has_internet = interests
+            .iter()
+            .any(|(descriptor, _)| is_internet_socket(u64::from(*descriptor)));
         WAITED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if !sleep_on(&members, deadline, || {
+        if !sleep_on(&members, recheck_deadline(deadline, has_internet), || {
             interests.iter().any(|(descriptor, want)| {
                 let now = ready_now(u64::from(*descriptor));
                 now & (event::ERR | event::HUP | event::NVAL) != 0
@@ -605,6 +664,10 @@ pub fn wait(set: u64, events: u64, most: u64, timeout: i64) -> u64 {
                     || (now & event::OUT != 0 && want.events & epoll::OUT != 0)
             })
         }) {
+            if members.is_empty() && has_internet {
+                crate::sched::sleep_ms(5);
+                continue;
+            }
             return 0;
         }
     }
