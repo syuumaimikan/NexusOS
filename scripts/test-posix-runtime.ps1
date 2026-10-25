@@ -149,6 +149,12 @@ try {
     if ($WithGlibc32 -and [regex]::Matches($SemaphoreGuestLog, 'glibc32-probe: PASS i386 sysinfo, robust-list and rlimit ABI').Count -ne 3) {
         throw "Missing three i386 ABI probe variants: $Serial"
     }
+    if ($WithGlibc32 -and [regex]::Matches($SemaphoreGuestLog, 'glibc32-probe: PASS i386 gettimeofday and time report the RTC epoch').Count -ne 3) {
+        throw "Missing three i386 realtime clock probe variants: $Serial"
+    }
+    if ($WithGlibc32 -and [regex]::Matches($SemaphoreGuestLog, 'glibc32-probe: PASS i386 coarse realtime and boottime clocks').Count -ne 3) {
+        throw "Missing three i386 coarse/boottime clock probe variants: $Serial"
+    }
     if ($WithGlibc32 -and [regex]::Matches($SemaphoreGuestLog, 'glibc32-probe: PASS named FIFO creation blocking rendezvous nonblocking error stream and unlink').Count -ne 3) {
         throw "Missing three i386 named FIFO probe variants: $Serial"
     }

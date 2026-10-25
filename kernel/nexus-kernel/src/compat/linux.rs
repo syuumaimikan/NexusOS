@@ -896,28 +896,40 @@ pub(super) fn uname_into(buffer: u64) -> u64 {
 ///
 /// `struct timespec { i64 seconds; i64 nanoseconds; }`.
 ///
-/// The realtime clock comes from the machine's own, and the monotonic one from
-/// uptime -- which is what each of them means. A machine with no clock gets
+/// Realtime clocks come from the machine's RTC; monotonic clocks come from
+/// uptime. Linux coarse/raw/boottime variants share those sources here: their
+/// distinctions require clock resolution, suspend accounting or hardware
+/// counter calibration that this kernel does not currently expose. A machine with no clock gets
 /// uptime for both, because a wall clock that starts at 1970 every boot is
 /// worse than one a program can tell is not a wall clock.
 pub(super) fn clock_gettime(which: u64, buffer: u64) -> u64 {
-    /// `CLOCK_REALTIME` and `CLOCK_MONOTONIC`.
+    /// Linux clock IDs with sources provided by NexusOS.
     const REALTIME: u64 = 0;
     const MONOTONIC: u64 = 1;
+    const MONOTONIC_RAW: u64 = 4;
+    const REALTIME_COARSE: u64 = 5;
+    const MONOTONIC_COARSE: u64 = 6;
+    const BOOTTIME: u64 = 7;
+    const REALTIME_ALARM: u64 = 8;
+    const BOOTTIME_ALARM: u64 = 9;
 
-    let seconds: i64 = match which {
-        REALTIME => match crate::drivers::rtc::now() {
+    let uptime_ms = crate::arch::time::uptime_ms();
+    let realtime = matches!(which, REALTIME | REALTIME_COARSE | REALTIME_ALARM);
+    let monotonic = matches!(
+        which,
+        MONOTONIC | MONOTONIC_RAW | MONOTONIC_COARSE | BOOTTIME | BOOTTIME_ALARM
+    );
+    let seconds: i64 = if realtime {
+        match crate::drivers::rtc::now() {
             Some(now) => now as i64,
-            None => (crate::arch::time::uptime_ms() / 1000) as i64,
-        },
-        MONOTONIC => (crate::arch::time::uptime_ms() / 1000) as i64,
-        _ => return error::EINVAL,
-    };
-    let nanoseconds: i64 = if which == MONOTONIC {
-        ((crate::arch::time::uptime_ms() % 1000) * 1_000_000) as i64
+            None => (uptime_ms / 1000) as i64,
+        }
+    } else if monotonic {
+        (uptime_ms / 1000) as i64
     } else {
-        0
+        return error::EINVAL;
     };
+    let nanoseconds: i64 = ((uptime_ms % 1000) * 1_000_000) as i64;
 
     let Some((pointer, _)) = crate::arch::syscall::user_range(buffer, 16, 16) else {
         return error::EFAULT;

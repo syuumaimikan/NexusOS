@@ -189,7 +189,7 @@ pub(super) fn read(view: &ProcessData, buffer: u64, count: u64, offset: Option<u
         let comm: String = process.name.chars().take(15).collect();
         let starttime = process.started_at_ms / 10;
         let stat = alloc::format!(
-            "{} ({}) R 1 {} {} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 {} 0 {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+            "{} ({}) R 1 {} {} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 {} 0 {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
             process.id.0,
             comm,
             process.id.0,

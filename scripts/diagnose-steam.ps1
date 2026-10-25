@@ -67,11 +67,12 @@ try {
     if ($LASTEXITCODE) { throw 'Steam diagnostic init build failed' }
     Publish-Program -Elf (Join-Path $Repo 'target/x86_64-nexus-user/debug/nexus-steam-diagnostic') -ProgramDir $Programs -Name 'init.elf' | Out-Null
     Publish-Esp -BootEfi (Join-Path $Repo 'build/esp/EFI/BOOT/BOOTX64.EFI') -KernelElf (Join-Path $Repo 'target/x86_64-nexus/debug/nexus-kernel') -EspDir $Esp | Out-Null
-    & (Join-Path $PSScriptRoot 'make-disk.ps1') -Output (Join-Path $Run 'nexus-disk.img') -ProgramDir $Programs -SizeMiB 512 -FatMiB 256
+    & (Join-Path $PSScriptRoot 'make-disk.ps1') -Output (Join-Path $Run 'nexus-disk.img') -ProgramDir $Programs -SizeMiB 1024 -FatMiB 256
 } finally { Pop-Location }
 # The i386 GNU runtime plus Steam diagnostic payload exceeds 96 MiB. Give this
-# disposable image enough FAT32 space for staged files.
-function Get-NexusDiskSizes { return @{SizeMiB=512; FatMiB=256} }
+# disposable image enough FAT32 space for staged files and a writable Linux
+# root with more than Steam's 250 MiB minimum update-space requirement.
+function Get-NexusDiskSizes { return @{SizeMiB=1024; FatMiB=256} }
 $Qemu = (Get-Command qemu-system-x86_64).Source
 $Share = Join-Path (Split-Path $Qemu -Parent) 'share'
 $Code = Join-Path $Run 'code.fd'

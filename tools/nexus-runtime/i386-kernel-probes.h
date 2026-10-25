@@ -1,4 +1,9 @@
 #if defined(__i386__)
+#include <sys/time.h>
+#ifndef SYS_clock_gettime64
+#define SYS_clock_gettime64 403
+#endif
+
 struct i386_fifo_probe_state {
     const char *path;
     const char *payload;
@@ -15,6 +20,26 @@ static void *i386_fifo_writer(void *opaque) {
 }
 
 static int i386_kernel_abi_probe(void) {
+    struct timeval wall;
+    errno = 0;
+    long gettimeofday_result = syscall(SYS_gettimeofday, &wall, NULL);
+    long time_result = syscall(SYS_time, NULL);
+    if (!check(gettimeofday_result == 0 && time_result > 1700000000L &&
+        wall.tv_sec > 1700000000 && wall.tv_sec <= time_result &&
+        wall.tv_usec >= 0 && wall.tv_usec < 1000000, 350)) return 0;
+    int32_t copied_time = 0;
+    if (!check(syscall(SYS_time, &copied_time) == time_result &&
+        copied_time == (int32_t)time_result, 351)) return 0;
+    puts(PROBE_NAME ": PASS i386 gettimeofday and time report the RTC epoch");
+
+    struct { int64_t seconds, nanoseconds; } realtime_coarse, boottime;
+    if (!check(syscall(SYS_clock_gettime64, 5, &realtime_coarse) == 0 &&
+        realtime_coarse.seconds > 1700000000 && realtime_coarse.nanoseconds >= 0 &&
+        realtime_coarse.nanoseconds < 1000000000 &&
+        syscall(SYS_clock_gettime64, 7, &boottime) == 0 &&
+        boottime.seconds >= 0 && boottime.seconds < 86400, 352)) return 0;
+    puts(PROBE_NAME ": PASS i386 coarse realtime and boottime clocks");
+
     struct sysinfo information;
     if (!check(syscall(SYS_sysinfo, &information) == 0 &&
         information.mem_unit == 4096 && information.totalram != 0, 333)) return 0;

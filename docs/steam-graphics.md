@@ -204,18 +204,18 @@ loader, a static i386 shell, and the system's PEM root bundle at
 `/etc/ssl/certs/ca-certificates.crt`. This removed Steam's earlier “unable to
 load trusted SSL root certificates” error. `flock`, `statfs64` (including
 Steam's `statvfs64` query), `sigaltstack`, robust-list setup, i386 `sysinfo`,
-and process-existence `kill(pid, 0)` now pass targeted libc probes. Named
-FIFO creation and nonzero `/proc/self/stat` start time now pass i386 glibc
-probes, and Steam no longer reports the FIFO creation failure. The bootstrap
-starts valid `clone3` worker threads and reaches “Verifying
-installation...” in the latest QEMU run, then exits with status
-`4294967294` after Steam reports an illegal worker-thread termination. The
-diagnostic still does not run the full shell installer, install the client, or
-verify sign-in; it still logs `GID StartTime out of range`. i386 `ugetrlimit` now reports the 32-bit ABI values, including
+and process-existence `kill(pid, 0)` now pass targeted libc probes. Named FIFO
+creation, nonzero `/proc/self/stat` start time, i386 wall-clock calls, and
+coarse realtime/boottime clock IDs now pass glibc probes. Steam receives the
+RTC date, passes the 250 MiB free-space gate, and reaches “Verifying
+installation...” before it reports that it must be online to update. It then
+exits with status `4294967294` after an illegal worker-thread termination.
+Internet sockets and the full shell installer remain unimplemented, so this
+does not establish an installed client or sign-in. i386 `ugetrlimit` reports the 32-bit ABI values, including
 the 8 MiB stack limit used by glibc thread startup. Other observed missing calls
 include `rseq`, `setresuid32` and `getppid`; shared-VM clone and i386
 signal delivery also remain incomplete. See the current serial log at
-`build/steam-diagnostic-3d5aca66e0254ed5aea54715d7e70a46/serial.log` and the
+`build/steam-diagnostic-5a043cd5a12e47b09635e5b18dff1ca4/serial.log` and the
 [native runtime evidence](posix-runtime.md).
 
 ### Thirty-two bit programs
@@ -401,7 +401,7 @@ interfaces it needs.
 | Shaders | **A SPIR-V module is read and executed, and its pixels reach the screen** | A module from a real compiler rather than from this repository; images, samplers, buffers, push constants, matrices, function calls; compiling a module instead of interpreting it | `glslang`'s output for a non-trivial shader runs and matches a reference image |
 | Vulkan | **Upstream SwiftShader CPU ICD compiles SPIR-V and submits a compute dispatch** | Vulkan loader discovery, WSI/swapchain, broader graphics tests, conformance and hardware driver | The Vulkan loader discovers the ICD, `vulkaninfo` succeeds and `vkcube` presents; then conformance |
 | Physical RTX 5060 | **Native PCI identity, pinned bootstrap/RM/microcode verification, unpublished contiguous/scatter buffers and three-level GSP radix tables implemented; QEMU disk/USB tests pass** | GSP firmware boot/authentication and RPC, DMA/IOMMU mapping, WPR, VRAM/virtual address spaces, fences, interrupts, command submission and native Vulkan integration | NexusOS boots on the physical card and GPU-generated pixels reach the display |
-| Steam installation | **Official ELF32 bootstrap loads through i386 glibc, forks, runs `/bin/sh`, execs Steam, creates named FIFOs and reaches “Verifying installation...”** | GID start-time warning, worker-thread termination, further Linux services and complete graphics/audio/network integration | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
+| Steam installation | **Official ELF32 bootstrap loads through i386 glibc, forks, runs `/bin/sh`, execs Steam, creates named FIFOs, gets wall-clock time, passes the free-space check and reaches “Verifying installation...”** | IPv4 sockets/online update, worker-thread termination and full installer/client integration | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
 
 ## Can Mesa not just be used?
 

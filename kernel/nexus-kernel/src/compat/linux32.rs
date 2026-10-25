@@ -52,7 +52,9 @@ mod call {
     pub const CLOSE: u64 = 6;
     pub const UNLINK: u64 = 10;
     pub const CHDIR: u64 = 12;
+    pub const TIME: u64 = 13;
     pub const FCHDIR: u64 = 133;
+    pub const GETTIMEOFDAY: u64 = 78;
     pub const MKDIRAT: u64 = 296;
     pub const MKNODAT: u64 = 297;
     pub const UNLINKAT: u64 = 301;
@@ -236,11 +238,20 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
         }
         call::CLOCK_GETTIME | call::CLOCK_GETTIME64 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if number == call::CLOCK_GETTIME64 {
+            let result = if number == call::CLOCK_GETTIME64 {
                 super::linux::clock_gettime(argument0, argument1)
             } else {
                 clock32(argument0, argument1)
-            }
+            };
+            result
+        }
+        call::TIME => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            time32(argument0)
+        }
+        call::GETTIMEOFDAY => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            gettimeofday32(argument0)
         }
         call::NANOSLEEP => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -700,14 +711,27 @@ fn clone3(arguments: u64, size: u64, frame: &Frame) -> u64 {
 }
 
 fn clock32(which: u64, address: u64) -> u64 {
-    if which > 1 {
+    const REALTIME: u64 = 0;
+    const MONOTONIC: u64 = 1;
+    const MONOTONIC_RAW: u64 = 4;
+    const REALTIME_COARSE: u64 = 5;
+    const MONOTONIC_COARSE: u64 = 6;
+    const BOOTTIME: u64 = 7;
+    const REALTIME_ALARM: u64 = 8;
+    const BOOTTIME_ALARM: u64 = 9;
+    let realtime = matches!(which, REALTIME | REALTIME_COARSE | REALTIME_ALARM);
+    let monotonic = matches!(
+        which,
+        MONOTONIC | MONOTONIC_RAW | MONOTONIC_COARSE | BOOTTIME | BOOTTIME_ALARM
+    );
+    if !realtime && !monotonic {
         return error::EINVAL;
     }
     let Some((out, _)) = crate::arch::syscall::user_range(address, 8, 8) else {
         return error::EFAULT;
     };
     let milliseconds = crate::arch::time::uptime_ms();
-    let seconds = if which == 0 {
+    let seconds = if realtime {
         crate::drivers::rtc::now().unwrap_or(milliseconds / 1000)
     } else {
         milliseconds / 1000
@@ -715,13 +739,47 @@ fn clock32(which: u64, address: u64) -> u64 {
     if seconds > i32::MAX as u64 {
         return (-75i64) as u64;
     }
-    let nanos = if which == 0 {
-        0
-    } else {
-        (milliseconds % 1000) * 1_000_000
-    };
+    let nanos = (milliseconds % 1000) * 1_000_000;
     unsafe {
         (out as *mut [i32; 2]).write_unaligned([seconds as i32, nanos as i32]);
+    }
+    0
+}
+
+/// i386 `time(time_t *)`, with Linux's signed 32-bit time ABI.
+fn time32(address: u64) -> u64 {
+    let seconds = crate::drivers::rtc::now().unwrap_or(crate::arch::time::uptime_ms() / 1000);
+    if seconds > i32::MAX as u64 {
+        return (-75i64) as u64; // EOVERFLOW
+    }
+    if address != 0 {
+        let Some((out, _)) = crate::arch::syscall::user_range(address, 4, 4) else {
+            return error::EFAULT;
+        };
+        // SAFETY: the caller's four-byte i386 time_t was checked above.
+        unsafe { (out as *mut i32).write_unaligned(seconds as i32) };
+    }
+    seconds as u32 as u64
+}
+
+/// i386 `gettimeofday(timeval32 *, timezone *)`; the obsolete timezone is
+/// ignored, as it is on Linux. The fractional component follows the kernel's
+/// monotonic timer rather than introducing a second wall-clock source.
+fn gettimeofday32(address: u64) -> u64 {
+    if address == 0 {
+        return 0;
+    }
+    let Some((out, _)) = crate::arch::syscall::user_range(address, 8, 8) else {
+        return error::EFAULT;
+    };
+    let seconds = crate::drivers::rtc::now().unwrap_or(crate::arch::time::uptime_ms() / 1000);
+    if seconds > i32::MAX as u64 {
+        return (-75i64) as u64; // EOVERFLOW
+    }
+    let microseconds = ((crate::arch::time::uptime_ms() % 1000) * 1000) as i32;
+    // SAFETY: `user_range` checked the eight-byte timeval32 output.
+    unsafe {
+        (out as *mut [i32; 2]).write_unaligned([seconds as i32, microseconds]);
     }
     0
 }
