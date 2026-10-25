@@ -118,6 +118,11 @@ const MAX_PATH: u64 = 4096;
 /// rather than somebody else's file.
 static POSITIONS: IrqSpinLock<BTreeMap<(u64, u32), u64>> = IrqSpinLock::new(BTreeMap::new());
 
+/// Named Linux FIFOs are transient runtime objects, not NexusFS files. Unlink
+/// removes only the name; already-open descriptors retain the stream.
+static FIFOS: IrqSpinLock<BTreeMap<String, Arc<crate::pipe::Pipe>>> =
+    IrqSpinLock::new(BTreeMap::new());
+
 /// Turn a store failure into the Linux error that means the same thing.
 ///
 /// Not a single catch-all: a program that cannot tell "no such file" from "the
@@ -274,10 +279,14 @@ pub(super) enum Descriptor {
 pub(super) fn flock_identity(descriptor: u64) -> Result<Option<(u64, u64)>, u64> {
     match describe(descriptor)? {
         Descriptor::File(node, _) => Ok(Some((1, u64::from(node.inode())))),
-        Descriptor::Other(crate::ipc::Object::ProcessData(view)) => Ok(Some((
-            2,
-            view.owner.0 * 4 + if view.environment { 2 } else { 1 },
-        ))),
+        Descriptor::Other(crate::ipc::Object::ProcessData(view)) => {
+            let leaf = match view.view {
+                crate::process::ProcessView::Arguments => 1,
+                crate::process::ProcessView::Environment => 2,
+                crate::process::ProcessView::Stat => 4,
+            };
+            Ok(Some((2, view.owner.0 * 4 + leaf)))
+        }
         Descriptor::Other(crate::ipc::Object::Console(console))
             if console.stream == EMPTY_MEMFD =>
         {
@@ -890,6 +899,43 @@ pub fn openat(directory: u64, pointer: u64, flags: u64) -> u64 {
     // disk.
     if super::linux_display::is_device(&resolved.path) {
         return super::linux_display::open();
+    }
+
+    // Drop the namespace lock before waiting for the opposite FIFO endpoint;
+    // that peer needs the same lock to enter open.
+    let fifo = { FIFOS.lock().get(&resolved.path).cloned() };
+    if let Some(pipe) = fifo {
+        if flags & flag::CREAT != 0 && flags & flag::EXCL != 0 {
+            return EEXIST;
+        }
+        if flags & flag::DIRECTORY != 0 {
+            return ENOTDIR;
+        }
+        let reading = flags & flag::WRONLY == 0;
+        let writing = flags & (flag::WRONLY | flag::RDWR) != 0;
+        let end = pipe.open(reading, writing);
+        let nonblocking = flags & 0o4000 != 0;
+        if let Err(error) = end.wait_for_peer(nonblocking) {
+            return match error {
+                crate::pipe::PipeError::NoReader => (-6i64) as u64, // ENXIO
+                crate::pipe::PipeError::Cancelled => EINTR,
+                crate::pipe::PipeError::WrongEnd => error::EINVAL,
+            };
+        }
+        let Ok(process) = process() else {
+            return error::EBADF;
+        };
+        let mut rights = crate::ipc::Rights::CLOSE | crate::ipc::Rights::TRANSFER;
+        if reading {
+            rights = rights | crate::ipc::Rights::READ;
+        }
+        if writing {
+            rights = rights | crate::ipc::Rights::WRITE;
+        }
+        let handle = process
+            .handles
+            .insert(crate::ipc::Object::Pipe(end), rights);
+        return u64::from(handle);
     }
 
     if resolved.node.as_ref().is_some_and(|node| node.is_symlink()) {
@@ -1617,6 +1663,36 @@ pub fn mkdirat(directory: u64, pointer: u64) -> u64 {
     }
 }
 
+/// `mknodat` for named FIFOs. Other special node types need device and
+/// permission machinery NexusOS does not expose yet and are explicitly denied.
+pub fn mknodat(directory: u64, pointer: u64, mode: u64) -> u64 {
+    const TYPE_MASK: u64 = 0o170000;
+    const FIFO: u64 = 0o010000;
+    if mode & TYPE_MASK != FIFO {
+        return (-1i64) as u64; // EPERM
+    }
+    let path = match path_of(pointer) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    let resolved = match super::linux_paths::resolve_entry(directory, &path) {
+        Ok(resolved) => resolved,
+        Err(error) => return error,
+    };
+    if resolved.node.is_some() || resolved.special {
+        return EEXIST;
+    }
+    if let Err(errno) = resolved.entry(&path) {
+        return errno;
+    }
+    let mut fifos = FIFOS.lock();
+    if fifos.contains_key(&resolved.path) {
+        return EEXIST;
+    }
+    fifos.insert(resolved.path, crate::pipe::Pipe::named());
+    0
+}
+
 /// `unlinkat(dirfd, path, flags)`, which is also `unlink` and `rmdir`.
 pub fn unlinkat(directory: u64, pointer: u64, flags: u64) -> u64 {
     if flags & !0x200 != 0 {
@@ -1630,6 +1706,15 @@ pub fn unlinkat(directory: u64, pointer: u64, flags: u64) -> u64 {
         Ok(resolved) => resolved,
         Err(error) => return error,
     };
+    let mut fifos = FIFOS.lock();
+    if fifos.contains_key(&resolved.path) {
+        if flags & 0x200 != 0 {
+            return ENOTDIR;
+        }
+        fifos.remove(&resolved.path);
+        return 0;
+    }
+    drop(fifos);
     let (parent, name) = match resolved.entry(&path) {
         Ok(entry) => entry,
         Err(error) => return error,

@@ -110,6 +110,7 @@ mod call {
     pub const GETDENTS64: u64 = 217;
     pub const OPENAT: u64 = 257;
     pub const MKDIRAT: u64 = 258;
+    pub const MKNODAT: u64 = 259;
     pub const UNLINKAT: u64 = 263;
     pub const NEWFSTATAT: u64 = 262;
     pub const FACCESSAT: u64 = 269;
@@ -344,6 +345,10 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
         call::MKDIRAT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             files::mkdirat(argument0, argument1)
+        }
+        call::MKNODAT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::mknodat(argument0, argument1, argument2)
         }
         call::MKDIR => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

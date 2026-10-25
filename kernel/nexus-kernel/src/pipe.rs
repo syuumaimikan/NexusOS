@@ -90,6 +90,7 @@ pub struct Pipe {
 /// One side of a pipe: the authority to read it, or to write it.
 pub struct PipeEnd {
     pipe: Arc<Pipe>,
+    reading: bool,
     writing: bool,
 }
 
@@ -115,28 +116,45 @@ impl core::fmt::Display for PipeError {
 }
 
 impl Pipe {
-    /// A pipe, and the two ends of it.
+    /// A named pipe starts without open ends. Each successful FIFO open adds
+    /// the appropriate reader and/or writer reference.
     #[must_use]
-    pub fn pair() -> (Arc<PipeEnd>, Arc<PipeEnd>) {
-        let pipe = Arc::new(Self {
+    pub fn named() -> Arc<Self> {
+        CREATED.fetch_add(1, Ordering::Relaxed);
+        Arc::new(Self {
             bytes: IrqSpinLock::new(VecDeque::new()),
             readable: WaitQueue::new(),
             writable: WaitQueue::new(),
             watchers: Watchers::new(),
-            readers: AtomicUsize::new(1),
-            writers: AtomicUsize::new(1),
-        });
-        CREATED.fetch_add(1, Ordering::Relaxed);
-        (
-            Arc::new(PipeEnd {
-                pipe: Arc::clone(&pipe),
-                writing: false,
-            }),
-            Arc::new(PipeEnd {
-                pipe,
-                writing: true,
-            }),
-        )
+            readers: AtomicUsize::new(0),
+            writers: AtomicUsize::new(0),
+        })
+    }
+
+    /// Open one descriptor on an existing pipe.
+    #[must_use]
+    pub fn open(self: &Arc<Self>, reading: bool, writing: bool) -> Arc<PipeEnd> {
+        if reading {
+            self.readers.fetch_add(1, Ordering::AcqRel);
+        }
+        if writing {
+            self.writers.fetch_add(1, Ordering::AcqRel);
+        }
+        self.readable.wake_all();
+        self.writable.wake_all();
+        self.watchers.signal();
+        Arc::new(PipeEnd {
+            pipe: Arc::clone(self),
+            reading,
+            writing,
+        })
+    }
+
+    /// A pipe, and the two ends of it.
+    #[must_use]
+    pub fn pair() -> (Arc<PipeEnd>, Arc<PipeEnd>) {
+        let pipe = Self::named();
+        (pipe.open(true, false), pipe.open(false, true))
     }
 
     /// Start telling `set` when this pipe may have become ready.
@@ -170,10 +188,54 @@ impl Pipe {
 }
 
 impl PipeEnd {
+    /// Whether this end can read from the stream.
+    #[must_use]
+    pub const fn is_reading(&self) -> bool {
+        self.reading
+    }
+
     /// Whether this end is the one that writes.
     #[must_use]
     pub const fn is_writing(&self) -> bool {
         self.writing
+    }
+
+    /// Wait for the other side of a FIFO open. A nonblocking writer with no
+    /// reader gets `NoReader` so the caller can return `ENXIO`.
+    pub fn wait_for_peer(&self, nonblocking: bool) -> Result<(), PipeError> {
+        if self.reading && self.writing {
+            return Ok(());
+        }
+        loop {
+            let ready = if self.writing {
+                self.pipe.readers_open()
+            } else {
+                self.pipe.writers_open() || nonblocking
+            };
+            if ready {
+                return Ok(());
+            }
+            if nonblocking {
+                return Err(PipeError::NoReader);
+            }
+            if crate::sched::cancelled() {
+                return Err(PipeError::Cancelled);
+            }
+            let queue = if self.writing {
+                &self.pipe.writable
+            } else {
+                &self.pipe.readable
+            };
+            let seen = queue.generation();
+            let ready = if self.writing {
+                self.pipe.readers_open()
+            } else {
+                self.pipe.writers_open()
+            };
+            if !ready {
+                queue.wait_if_unchanged(seen);
+            }
+        }
     }
 
     /// The pipe behind it.
@@ -191,7 +253,7 @@ impl PipeEnd {
     /// reader of a finished pipe asleep for ever.
     #[must_use]
     pub fn readable(&self) -> bool {
-        !self.writing && (self.pipe.queued() > 0 || !self.pipe.writers_open())
+        self.reading && (self.pipe.queued() > 0 || !self.pipe.writers_open())
     }
 
     /// Whether a write on this end would return without waiting.
@@ -215,7 +277,7 @@ impl PipeEnd {
     /// [`PipeError::WrongEnd`] on the writing end; [`PipeError::Cancelled`] if
     /// the thread is asked to stop while it waits.
     pub fn read(&self, wanted: usize) -> Result<alloc::vec::Vec<u8>, PipeError> {
-        if self.writing {
+        if !self.reading {
             return Err(PipeError::WrongEnd);
         }
         loop {
@@ -305,7 +367,8 @@ impl Drop for PipeEnd {
     fn drop(&mut self) {
         if self.writing {
             self.pipe.writers.fetch_sub(1, Ordering::Release);
-        } else {
+        }
+        if self.reading {
             self.pipe.readers.fetch_sub(1, Ordering::Release);
         }
         self.pipe.readable.wake_all();

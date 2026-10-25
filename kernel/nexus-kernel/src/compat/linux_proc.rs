@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     ipc::{Object, Rights},
-    process::{Process, ProcessData},
+    process::{Process, ProcessData, ProcessView},
     sync::IrqSpinLock,
 };
 use alloc::{string::String, sync::Arc};
@@ -17,6 +17,7 @@ enum Entry {
     Executable,
     Arguments,
     Environment,
+    Stat,
 }
 
 pub(super) fn known(path: &str) -> bool {
@@ -42,6 +43,7 @@ fn entry(process: &Process, path: &str) -> Option<Entry> {
         "exe" => Some(Entry::Executable),
         "cmdline" => Some(Entry::Arguments),
         "environ" => Some(Entry::Environment),
+        "stat" => Some(Entry::Stat),
         _ => None,
     }
 }
@@ -91,7 +93,12 @@ pub(super) fn open(path: &str, flags: u64) -> Option<u64> {
     }
     let view = Arc::new(ProcessData {
         owner: process.id,
-        environment: matches!(entry, Entry::Environment),
+        view: match entry {
+            Entry::Arguments => ProcessView::Arguments,
+            Entry::Environment => ProcessView::Environment,
+            Entry::Stat => ProcessView::Stat,
+            Entry::Executable => return None,
+        },
         position: IrqSpinLock::new(0),
         nonblocking: core::sync::atomic::AtomicBool::new(flags & 0o4000 != 0),
     });
@@ -104,14 +111,23 @@ pub(super) fn open(path: &str, flags: u64) -> Option<u64> {
     Some(u64::from(handle))
 }
 
-fn data_metadata(process: &Process, environment: bool) -> Metadata {
+fn data_metadata(process: &Process, view: ProcessView) -> Metadata {
     // A distinct native virtual device, and stable identity for each actual
     // process's information. proc byte files report st_size == 0 on Linux.
     Metadata {
         device: 2,
         rdevice: 0,
-        inode: process.id.0 * 4 + if environment { 2 } else { 1 },
-        mode: if environment { 0o100400 } else { 0o100444 },
+        inode: process.id.0 * 4
+            + match view {
+                ProcessView::Arguments => 1,
+                ProcessView::Environment => 2,
+                ProcessView::Stat => 4,
+            },
+        mode: if view == ProcessView::Environment {
+            0o100400
+        } else {
+            0o100444
+        },
         links: 1,
         size: 0,
         blocks: 0,
@@ -138,8 +154,9 @@ pub(super) fn metadata(path: &str, nofollow: bool) -> Option<Result<Metadata, u6
             }
         }
         Entry::Executable => linux_files::walk(path).and_then(|node| Metadata::node(&node)),
-        Entry::Arguments => Ok(data_metadata(&process, false)),
-        Entry::Environment => Ok(data_metadata(&process, true)),
+        Entry::Arguments => Ok(data_metadata(&process, ProcessView::Arguments)),
+        Entry::Environment => Ok(data_metadata(&process, ProcessView::Environment)),
+        Entry::Stat => Ok(data_metadata(&process, ProcessView::Stat)),
     })
 }
 
@@ -151,7 +168,7 @@ pub(super) fn descriptor_metadata(descriptor: u64) -> Option<Result<Metadata, u6
     };
     let process = crate::sched::current_process()?;
     Some(if process.id == view.owner {
-        Ok(data_metadata(&process, view.environment))
+        Ok(data_metadata(&process, view.view))
     } else {
         Err((-13i64) as u64)
     })
@@ -167,9 +184,24 @@ pub(super) fn read(view: &ProcessData, buffer: u64, count: u64, offset: Option<u
     if process.id != view.owner {
         return (-13i64) as u64;
     }
+    if view.view == ProcessView::Stat {
+        let threads = crate::sched::live_threads_of_process(process.id.0).len().max(1);
+        let comm: String = process.name.chars().take(15).collect();
+        let starttime = process.started_at_ms / 10;
+        let stat = alloc::format!(
+            "{} ({}) R 1 {} {} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 {} 0 {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+            process.id.0,
+            comm,
+            process.id.0,
+            process.id.0,
+            threads,
+            starttime
+        );
+        return read_stat_bytes(view, buffer, count, offset, stat.as_bytes());
+    }
     let (start, end) = {
         let image = process.image.lock();
-        if view.environment {
+        if view.view == ProcessView::Environment {
             image.environment
         } else {
             image.arguments
@@ -206,6 +238,47 @@ pub(super) fn read(view: &ProcessData, buffer: u64, count: u64, offset: Option<u
         *cursor += taken;
     }
     taken
+}
+
+/// Read a generated proc file through the same checked descriptor cursor as
+/// the loader-backed argv and environment views.
+fn read_stat_bytes(
+    view: &ProcessData,
+    buffer: u64,
+    count: u64,
+    offset: Option<u64>,
+    bytes: &[u8],
+) -> u64 {
+    let Some(process) = crate::sched::current_process() else {
+        return error::EBADF;
+    };
+    let wanted = count.min(65536);
+    if wanted == 0 {
+        return 0;
+    }
+    let mut cursor = view.position.lock();
+    let at = offset.unwrap_or(*cursor).min(bytes.len() as u64);
+    let taken = wanted.min(bytes.len() as u64 - at) as usize;
+    if taken == 0 {
+        return 0;
+    }
+    let Some((output, _)) = crate::arch::syscall::user_range_for(
+        &process,
+        buffer,
+        taken as u64,
+        65536,
+        true,
+    ) else {
+        return error::EFAULT;
+    };
+    // SAFETY: the generated line and caller output were bounded above.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr().add(at as usize), output as *mut u8, taken);
+    }
+    if offset.is_none() {
+        *cursor += taken as u64;
+    }
+    taken as u64
 }
 
 pub(super) fn seek(view: &ProcessData, offset: u64, whence: u64) -> u64 {

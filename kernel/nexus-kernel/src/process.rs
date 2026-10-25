@@ -242,14 +242,24 @@ pub struct Image {
 /// retained, so a process holding its own information cannot form an Arc cycle.
 pub struct ProcessData {
     pub owner: ProcessId,
-    pub environment: bool,
+    pub view: ProcessView,
     pub position: crate::sync::IrqSpinLock<u64>,
     pub nonblocking: AtomicBool,
+}
+
+/// Which current-process proc file an open descriptor reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessView {
+    Arguments,
+    Environment,
+    Stat,
 }
 
 pub struct Process {
     pub id: ProcessId,
     pub name: String,
+    /// Monotonic milliseconds since boot when this process was created.
+    pub started_at_ms: u64,
     /// Which interface its system calls are read as.
     pub personality: Personality,
     /// The page tables its threads run on.
@@ -325,6 +335,7 @@ impl Process {
         Arc::new(Self {
             id,
             name: String::from(name),
+            started_at_ms: crate::arch::time::uptime_ms(),
             personality,
             address_space,
             memory_mappings: crate::sync::IrqSpinLock::new(BTreeMap::new()),

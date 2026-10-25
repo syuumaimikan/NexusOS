@@ -133,7 +133,7 @@ try {
     if ($WithGlibc) { $SemaphoreRuntimes += 'glibc-probe' }
     if ($WithGlibc32) { $SemaphoreRuntimes += 'glibc32-probe' }
     foreach ($ProcRuntime in $SemaphoreRuntimes) {
-        foreach ($ProcResult in @('executable identity live proc arguments/environment and shared cursor', 'real directory enumeration and executable inode', 'cwd parent traversal dirfd rename identity and removed directories', 'persistent symlinks follow lstat readlink loops dirfd and safe unlink', 'native urandom character metadata reads bounds dup flags and readiness')) {
+        foreach ($ProcResult in @('executable identity live proc arguments/environment and shared cursor', 'real directory enumeration and executable inode', 'cwd parent traversal dirfd rename identity and removed directories', 'persistent symlinks follow lstat readlink loops dirfd and safe unlink', 'native urandom character metadata reads bounds dup flags and readiness', '/proc/self/stat reports a valid nonzero process start time')) {
             $ProcMarker = "${ProcRuntime}: PASS $ProcResult"
             if ([regex]::Matches($SemaphoreGuestLog, [regex]::Escape($ProcMarker)).Count -ne 3) {
                 throw "Missing basic/thread/dynamic proc evidence '$ProcRuntime $ProcResult': $Serial"
@@ -148,6 +148,9 @@ try {
     }
     if ($WithGlibc32 -and [regex]::Matches($SemaphoreGuestLog, 'glibc32-probe: PASS i386 sysinfo, robust-list and rlimit ABI').Count -ne 3) {
         throw "Missing three i386 ABI probe variants: $Serial"
+    }
+    if ($WithGlibc32 -and [regex]::Matches($SemaphoreGuestLog, 'glibc32-probe: PASS named FIFO creation blocking rendezvous nonblocking error stream and unlink').Count -ne 3) {
+        throw "Missing three i386 named FIFO probe variants: $Serial"
     }
     foreach ($ExecRuntime in @('musl-probe', $(if ($WithGlibc) { 'glibc-probe' }))) {
         if ($ExecRuntime -and -not $SemaphoreGuestLog.Contains("${ExecRuntime}: PASS relative execve retains cwd and actual executable identity")) {

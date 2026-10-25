@@ -496,6 +496,21 @@ permission, signal, socket-option and application-specific requests. See
 FIFO, flock, permissions, i386 signals, further process/network and desktop
 services remain incomplete. None of these diagnostics proves sign-in.
 
+The current run implements transient named FIFOs through `mknodat`, including
+blocking reader/writer rendezvous, `O_NONBLOCK` writer `ENXIO`, stream transfer
+and unlink lifetime. `/proc/self/stat` now reports a Linux-format, nonzero
+process start time; musl, x86-64 glibc and i386 glibc probes validate field 22.
+The prior full POSIX runtime run passed these checks. A later rerun passed the
+i386 basic and pthread configurations but timed out in the i386 dynamic-loader
+configuration before completion; its evidence is
+`build/runtime-test-6689d6bdb1dc49009c3d69a19c99da45/serial.log`. The Steam
+bootstrap no longer reports its earlier FIFO creation failure, but still logs `GID StartTime out
+of range`, reaches “Verifying installation...”, and exits `4294967294` after an
+illegal worker-thread termination. Current evidence:
+`build/steam-diagnostic-3d5aca66e0254ed5aea54715d7e70a46/serial.log` and
+`build/runtime-test-67cad88f06124f04a3f65ea5645ba061/serial.log`. This does not
+establish an installed client, Steam sign-in, or RTX acceleration.
+
 The physical target is the user's RTX 5060 (`10de:2d05`). Native NVIDIA boot
 discovery reads PCI/D0/BAR0 and the published Blackwell identity registers.
 It does not start GSP, allocate VRAM or submit GPU work. Firmware framebuffer
@@ -508,23 +523,27 @@ correctly receives `EINVAL` because `CLONE_SIGHAND` requires `CLONE_VM` and
 `CLONE_THREAD`. The latest run also starts valid `clone3` workers, installs the
 system PEM roots into `/etc/ssl/certs/ca-certificates.crt`, and passes its
 `statvfs64` query. It reaches “Verifying installation...” before Steam exits
-with `4294967294` after an illegal worker-thread termination. This still does
-not prove an installed client or sign-in. The current serial evidence is
-`build/steam-diagnostic-7f742494ef5d4d1e995b02659631e91a/serial.log`.
+with `4294967294` after an illegal worker-thread termination. Named FIFO and
+`/proc/self/stat` support are now also implemented and tested through i386
+glibc. This still does not prove an installed client or sign-in. Current serial
+evidence is
+`build/steam-diagnostic-3d5aca66e0254ed5aea54715d7e70a46/serial.log`.
 
-The latest `scripts/test-posix-runtime.ps1 -WithGlibc32 -Timeout 360` run passes
-all musl, x86-64 glibc and i386 glibc configurations, including flock lifetime
+The successful `scripts/test-posix-runtime.ps1 -WithGlibc32 -Timeout 360` run at
+`build/runtime-test-67cad88f06124f04a3f65ea5645ba061/serial.log` passed all
+musl, x86-64 glibc and i386 glibc configurations, including flock lifetime
 and conflicts, `statfs`/`fstatfs` on files and console descriptors, alternate
 signal-stack install/query/disable, i386 `sysinfo`, robust-list layouts,
 32-bit `ugetrlimit` values for `RLIMIT_NOFILE`, `RLIMIT_CORE` and
 `RLIMIT_STACK`, and `kill(pid, 0)` validation. The real i386 glibc pthread test
 also passes with the reported 8 MiB stack limit:
-`build/runtime-test-4f73bcde83994a3dabb50b3add94ee74/serial.log`.
+`build/runtime-test-67cad88f06124f04a3f65ea5645ba061/serial.log`.
 
 The same kernel then reran the Steam bootstrap diagnostic. It still reaches
-“Verifying installation...” and exits with `4294967294`; the new i386 resource
-limit support does not yet resolve Steam's worker-thread termination:
-`build/steam-diagnostic-bcad4c92d6d94cfd8c2e6662cb55ca45/serial.log`.
+“Verifying installation...” and exits with `4294967294`; resource limit,
+named FIFO and proc-stat support do not yet resolve Steam's worker-thread
+termination:
+`build/steam-diagnostic-3d5aca66e0254ed5aea54715d7e70a46/serial.log`.
 
 ## Launch and maintenance verification (2026-10-14)
 

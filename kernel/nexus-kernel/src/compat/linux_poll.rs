@@ -177,6 +177,16 @@ pub(super) fn ready_now(descriptor: u64) -> i16 {
         }
         Ok(Descriptor::Pipe(end)) => {
             let mut bits = 0;
+            if end.is_reading() {
+                if end.pipe().queued() > 0 {
+                    bits |= event::IN;
+                }
+                if !end.pipe().writers_open() {
+                    // The far end has gone. Buffered bytes remain readable,
+                    // then the next read reports EOF.
+                    bits |= event::HUP | event::IN;
+                }
+            }
             if end.is_writing() {
                 if end.pipe().room() > 0 {
                     bits |= event::OUT;
@@ -185,16 +195,6 @@ pub(super) fn ready_now(descriptor: u64) -> i16 {
                     // Nothing will ever read this, which is an error condition
                     // the writer has to notice rather than a reason to wait.
                     bits |= event::ERR;
-                }
-            } else {
-                if end.pipe().queued() > 0 {
-                    bits |= event::IN;
-                }
-                if !end.pipe().writers_open() {
-                    // The far end has gone. `POLLHUP` *and* `POLLIN`: there may
-                    // still be bytes buffered, and a reader told only about the
-                    // hangup would throw them away.
-                    bits |= event::HUP | event::IN;
                 }
             }
             bits

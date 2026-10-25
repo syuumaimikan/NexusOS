@@ -54,6 +54,7 @@ mod call {
     pub const CHDIR: u64 = 12;
     pub const FCHDIR: u64 = 133;
     pub const MKDIRAT: u64 = 296;
+    pub const MKNODAT: u64 = 297;
     pub const UNLINKAT: u64 = 301;
     pub const LSEEK: u64 = 19;
     pub const GETPID: u64 = 20;
@@ -449,6 +450,10 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
         270 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             super::linux_signal::tgkill(argument0, argument1, argument2)
+        }
+        call::MKNODAT => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::mknodat(argument0, argument1, argument2)
         }
         120 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

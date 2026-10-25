@@ -108,6 +108,23 @@ static int proc_probe(int argc, char **argv, char **environment) {
         environment[0][0] = original_environment;
     }
     close(variables);
+    int process_stat = open("/proc/self/stat", O_RDONLY);
+    ssize_t stat_length = process_stat >= 0 ? read(process_stat, bytes, sizeof(bytes) - 1) : -1;
+    if (process_stat >= 0) close(process_stat);
+    if (!check(stat_length > 0, 224)) return 0;
+    bytes[stat_length] = 0;
+    char *stat_fields = strrchr(bytes, ')');
+    if (!check(stat_fields && stat_fields[1] == ' ', 225)) return 0;
+    char *field = strtok(stat_fields + 2, " ");
+    unsigned long long start_ticks = 0;
+    for (int number = 3; field && number <= 22; number++) {
+        if (number == 22) {
+            start_ticks = strtoull(field, NULL, 10);
+        }
+        field = strtok(NULL, " ");
+    }
+    if (!check(start_ticks > 0, 226)) return 0;
+    puts(PROBE_NAME ": PASS /proc/self/stat reports a valid nonzero process start time");
     munmap(readonly, 4096);
     puts(PROBE_NAME ": PASS executable identity live proc arguments/environment and shared cursor");
     return 1;
