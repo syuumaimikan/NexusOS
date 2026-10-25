@@ -89,9 +89,27 @@ pub fn statistics() -> (u64, u64, u64) {
 
 /// Take a port, and say which.
 pub fn bind() -> Option<u16> {
+    bind_at(0)
+}
+
+/// Bind a requested port, or choose an ephemeral one when `wanted` is zero.
+///
+/// Linux `bind` needs fixed ports for servers; clients leave the port at zero
+/// and use the same bounded ephemeral range as the native network service.
+pub fn bind_at(wanted: u16) -> Option<u16> {
     let mut bound = BOUND.lock();
     if bound.len() >= MAX_PORTS {
         return None;
+    }
+    if wanted != 0 {
+        if bound.iter().any(|holder| holder.port == wanted) {
+            return None;
+        }
+        bound.push(Bound {
+            port: wanted,
+            arrived: VecDeque::new(),
+        });
+        return Some(wanted);
     }
     for _ in 0..(LAST_PORT - FIRST_PORT) as u32 {
         let next = NEXT_PORT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

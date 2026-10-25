@@ -439,15 +439,27 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             socket::accept(argument0, argument1, argument2, _argument3)
         }
-        // A connected socket has no address to send to, so `sendto`'s last two
-        // arguments are ignored -- which is what Linux does with them.
         call::SENDTO => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            socket::send(argument0, argument1, argument2, _argument3)
+            socket::send_to(
+                argument0,
+                argument1,
+                argument2,
+                _argument3,
+                _argument4,
+                _argument5,
+            )
         }
         call::RECVFROM => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            socket::receive(argument0, argument1, argument2, _argument3)
+            socket::receive_from(
+                argument0,
+                argument1,
+                argument2,
+                _argument3,
+                _argument4,
+                _argument5,
+            )
         }
         call::SENDMSG => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

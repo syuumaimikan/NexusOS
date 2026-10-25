@@ -539,6 +539,16 @@ online update path remain incomplete, so this does not prove an installed
 client or sign-in. Current serial evidence is
 `build/steam-diagnostic-5a043cd5a12e47b09635e5b18dff1ca4/serial.log`.
 
+The Linux compatibility layer now has initial i386 `AF_INET` TCP/UDP socket,
+connect, sendto/recvfrom and UDP bind translations backed by the native IPv4
+stack, including the newer individual i386 socket syscall numbers used by
+current runtimes. This has not yet made the Steam updater online: the latest
+diagnostic still reports “Steam needs to be online to update”; successful
+Steam update traffic has not been demonstrated (`build/steam-diagnostic-2b38ab23fe89420694c31c98d2d687cc/serial.log`).
+Network readiness/epoll and more complete socket options still need work. The
+latest full `-WithGlibc32` runtime run also timed out in its second threaded
+probe; its failure evidence is `build/runtime-test-62105cfb45274910be733c5555e87c40/serial.log`.
+
 The latest successful `scripts/test-posix-runtime.ps1 -WithGlibc32 -Timeout
 300` run at `build/runtime-test-5da84140e2c045b3aab16388091a3e49/serial.log`
 passed all musl, x86-64 glibc and i386 glibc configurations. It covers flock,

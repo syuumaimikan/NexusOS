@@ -150,6 +150,10 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
     let argument4 = frame.rdi & 0xFFFF_FFFF;
     let argument5 = frame.rbp & 0xFFFF_FFFF;
 
+    if matches!(number, 359..=364 | 366 | 369 | 371) {
+        TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
     match number {
         323 | 328 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -322,6 +326,21 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
         83 => super::linux_paths::symlinkat(argument0, files::AT_FDCWD as u32 as u64, argument1),
         304 => super::linux_paths::symlinkat(argument0, argument1, argument2),
         102 => socketcall(argument0, argument1),
+        // The newer i386 socket ABI assigns one syscall to each operation.
+        // Steam's bootstrap uses this interface rather than legacy socketcall.
+        359 => super::linux_socket::socket(argument0, argument1, argument2),
+        360 => super::linux_socket::socketpair(argument0, argument1, argument2, argument3),
+        361 => super::linux_socket::bind(argument0, argument1, argument2),
+        362 => super::linux_socket::connect(argument0, argument1, argument2),
+        363 => super::linux_socket::listen(argument0, argument1),
+        364 => super::linux_socket::accept(argument0, argument1, argument2, argument3),
+        366 => super::linux_socket::setsockopt(argument0, argument1, argument2),
+        369 => super::linux_socket::send_to(
+            argument0, argument1, argument2, argument3, argument4, argument5,
+        ),
+        371 => super::linux_socket::receive_from(
+            argument0, argument1, argument2, argument3, argument4, argument5,
+        ),
         call::MKDIRAT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             files::mkdirat(argument0, argument1)
@@ -938,6 +957,7 @@ fn socketcall(operation: u64, arguments: u64) -> u64 {
         1 | 2 | 3 | 5 => 3,
         4 => 2,
         8 | 9 | 10 | 18 => 4,
+        11 | 12 => 6,
         14 | 15 => 5,
         _ => {
             crate::kprintln!("[linux32] socketcall operation {operation} is not implemented");
@@ -948,15 +968,15 @@ fn socketcall(operation: u64, arguments: u64) -> u64 {
         return error::EBADF;
     };
     let Some((pointer, _)) =
-        crate::arch::syscall::user_range_for(&process, arguments, count * 4, 20, false)
+        crate::arch::syscall::user_range_for(&process, arguments, count * 4, 24, false)
     else {
         return error::EFAULT;
     };
-    let mut values = [0u64; 5];
+    let mut values = [0u64; 6];
     for index in 0..count as usize {
         values[index] = unsafe { (pointer as *const u32).add(index).read_unaligned() } as u64;
     }
-    let [a, b, c, d, e] = values;
+    let [a, b, c, d, e, f] = values;
     // The native stream endpoint has no descriptor-level nonblocking mode yet.
     // MSG_DONTWAIT receives below are implemented, but silently ignoring a
     // requested SOCK_NONBLOCK would create a blocking descriptor instead.
@@ -992,8 +1012,11 @@ fn socketcall(operation: u64, arguments: u64) -> u64 {
         }
         9 if d & !0x4000 == 0 => socket::send(a, b, c, d),
         10 if d & !0x40 == 0 => socket::receive(a, b, c, d),
+        11 if d & !0x4000 == 0 => socket::send_to(a, b, c, d, e, f),
+        12 if d & !0x40 == 0 => socket::receive_from(a, b, c, d, e, f),
         18 if d == 0 => socket::accept(a, b, c, 0),
-        14 | 15 => {
+        14 => socket::setsockopt(a, b, c),
+        15 => {
             crate::kprintln!(
                 "[linux32] socketcall option op={operation} fd={a} level={b} option={c} length_arg={e}; not implemented"
             );

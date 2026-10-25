@@ -50,7 +50,7 @@ use super::linux::error;
 mod family {
     /// A connection between two programs on this machine.
     pub const UNIX: u64 = 1;
-    /// The internet. Refused; see the note at the top.
+    /// The internet, over the machine's IPv4 stack.
     pub const INET: u64 = 2;
     pub const INET6: u64 = 10;
 }
@@ -88,12 +88,18 @@ const ECONNREFUSED: u64 = (-111i64) as u64;
 const EINVAL: u64 = error::EINVAL;
 /// There is nothing to accept and the caller asked not to wait.
 const EAGAIN: u64 = (-11i64) as u64;
+/// No route or resolution for a peer address.
+const ENETUNREACH: u64 = (-101i64) as u64;
 /// Interrupted.
 const EINTR: u64 = (-4i64) as u64;
 /// Broken connection.
 const EPIPE: u64 = (-32i64) as u64;
 /// The path is longer than a `sockaddr_un` holds.
 const ENAMETOOLONG: u64 = (-36i64) as u64;
+/// The peer did not answer before the TCP connect deadline.
+const ETIMEDOUT: u64 = (-110i64) as u64;
+/// No datagram port remains available.
+const ENOBUFS: u64 = (-105i64) as u64;
 
 /// `sockaddr_un` is a two-byte family and a hundred and eight bytes of path.
 ///
@@ -202,18 +208,73 @@ fn address_of(pointer: u64, length: u64) -> Result<String, u64> {
     String::from_utf8(Vec::from(name)).map_err(|_| EINVAL)
 }
 
+/// Read the fixed sixteen-byte Linux `sockaddr_in` layout.
+fn ipv4_address_of(pointer: u64, length: u64) -> Result<(nexus_net::Ipv4, u16), u64> {
+    if length < 16 {
+        return Err(EINVAL);
+    }
+    let Some((at, _)) = crate::arch::syscall::user_range(pointer, 16, 16) else {
+        return Err(error::EFAULT);
+    };
+    let bytes = unsafe { core::slice::from_raw_parts(at as *const u8, 16) };
+    if u16::from_le_bytes([bytes[0], bytes[1]]) != family::INET as u16 {
+        return Err(EAFNOSUPPORT);
+    }
+    Ok((
+        [bytes[4], bytes[5], bytes[6], bytes[7]],
+        u16::from_be_bytes([bytes[2], bytes[3]]),
+    ))
+}
+
+fn ensure_datagram_bound(
+    internet: &crate::socket::InternetSocket,
+    requested: u16,
+) -> Result<u16, u64> {
+    let state = *internet.state.lock();
+    let crate::socket::InternetState::Udp { port, .. } = state else {
+        return Err(EINVAL);
+    };
+    if let Some(port) = port {
+        return Ok(port);
+    }
+    let Some(port) = crate::net::datagram::bind_at(requested) else {
+        return Err(ENOBUFS);
+    };
+    let mut state = internet.state.lock();
+    let crate::socket::InternetState::Udp { port: slot, .. } = &mut *state else {
+        crate::net::datagram::unbind(port);
+        return Err(EINVAL);
+    };
+    if slot.is_none() {
+        *slot = Some(port);
+        Ok(port)
+    } else {
+        crate::net::datagram::unbind(port);
+        Ok(slot.unwrap_or(port))
+    }
+}
+
 /// `socket(family, kind, protocol)`.
 pub fn socket(family: u64, kind: u64, protocol: u64) -> u64 {
-    if family == family::INET || family == family::INET6 {
-        crate::kprintln!(
-            "[linux] a socket in the internet family is not translated yet; answering EAFNOSUPPORT"
-        );
-        return EAFNOSUPPORT;
+    let bare = kind & !(kind::NONBLOCK | kind::CLOEXEC);
+    if family == family::INET {
+        let datagram = match bare {
+            kind::STREAM if protocol == 0 || protocol == 6 => false,
+            kind::DGRAM if protocol == 0 || protocol == 17 => true,
+            _ => return EPROTONOSUPPORT,
+        };
+        let Some(process) = crate::sched::current_process() else {
+            return error::ENOSYS;
+        };
+        MADE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return u64::from(process.handles.insert(
+            ipc::Object::Socket(Arc::new(crate::socket::Socket::internet(datagram))),
+            ipc::Rights::ALL,
+        ));
     }
     if family != family::UNIX {
         return EAFNOSUPPORT;
     }
-    let bare = kind & !(kind::NONBLOCK | kind::CLOEXEC);
     if bare == kind::DGRAM || bare == kind::SEQPACKET {
         crate::kprintln!("[linux] only a stream socket is translated; answering EPROTONOSUPPORT");
         return EPROTONOSUPPORT;
@@ -280,6 +341,23 @@ pub fn bind(descriptor: u64, address: u64, length: u64) -> u64 {
         Ok(socket) => socket,
         Err(reason) => return reason,
     };
+    if let Some(internet) = socket.internet_state() {
+        if !internet.datagram {
+            return EINVAL;
+        }
+        let (ip, port) = match ipv4_address_of(address, length) {
+            Ok(address) => address,
+            Err(reason) => return reason,
+        };
+        let interface = crate::net::interface();
+        if ip != [0; 4] && ip != interface.ip {
+            return (-99i64) as u64; // EADDRNOTAVAIL
+        }
+        return match ensure_datagram_bound(&internet, port) {
+            Ok(_) => 0,
+            Err(reason) => reason,
+        };
+    }
     let name = match address_of(address, length) {
         Ok(name) => name,
         Err(reason) => return reason,
@@ -347,6 +425,61 @@ pub fn connect(descriptor: u64, address: u64, length: u64) -> u64 {
         Ok(socket) => socket,
         Err(reason) => return reason,
     };
+    if let Some(internet) = socket.internet_state() {
+        let (peer, port) = match ipv4_address_of(address, length) {
+            Ok(address) => address,
+            Err(reason) => return reason,
+        };
+        if peer == [0; 4] || port == 0 {
+            return EINVAL;
+        }
+        if internet.datagram {
+            if let Err(reason) = ensure_datagram_bound(&internet, 0) {
+                return reason;
+            }
+            let mut state = internet.state.lock();
+            if let crate::socket::InternetState::Udp { peer: current, .. } = &mut *state {
+                *current = Some((peer, port));
+                return 0;
+            }
+            return EINVAL;
+        }
+        let current = *internet.state.lock();
+        if !matches!(current, crate::socket::InternetState::New) {
+            return EISCONN;
+        }
+        if !crate::net::is_up() {
+            return (-100i64) as u64; // ENETDOWN
+        }
+        let id = match crate::net::stream::open(peer, port) {
+            Ok(id) => id,
+            Err(crate::net::stream::OpenError::NoNetwork) => return (-100i64) as u64,
+            Err(crate::net::stream::OpenError::Busy) => return ENOBUFS,
+        };
+        *internet.state.lock() = crate::socket::InternetState::Tcp(id);
+        let deadline = crate::arch::time::uptime_ms().saturating_add(6_000);
+        loop {
+            match crate::net::stream::state(id) {
+                Some(crate::net::stream::State::Established) => return 0,
+                Some(crate::net::stream::State::Closed) | None => {
+                    let _ = crate::net::stream::trouble(id);
+                    return ECONNREFUSED;
+                }
+                _ => {}
+            }
+            if crate::sched::cancelled() {
+                crate::net::stream::forget(id);
+                *internet.state.lock() = crate::socket::InternetState::New;
+                return EINTR;
+            }
+            if crate::arch::time::uptime_ms() >= deadline {
+                crate::net::stream::forget(id);
+                *internet.state.lock() = crate::socket::InternetState::New;
+                return ETIMEDOUT;
+            }
+            crate::sched::sleep_ms(10);
+        }
+    }
     if socket.stream().is_some() {
         return EISCONN;
     }
@@ -448,15 +581,24 @@ pub fn accept(descriptor: u64, address: u64, length: u64, flags: u64) -> u64 {
 
 /// `read`, `recv` and `recvfrom` on a connected socket.
 pub fn receive(descriptor: u64, buffer: u64, count: u64, flags: u64) -> u64 {
+    receive_from(descriptor, buffer, count, flags, 0, 0)
+}
+
+/// `recvfrom`, including the optional source `sockaddr_in` and `socklen_t`.
+pub fn receive_from(
+    descriptor: u64,
+    buffer: u64,
+    count: u64,
+    flags: u64,
+    address: u64,
+    address_length: u64,
+) -> u64 {
     /// `MSG_DONTWAIT`: do not block, whatever the socket was opened as.
     const DONTWAIT: u64 = 0x40;
 
     let socket = match socket_of(descriptor) {
         Ok(socket) => socket,
         Err(reason) => return reason,
-    };
-    let Some(stream) = socket.stream() else {
-        return ENOTCONN;
     };
     let wanted = count.min(MAX_TRANSFER);
     if wanted == 0 {
@@ -469,6 +611,13 @@ pub fn receive(descriptor: u64, buffer: u64, count: u64, flags: u64) -> u64 {
         crate::arch::syscall::user_range_for(&process, buffer, wanted, MAX_TRANSFER, true)
     else {
         return error::EFAULT;
+    };
+
+    if let Some(internet) = socket.internet_state() {
+        return receive_internet(&internet, pointer, length, flags, address, address_length);
+    }
+    let Some(stream) = socket.stream() else {
+        return ENOTCONN;
     };
 
     let bytes = if flags & DONTWAIT != 0 {
@@ -493,13 +642,22 @@ pub fn receive(descriptor: u64, buffer: u64, count: u64, flags: u64) -> u64 {
 }
 
 /// `write`, `send` and `sendto` on a connected socket.
-pub fn send(descriptor: u64, buffer: u64, count: u64, _flags: u64) -> u64 {
+pub fn send(descriptor: u64, buffer: u64, count: u64, flags: u64) -> u64 {
+    send_to(descriptor, buffer, count, flags, 0, 0)
+}
+
+/// `sendto`; a zero address means the destination of a connected socket.
+pub fn send_to(
+    descriptor: u64,
+    buffer: u64,
+    count: u64,
+    flags: u64,
+    address: u64,
+    address_length: u64,
+) -> u64 {
     let socket = match socket_of(descriptor) {
         Ok(socket) => socket,
         Err(reason) => return reason,
-    };
-    let Some(stream) = socket.stream() else {
-        return ENOTCONN;
     };
     let wanted = count.min(MAX_TRANSFER);
     if wanted == 0 {
@@ -512,11 +670,155 @@ pub fn send(descriptor: u64, buffer: u64, count: u64, _flags: u64) -> u64 {
     // SAFETY: as in `receive`.
     let bytes = unsafe { core::slice::from_raw_parts(pointer as *const u8, length) };
     let held = Vec::from(bytes);
+    if let Some(internet) = socket.internet_state() {
+        let peer = if address == 0 {
+            None
+        } else {
+            match ipv4_address_of(address, address_length) {
+                Ok(peer) => Some(peer),
+                Err(reason) => return reason,
+            }
+        };
+        return send_internet(&internet, &held, flags, peer);
+    }
+    let Some(stream) = socket.stream() else {
+        return ENOTCONN;
+    };
     match stream.write(&held) {
         Ok(written) => written as u64,
         Err(SocketError::Cancelled) => EINTR,
         Err(_) => EPIPE,
     }
+}
+
+fn send_internet(
+    internet: &crate::socket::InternetSocket,
+    bytes: &[u8],
+    flags: u64,
+    destination: Option<(nexus_net::Ipv4, u16)>,
+) -> u64 {
+    const DONTWAIT: u64 = 0x40;
+    if internet.datagram {
+        let (source, connected) = match *internet.state.lock() {
+            crate::socket::InternetState::Udp { port, peer } => (port, peer),
+            _ => return EINVAL,
+        };
+        let Some((address, port)) = destination.or(connected) else {
+            return ENOTCONN;
+        };
+        let source = match source {
+            Some(source) => source,
+            None => match ensure_datagram_bound(internet, 0) {
+                Ok(source) => source,
+                Err(reason) => return reason,
+            },
+        };
+        return crate::net::datagram::send(source, address, port, bytes)
+            .map_or_else(|_| ENETUNREACH, |_| bytes.len() as u64);
+    }
+    let crate::socket::InternetState::Tcp(id) = *internet.state.lock() else {
+        return ENOTCONN;
+    };
+    loop {
+        match crate::net::stream::write(id, bytes) {
+            Some(written) if written > 0 => return written as u64,
+            Some(_) if flags & DONTWAIT != 0 => return EAGAIN,
+            Some(_) if crate::net::stream::state(id).is_some() => {}
+            _ => return EPIPE,
+        }
+        if crate::sched::cancelled() {
+            return EINTR;
+        }
+        crate::sched::sleep_ms(5);
+    }
+}
+
+fn receive_internet(
+    internet: &crate::socket::InternetSocket,
+    output: u64,
+    limit: usize,
+    flags: u64,
+    address: u64,
+    address_length: u64,
+) -> u64 {
+    const DONTWAIT: u64 = 0x40;
+    if internet.datagram {
+        let crate::socket::InternetState::Udp { port: Some(port), peer } =
+            *internet.state.lock()
+        else {
+            return EINVAL;
+        };
+        loop {
+            if let Some(Some((from, source, bytes))) = crate::net::datagram::take(port) {
+                if peer.is_some_and(|peer| peer != (from, source)) {
+                    continue;
+                }
+                let taken = limit.min(bytes.len());
+                unsafe {
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), output as *mut u8, taken);
+                }
+                if address != 0 && address_length != 0 {
+                    if !write_sockaddr_in(address, address_length, from, source) {
+                        return error::EFAULT;
+                    }
+                }
+                return taken as u64;
+            }
+            if flags & DONTWAIT != 0 {
+                return EAGAIN;
+            }
+            if crate::sched::cancelled() {
+                return EINTR;
+            }
+            crate::sched::sleep_ms(5);
+        }
+    }
+    let crate::socket::InternetState::Tcp(id) = *internet.state.lock() else {
+        return ENOTCONN;
+    };
+    loop {
+        let bytes = crate::net::stream::read(id, limit).unwrap_or_default();
+        if !bytes.is_empty() {
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), output as *mut u8, bytes.len());
+            }
+            return bytes.len() as u64;
+        }
+        match crate::net::stream::state(id) {
+            Some(crate::net::stream::State::Closed | crate::net::stream::State::CloseWait) | None => {
+                return 0;
+            }
+            _ => {}
+        }
+        if flags & DONTWAIT != 0 {
+            return EAGAIN;
+        }
+        if crate::sched::cancelled() {
+            return EINTR;
+        }
+        crate::sched::sleep_ms(5);
+    }
+}
+
+fn write_sockaddr_in(address: u64, length: u64, ip: nexus_net::Ipv4, port: u16) -> bool {
+    let Some((size_at, _)) = crate::arch::syscall::user_range(length, 4, 4) else {
+        return false;
+    };
+    let requested = unsafe { (size_at as *const u32).read_unaligned() }.min(16);
+    if requested < 16 {
+        return false;
+    }
+    let Some((out, _)) = crate::arch::syscall::user_range(address, 16, 16) else {
+        return false;
+    };
+    unsafe {
+        core::ptr::write_bytes(out as *mut u8, 0, 16);
+        (out as *mut u16).write_unaligned(family::INET as u16);
+        (out as *mut u8).add(2).cast::<u16>().write_unaligned(port.to_be());
+        core::ptr::copy_nonoverlapping(ip.as_ptr(), (out as *mut u8).add(4), 4);
+        (size_at as *mut u32).write_unaligned(16);
+    }
+    true
 }
 
 /// `struct msghdr`, as x86-64 lays it out.

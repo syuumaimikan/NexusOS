@@ -370,6 +370,34 @@ pub enum State {
 /// A socket, in whatever state it has reached.
 pub struct Socket {
     state: IrqSpinLock<State>,
+    internet: Option<Arc<InternetSocket>>,
+}
+
+/// The deliberately small network state behind an `AF_INET` socket.
+#[derive(Clone, Copy)]
+pub enum InternetState {
+    New,
+    Tcp(u32),
+    Udp {
+        port: Option<u16>,
+        peer: Option<(nexus_net::Ipv4, u16)>,
+    },
+}
+
+/// A Linux internet socket backed by the kernel's IPv4 stack.
+pub struct InternetSocket {
+    pub datagram: bool,
+    pub state: IrqSpinLock<InternetState>,
+}
+
+impl Drop for InternetSocket {
+    fn drop(&mut self) {
+        match *self.state.lock() {
+            InternetState::Tcp(id) => crate::net::stream::forget(id),
+            InternetState::Udp { port: Some(port), .. } => crate::net::datagram::unbind(port),
+            _ => {}
+        }
+    }
 }
 
 impl Default for Socket {
@@ -384,7 +412,33 @@ impl Socket {
     pub fn new() -> Self {
         Self {
             state: IrqSpinLock::new(State::New),
+            internet: None,
         }
+    }
+
+    /// A TCP or UDP internet socket.
+    #[must_use]
+    pub fn internet(datagram: bool) -> Self {
+        Self {
+            state: IrqSpinLock::new(State::New),
+            internet: Some(Arc::new(InternetSocket {
+                datagram,
+                state: IrqSpinLock::new(if datagram {
+                    InternetState::Udp {
+                        port: None,
+                        peer: None,
+                    }
+                } else {
+                    InternetState::New
+                }),
+            })),
+        }
+    }
+
+    /// The IPv4 state, if this socket belongs to the internet family.
+    #[must_use]
+    pub fn internet_state(&self) -> Option<Arc<InternetSocket>> {
+        self.internet.clone()
     }
 
     /// The connection, if it has one.
