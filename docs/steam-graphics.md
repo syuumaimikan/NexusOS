@@ -166,8 +166,13 @@ and the abstract namespace. **`SCM_RIGHTS` works**: a descriptor sent across a
 connection arrives as a descriptor on the other side, because a descriptor here
 is a handle and a handle is a thing that crosses boundaries.
 
-`AF_INET` is refused: this machine's TCP stack is reached through a different
-object, and connecting the two is real work.
+`AF_INET` TCP and UDP client sockets are backed by the kernel's IPv4 stack across
+both x86-64 and i386 (`socketcall` and direct syscalls `359..=373`), including
+nonblocking `connect`, `send`/`recv`, `sendto`/`recvfrom`, `sendmsg`/`recvmsg`
+(`msghdr32`/`iovec32`), `getsockname`/`getpeername`, `getsockopt` (`SO_TYPE`,
+`SO_ERROR`, `SO_SNDBUF`, `SO_RCVBUF`), `setsockopt`, `shutdown`, `fcntl(O_NONBLOCK)`,
+`ioctl(FIONBIO/FIONREAD)` and `epoll` (`EPOLLONESHOT`) readiness. Listening
+`AF_INET` sockets and IPv6 remain unimplemented.
 
 ### Signals
 
@@ -205,17 +210,22 @@ loader, a static i386 shell, and the system's PEM root bundle at
 load trusted SSL root certificates” error. `flock`, `statfs64` (including
 Steam's `statvfs64` query), `sigaltstack`, robust-list setup, i386 `sysinfo`,
 and process-existence `kill(pid, 0)` now pass targeted libc probes. Named FIFO
-creation, nonzero `/proc/self/stat` start time, i386 wall-clock calls, and
-coarse realtime/boottime clock IDs now pass glibc probes. Steam receives the
-RTC date, passes the 250 MiB free-space gate, and reaches “Verifying
-installation...” before it reports that it must be online to update. It then
-exits with status `4294967294` after an illegal worker-thread termination.
-Internet sockets and the full shell installer remain unimplemented, so this
-does not establish an installed client or sign-in. i386 `ugetrlimit` reports the 32-bit ABI values, including
-the 8 MiB stack limit used by glibc thread startup. Other observed missing calls
-include `rseq`, `setresuid32` and `getppid`; shared-VM clone and i386
-signal delivery also remain incomplete. See the current serial log at
-`build/steam-diagnostic-5a043cd5a12e47b09635e5b18dff1ca4/serial.log` and the
+creation, nonzero `/proc/self/stat` start time, `/proc/cpuinfo`, i386 wall-clock
+calls, coarse realtime/boottime clock IDs, `EPOLLONESHOT`, `ioctl(FIONBIO/FIONREAD)`,
+and i386 `msghdr32`/`AF_INET` socket operations now pass glibc probes. Steam
+receives the RTC date, reads `/proc/cpuinfo`, passes the 250 MiB free-space gate,
+reaches “Verifying installation...” and “Checking for available updates...”,
+resolves `client-update.steamstatic.com` via DNS (`getaddrinfo`), opens three
+parallel nonblocking HTTPS connections to `:443`, and actively downloads the
+504,927 KB Steam update package (`[  0%] Downloading update (265 of 504927 KB)...`,
+335 KB received within the 30-second diagnostic window) before the diagnostic
+cleanly terminates the running bootstrap. Full update extraction, client startup
+and Steam sign-in remain unverified. i386 `ugetrlimit` reports the 32-bit ABI
+values, including the 8 MiB stack limit used by glibc thread startup; `getppid`
+and `setresuid32`/`setresgid32` are also implemented. Other observed missing
+calls include `rseq`; shared-VM non-thread clone and i386 signal delivery also
+remain incomplete. See the current serial log at
+`build/steam-diagnostic-942d89c8b7644f30ad174d6d335aa9fe/serial.log` and the
 [native runtime evidence](posix-runtime.md).
 
 ### Thirty-two bit programs
@@ -394,14 +404,14 @@ interfaces it needs.
 | Stage | State | What is left | Acceptance evidence |
 | --- | --- | --- | --- |
 | Dynamic ELF execution | **Real musl and glibc 2.36 loaders, dlopen and TLS verified** | Broader GNU library/application coverage | Focused unmodified-libc probes start through glibc's loader and exit successfully |
-| Process/runtime services | **Focused real-musl tests pass; threads, futex, TLS, pipes, readiness, Unix sockets, fork/wait, 32-bit execve and initial i386 AF_INET TCP/UDP socket calls have implementations** | i386 signal-frame delivery, kernel-raised signals, `O_CLOEXEC`, filesystem links and permissions, network readiness/complete socket options, broader futex operations and conformance | libc and threading test suites run in the guest without success-returning stubs |
-| 32-bit execution | **Actual i386 glibc loader, allocation, stat64/statx, pthread GS TLS, futex/join and dlopen verified** | i386 signal actions/frames, complete process/socket interfaces, bootstrap dependencies and application coverage | The actual Steam bootstrap starts |
+| Process/runtime services | **Focused real-musl and glibc tests pass; threads, futex, TLS, pipes, readiness (`EPOLLONESHOT`), `/proc/cpuinfo`, Unix sockets, fork/wait, 32-bit execve and `AF_INET` TCP/UDP client sockets (`msghdr32`, `FIONBIO`/`FIONREAD`, `getsockopt`, `getsockname`/`getpeername`) are verified** | i386 signal-frame delivery, kernel-raised signals, `O_CLOEXEC`, filesystem permissions, broader socket options, broader futex operations and conformance | libc and threading test suites run in the guest without success-returning stubs |
+| 32-bit execution | **Actual i386 glibc loader, allocation, stat64/statx, pthread GS TLS, futex/join, dlopen and `AF_INET`/DNS/TLS socket I/O verified** | i386 signal actions/frames, complete process/socket interfaces, bootstrap dependencies and application coverage | The actual Steam bootstrap starts |
 | Linux desktop transport | **Upstream libwayland client presents, resizes, receives input and releases buffers** | An XKB keymap; pointer and touch; subsurfaces, popups and regions; several clients; protocol errors; then Xwayland | Current focused gate passes with the upstream library; broader desktop applications remain untested |
 | Software OpenGL | **Real Mesa OSMesa/softpipe depth and GLSL pixels pass, including Wayland presentation** | Broader API coverage/conformance; EGL/GLX/window-system integration; GPU acceleration | Current triangle, shader, resize and screenshot checks pass; full application compatibility remains untested |
 | Shaders | **A SPIR-V module is read and executed, and its pixels reach the screen** | A module from a real compiler rather than from this repository; images, samplers, buffers, push constants, matrices, function calls; compiling a module instead of interpreting it | `glslang`'s output for a non-trivial shader runs and matches a reference image |
 | Vulkan | **Upstream SwiftShader CPU ICD compiles SPIR-V and submits a compute dispatch** | Vulkan loader discovery, WSI/swapchain, broader graphics tests, conformance and hardware driver | The Vulkan loader discovers the ICD, `vulkaninfo` succeeds and `vkcube` presents; then conformance |
 | Physical RTX 5060 | **Native PCI identity, pinned bootstrap/RM/microcode verification, unpublished contiguous/scatter buffers and three-level GSP radix tables implemented; QEMU disk/USB tests pass** | GSP firmware boot/authentication and RPC, DMA/IOMMU mapping, WPR, VRAM/virtual address spaces, fences, interrupts, command submission and native Vulkan integration | NexusOS boots on the physical card and GPU-generated pixels reach the display |
-| Steam installation | **Official ELF32 bootstrap loads through i386 glibc, forks, runs `/bin/sh`, execs Steam, creates named FIFOs, gets wall-clock time, passes the free-space check and reaches “Verifying installation...”** | Successful IPv4 online update, network readiness/complete socket options, worker-thread termination and full installer/client integration | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
+| Steam installation | **Official ELF32 bootstrap loads through i386 glibc, forks, runs `/bin/sh`, execs Steam, reads `/proc/cpuinfo`, passes `statvfs64`, resolves `client-update.steamstatic.com` via DNS, opens 3 parallel HTTPS connections and actively downloads the 504,927 KB Steam update package** | Full update download/extraction completion, client launch, X11/Wayland UI integration and Steam sign-in | Download the official installer in the Nexus browser, install, launch the genuine client, reach sign-in, restart |
 
 ## Can Mesa not just be used?
 

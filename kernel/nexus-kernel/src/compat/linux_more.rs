@@ -133,7 +133,7 @@ fn statfs64_write(size: u64, output: u64) -> u64 {
     let Some((at, _)) = user_range(output, SIZE, SIZE) else {
         return error::EFAULT;
     };
-    let Some((total, free)) = crate::fs::store::space() else {
+    let Some((total, free)) = crate::fs::store::space_blocking() else {
         return also::EAGAIN;
     };
     let mut fields = [0u8; SIZE as usize];
@@ -222,11 +222,12 @@ static OPEN_DESCRIPTIONS: crate::sync::IrqSpinLock<alloc::collections::BTreeMap<
     crate::sync::IrqSpinLock::new(alloc::collections::BTreeMap::new());
 static NEXT_OPEN_DESCRIPTION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
+type FlockOwners = alloc::vec::Vec<(u64, bool)>;
+
 /// Inode-scoped `flock` state. The token models Linux's open-file description,
 /// so duplicate descriptors share one lock and independent opens conflict.
-static FLOCKS: crate::sync::IrqSpinLock<
-    alloc::collections::BTreeMap<(u64, u64), alloc::vec::Vec<(u64, bool)>>,
-> = crate::sync::IrqSpinLock::new(alloc::collections::BTreeMap::new());
+static FLOCKS: crate::sync::IrqSpinLock<alloc::collections::BTreeMap<(u64, u64), FlockOwners>> =
+    crate::sync::IrqSpinLock::new(alloc::collections::BTreeMap::new());
 
 /// What is remembered about one open descriptor.
 #[derive(Debug, Clone, Copy, Default)]
@@ -427,9 +428,7 @@ fn nanosleep(request: u64, remaining: u64) -> u64 {
     }
     let milliseconds = (seconds as u64)
         .saturating_mul(1000)
-        // Rounded up by hand: `div_ceil` is not stable for the integer types
-        // this target builds with.
-        .saturating_add(((nanoseconds as u64) + 999_999) / 1_000_000);
+        .saturating_add((nanoseconds as u64).div_ceil(1_000_000));
     if milliseconds > 0 {
         crate::sched::sleep_ms(milliseconds);
     }
@@ -825,17 +824,20 @@ fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
     // The descriptor has to exist whatever is being asked about it, and asking
     // first means `fcntl` on a closed one is `EBADF` rather than a cheerful
     // answer about flags nobody owns.
-    let (counter, view, random) = match linux_files::describe(descriptor) {
+    let (counter, view, random, socket) = match linux_files::describe(descriptor) {
         Ok(linux_files::Descriptor::Other(crate::ipc::Object::Counter(counter))) => {
-            (Some(counter), None, None)
+            (Some(counter), None, None, None)
         }
         Ok(linux_files::Descriptor::Other(crate::ipc::Object::ProcessData(view))) => {
-            (None, Some(view), None)
+            (None, Some(view), None, None)
         }
         Ok(linux_files::Descriptor::Other(crate::ipc::Object::Random(random))) => {
-            (None, None, Some(random))
+            (None, None, Some(random), None)
         }
-        Ok(_) => (None, None, None),
+        Ok(linux_files::Descriptor::Other(crate::ipc::Object::Socket(socket))) => {
+            (None, None, None, Some(socket))
+        }
+        Ok(_) => (None, None, None, None),
         Err(_) => return error::EBADF,
     };
     let Some(process) = whose() else {
@@ -897,6 +899,14 @@ fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
             if let Some(counter) = counter {
                 return O_RDWR | if counter.nonblocking() { O_NONBLOCK } else { 0 };
             }
+            if let Some(internet) = socket.and_then(|socket| socket.internet_state()) {
+                return O_RDWR
+                    | if internet.is_nonblocking() {
+                        O_NONBLOCK
+                    } else {
+                        0
+                    };
+            }
             let non_blocking = FLAGS
                 .lock()
                 .get(&(process, descriptor))
@@ -904,23 +914,24 @@ fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
             O_RDWR | if non_blocking { O_NONBLOCK } else { 0 }
         }
         F_SETFL => {
+            let on = argument & O_NONBLOCK != 0;
             if let Some(random) = random {
-                random.nonblocking.store(
-                    argument & O_NONBLOCK != 0,
-                    core::sync::atomic::Ordering::Relaxed,
-                );
+                random
+                    .nonblocking
+                    .store(on, core::sync::atomic::Ordering::Relaxed);
                 return 0;
             }
             if let Some(view) = view {
-                view.nonblocking.store(
-                    argument & O_NONBLOCK != 0,
-                    core::sync::atomic::Ordering::Relaxed,
-                );
+                view.nonblocking
+                    .store(on, core::sync::atomic::Ordering::Relaxed);
                 return 0;
             }
             if let Some(counter) = counter {
-                counter.set_nonblocking(argument & O_NONBLOCK != 0);
+                counter.set_nonblocking(on);
                 return 0;
+            }
+            if let Some(internet) = socket.and_then(|socket| socket.internet_state()) {
+                internet.set_nonblocking(on);
             }
             // Only the bit `F_SETFL` is allowed to change. The access mode and
             // the creation flags are fixed once a file is open, and Linux
@@ -929,10 +940,95 @@ fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
                 .lock()
                 .entry((process, descriptor))
                 .or_default()
-                .non_blocking = argument & O_NONBLOCK != 0;
+                .non_blocking = on;
             0
         }
         _ => error::EINVAL,
+    }
+}
+
+/// `ioctl(fd, request, argument)`.
+///
+/// Translates `FIONBIO` (non-blocking mode toggle on sockets and descriptors),
+/// `FIONREAD` (queued readable byte count on sockets and pipes), and the
+/// Nexus display window ioctls; everything else receives `ENOTTY`.
+pub fn ioctl(descriptor: u64, request: u64, argument: u64) -> u64 {
+    const FIONREAD: u64 = 0x541B;
+    const FIONBIO: u64 = 0x5421;
+
+    let Some(process) = crate::sched::current_process() else {
+        return error::ENOSYS;
+    };
+    if super::linux_display::is_window(process.id.0, descriptor) {
+        return super::linux_display::ioctl(descriptor, request, argument);
+    }
+
+    match request {
+        FIONBIO => {
+            let Some((at, _)) = user_range_for(&process, argument, 4, 4, false) else {
+                return error::EFAULT;
+            };
+            // SAFETY: four readable bytes checked above.
+            let on = unsafe { (at as *const i32).read_unaligned() } != 0;
+            match linux_files::describe(descriptor) {
+                Ok(linux_files::Descriptor::Other(crate::ipc::Object::Socket(socket))) => {
+                    if let Some(internet) = socket.internet_state() {
+                        internet.set_nonblocking(on);
+                    }
+                }
+                Ok(linux_files::Descriptor::Other(crate::ipc::Object::Counter(counter))) => {
+                    counter.set_nonblocking(on);
+                }
+                Ok(linux_files::Descriptor::Other(crate::ipc::Object::ProcessData(view))) => {
+                    view.nonblocking
+                        .store(on, core::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(linux_files::Descriptor::Other(crate::ipc::Object::Random(random))) => {
+                    random
+                        .nonblocking
+                        .store(on, core::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(_) => {}
+                Err(_) => return error::EBADF,
+            }
+            FLAGS
+                .lock()
+                .entry((process.id.0, descriptor))
+                .or_default()
+                .non_blocking = on;
+            0
+        }
+        FIONREAD => {
+            let available = match linux_files::describe(descriptor) {
+                Ok(linux_files::Descriptor::Other(crate::ipc::Object::Socket(socket))) => {
+                    if let Some(internet) = socket.internet_state() {
+                        match *internet.state.lock() {
+                            crate::socket::InternetState::Tcp(id) => crate::net::stream::queued(id),
+                            crate::socket::InternetState::Udp {
+                                port: Some(port), ..
+                            } => crate::net::datagram::next_size(port),
+                            _ => 0,
+                        }
+                    } else if let Some(stream) = socket.stream() {
+                        stream.queued()
+                    } else {
+                        0
+                    }
+                }
+                Ok(linux_files::Descriptor::Pipe(end)) => end.pipe().queued(),
+                Ok(_) => return error::ENOTTY,
+                Err(_) => return error::EBADF,
+            };
+            let Some((at, _)) = user_range_for(&process, argument, 4, 4, true) else {
+                return error::EFAULT;
+            };
+            // SAFETY: four writable bytes checked above.
+            unsafe {
+                (at as *mut i32).write_unaligned(available.min(i32::MAX as usize) as i32);
+            }
+            0
+        }
+        _ => error::ENOTTY,
     }
 }
 
@@ -1208,7 +1304,7 @@ fn statfs_into(out: u64) -> u64 {
     // `None` while the volume lock is held by something else, which is a real
     // state rather than an error: the answer is "ask again", and `EAGAIN` says
     // that where a fabricated figure would not.
-    let Some((total, free)) = crate::fs::store::space() else {
+    let Some((total, free)) = crate::fs::store::space_blocking() else {
         return also::EAGAIN;
     };
 

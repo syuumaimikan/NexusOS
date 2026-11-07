@@ -94,6 +94,16 @@ extern "C" fn main() -> ! {
             nexus_user::close(set).ok();
             nexus_user::exit()
         }
+        Ok(0) => {
+            nexus_user::kill(handles[1]).ok();
+            nexus_user::log(
+                "steam-diagnostic: bootstrap ending Running(30s); client sign-in is not verified",
+            )
+            .ok();
+            nexus_user::close(handles[1]).ok();
+            nexus_user::close(set).ok();
+            nexus_user::exit()
+        }
         other => stop(
             &alloc::format!("steam-diagnostic: bootstrap did not complete: {other:?}"),
             1,

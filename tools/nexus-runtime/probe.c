@@ -133,6 +133,7 @@ int main(int argc, char **argv, char **environment) {
     if (!flock_probe()) return 195;
     if (!statfs_probe()) return 196;
     if (!signal_stack_probe()) return 197;
+    if (!i386_kernel_abi_probe()) return 198;
     if (!cwd_probe()) return 191;
     if (!symlink_probe()) return 192;
     if (!random_probe()) return 193;
@@ -223,7 +224,16 @@ int main(int argc, char **argv, char **environment) {
     if (!check(epoll_wait(epoll_fd, &event, 1, 0) == 0 && write(epoll_pipe[1], "e", 1) == 1 &&
         epoll_wait(epoll_fd, &event, 1, 100) == 1 && (event.events & EPOLLIN) && event.data.u64 == interest.data.u64, 73)) return 73;
     char event_byte;
-    if (!check(read(epoll_pipe[0], &event_byte, 1) == 1 && event_byte == 'e' &&
+    if (!check(read(epoll_pipe[0], &event_byte, 1) == 1 && event_byte == 'e', 74)) return 74;
+    interest.events = EPOLLIN | EPOLLONESHOT;
+    if (!check(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, epoll_pipe[0], &interest) == 0 &&
+        write(epoll_pipe[1], "ab", 2) == 2 &&
+        epoll_wait(epoll_fd, &event, 1, 100) == 1 && (event.events & EPOLLIN) &&
+        read(epoll_pipe[0], &event_byte, 1) == 1 && event_byte == 'a' &&
+        epoll_wait(epoll_fd, &event, 1, 0) == 0 &&
+        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, epoll_pipe[0], &interest) == 0 &&
+        epoll_wait(epoll_fd, &event, 1, 100) == 1 && (event.events & EPOLLIN) &&
+        read(epoll_pipe[0], &event_byte, 1) == 1 && event_byte == 'b' &&
         epoll_ctl(epoll_fd, EPOLL_CTL_DEL, epoll_pipe[0], NULL) == 0, 74)) return 74;
     close(epoll_pipe[0]); close(epoll_pipe[1]); close(epoll_fd);
     puts(PROBE_NAME ": PASS epoll pipe readiness and packed 64-bit event data");
@@ -333,7 +343,6 @@ int main(int argc, char **argv, char **environment) {
     int eventfd_result = eventfd_checks();
     if (eventfd_result != 0) return eventfd_result;
 #endif
-    if (!i386_kernel_abi_probe()) return 198;
     puts(PROBE_NAME ": PASS allocation files positional-read clock sleep");
 #if !defined(__i386__) && !defined(PROBE_THREADS) && !defined(PROBE_DYNAMIC)
     return proc_exec_start(argv[0]);

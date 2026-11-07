@@ -35,7 +35,7 @@ use crate::sync::IrqSpinLock;
 ///
 /// A bound rather than a policy: each port holds a queue, and a table that grew
 /// on request would be unbounded kernel memory driven by a program.
-const MAX_PORTS: usize = 8;
+const MAX_PORTS: usize = 16;
 
 /// How many datagrams one port will hold before the oldest is dropped.
 ///
@@ -154,14 +154,7 @@ pub fn send(from: u16, to: Ipv4, port: u16, payload: &[u8]) -> Result<(), &'stat
     let interface = super::interface();
     let mut packet = alloc::vec![0u8; wire::UDP_HEADER + payload.len()];
     packet[wire::UDP_HEADER..].copy_from_slice(payload);
-    wire::udp(
-        &mut packet,
-        interface.ip,
-        to,
-        from,
-        port,
-        wire::UDP_HEADER + payload.len(),
-    );
+    wire::udp(&mut packet, interface.ip, to, from, port, payload.len());
     super::send_ipv4(to, wire::protocol::UDP, &packet)
         .map_err(|_| "that address could not be reached")?;
     SENT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -186,6 +179,17 @@ pub fn readable(port: u16) -> bool {
         .lock()
         .iter()
         .any(|holder| holder.port == port && !holder.arrived.is_empty())
+}
+
+/// Size in bytes of the next datagram waiting on a bound port, or zero.
+#[must_use]
+pub fn next_size(port: u16) -> usize {
+    BOUND
+        .lock()
+        .iter()
+        .find(|holder| holder.port == port)
+        .and_then(|holder| holder.arrived.front())
+        .map_or(0, |(_, _, payload)| payload.len())
 }
 
 /// A datagram arrived for one of this machine's ports.

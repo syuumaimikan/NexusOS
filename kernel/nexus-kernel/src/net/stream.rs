@@ -41,17 +41,16 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use nexus_net as wire;
-use nexus_net::{tcp_flag, Ipv4};
+use nexus_net::{Ipv4, tcp_flag};
 
 use crate::sync::IrqSpinLock;
 use crate::{arch, kprintln};
 
 /// How many connections this machine will have open at once.
 ///
-/// Four: a page and the name lookup that found it, twice over. A bound rather
-/// than a policy -- each stream holds two buffers, and a table that grew on
-/// request would be unbounded kernel memory driven by a program.
-pub const MAX_STREAMS: usize = 4;
+/// Sixteen: enough for a multi-threaded HTTP client or browser opening parallel
+/// streams while still keeping kernel buffer memory bounded.
+pub const MAX_STREAMS: usize = 16;
 
 /// How much this end is willing to receive at once, and how much it will hold.
 ///
@@ -316,6 +315,36 @@ pub fn trouble(id: u32) -> Option<&'static str> {
     let mut streams = STREAMS.lock();
     let stream = streams.iter_mut().find(|stream| stream.id == id)?;
     stream.trouble.take()
+}
+
+/// Whether a connection has recorded an error condition without consuming it.
+#[must_use]
+pub fn has_trouble(id: u32) -> bool {
+    STREAMS
+        .lock()
+        .iter()
+        .find(|stream| stream.id == id)
+        .is_some_and(|stream| stream.trouble.is_some())
+}
+
+/// The local ephemeral port assigned to a connection.
+#[must_use]
+pub fn local_port(id: u32) -> Option<u16> {
+    STREAMS
+        .lock()
+        .iter()
+        .find(|stream| stream.id == id)
+        .map(|stream| stream.local_port)
+}
+
+/// The remote IPv4 address and port of a connection.
+#[must_use]
+pub fn peer(id: u32) -> Option<(Ipv4, u16)> {
+    STREAMS
+        .lock()
+        .iter()
+        .find(|stream| stream.id == id)
+        .map(|stream| (stream.peer, stream.peer_port))
 }
 
 /// Queue bytes to go out.

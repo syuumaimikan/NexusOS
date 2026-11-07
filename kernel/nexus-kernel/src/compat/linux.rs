@@ -39,7 +39,6 @@
 //! does not implement — a real answer that a real program is required to
 //! handle, not a stub pretending to succeed.
 
-use super::linux_display as display;
 use super::linux_exec as exec;
 use super::linux_files as files;
 use super::linux_memory as memory;
@@ -442,23 +441,13 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
         call::SENDTO => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             socket::send_to(
-                argument0,
-                argument1,
-                argument2,
-                _argument3,
-                _argument4,
-                _argument5,
+                argument0, argument1, argument2, _argument3, _argument4, _argument5,
             )
         }
         call::RECVFROM => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             socket::receive_from(
-                argument0,
-                argument1,
-                argument2,
-                _argument3,
-                _argument4,
-                _argument5,
+                argument0, argument1, argument2, _argument3, _argument4, _argument5,
             )
         }
         call::SENDMSG => {
@@ -470,20 +459,29 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
             socket::recvmsg(argument0, argument1, argument2)
         }
         call::SHUTDOWN => {
-            REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            socket::shutdown(argument0, argument1)
+            let answer = socket::shutdown(argument0, argument1);
+            if answer == error::ENOSYS {
+                REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            } else {
+                TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            answer
         }
-        call::SETSOCKOPT | call::GETSOCKOPT => {
+        call::SETSOCKOPT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             socket::setsockopt(argument0, argument1, argument2)
         }
-        // Which address a socket is at, and which its peer is. A connection
-        // made through a name has no address of its own here, so both write
-        // the family and nothing else -- which is what Linux writes for an
-        // unnamed socket.
-        call::GETSOCKNAME | call::GETPEERNAME => {
+        call::GETSOCKOPT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            unnamed_address(argument1, argument2)
+            socket::getsockopt(argument0, argument1, argument2, _argument3, _argument4)
+        }
+        call::GETSOCKNAME => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            socket::getsockname(argument0, argument1, argument2)
+        }
+        call::GETPEERNAME => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            socket::getpeername(argument0, argument1, argument2)
         }
 
         // Waiting for a descriptor. `ppoll` differs by taking a `timespec`
@@ -705,13 +703,7 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
         // sequences at it.
         call::IOCTL => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            let window = crate::sched::current_process()
-                .is_some_and(|process| display::is_window(process.id.0, argument0));
-            if window {
-                display::ioctl(argument0, argument1, argument2)
-            } else {
-                error::ENOTTY
-            }
+            super::linux_more::ioctl(argument0, argument1, argument2)
         }
         call::GETPID => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -952,33 +944,6 @@ pub(super) fn clock_gettime(which: u64, buffer: u64) -> u64 {
         core::ptr::write_unaligned(pointer as *mut i64, seconds);
         core::ptr::write_unaligned((pointer + 8) as *mut i64, nanoseconds);
     }
-    0
-}
-
-/// Write the address of a socket that has not got one.
-///
-/// Two bytes of family and a length of two. What Linux writes for an unnamed
-/// socket, and what every connection accepted through a name is here.
-fn unnamed_address(address: u64, length: u64) -> u64 {
-    /// `AF_UNIX`.
-    const UNIX: u16 = 1;
-    if address == 0 || length == 0 {
-        return error::EINVAL;
-    }
-    let Some((at, _)) = crate::arch::syscall::user_range(length, 4, 4) else {
-        return error::EFAULT;
-    };
-    // SAFETY: four bytes inside the user half, read as the `socklen_t` it is.
-    let room = unsafe { core::ptr::read_unaligned(at as *const u32) };
-    if room >= 2 {
-        let Some((into, _)) = crate::arch::syscall::user_range(address, 2, 110) else {
-            return error::EFAULT;
-        };
-        // SAFETY: two bytes inside the user half.
-        unsafe { core::ptr::write_unaligned(into as *mut u16, UNIX) };
-    }
-    // SAFETY: as above.
-    unsafe { core::ptr::write_unaligned(at as *mut u32, 2) };
     0
 }
 

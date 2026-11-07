@@ -403,12 +403,17 @@ capped at 64 KiB, with normal short reads. Hardware absence returns ENODEV;
 transient generation failure returns EAGAIN. Entropy writes/mixing, a software
 pool, /dev/random, seeking and positioned reads remain unsupported.
 
-Legacy i386 socketcall decodes bounded arrays of 32-bit argument words and
-translates basic UNIX stream socket, bind/listen/connect/accept, socketpair,
-send and recv. Tests use genuine byte exchange, MSG_DONTWAIT, checked read-only
-outputs and a four-byte socklen at the end of a page. Structures such as the
-i386 msghdr/control layout, socket options, datagrams and SOCK_NONBLOCK remain
-unsupported. CLOEXEC is recorded, but exec still does not enforce it.
+Legacy i386 socketcall and the direct i386 socket syscalls (`359..=373`) decode
+bounded arrays of 32-bit argument words and translate UNIX stream and `AF_INET`
+TCP/UDP `socket`, `bind`/`listen`/`connect`/`accept`, `socketpair`, `send`/`recv`,
+`sendto`/`recvfrom`, `sendmsg`/`recvmsg` (`msghdr32`/`iovec32`), `getsockname`,
+`getpeername`, `getsockopt` (`SO_TYPE`, `SO_ERROR`, `SO_SNDBUF`, `SO_RCVBUF`),
+`setsockopt` and `shutdown`, plus `SOCK_NONBLOCK`, `fcntl(O_NONBLOCK)` and
+`ioctl(FIONBIO/FIONREAD)`. Tests use genuine byte exchange, `MSG_DONTWAIT`,
+checked read-only outputs, a four-byte socklen at the end of a page, `msghdr32`
+scatter/gather with `FIONREAD`, and RFC 3484 UDP destination probing (`port == 0`
+and `AF_UNSPEC` peer reset). CLOEXEC is recorded, but exec still does not
+enforce it.
 
 An integrated run exposed exit_group publishing cancellation before recording
 its exit code, allowing a sibling's stop to win the completion status. The
@@ -539,29 +544,40 @@ online update path remain incomplete, so this does not prove an installed
 client or sign-in. Current serial evidence is
 `build/steam-diagnostic-5a043cd5a12e47b09635e5b18dff1ca4/serial.log`.
 
-The Linux compatibility layer now has initial i386 `AF_INET` TCP/UDP socket,
-connect, sendto/recvfrom and UDP bind translations backed by the native IPv4
-stack, including the newer individual i386 socket syscall numbers used by
-current runtimes. This has not yet made the Steam updater online: the latest
-diagnostic still reports “Steam needs to be online to update”; successful
-Steam update traffic has not been demonstrated (`build/steam-diagnostic-2b38ab23fe89420694c31c98d2d687cc/serial.log`).
-TCP/UDP readiness is now exposed to `poll`/`epoll` with periodic rechecks while
-the network stack lacks direct wait notifications; more complete socket options still need work. The
-DHCP client now also writes its leased DNS server to the Linux root's
-`/etc/resolv.conf`, as well as recording `system/network.txt`. The Steam
-diagnostic still does not demonstrate a successful update after that change
-(`build/steam-diagnostic-86acb9d8d88843dfaaf0ee5c87f85bec/serial.log`). The
-latest full `-WithGlibc32` runtime run also timed out in its second threaded
-probe; its failure evidence is `build/runtime-test-62105cfb45274910be733c5555e87c40/serial.log`.
+The Linux compatibility layer now implements i386 and x86-64 `AF_INET` TCP/UDP
+`socket`, `bind` (including local TCP client `bind` before `connect`), `connect`
+(including UDP `port == 0` and `AF_UNSPEC` peer reset used by glibc `getaddrinfo`
+RFC 3484 destination address sorting), `sendto`/`recvfrom`, `sendmsg`/`recvmsg`
+(`msghdr32`/`iovec32`), `getsockname`, `getpeername`, `getsockopt` (`SO_TYPE`,
+`SO_ERROR`, `SO_SNDBUF`, `SO_RCVBUF`), `setsockopt`, `shutdown`, `fcntl(O_NONBLOCK)`,
+`ioctl(FIONBIO/FIONREAD)`, `epoll` `EPOLLONESHOT` disarm/re-arm and error/hangup
+readiness, blocking `statfs`/`statfs64` (`store::space_blocking()`), and
+`/proc/cpuinfo` (`ProcessView::CpuInfo`), alongside both legacy `socketcall` and
+the individual i386 socket syscall numbers (`359..=373`). The DHCP client writes
+fallback public DNS resolvers (`1.1.1.1`, `8.8.8.8`) ahead of QEMU SLIRP's
+`10.0.2.3` in `/etc/resolv.conf` and coordinates directory creation with boot-time
+Linux runtime installation so concurrent `/linux` and `/linux/etc` creation does
+not fail with `EEXIST`.
 
-The latest successful `scripts/test-posix-runtime.ps1 -WithGlibc32 -Timeout
-300` run at `build/runtime-test-5da84140e2c045b3aab16388091a3e49/serial.log`
-passed all musl, x86-64 glibc and i386 glibc configurations. It covers flock,
-statfs, signal stacks, i386 sysinfo/resource limits, clock/time syscalls, named
-FIFOs, proc start-time fields, pthread TLS/join, futexes, and eventfd/epoll.
-The Steam bootstrap then used the RTC date, passed its free-space check and
-reached its online-update failure:
-`build/steam-diagnostic-5a043cd5a12e47b09635e5b18dff1ca4/serial.log`.
+The latest `scripts/test-posix-runtime.ps1 -WithGlibc32 -Timeout 300` run at
+`build/runtime-test-5aec4d9bc31f4bcf97f3b81f9cce1cc3/serial.log` passes all musl,
+x86-64 glibc and i386 glibc configurations. It covers `/proc/cpuinfo`, `flock`,
+blocking `statfs`/`statfs64`, signal stacks, i386 `sysinfo`/resource limits,
+clock/time syscalls, named FIFOs, proc start-time fields, pthread TLS/join,
+futexes, `eventfd`/`epoll` (`EPOLLONESHOT`), `ioctl(FIONBIO/FIONREAD)`, and
+i386 `msghdr32`/`AF_INET` socket probes.
+
+With these compatibility paths in place, `scripts/diagnose-steam.ps1 -Timeout 180`
+passes (`build/steam-diagnostic-942d89c8b7644f30ad174d6d335aa9fe/serial.log`):
+the genuine Valve ELF32 Steam bootstrap reads `/proc/cpuinfo` without asserting,
+passes its `statvfs64` free-space check, resolves `client-update.steamstatic.com`
+via DNS (`getaddrinfo`), opens three parallel nonblocking TCP/TLS connections to
+`:443`, and actively downloads the 504,927 KB Steam client update package
+(`[  0%] Downloading update (265 of 504927 KB)...`, receiving 335 KB across three
+HTTPS streams within the 30-second diagnostic window) before the diagnostic
+cleanly terminates the running bootstrap (`steam-diagnostic: bootstrap ending
+Running(30s); client sign-in is not verified`). Full update completion, client
+sign-in and physical RTX 5060 GPU acceleration remain unimplemented.
 
 ## Launch and maintenance verification (2026-10-14)
 

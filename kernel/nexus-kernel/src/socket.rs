@@ -44,7 +44,7 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::ipc::Handle;
 use crate::pipe::{Pipe, PipeEnd, PipeError};
@@ -157,6 +157,12 @@ impl Stream {
     #[must_use]
     pub fn readable(&self) -> bool {
         self.incoming.readable() || !self.received.lock().is_empty()
+    }
+
+    /// Bytes currently waiting to be read on this stream.
+    #[must_use]
+    pub fn queued(&self) -> usize {
+        self.incoming.pipe().queued()
     }
 
     /// Whether a write would return without waiting.
@@ -387,14 +393,31 @@ pub enum InternetState {
 /// A Linux internet socket backed by the kernel's IPv4 stack.
 pub struct InternetSocket {
     pub datagram: bool,
+    pub nonblocking: AtomicBool,
     pub state: IrqSpinLock<InternetState>,
+}
+
+impl InternetSocket {
+    /// Whether operations on this socket should return `EAGAIN`/`EINPROGRESS`
+    /// rather than blocking.
+    #[must_use]
+    pub fn is_nonblocking(&self) -> bool {
+        self.nonblocking.load(Ordering::Relaxed)
+    }
+
+    /// Update the non-blocking mode (`fcntl(F_SETFL)` / `ioctl(FIONBIO)`).
+    pub fn set_nonblocking(&self, nonblocking: bool) {
+        self.nonblocking.store(nonblocking, Ordering::Relaxed);
+    }
 }
 
 impl Drop for InternetSocket {
     fn drop(&mut self) {
         match *self.state.lock() {
             InternetState::Tcp(id) => crate::net::stream::forget(id),
-            InternetState::Udp { port: Some(port), .. } => crate::net::datagram::unbind(port),
+            InternetState::Udp {
+                port: Some(port), ..
+            } => crate::net::datagram::unbind(port),
             _ => {}
         }
     }
@@ -418,11 +441,12 @@ impl Socket {
 
     /// A TCP or UDP internet socket.
     #[must_use]
-    pub fn internet(datagram: bool) -> Self {
+    pub fn internet(datagram: bool, nonblocking: bool) -> Self {
         Self {
             state: IrqSpinLock::new(State::New),
             internet: Some(Arc::new(InternetSocket {
                 datagram,
+                nonblocking: AtomicBool::new(nonblocking),
                 state: IrqSpinLock::new(if datagram {
                     InternetState::Udp {
                         port: None,

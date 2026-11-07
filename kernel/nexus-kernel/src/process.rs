@@ -253,6 +253,7 @@ pub enum ProcessView {
     Arguments,
     Environment,
     Stat,
+    CpuInfo,
 }
 
 pub struct Process {

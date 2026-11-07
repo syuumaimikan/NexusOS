@@ -124,6 +124,12 @@ static int proc_probe(int argc, char **argv, char **environment) {
         field = strtok(NULL, " ");
     }
     if (!check(start_ticks > 0, 226)) return 0;
+    int cpuinfo_fd = open("/proc/cpuinfo", O_RDONLY);
+    ssize_t cpuinfo_len = cpuinfo_fd >= 0 ? read(cpuinfo_fd, bytes, sizeof(bytes) - 1) : -1;
+    if (cpuinfo_fd >= 0) close(cpuinfo_fd);
+    if (!check(cpuinfo_len > 0, 227)) return 0;
+    bytes[cpuinfo_len] = 0;
+    if (!check(strstr(bytes, "processor\t: 0") != NULL && strstr(bytes, "cpu MHz\t\t:") != NULL, 228)) return 0;
     puts(PROBE_NAME ": PASS /proc/self/stat reports a valid nonzero process start time");
     munmap(readonly, 4096);
     puts(PROBE_NAME ": PASS executable identity live proc arguments/environment and shared cursor");

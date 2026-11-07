@@ -52,7 +52,6 @@ mod family {
     pub const UNIX: u64 = 1;
     /// The internet, over the machine's IPv4 stack.
     pub const INET: u64 = 2;
-    pub const INET6: u64 = 10;
 }
 
 /// The kinds of socket, and the flags `socket` and `accept4` accept beside them.
@@ -100,6 +99,8 @@ const ENAMETOOLONG: u64 = (-36i64) as u64;
 const ETIMEDOUT: u64 = (-110i64) as u64;
 /// No datagram port remains available.
 const ENOBUFS: u64 = (-105i64) as u64;
+/// A nonblocking connection is still being established.
+const EINPROGRESS: u64 = (-115i64) as u64;
 
 /// `sockaddr_un` is a two-byte family and a hundred and eight bytes of path.
 ///
@@ -217,13 +218,12 @@ fn ipv4_address_of(pointer: u64, length: u64) -> Result<(nexus_net::Ipv4, u16), 
         return Err(error::EFAULT);
     };
     let bytes = unsafe { core::slice::from_raw_parts(at as *const u8, 16) };
-    if u16::from_le_bytes([bytes[0], bytes[1]]) != family::INET as u16 {
+    let address_family = u16::from_le_bytes([bytes[0], bytes[1]]);
+    if address_family != family::INET as u16 {
         return Err(EAFNOSUPPORT);
     }
-    Ok((
-        [bytes[4], bytes[5], bytes[6], bytes[7]],
-        u16::from_be_bytes([bytes[2], bytes[3]]),
-    ))
+    let port = u16::from_be_bytes([bytes[2], bytes[3]]);
+    Ok(([bytes[4], bytes[5], bytes[6], bytes[7]], port))
 }
 
 fn ensure_datagram_bound(
@@ -268,12 +268,18 @@ pub fn socket(family: u64, kind: u64, protocol: u64) -> u64 {
         };
         MADE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return u64::from(process.handles.insert(
-            ipc::Object::Socket(Arc::new(crate::socket::Socket::internet(datagram))),
+            ipc::Object::Socket(Arc::new(crate::socket::Socket::internet(
+                datagram,
+                kind & kind::NONBLOCK != 0,
+            ))),
             ipc::Rights::ALL,
         ));
     }
     if family != family::UNIX {
         return EAFNOSUPPORT;
+    }
+    if kind & kind::NONBLOCK != 0 {
+        return EPROTONOSUPPORT;
     }
     if bare == kind::DGRAM || bare == kind::SEQPACKET {
         crate::kprintln!("[linux] only a stream socket is translated; answering EPROTONOSUPPORT");
@@ -342,16 +348,20 @@ pub fn bind(descriptor: u64, address: u64, length: u64) -> u64 {
         Err(reason) => return reason,
     };
     if let Some(internet) = socket.internet_state() {
-        if !internet.datagram {
-            return EINVAL;
-        }
         let (ip, port) = match ipv4_address_of(address, length) {
             Ok(address) => address,
             Err(reason) => return reason,
         };
         let interface = crate::net::interface();
-        if ip != [0; 4] && ip != interface.ip {
+        if ip != [0; 4] && ip != [127, 0, 0, 1] && ip != interface.ip {
             return (-99i64) as u64; // EADDRNOTAVAIL
+        }
+        if !internet.datagram {
+            return if matches!(*internet.state.lock(), crate::socket::InternetState::New) {
+                0
+            } else {
+                EINVAL
+            };
         }
         return match ensure_datagram_bound(&internet, port) {
             Ok(_) => 0,
@@ -426,11 +436,27 @@ pub fn connect(descriptor: u64, address: u64, length: u64) -> u64 {
         Err(reason) => return reason,
     };
     if let Some(internet) = socket.internet_state() {
+        if internet.datagram && length >= 2 {
+            let Some((at, _)) = crate::arch::syscall::user_range(address, 2, 2) else {
+                return error::EFAULT;
+            };
+            // SAFETY: two bytes inside the user half, checked above.
+            let address_family = unsafe { (at as *const u16).read_unaligned() };
+            if address_family == 0 {
+                // `AF_UNSPEC` disconnects a UDP socket (used by glibc getaddrinfo
+                // destination address selection between candidate checks).
+                let mut state = internet.state.lock();
+                if let crate::socket::InternetState::Udp { peer: current, .. } = &mut *state {
+                    *current = None;
+                    return 0;
+                }
+            }
+        }
         let (peer, port) = match ipv4_address_of(address, length) {
             Ok(address) => address,
             Err(reason) => return reason,
         };
-        if peer == [0; 4] || port == 0 {
+        if peer == [0; 4] || (!internet.datagram && port == 0) {
             return EINVAL;
         }
         if internet.datagram {
@@ -444,19 +470,37 @@ pub fn connect(descriptor: u64, address: u64, length: u64) -> u64 {
             }
             return EINVAL;
         }
-        let current = *internet.state.lock();
-        if !matches!(current, crate::socket::InternetState::New) {
-            return EISCONN;
-        }
-        if !crate::net::is_up() {
-            return (-100i64) as u64; // ENETDOWN
-        }
-        let id = match crate::net::stream::open(peer, port) {
-            Ok(id) => id,
-            Err(crate::net::stream::OpenError::NoNetwork) => return (-100i64) as u64,
-            Err(crate::net::stream::OpenError::Busy) => return ENOBUFS,
+        let current_state = *internet.state.lock();
+        let id = match current_state {
+            crate::socket::InternetState::Tcp(id) => match crate::net::stream::state(id) {
+                Some(crate::net::stream::State::Established) => return 0,
+                Some(crate::net::stream::State::SynSent) if internet.is_nonblocking() => {
+                    return EINPROGRESS;
+                }
+                Some(crate::net::stream::State::SynSent) => id,
+                Some(crate::net::stream::State::Closed) | None => {
+                    let _ = crate::net::stream::trouble(id);
+                    return ECONNREFUSED;
+                }
+                _ => return EISCONN,
+            },
+            crate::socket::InternetState::New => {
+                if !crate::net::is_up() {
+                    return (-100i64) as u64; // ENETDOWN
+                }
+                let id = match crate::net::stream::open(peer, port) {
+                    Ok(id) => id,
+                    Err(crate::net::stream::OpenError::NoNetwork) => return (-100i64) as u64,
+                    Err(crate::net::stream::OpenError::Busy) => return ENOBUFS,
+                };
+                *internet.state.lock() = crate::socket::InternetState::Tcp(id);
+                if internet.is_nonblocking() {
+                    return EINPROGRESS;
+                }
+                id
+            }
+            _ => return EISCONN,
         };
-        *internet.state.lock() = crate::socket::InternetState::Tcp(id);
         let deadline = crate::arch::time::uptime_ms().saturating_add(6_000);
         loop {
             match crate::net::stream::state(id) {
@@ -719,15 +763,82 @@ fn send_internet(
     let crate::socket::InternetState::Tcp(id) = *internet.state.lock() else {
         return ENOTCONN;
     };
+    if bytes.is_empty() {
+        return if crate::net::stream::state(id).is_some() {
+            0
+        } else {
+            EPIPE
+        };
+    }
     loop {
         match crate::net::stream::write(id, bytes) {
             Some(written) if written > 0 => return written as u64,
-            Some(_) if flags & DONTWAIT != 0 => return EAGAIN,
+            Some(_) if flags & DONTWAIT != 0 || internet.is_nonblocking() => return EAGAIN,
             Some(_) if crate::net::stream::state(id).is_some() => {}
             _ => return EPIPE,
         }
         if crate::sched::cancelled() {
             return EINTR;
+        }
+        crate::sched::sleep_ms(5);
+    }
+}
+
+type PeerAddress = (nexus_net::Ipv4, u16);
+
+fn receive_internet_vec(
+    internet: &crate::socket::InternetSocket,
+    limit: usize,
+    flags: u64,
+) -> Result<(Vec<u8>, Option<PeerAddress>), u64> {
+    const DONTWAIT: u64 = 0x40;
+    if internet.datagram {
+        let crate::socket::InternetState::Udp {
+            port: Some(port),
+            peer,
+        } = *internet.state.lock()
+        else {
+            return Err(EINVAL);
+        };
+        loop {
+            if let Some(Some((from, source, mut bytes))) = crate::net::datagram::take(port) {
+                if peer.is_some_and(|(peer_ip, peer_port)| {
+                    peer_ip != from || (peer_port != 0 && peer_port != source)
+                }) {
+                    continue;
+                }
+                bytes.truncate(limit);
+                return Ok((bytes, Some((from, source))));
+            }
+            if flags & DONTWAIT != 0 || internet.is_nonblocking() {
+                return Err(EAGAIN);
+            }
+            if crate::sched::cancelled() {
+                return Err(EINTR);
+            }
+            crate::sched::sleep_ms(5);
+        }
+    }
+    let crate::socket::InternetState::Tcp(id) = *internet.state.lock() else {
+        return Err(ENOTCONN);
+    };
+    loop {
+        let bytes = crate::net::stream::read(id, limit).unwrap_or_default();
+        if !bytes.is_empty() {
+            return Ok((bytes, None));
+        }
+        match crate::net::stream::state(id) {
+            Some(crate::net::stream::State::Closed | crate::net::stream::State::CloseWait)
+            | None => {
+                return Ok((Vec::new(), None));
+            }
+            _ => {}
+        }
+        if flags & DONTWAIT != 0 || internet.is_nonblocking() {
+            return Err(EAGAIN);
+        }
+        if crate::sched::cancelled() {
+            return Err(EINTR);
         }
         crate::sched::sleep_ms(5);
     }
@@ -741,63 +852,26 @@ fn receive_internet(
     address: u64,
     address_length: u64,
 ) -> u64 {
-    const DONTWAIT: u64 = 0x40;
-    if internet.datagram {
-        let crate::socket::InternetState::Udp { port: Some(port), peer } =
-            *internet.state.lock()
-        else {
-            return EINVAL;
-        };
-        loop {
-            if let Some(Some((from, source, bytes))) = crate::net::datagram::take(port) {
-                if peer.is_some_and(|peer| peer != (from, source)) {
-                    continue;
-                }
-                let taken = limit.min(bytes.len());
-                unsafe {
-                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), output as *mut u8, taken);
-                }
-                if address != 0 && address_length != 0 {
-                    if !write_sockaddr_in(address, address_length, from, source) {
-                        return error::EFAULT;
-                    }
-                }
-                return taken as u64;
-            }
-            if flags & DONTWAIT != 0 {
-                return EAGAIN;
-            }
-            if crate::sched::cancelled() {
-                return EINTR;
-            }
-            crate::sched::sleep_ms(5);
-        }
-    }
-    let crate::socket::InternetState::Tcp(id) = *internet.state.lock() else {
-        return ENOTCONN;
+    let (bytes, source) = match receive_internet_vec(internet, limit, flags) {
+        Ok(result) => result,
+        Err(reason) => return reason,
     };
-    loop {
-        let bytes = crate::net::stream::read(id, limit).unwrap_or_default();
-        if !bytes.is_empty() {
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), output as *mut u8, bytes.len());
-            }
-            return bytes.len() as u64;
+    if !bytes.is_empty() {
+        // SAFETY: `output` was validated by the caller for `limit` bytes and
+        // `bytes.len() <= limit`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), output as *mut u8, bytes.len());
         }
-        match crate::net::stream::state(id) {
-            Some(crate::net::stream::State::Closed | crate::net::stream::State::CloseWait) | None => {
-                return 0;
-            }
-            _ => {}
-        }
-        if flags & DONTWAIT != 0 {
-            return EAGAIN;
-        }
-        if crate::sched::cancelled() {
-            return EINTR;
-        }
-        crate::sched::sleep_ms(5);
     }
+    if let Some((from, port)) = source {
+        if address != 0
+            && address_length != 0
+            && !write_sockaddr_in(address, address_length, from, port)
+        {
+            return error::EFAULT;
+        }
+    }
+    bytes.len() as u64
 }
 
 fn write_sockaddr_in(address: u64, length: u64, ip: nexus_net::Ipv4, port: u16) -> bool {
@@ -814,42 +888,101 @@ fn write_sockaddr_in(address: u64, length: u64, ip: nexus_net::Ipv4, port: u16) 
     unsafe {
         core::ptr::write_bytes(out as *mut u8, 0, 16);
         (out as *mut u16).write_unaligned(family::INET as u16);
-        (out as *mut u8).add(2).cast::<u16>().write_unaligned(port.to_be());
+        (out as *mut u8)
+            .add(2)
+            .cast::<u16>()
+            .write_unaligned(port.to_be());
         core::ptr::copy_nonoverlapping(ip.as_ptr(), (out as *mut u8).add(4), 4);
         (size_at as *mut u32).write_unaligned(16);
     }
     true
 }
 
-/// `struct msghdr`, as x86-64 lays it out.
-///
-/// Fifty-six bytes: a name and its length, an iovec array and its count, a
-/// control buffer and its length, and a flags word. Read field by field rather
-/// than as a structure, because the file it comes from is the caller's memory
-/// and carries no alignment guarantee.
+/// `struct msghdr`, normalized across x86-64 (56 bytes) and i386 (28 bytes).
 struct MessageHeader {
+    name: u64,
+    name_length: u64,
     vectors: u64,
     vector_count: u64,
     control: u64,
     control_length: u64,
 }
 
-fn header_of(at: u64) -> Result<MessageHeader, u64> {
-    const MSGHDR: u64 = 56;
-    let Some((pointer, _)) = crate::arch::syscall::user_range(at, MSGHDR, MSGHDR) else {
+fn header_of(at: u64, compat32: bool) -> Result<MessageHeader, u64> {
+    if compat32 {
+        const MSGHDR32: u64 = 28;
+        let Some((pointer, _)) = crate::arch::syscall::user_range(at, MSGHDR32, MSGHDR32) else {
+            return Err(error::EFAULT);
+        };
+        // SAFETY: twenty-eight bytes inside the user half, read as seven 32-bit words.
+        unsafe {
+            let words = pointer as *const u32;
+            Ok(MessageHeader {
+                name: u64::from(words.read_unaligned()),
+                name_length: u64::from(words.add(1).read_unaligned()),
+                vectors: u64::from(words.add(2).read_unaligned()),
+                vector_count: u64::from(words.add(3).read_unaligned()),
+                control: u64::from(words.add(4).read_unaligned()),
+                control_length: u64::from(words.add(5).read_unaligned()),
+            })
+        }
+    } else {
+        const MSGHDR64: u64 = 56;
+        let Some((pointer, _)) = crate::arch::syscall::user_range(at, MSGHDR64, MSGHDR64) else {
+            return Err(error::EFAULT);
+        };
+        // SAFETY: fifty-six bytes inside the user half, read as the seven words a
+        // `msghdr` is.
+        unsafe {
+            let words = pointer as *const u64;
+            Ok(MessageHeader {
+                name: words.read_unaligned(),
+                name_length: u64::from((pointer as *const u32).add(2).read_unaligned()),
+                vectors: words.add(2).read_unaligned(),
+                vector_count: words.add(3).read_unaligned(),
+                control: words.add(4).read_unaligned(),
+                control_length: words.add(5).read_unaligned(),
+            })
+        }
+    }
+}
+
+fn gather_vectors(vectors: u64, count: u64, compat32: bool) -> Result<Vec<(u64, u64)>, u64> {
+    if count > MAX_VECTORS {
+        return Err(EMSGSIZE);
+    }
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let stride = if compat32 { 8u64 } else { 16u64 };
+    let Some((base, _)) =
+        crate::arch::syscall::user_range(vectors, count * stride, MAX_VECTORS * stride)
+    else {
         return Err(error::EFAULT);
     };
-    // SAFETY: fifty-six bytes inside the user half, read as the seven words a
-    // `msghdr` is.
-    unsafe {
-        let words = pointer as *const u64;
-        Ok(MessageHeader {
-            vectors: words.add(2).read_unaligned(),
-            vector_count: words.add(3).read_unaligned(),
-            control: words.add(4).read_unaligned(),
-            control_length: words.add(5).read_unaligned(),
-        })
+    let mut list = Vec::with_capacity(count as usize);
+    for index in 0..count as usize {
+        let (at, length) = if compat32 {
+            // SAFETY: inside the checked iovec32 array.
+            unsafe {
+                let vector = (base as *const u32).add(index * 2);
+                (
+                    u64::from(vector.read_unaligned()),
+                    u64::from(vector.add(1).read_unaligned()),
+                )
+            }
+        } else {
+            // SAFETY: inside the checked iovec64 array.
+            unsafe {
+                let vector = (base as *const u64).add(index * 2);
+                (vector.read_unaligned(), vector.add(1).read_unaligned())
+            }
+        };
+        if length != 0 {
+            list.push((at, length));
+        }
     }
+    Ok(list)
 }
 
 /// The most `iovec`s one message may carry.
@@ -875,51 +1008,94 @@ const SCM_RIGHTS: u32 = 1;
 /// the payload aligned to eight.
 const CMSGHDR: u64 = 16;
 
-/// `sendmsg(fd, message, flags)`.
-///
-/// The gather is flattened and sent as one run of bytes, which is what a stream
-/// socket does with it anyway. What makes this different from `send` is the
-/// control buffer: `SCM_RIGHTS` carries descriptors, and descriptors here are
-/// handles.
-pub fn sendmsg(descriptor: u64, message: u64, _flags: u64) -> u64 {
+/// `sendmsg(fd, message, flags)` for x86-64 callers.
+pub fn sendmsg(descriptor: u64, message: u64, flags: u64) -> u64 {
+    sendmsg_with(descriptor, message, flags, false)
+}
+
+/// `sendmsg(fd, message, flags)` for i386 callers (`msghdr32` / `iovec32`).
+pub fn sendmsg32(descriptor: u64, message: u64, flags: u64) -> u64 {
+    sendmsg_with(descriptor, message, flags, true)
+}
+
+fn sendmsg_with(descriptor: u64, message: u64, flags: u64, compat32: bool) -> u64 {
     let socket = match socket_of(descriptor) {
         Ok(socket) => socket,
         Err(reason) => return reason,
     };
-    let Some(stream) = socket.stream() else {
-        return ENOTCONN;
-    };
     let Some(process) = crate::sched::current_process() else {
         return error::ENOSYS;
     };
-    let header = match header_of(message) {
+    let header = match header_of(message, compat32) {
         Ok(header) => header,
         Err(reason) => return reason,
+    };
+    let vectors = match gather_vectors(header.vectors, header.vector_count, compat32) {
+        Ok(vectors) => vectors,
+        Err(reason) => return reason,
+    };
+
+    let mut payload: Vec<u8> = Vec::new();
+    for (at, length) in vectors {
+        let take = length.min(MAX_TRANSFER - payload.len() as u64);
+        let Some((from, size)) = crate::arch::syscall::user_range(at, take, MAX_TRANSFER) else {
+            return error::EFAULT;
+        };
+        // SAFETY: `from` and `size` were validated by `user_range`.
+        payload.extend_from_slice(unsafe { core::slice::from_raw_parts(from as *const u8, size) });
+        if payload.len() as u64 >= MAX_TRANSFER {
+            break;
+        }
+    }
+
+    if let Some(internet) = socket.internet_state() {
+        let peer = if header.name == 0 || header.name_length == 0 {
+            None
+        } else {
+            match ipv4_address_of(header.name, header.name_length) {
+                Ok(peer) => Some(peer),
+                Err(reason) => return reason,
+            }
+        };
+        return send_internet(&internet, &payload, flags, peer);
+    }
+
+    let Some(stream) = socket.stream() else {
+        return ENOTCONN;
     };
 
     // The handles first. They are *taken* from this process before a byte is
     // sent, so there is never a moment where the bytes have gone and the
     // handles are still here -- a receiver that read the message and found no
     // descriptors would have no way to ask again.
+    let cmsg_header = if compat32 { 12u64 } else { CMSGHDR };
     let mut carried: Vec<ipc::Handle> = Vec::new();
-    if header.control != 0 && header.control_length >= CMSGHDR {
+    if header.control != 0 && header.control_length >= cmsg_header {
         let most = header
             .control_length
-            .min(CMSGHDR + (MAX_HANDLES as u64) * 4 + 8);
+            .min(cmsg_header + (MAX_HANDLES as u64) * 4 + 8);
         let Some((at, _)) = crate::arch::syscall::user_range(header.control, most, most) else {
             return error::EFAULT;
         };
         // SAFETY: the range was checked to lie inside the user half.
         let (length, level, which) = unsafe {
             let words = at as *const u8;
-            (
-                words.cast::<u64>().read_unaligned(),
-                words.add(8).cast::<u32>().read_unaligned(),
-                words.add(12).cast::<u32>().read_unaligned(),
-            )
+            if compat32 {
+                (
+                    u64::from(words.cast::<u32>().read_unaligned()),
+                    words.add(4).cast::<u32>().read_unaligned(),
+                    words.add(8).cast::<u32>().read_unaligned(),
+                )
+            } else {
+                (
+                    words.cast::<u64>().read_unaligned(),
+                    words.add(8).cast::<u32>().read_unaligned(),
+                    words.add(12).cast::<u32>().read_unaligned(),
+                )
+            }
         };
-        if level == SOL_SOCKET && which == SCM_RIGHTS && length >= CMSGHDR {
-            let count = ((length - CMSGHDR) / 4) as usize;
+        if level == SOL_SOCKET && which == SCM_RIGHTS && length >= cmsg_header {
+            let count = ((length - cmsg_header) / 4) as usize;
             if count > MAX_HANDLES {
                 return EINVAL;
             }
@@ -928,63 +1104,19 @@ pub fn sendmsg(descriptor: u64, message: u64, _flags: u64) -> u64 {
                 // by `most`, which the check covered.
                 let fd = unsafe {
                     (at as *const u8)
-                        .add(CMSGHDR as usize + index * 4)
+                        .add(cmsg_header as usize + index * 4)
                         .cast::<u32>()
                         .read_unaligned()
                 };
-                // Moved, not copied: the sender gives it up here. That is what
-                // a handle crossing a boundary means everywhere else in this
-                // system, and `SCM_RIGHTS` is the one place Linux copies
-                // instead -- so this is the stricter of the two, and a sender
-                // that wanted to keep its own duplicates it first.
                 match process.handles.take(fd, ipc::Rights::TRANSFER) {
                     Ok(handle) => carried.push(handle),
                     Err(_) => {
-                        // Put back whatever was already taken, so a bad
-                        // descriptor halfway through is a refusal rather than
-                        // a program that has lost handles.
                         for handle in carried {
                             process.handles.restore(handle);
                         }
                         return error::EBADF;
                     }
                 }
-            }
-        }
-    }
-
-    // Then the bytes, gathered flat.
-    let mut payload: Vec<u8> = Vec::new();
-    if header.vector_count > 0 {
-        const IOVEC: u64 = 16;
-        if header.vector_count > MAX_VECTORS {
-            return EMSGSIZE;
-        }
-        let count = header.vector_count;
-        let Some((base, _)) =
-            crate::arch::syscall::user_range(header.vectors, count * IOVEC, MAX_VECTORS * IOVEC)
-        else {
-            return error::EFAULT;
-        };
-        for index in 0..count as usize {
-            // SAFETY: inside the range checked above.
-            let (at, length) = unsafe {
-                let vector = (base as *const u64).add(index * 2);
-                (vector.read_unaligned(), vector.add(1).read_unaligned())
-            };
-            if length == 0 {
-                continue;
-            }
-            let take = length.min(MAX_TRANSFER - payload.len() as u64);
-            let Some((from, size)) = crate::arch::syscall::user_range(at, take, MAX_TRANSFER)
-            else {
-                return error::EFAULT;
-            };
-            // SAFETY: as above.
-            payload
-                .extend_from_slice(unsafe { core::slice::from_raw_parts(from as *const u8, size) });
-            if payload.len() as u64 >= MAX_TRANSFER {
-                break;
             }
         }
     }
@@ -1002,8 +1134,17 @@ pub fn sendmsg(descriptor: u64, message: u64, _flags: u64) -> u64 {
     }
 }
 
-/// `recvmsg(fd, message, flags)`.
+/// `recvmsg(fd, message, flags)` for x86-64 callers.
 pub fn recvmsg(descriptor: u64, message: u64, flags: u64) -> u64 {
+    recvmsg_with(descriptor, message, flags, false)
+}
+
+/// `recvmsg(fd, message, flags)` for i386 callers (`msghdr32` / `iovec32`).
+pub fn recvmsg32(descriptor: u64, message: u64, flags: u64) -> u64 {
+    recvmsg_with(descriptor, message, flags, true)
+}
+
+fn recvmsg_with(descriptor: u64, message: u64, flags: u64, compat32: bool) -> u64 {
     /// `MSG_DONTWAIT`.
     const DONTWAIT: u64 = 0x40;
 
@@ -1011,73 +1152,96 @@ pub fn recvmsg(descriptor: u64, message: u64, flags: u64) -> u64 {
         Ok(socket) => socket,
         Err(reason) => return reason,
     };
-    let Some(stream) = socket.stream() else {
-        return ENOTCONN;
-    };
     let Some(process) = crate::sched::current_process() else {
         return error::ENOSYS;
     };
-    let header = match header_of(message) {
+    let header = match header_of(message, compat32) {
         Ok(header) => header,
         Err(reason) => return reason,
     };
-
-    // How much the caller has room for, across its vectors.
-    const IOVEC: u64 = 16;
-    if header.vector_count > MAX_VECTORS {
-        return EMSGSIZE;
-    }
-    let count = header.vector_count;
+    let targets = match gather_vectors(header.vectors, header.vector_count, compat32) {
+        Ok(targets) => targets,
+        Err(reason) => return reason,
+    };
     let mut room = 0u64;
-    let mut targets: Vec<(u64, u64)> = Vec::new();
-    if count > 0 {
-        let Some((base, _)) =
-            crate::arch::syscall::user_range(header.vectors, count * IOVEC, MAX_VECTORS * IOVEC)
-        else {
-            return error::EFAULT;
-        };
-        for index in 0..count as usize {
-            // SAFETY: inside the range checked above.
-            let (at, length) = unsafe {
-                let vector = (base as *const u64).add(index * 2);
-                (vector.read_unaligned(), vector.add(1).read_unaligned())
-            };
-            if length == 0 {
-                continue;
-            }
-            targets.push((at, length));
-            room = room.saturating_add(length);
-        }
+    for (_, length) in &targets {
+        room = room.saturating_add(*length);
     }
     let room = room.min(MAX_TRANSFER);
 
+    if let Some(internet) = socket.internet_state() {
+        let (bytes, source) = match receive_internet_vec(&internet, room as usize, flags) {
+            Ok(result) => result,
+            Err(reason) => return reason,
+        };
+        let mut written = 0usize;
+        for (at, length) in targets {
+            if written >= bytes.len() {
+                break;
+            }
+            let take = (length as usize).min(bytes.len() - written);
+            let Some((into, size)) =
+                crate::arch::syscall::user_range_for(&process, at, take as u64, MAX_TRANSFER, true)
+            else {
+                return error::EFAULT;
+            };
+            // SAFETY: `into` was checked to be writable for `size` bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr().add(written), into as *mut u8, size);
+            }
+            written += size;
+        }
+        if let Some((from, port)) = source {
+            if header.name != 0 && header.name_length >= 16 {
+                let Some((out, _)) =
+                    crate::arch::syscall::user_range_for(&process, header.name, 16, 16, true)
+                else {
+                    return error::EFAULT;
+                };
+                // SAFETY: 16 writable bytes checked above.
+                unsafe {
+                    core::ptr::write_bytes(out as *mut u8, 0, 16);
+                    (out as *mut u16).write_unaligned(family::INET as u16);
+                    (out as *mut u8)
+                        .add(2)
+                        .cast::<u16>()
+                        .write_unaligned(port.to_be());
+                    core::ptr::copy_nonoverlapping(from.as_ptr(), (out as *mut u8).add(4), 4);
+                }
+            }
+        }
+        write_msghdr_out(
+            &process,
+            message,
+            compat32,
+            if source.is_some() && header.name != 0 {
+                Some(16)
+            } else {
+                None
+            },
+            0,
+        );
+        return written as u64;
+    }
+
+    let Some(stream) = socket.stream() else {
+        return ENOTCONN;
+    };
+
     // Handles are looked for twice: once before the read and once after it.
-    //
-    // They are a separate queue from the byte stream -- see the note at the top
-    // of the file -- and a sender puts them in *before* the bytes. A receiver
-    // that arrived first would find the queue empty, block for the bytes, and
-    // return a message with no descriptors on it although the sender had
-    // attached one. That is exactly what happened: the server read the marker
-    // and reported no control message, and the descriptor it was sent was still
-    // sitting in the queue.
-    //
-    // Looking again after the read closes it, because the bytes cannot arrive
-    // before the handles that were sent ahead of them.
+    let cmsg_header = if compat32 { 12u64 } else { CMSGHDR };
     let mut control_written = 0u64;
     let take_handles = |stream: &Arc<Stream>| -> Option<u64> {
-        if header.control == 0 || header.control_length < CMSGHDR {
+        if header.control == 0 || header.control_length < cmsg_header {
             return None;
         }
         let taken = stream
-            .take_handles((((header.control_length - CMSGHDR) / 4) as usize).min(MAX_HANDLES));
+            .take_handles((((header.control_length - cmsg_header) / 4) as usize).min(MAX_HANDLES));
         if !taken.is_empty() {
-            let length = CMSGHDR + taken.len() as u64 * 4;
+            let length = cmsg_header + taken.len() as u64 * 4;
             let Some((at, _)) =
                 crate::arch::syscall::user_range(header.control, length, header.control_length)
             else {
-                // The handles have already left the stream, so they are put
-                // back into this side's own queue rather than lost: the peer
-                // sent them, and a bad control pointer is this side's mistake.
                 let mut queue = stream.received_queue();
                 for handle in taken.into_iter().rev() {
                     queue.push_front(handle);
@@ -1088,12 +1252,18 @@ pub fn recvmsg(descriptor: u64, message: u64, flags: u64) -> u64 {
             // exactly `length` bytes.
             unsafe {
                 let out = at as *mut u8;
-                out.cast::<u64>().write_unaligned(length);
-                out.add(8).cast::<u32>().write_unaligned(SOL_SOCKET);
-                out.add(12).cast::<u32>().write_unaligned(SCM_RIGHTS);
+                if compat32 {
+                    out.cast::<u32>().write_unaligned(length as u32);
+                    out.add(4).cast::<u32>().write_unaligned(SOL_SOCKET);
+                    out.add(8).cast::<u32>().write_unaligned(SCM_RIGHTS);
+                } else {
+                    out.cast::<u64>().write_unaligned(length);
+                    out.add(8).cast::<u32>().write_unaligned(SOL_SOCKET);
+                    out.add(12).cast::<u32>().write_unaligned(SCM_RIGHTS);
+                }
                 for (index, handle) in taken.into_iter().enumerate() {
                     let fd = process.handles.restore(handle);
-                    out.add(CMSGHDR as usize + index * 4)
+                    out.add(cmsg_header as usize + index * 4)
                         .cast::<u32>()
                         .write_unaligned(fd);
                 }
@@ -1154,44 +1324,249 @@ pub fn recvmsg(descriptor: u64, message: u64, flags: u64) -> u64 {
         written += size;
     }
 
-    // And the control length the caller is told about.
     if header.control != 0 {
-        const MSGHDR: u64 = 56;
-        if let Some((pointer, _)) = crate::arch::syscall::user_range(message, MSGHDR, MSGHDR) {
-            // SAFETY: as in `header_of`.
-            unsafe {
-                (pointer as *mut u64)
-                    .add(5)
-                    .write_unaligned(control_written);
-            }
-        }
+        write_msghdr_out(&process, message, compat32, None, control_written);
     }
     written as u64
 }
 
+fn write_msghdr_out(
+    process: &crate::process::Process,
+    message: u64,
+    compat32: bool,
+    name_length: Option<u32>,
+    control_written: u64,
+) {
+    if compat32 {
+        if let Some((pointer, _)) =
+            crate::arch::syscall::user_range_for(process, message, 28, 28, true)
+        {
+            // SAFETY: 28-byte msghdr32 validated writable.
+            unsafe {
+                let words = pointer as *mut u32;
+                if let Some(len) = name_length {
+                    words.add(1).write_unaligned(len);
+                }
+                words.add(5).write_unaligned(control_written as u32);
+                words.add(6).write_unaligned(0);
+            }
+        }
+    } else if let Some((pointer, _)) =
+        crate::arch::syscall::user_range_for(process, message, 56, 56, true)
+    {
+        // SAFETY: 56-byte msghdr64 validated writable.
+        unsafe {
+            if let Some(len) = name_length {
+                (pointer as *mut u32).add(2).write_unaligned(len);
+            }
+            (pointer as *mut u64)
+                .add(5)
+                .write_unaligned(control_written);
+            (pointer as *mut u32).add(12).write_unaligned(0);
+        }
+    }
+}
+
 /// `shutdown(fd, how)`.
 ///
-/// Accepted and recorded only as far as it can be: this closes nothing, because
-/// a direction of a connection cannot be closed here without a third state in
-/// the pipe underneath. A program using it to signal end of stream will find
-/// the other side still waiting, so it is answered `ENOSYS` rather than zero --
-/// the one thing worse than not having it is appearing to.
-pub fn shutdown(_descriptor: u64, _how: u64) -> u64 {
+/// For `AF_INET` TCP sockets, closing the write side (`SHUT_WR` or `SHUT_RDWR`)
+/// queues a FIN once outgoing data drains. For `AF_UNIX` pipes, half-close is
+/// still answered `ENOSYS`.
+pub fn shutdown(descriptor: u64, how: u64) -> u64 {
+    if how > 2 {
+        return EINVAL;
+    }
+    let socket = match socket_of(descriptor) {
+        Ok(socket) => socket,
+        Err(reason) => return reason,
+    };
+    if let Some(internet) = socket.internet_state() {
+        return match *internet.state.lock() {
+            crate::socket::InternetState::Tcp(id) => {
+                if how != 0 {
+                    crate::net::stream::close(id);
+                }
+                0
+            }
+            crate::socket::InternetState::Udp { peer: Some(_), .. } => 0,
+            _ => ENOTCONN,
+        };
+    }
     crate::kprintln!("[linux] shutdown of one direction is not translated; answering ENOSYS");
     error::ENOSYS
 }
 
-/// `getsockopt` and `setsockopt`.
+/// `setsockopt(fd, level, option, ...)`.
 ///
 /// Every option is accepted and none is honoured, with one exception that
 /// matters: `SO_PEERCRED` is refused, because a program asking who is on the
 /// other end of a connection is asking a security question and an invented
 /// answer is worse than none.
-pub fn setsockopt(_descriptor: u64, level: u64, option: u64) -> u64 {
+pub fn setsockopt(descriptor: u64, level: u64, option: u64) -> u64 {
     /// `SO_PEERCRED`.
     const PEERCRED: u64 = 17;
+    if let Err(reason) = socket_of(descriptor) {
+        return reason;
+    }
     if level == u64::from(SOL_SOCKET) && option == PEERCRED {
         return error::ENOSYS;
     }
+    0
+}
+
+/// `getsockopt(fd, level, option, value, length)`.
+///
+/// Reports actual socket type and pending TCP connection errors (`SO_ERROR`),
+/// which nonblocking `connect` callers inspect after `poll`/`epoll_wait` reports
+/// `POLLOUT`.
+pub fn getsockopt(descriptor: u64, level: u64, option: u64, value: u64, length: u64) -> u64 {
+    const SO_TYPE: u64 = 3;
+    const SO_ERROR: u64 = 4;
+    const SO_SNDBUF: u64 = 7;
+    const SO_RCVBUF: u64 = 8;
+    const PEERCRED: u64 = 17;
+
+    let socket = match socket_of(descriptor) {
+        Ok(socket) => socket,
+        Err(reason) => return reason,
+    };
+    if level == u64::from(SOL_SOCKET) && option == PEERCRED {
+        return error::ENOSYS;
+    }
+    let Some(process) = crate::sched::current_process() else {
+        return error::ENOSYS;
+    };
+    let Some((length_at, _)) = crate::arch::syscall::user_range_for(&process, length, 4, 4, true)
+    else {
+        return error::EFAULT;
+    };
+    // SAFETY: four writable bytes checked above.
+    let room = unsafe { (length_at as *const u32).read_unaligned() };
+    if room < 4 {
+        return EINVAL;
+    }
+    let Some((value_at, _)) = crate::arch::syscall::user_range_for(&process, value, 4, 4, true)
+    else {
+        return error::EFAULT;
+    };
+
+    let answer: i32 = if level == u64::from(SOL_SOCKET) {
+        match option {
+            SO_TYPE => {
+                if socket
+                    .internet_state()
+                    .is_some_and(|internet| internet.datagram)
+                {
+                    kind::DGRAM as i32
+                } else {
+                    kind::STREAM as i32
+                }
+            }
+            SO_ERROR => {
+                if let Some(internet) = socket.internet_state() {
+                    match *internet.state.lock() {
+                        crate::socket::InternetState::Tcp(id)
+                            if crate::net::stream::trouble(id).is_some() =>
+                        {
+                            111 // ECONNREFUSED
+                        }
+                        _ => 0,
+                    }
+                } else {
+                    0
+                }
+            }
+            SO_SNDBUF | SO_RCVBUF => 131_072,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+
+    // SAFETY: both four-byte outputs were validated writable above.
+    unsafe {
+        (value_at as *mut i32).write_unaligned(answer);
+        (length_at as *mut u32).write_unaligned(4);
+    }
+    0
+}
+
+/// `getsockname(fd, address, length)`.
+pub fn getsockname(descriptor: u64, address: u64, length: u64) -> u64 {
+    let socket = match socket_of(descriptor) {
+        Ok(socket) => socket,
+        Err(reason) => return reason,
+    };
+    if let Some(internet) = socket.internet_state() {
+        let interface = crate::net::interface();
+        let (ip, port) = match *internet.state.lock() {
+            crate::socket::InternetState::Udp { port, peer } => (
+                if peer.is_some() || port.is_some() {
+                    interface.ip
+                } else {
+                    [0; 4]
+                },
+                port.unwrap_or(0),
+            ),
+            crate::socket::InternetState::Tcp(id) => (
+                interface.ip,
+                crate::net::stream::local_port(id).unwrap_or(0),
+            ),
+            crate::socket::InternetState::New => ([0; 4], 0),
+        };
+        return if write_sockaddr_in(address, length, ip, port) {
+            0
+        } else {
+            error::EFAULT
+        };
+    }
+    unnamed_unix_address(address, length)
+}
+
+/// `getpeername(fd, address, length)`.
+pub fn getpeername(descriptor: u64, address: u64, length: u64) -> u64 {
+    let socket = match socket_of(descriptor) {
+        Ok(socket) => socket,
+        Err(reason) => return reason,
+    };
+    if let Some(internet) = socket.internet_state() {
+        let peer = match *internet.state.lock() {
+            crate::socket::InternetState::Udp { peer, .. } => peer,
+            crate::socket::InternetState::Tcp(id) => crate::net::stream::peer(id),
+            crate::socket::InternetState::New => None,
+        };
+        let Some((ip, port)) = peer else {
+            return ENOTCONN;
+        };
+        return if write_sockaddr_in(address, length, ip, port) {
+            0
+        } else {
+            error::EFAULT
+        };
+    }
+    if socket.stream().is_none() {
+        return ENOTCONN;
+    }
+    unnamed_unix_address(address, length)
+}
+
+fn unnamed_unix_address(address: u64, length: u64) -> u64 {
+    if address == 0 || length == 0 {
+        return EINVAL;
+    }
+    let Some((at, _)) = crate::arch::syscall::user_range(length, 4, 4) else {
+        return error::EFAULT;
+    };
+    // SAFETY: four bytes inside the user half, read as `socklen_t`.
+    let room = unsafe { core::ptr::read_unaligned(at as *const u32) };
+    if room >= 2 {
+        let Some((into, _)) = crate::arch::syscall::user_range(address, 2, 110) else {
+            return error::EFAULT;
+        };
+        // SAFETY: two bytes inside the user half.
+        unsafe { core::ptr::write_unaligned(into as *mut u16, family::UNIX as u16) };
+    }
+    // SAFETY: as above.
+    unsafe { core::ptr::write_unaligned(at as *mut u32, 2) };
     0
 }

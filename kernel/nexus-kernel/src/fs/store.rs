@@ -37,7 +37,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::gpt;
-use super::nexusfs::{FsError, Kind, Volume, MAX_FILE};
+use super::nexusfs::{FsError, Kind, MAX_FILE, Volume};
 use crate::drivers::virtio_blk;
 use crate::sync::{IrqSpinLock, SleepLock};
 
@@ -176,6 +176,16 @@ pub fn mount() -> Result<Mounted, StoreError> {
 #[must_use]
 pub fn space() -> Option<(u64, u64)> {
     let volume = VOLUME.try_lock()?;
+    let volume = volume.as_ref()?;
+    let (total, free) = volume.space();
+    let size = volume.block_size() as u64;
+    Some((total * size, free * size))
+}
+
+/// Blocks and free blocks, turned into bytes, waiting if the volume is busy.
+#[must_use]
+pub fn space_blocking() -> Option<(u64, u64)> {
+    let volume = VOLUME.lock();
     let volume = volume.as_ref()?;
     let (total, free) = volume.space();
     let size = volume.block_size() as u64;
@@ -705,7 +715,11 @@ pub fn directory(name: &str) -> Result<Arc<Node>, StoreError> {
     let root = root()?;
     match open_child(&root, name) {
         Ok(node) => Ok(node),
-        Err(_) => create_child(&root, name, true),
+        Err(_) => match create_child(&root, name, true) {
+            Ok(node) => Ok(node),
+            Err(StoreError::Fs(FsError::Exists)) => open_child(&root, name),
+            Err(error) => Err(error),
+        },
     }
 }
 

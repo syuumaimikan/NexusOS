@@ -150,7 +150,7 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
     let argument4 = frame.rdi & 0xFFFF_FFFF;
     let argument5 = frame.rbp & 0xFFFF_FFFF;
 
-    if matches!(number, 359..=364 | 366 | 369 | 371) {
+    if matches!(number, 359..=373) {
         TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 
@@ -242,12 +242,11 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
         }
         call::CLOCK_GETTIME | call::CLOCK_GETTIME64 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            let result = if number == call::CLOCK_GETTIME64 {
+            if number == call::CLOCK_GETTIME64 {
                 super::linux::clock_gettime(argument0, argument1)
             } else {
                 clock32(argument0, argument1)
-            };
-            result
+            }
         }
         call::TIME => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -328,19 +327,35 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
         102 => socketcall(argument0, argument1),
         // The newer i386 socket ABI assigns one syscall to each operation.
         // Steam's bootstrap uses this interface rather than legacy socketcall.
-        359 => super::linux_socket::socket(argument0, argument1, argument2),
+        359 => {
+            let descriptor = super::linux_socket::socket(argument0, argument1, argument2);
+            if (descriptor as i64) >= 0 && argument1 & 0o2_000_000 != 0 {
+                if let Some(process) = crate::sched::current_process() {
+                    super::linux_more::mark_cloexec(process.id.0, descriptor);
+                }
+            }
+            descriptor
+        }
         360 => super::linux_socket::socketpair(argument0, argument1, argument2, argument3),
         361 => super::linux_socket::bind(argument0, argument1, argument2),
         362 => super::linux_socket::connect(argument0, argument1, argument2),
         363 => super::linux_socket::listen(argument0, argument1),
         364 => super::linux_socket::accept(argument0, argument1, argument2, argument3),
+        365 => {
+            super::linux_socket::getsockopt(argument0, argument1, argument2, argument3, argument4)
+        }
         366 => super::linux_socket::setsockopt(argument0, argument1, argument2),
+        367 => super::linux_socket::getsockname(argument0, argument1, argument2),
+        368 => super::linux_socket::getpeername(argument0, argument1, argument2),
         369 => super::linux_socket::send_to(
             argument0, argument1, argument2, argument3, argument4, argument5,
         ),
+        370 => super::linux_socket::sendmsg32(argument0, argument1, argument2),
         371 => super::linux_socket::receive_from(
             argument0, argument1, argument2, argument3, argument4, argument5,
         ),
+        372 => super::linux_socket::recvmsg32(argument0, argument1, argument2),
+        373 => super::linux_socket::shutdown(argument0, argument1),
         call::MKDIRAT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             files::mkdirat(argument0, argument1)
@@ -440,7 +455,11 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             crate::arch::percpu::current_thread()
         }
-        call::GETUID | call::GETGID | call::GETEUID | call::GETEGID | 199..=202 => {
+        64 => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            1
+        }
+        call::GETUID | call::GETGID | call::GETEUID | call::GETEGID | 199..=202 | 208 | 210 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             0
         }
@@ -455,7 +474,7 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
         }
         call::IOCTL => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            error::ENOTTY
+            super::linux_more::ioctl(argument0, argument1, argument2)
         }
         call::SET_THREAD_AREA | call::GET_THREAD_AREA => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -954,8 +973,8 @@ fn tls_descriptor(fields: [u32; 4]) -> Result<u64, u64> {
 fn socketcall(operation: u64, arguments: u64) -> u64 {
     use super::linux_socket as socket;
     let count = match operation {
-        1 | 2 | 3 | 5 => 3,
-        4 => 2,
+        1 | 2 | 3 | 5 | 6 | 7 | 16 | 17 => 3,
+        4 | 13 => 2,
         8 | 9 | 10 | 18 => 4,
         11 | 12 => 6,
         14 | 15 => 5,
@@ -973,20 +992,18 @@ fn socketcall(operation: u64, arguments: u64) -> u64 {
         return error::EFAULT;
     };
     let mut values = [0u64; 6];
-    for index in 0..count as usize {
-        values[index] = unsafe { (pointer as *const u32).add(index).read_unaligned() } as u64;
+    for (index, slot) in values.iter_mut().enumerate().take(count as usize) {
+        *slot = unsafe { (pointer as *const u32).add(index).read_unaligned() } as u64;
     }
     let [a, b, c, d, e, f] = values;
-    // The native stream endpoint has no descriptor-level nonblocking mode yet.
-    // MSG_DONTWAIT receives below are implemented, but silently ignoring a
-    // requested SOCK_NONBLOCK would create a blocking descriptor instead.
-    if matches!(operation, 1 | 8) && b & 0o4000 != 0 {
+    // Socket objects retain SOCK_NONBLOCK for AF_INET. socketpair has no
+    // descriptor-level mode yet, so do not silently promise it there.
+    if operation == 8 && b & 0o4000 != 0 {
         return error::ENOSYS;
     }
     TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     match operation {
         1 => {
-            crate::kprintln!("[linux32] socketcall socket family={a} type={b} protocol={c}");
             let descriptor = socket::socket(a, b, c);
             if descriptor as i64 >= 0 && b & 0o2000000 != 0 {
                 super::linux_more::mark_cloexec(process.id.0, descriptor);
@@ -997,6 +1014,8 @@ fn socketcall(operation: u64, arguments: u64) -> u64 {
         3 => socket::connect(a, b, c),
         4 => socket::listen(a, b),
         5 => socket::accept(a, b, c, 0),
+        6 => socket::getsockname(a, b, c),
+        7 => socket::getpeername(a, b, c),
         8 => {
             let result = socket::socketpair(a, b, c, d);
             if result == 0 && b & 0o2000000 != 0 {
@@ -1010,18 +1029,16 @@ fn socketcall(operation: u64, arguments: u64) -> u64 {
             }
             result
         }
-        9 if d & !0x4000 == 0 => socket::send(a, b, c, d),
+        9 if d & !(0x4000 | 0x40) == 0 => socket::send(a, b, c, d),
         10 if d & !0x40 == 0 => socket::receive(a, b, c, d),
-        11 if d & !0x4000 == 0 => socket::send_to(a, b, c, d, e, f),
+        11 if d & !(0x4000 | 0x40) == 0 => socket::send_to(a, b, c, d, e, f),
         12 if d & !0x40 == 0 => socket::receive_from(a, b, c, d, e, f),
-        18 if d == 0 => socket::accept(a, b, c, 0),
+        13 => socket::shutdown(a, b),
         14 => socket::setsockopt(a, b, c),
-        15 => {
-            crate::kprintln!(
-                "[linux32] socketcall option op={operation} fd={a} level={b} option={c} length_arg={e}; not implemented"
-            );
-            error::ENOSYS
-        }
+        15 => socket::getsockopt(a, b, c, d, e),
+        16 => socket::sendmsg32(a, b, c),
+        17 => socket::recvmsg32(a, b, c),
+        18 => socket::accept(a, b, c, d),
         _ => error::ENOSYS,
     }
 }

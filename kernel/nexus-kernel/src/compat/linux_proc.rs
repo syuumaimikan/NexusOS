@@ -18,6 +18,7 @@ enum Entry {
     Arguments,
     Environment,
     Stat,
+    CpuInfo,
 }
 
 pub(super) fn known(path: &str) -> bool {
@@ -32,6 +33,12 @@ fn entry(process: &Process, path: &str) -> Option<Entry> {
         return None;
     }
     let owner = components.next()?;
+    if owner == "cpuinfo" {
+        if components.next().is_some() || path.ends_with('/') {
+            return None;
+        }
+        return Some(Entry::CpuInfo);
+    }
     if owner != "self" && owner != "thread-self" && owner.parse::<u64>().ok()? != process.id.0 {
         return None;
     }
@@ -97,6 +104,7 @@ pub(super) fn open(path: &str, flags: u64) -> Option<u64> {
             Entry::Arguments => ProcessView::Arguments,
             Entry::Environment => ProcessView::Environment,
             Entry::Stat => ProcessView::Stat,
+            Entry::CpuInfo => ProcessView::CpuInfo,
             Entry::Executable => return None,
         },
         position: IrqSpinLock::new(0),
@@ -117,12 +125,12 @@ fn data_metadata(process: &Process, view: ProcessView) -> Metadata {
     Metadata {
         device: 2,
         rdevice: 0,
-        inode: process.id.0 * 4
-            + match view {
-                ProcessView::Arguments => 1,
-                ProcessView::Environment => 2,
-                ProcessView::Stat => 4,
-            },
+        inode: match view {
+            ProcessView::Arguments => process.id.0 * 4 + 1,
+            ProcessView::Environment => process.id.0 * 4 + 2,
+            ProcessView::Stat => process.id.0 * 4 + 4,
+            ProcessView::CpuInfo => 1 << 60,
+        },
         mode: if view == ProcessView::Environment {
             0o100400
         } else {
@@ -157,6 +165,7 @@ pub(super) fn metadata(path: &str, nofollow: bool) -> Option<Result<Metadata, u6
         Entry::Arguments => Ok(data_metadata(&process, ProcessView::Arguments)),
         Entry::Environment => Ok(data_metadata(&process, ProcessView::Environment)),
         Entry::Stat => Ok(data_metadata(&process, ProcessView::Stat)),
+        Entry::CpuInfo => Ok(data_metadata(&process, ProcessView::CpuInfo)),
     })
 }
 
@@ -185,7 +194,9 @@ pub(super) fn read(view: &ProcessData, buffer: u64, count: u64, offset: Option<u
         return (-13i64) as u64;
     }
     if view.view == ProcessView::Stat {
-        let threads = crate::sched::live_threads_of_process(process.id.0).len().max(1);
+        let threads = crate::sched::live_threads_of_process(process.id.0)
+            .len()
+            .max(1);
         let comm: String = process.name.chars().take(15).collect();
         let starttime = process.started_at_ms / 10;
         let stat = alloc::format!(
@@ -198,6 +209,30 @@ pub(super) fn read(view: &ProcessData, buffer: u64, count: u64, offset: Option<u
             starttime
         );
         return read_stat_bytes(view, buffer, count, offset, stat.as_bytes());
+    }
+    if view.view == ProcessView::CpuInfo {
+        use core::fmt::Write;
+        let cpus = crate::arch::percpu::online_count().max(1);
+        let mut info = String::new();
+        for index in 0..cpus {
+            let _ = write!(
+                info,
+                "processor\t: {index}\n\
+                 vendor_id\t: GenuineIntel\n\
+                 cpu family\t: 6\n\
+                 model\t\t: 6\n\
+                 model name\t: NexusOS x86_64 Processor\n\
+                 stepping\t: 3\n\
+                 cpu MHz\t\t: 2500.000\n\
+                 cache size\t: 512 KB\n\
+                 physical id\t: 0\n\
+                 siblings\t: {cpus}\n\
+                 core id\t\t: {index}\n\
+                 cpu cores\t: {cpus}\n\
+                 flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht\n\n"
+            );
+        }
+        return read_stat_bytes(view, buffer, count, offset, info.as_bytes());
     }
     let (start, end) = {
         let image = process.image.lock();
@@ -262,13 +297,9 @@ fn read_stat_bytes(
     if taken == 0 {
         return 0;
     }
-    let Some((output, _)) = crate::arch::syscall::user_range_for(
-        &process,
-        buffer,
-        taken as u64,
-        65536,
-        true,
-    ) else {
+    let Some((output, _)) =
+        crate::arch::syscall::user_range_for(&process, buffer, taken as u64, 65536, true)
+    else {
         return error::EFAULT;
     };
     // SAFETY: the generated line and caller output were bounded above.

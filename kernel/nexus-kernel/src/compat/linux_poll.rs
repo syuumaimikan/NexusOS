@@ -40,7 +40,7 @@ use crate::sync::IrqSpinLock;
 use crate::waitset::{WaitSet, Watched};
 
 use super::linux::error;
-use super::linux_files::{describe, Descriptor};
+use super::linux_files::{Descriptor, describe};
 
 /// The bits `poll` reports, as `poll.h` numbers them.
 pub mod event {
@@ -63,6 +63,8 @@ pub mod epoll {
     pub const OUT: u32 = 0x004;
     pub const ERR: u32 = 0x008;
     pub const HUP: u32 = 0x010;
+    /// One-shot notification: disarm after reporting once until re-armed with `EPOLL_CTL_MOD`.
+    pub const ONESHOT: u32 = 0x4000_0000;
     /// Edge-triggered. Refused; see the note at the top of the file.
     pub const ET: u32 = 0x8000_0000;
 
@@ -102,6 +104,9 @@ struct Interest {
     /// The whole point of `epoll` over `poll`: a program with fifty
     /// descriptors uses this to find out which one it was without a search.
     data: u64,
+    /// Whether this interest is currently active (`EPOLLONESHOT` disarms it
+    /// once an event is delivered until the next `EPOLL_CTL_MOD`).
+    armed: bool,
 }
 
 /// Every `epoll` instance, by process and by the descriptor that names it.
@@ -222,18 +227,25 @@ pub(super) fn ready_now(descriptor: u64) -> i16 {
                         if crate::net::stream::queued(id) > 0 {
                             bits |= event::IN;
                         }
+                        if crate::net::stream::has_trouble(id) {
+                            bits |= event::ERR;
+                        }
                         match crate::net::stream::state(id) {
                             Some(crate::net::stream::State::Established) => bits |= event::OUT,
-                            Some(crate::net::stream::State::CloseWait | crate::net::stream::State::Closed) => {
-                                bits |= event::IN | event::HUP;
+                            Some(
+                                crate::net::stream::State::CloseWait
+                                | crate::net::stream::State::Closed,
+                            )
+                            | None => {
+                                bits |= event::IN | event::OUT | event::HUP;
                             }
                             _ => {}
                         }
                         bits
                     }
-                    crate::socket::InternetState::Udp { port: Some(port), .. } => {
+                    crate::socket::InternetState::Udp { port, .. } => {
                         event::OUT
-                            | if crate::net::datagram::readable(port) {
+                            | if port.is_some_and(crate::net::datagram::readable) {
                                 event::IN
                             } else {
                                 0
@@ -242,11 +254,7 @@ pub(super) fn ready_now(descriptor: u64) -> i16 {
                     _ => 0,
                 }
             } else if let Some(listener) = socket.listener() {
-                if listener.ready() {
-                    event::IN
-                } else {
-                    0
-                }
+                if listener.ready() { event::IN } else { 0 }
             } else if let Some(stream) = socket.stream() {
                 let mut bits = 0;
                 if stream.readable() {
@@ -517,7 +525,11 @@ pub fn control(set: u64, operation: u64, descriptor: u64, event: u64) -> u64 {
     }
 
     let interest = if operation == epoll::CTL_DEL {
-        Interest { events: 0, data: 0 }
+        Interest {
+            events: 0,
+            data: 0,
+            armed: false,
+        }
     } else {
         let Some((pointer, _)) =
             crate::arch::syscall::user_range(event, EPOLL_EVENT_BYTES, EPOLL_EVENT_BYTES)
@@ -533,7 +545,11 @@ pub fn control(set: u64, operation: u64, descriptor: u64, event: u64) -> u64 {
             crate::kprintln!("[linux] an edge-triggered epoll is not translated; answering EINVAL");
             return error::EINVAL;
         }
-        Interest { events, data }
+        Interest {
+            events,
+            data,
+            armed: events != epoll::ONESHOT,
+        }
     };
 
     let mut sets = SETS.lock();
@@ -598,15 +614,22 @@ pub fn wait(set: u64, events: u64, most: u64, timeout: i64) -> u64 {
         };
 
         let mut reported = 0u64;
+        let mut disarmed: Vec<u32> = Vec::new();
         for (descriptor, want) in &interests {
             if reported >= most {
                 break;
+            }
+            if !want.armed {
+                continue;
             }
             let now = ready_now(u64::from(*descriptor));
             if now & event::NVAL != 0 {
                 // A descriptor that has stopped naming anything. Reported as an
                 // error rather than dropped silently, so the program finds out.
                 write_event(pointer, reported as usize, epoll::ERR, want.data);
+                if want.events & epoll::ONESHOT != 0 {
+                    disarmed.push(*descriptor);
+                }
                 reported += 1;
                 continue;
             }
@@ -629,7 +652,20 @@ pub fn wait(set: u64, events: u64, most: u64, timeout: i64) -> u64 {
             }
             if bits != 0 {
                 write_event(pointer, reported as usize, bits, want.data);
+                if want.events & epoll::ONESHOT != 0 {
+                    disarmed.push(*descriptor);
+                }
                 reported += 1;
+            }
+        }
+        if !disarmed.is_empty() {
+            let mut sets = SETS.lock();
+            if let Some(map) = sets.get_mut(&(process.id.0, set)) {
+                for fd in disarmed {
+                    if let Some(entry) = map.get_mut(&fd) {
+                        entry.armed = false;
+                    }
+                }
             }
         }
         if reported > 0 {
@@ -650,14 +686,18 @@ pub fn wait(set: u64, events: u64, most: u64, timeout: i64) -> u64 {
 
         let members: Vec<Watched> = interests
             .iter()
+            .filter(|(_, want)| want.armed)
             .filter_map(|(descriptor, _)| watchable(u64::from(*descriptor)))
             .collect();
         let has_internet = interests
             .iter()
-            .any(|(descriptor, _)| is_internet_socket(u64::from(*descriptor)));
+            .any(|(descriptor, want)| want.armed && is_internet_socket(u64::from(*descriptor)));
         WAITED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if !sleep_on(&members, recheck_deadline(deadline, has_internet), || {
             interests.iter().any(|(descriptor, want)| {
+                if !want.armed {
+                    return false;
+                }
                 let now = ready_now(u64::from(*descriptor));
                 now & (event::ERR | event::HUP | event::NVAL) != 0
                     || (now & event::IN != 0 && want.events & epoll::IN != 0)

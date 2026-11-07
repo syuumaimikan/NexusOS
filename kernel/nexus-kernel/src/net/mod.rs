@@ -748,19 +748,38 @@ fn record_address(interface: &Interface) {
         Err(error) => kprintln!("[net ] could not write system/network.txt: {error}"),
     }
 
-    let resolver = format!(
-        "nameserver {}.{}.{}.{}\n",
-        interface.dns[0], interface.dns[1], interface.dns[2], interface.dns[3],
-    );
+    let resolver = if interface.dns == [10, 0, 2, 3] {
+        format!(
+            "nameserver 1.1.1.1\n\
+             nameserver 8.8.8.8\n\
+             nameserver {}.{}.{}.{}\n",
+            interface.dns[0], interface.dns[1], interface.dns[2], interface.dns[3],
+        )
+    } else {
+        format!(
+            "nameserver {}.{}.{}.{}\n\
+             nameserver 1.1.1.1\n\
+             nameserver 8.8.8.8\n",
+            interface.dns[0], interface.dns[1], interface.dns[2], interface.dns[3],
+        )
+    };
     let result = (|| {
         let root = crate::fs::store::directory("linux")?;
         let etc = match crate::fs::store::open_child(&root, "etc") {
             Ok(node) if node.is_directory() => node,
-            Ok(_) => return Err(crate::fs::store::StoreError::Fs(
-                crate::fs::nexusfs::FsError::WrongKind,
-            )),
+            Ok(_) => {
+                return Err(crate::fs::store::StoreError::Fs(
+                    crate::fs::nexusfs::FsError::WrongKind,
+                ));
+            }
             Err(crate::fs::store::StoreError::Fs(crate::fs::nexusfs::FsError::NotFound)) => {
-                crate::fs::store::create_child(&root, "etc", true)?
+                match crate::fs::store::create_child(&root, "etc", true) {
+                    Ok(node) => node,
+                    Err(crate::fs::store::StoreError::Fs(crate::fs::nexusfs::FsError::Exists)) => {
+                        crate::fs::store::open_child(&root, "etc")?
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             Err(error) => return Err(error),
         };

@@ -185,7 +185,17 @@ pub(super) fn root() -> Result<Arc<Node>, u64> {
         // machine's.
         Ok(_) => Err(ENOTDIR),
         Err(StoreError::Fs(crate::fs::nexusfs::FsError::NotFound)) => {
-            store::create_child(&top, "linux", true).map_err(errno)
+            match store::create_child(&top, "linux", true) {
+                Ok(node) => Ok(node),
+                Err(StoreError::Fs(crate::fs::nexusfs::FsError::Exists)) => {
+                    match store::open_child(&top, "linux") {
+                        Ok(node) if node.is_directory() => Ok(node),
+                        Ok(_) => Err(ENOTDIR),
+                        Err(error) => Err(errno(error)),
+                    }
+                }
+                Err(error) => Err(errno(error)),
+            }
         }
         Err(error) => Err(errno(error)),
     }
@@ -199,9 +209,17 @@ pub fn prepare_root() -> Result<(), u64> {
         Ok(node) if node.is_directory() => Ok(()),
         Ok(_) => Err(ENOTDIR),
         Err(StoreError::Fs(crate::fs::nexusfs::FsError::NotFound)) => {
-            store::create_child(&root, "tmp", true)
-                .map(|_| ())
-                .map_err(errno)
+            match store::create_child(&root, "tmp", true) {
+                Ok(_) => Ok(()),
+                Err(StoreError::Fs(crate::fs::nexusfs::FsError::Exists)) => {
+                    match store::open_child(&root, "tmp") {
+                        Ok(node) if node.is_directory() => Ok(()),
+                        Ok(_) => Err(ENOTDIR),
+                        Err(error) => Err(errno(error)),
+                    }
+                }
+                Err(error) => Err(errno(error)),
+            }
         }
         Err(error) => Err(errno(error)),
     }
@@ -280,12 +298,13 @@ pub(super) fn flock_identity(descriptor: u64) -> Result<Option<(u64, u64)>, u64>
     match describe(descriptor)? {
         Descriptor::File(node, _) => Ok(Some((1, u64::from(node.inode())))),
         Descriptor::Other(crate::ipc::Object::ProcessData(view)) => {
-            let leaf = match view.view {
-                crate::process::ProcessView::Arguments => 1,
-                crate::process::ProcessView::Environment => 2,
-                crate::process::ProcessView::Stat => 4,
+            let inode = match view.view {
+                crate::process::ProcessView::Arguments => view.owner.0 * 4 + 1,
+                crate::process::ProcessView::Environment => view.owner.0 * 4 + 2,
+                crate::process::ProcessView::Stat => view.owner.0 * 4 + 4,
+                crate::process::ProcessView::CpuInfo => 1 << 60,
             };
-            Ok(Some((2, view.owner.0 * 4 + leaf)))
+            Ok(Some((2, inode)))
         }
         Descriptor::Other(crate::ipc::Object::Console(console))
             if console.stream == EMPTY_MEMFD =>
@@ -766,7 +785,17 @@ fn prepare_install(path: &str) -> Result<(Arc<Node>, Arc<Node>, &str), u64> {
             // replace: whatever is there was put there on purpose.
             Ok(_) => return Err(ENOTDIR),
             Err(StoreError::Fs(crate::fs::nexusfs::FsError::NotFound)) => {
-                store::create_child(&node, component, true).map_err(errno)?
+                match store::create_child(&node, component, true) {
+                    Ok(created) => created,
+                    Err(StoreError::Fs(crate::fs::nexusfs::FsError::Exists)) => {
+                        match store::open_child(&node, component) {
+                            Ok(found) if found.is_directory() => found,
+                            Ok(_) => return Err(ENOTDIR),
+                            Err(error) => return Err(errno(error)),
+                        }
+                    }
+                    Err(error) => return Err(errno(error)),
+                }
             }
             Err(error) => return Err(errno(error)),
         };
