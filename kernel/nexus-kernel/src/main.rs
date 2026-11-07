@@ -651,9 +651,9 @@ fn monitor_thread(_argument: usize) {
             }
         }
         if drivers::mouse::is_present() {
-            let (bytes, packets, desynchronised, overflows) = drivers::mouse::statistics();
+            let (bytes, packets, desynchronised, overflows, late) = drivers::mouse::statistics();
             kprintln!(
-                "[mon ] pointer {packets} packets from {bytes} bytes,              {desynchronised} resynchronised, {overflows} overflowed"
+                "[mon ] pointer {packets} packets from {bytes} bytes,              {desynchronised} resynchronised, {overflows} overflowed, {late} late"
             );
         }
         // Anything a fault left behind. Written from here rather than from the

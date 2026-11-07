@@ -217,6 +217,9 @@ struct Pointer {
     held: bool,
     /// The same, for the right button, which puts a window away.
     other_held: bool,
+    /// Every button as of the last movement acted on, so that a run of
+    /// movements with nothing pressed or released can be acted on once.
+    buttons: u32,
     /// What is under it, saved before the cursor was drawn over it.
     beneath: [u32; CURSOR * CURSOR],
     /// Whether `beneath` holds anything, and where it was taken from.
@@ -254,6 +257,53 @@ struct Drag {
 
 /// How large the pointer is, in pixels.
 const CURSOR: usize = 10;
+
+/// How the pointer has felt: how many pointer messages arrived, how many
+/// frames were drawn for them, and how long those frames took.
+///
+/// Reported every few seconds while the pointer is in use, because a pointer
+/// that lags behind the hand looks fine in every other figure this program
+/// keeps -- every packet arrives, every click lands -- and is still broken.
+struct Feel {
+    frames: u64,
+    total_ms: u64,
+    worst_ms: u64,
+    reported_moves: u32,
+    last_report: u64,
+}
+
+impl Feel {
+    fn new() -> Self {
+        Self {
+            frames: 0,
+            total_ms: 0,
+            worst_ms: 0,
+            reported_moves: 0,
+            last_report: nexus_user::uptime(),
+        }
+    }
+
+    /// Say how it went, at most every five seconds and only if it moved.
+    fn report(&mut self, moves: u32) {
+        let now = nexus_user::uptime();
+        if now.saturating_sub(self.last_report) < 5_000 || moves == self.reported_moves {
+            return;
+        }
+        let messages = moves.wrapping_sub(self.reported_moves);
+        let average = self.total_ms / self.frames.max(1);
+        nexus_user::log(&alloc::format!(
+            "compositor: pointer {messages} messages in {} frames, {average} ms average, {} ms worst",
+            self.frames,
+            self.worst_ms
+        ))
+        .ok();
+        self.reported_moves = moves;
+        self.last_report = now;
+        self.frames = 0;
+        self.total_ms = 0;
+        self.worst_ms = 0;
+    }
+}
 
 /// What a movement looks like on the wire: two signed numbers and the buttons.
 mod pointer {
@@ -1849,6 +1899,7 @@ fn serve(
         y: screen.y + screen.height / 2,
         held: false,
         other_held: false,
+        buttons: 0,
         beneath: [0; CURSOR * CURSOR],
         drawn: None,
         dragging: None,
@@ -1890,6 +1941,7 @@ fn serve(
     // scanout began.
     let mut pending = Region::nothing();
     let mut batched = 0u32;
+    let mut feel = Feel::new();
 
     announce(shell, tiles, focus, &mut reported);
     repaint(
@@ -1968,6 +2020,7 @@ fn serve(
         if count == 0 {
             break;
         }
+        let pointer_batch = keys[..count].contains(&KEY_POINTER);
 
         if asleep {
             // Anything at all: a key, a click, a window finishing. The screen
@@ -2049,8 +2102,8 @@ fn serve(
                     // What the pointer says it changed. A movement with no
                     // button held changes nothing but the pointer itself, and
                     // that is the overwhelming majority of what a mouse sends.
-                    Some(moved_damage) => {
-                        moved += 1;
+                    Some((messages, moved_damage)) => {
+                        moved += messages;
                         announce(shell, tiles, focus, &mut reported);
                         pending = pending.union(moved_damage);
                     }
@@ -2444,6 +2497,7 @@ fn serve(
 
         if !asleep && !pending.is_empty() {
             batched += 1;
+            let started = nexus_user::uptime();
             repaint(
                 screen,
                 tiles,
@@ -2456,7 +2510,25 @@ fn serve(
                 pending,
             );
             pending = Region::nothing();
+            if pointer_batch {
+                let took = nexus_user::uptime().saturating_sub(started);
+                feel.frames += 1;
+                feel.total_ms += took;
+                feel.worst_ms = feel.worst_ms.max(took);
+            }
+        } else if !asleep && pointing && cursor.drawn != Some((cursor.x, cursor.y)) {
+            // Only the pointer moved, which is nearly everything a mouse
+            // does. What it covered is put back and it is drawn again where it
+            // now is -- two hundred pixels, where a repaint would redraw every
+            // window, title and shadow under it and blur a whole glass bar.
+            let started = nexus_user::uptime();
+            move_cursor(screen, &mut cursor);
+            let took = nexus_user::uptime().saturating_sub(started);
+            feel.frames += 1;
+            feel.total_ms += took;
+            feel.worst_ms = feel.worst_ms.max(took);
         }
+        feel.report(moved);
         // A shown reply promises that this batch has finished reading the
         // shared surface. It must follow repaint, including for Wayland frame
         // callbacks layered on the native display protocol. Hidden/asleep
@@ -3689,8 +3761,22 @@ fn read_key(
 /// button went down and has no idea what it went down on.
 ///
 /// Returns what changed on screen, or `None` to stop. The pointer's own
-/// rectangle is not included: every repaint covers that anyway, because the
-/// pixels underneath it have to be repainted before it is drawn again.
+/// rectangle is not included: the pointer is put back and drawn again on its
+/// own, without repainting the scene, whenever it is the only thing that
+/// moved.
+///
+/// Everything queued is taken, not one movement. A mouse reports a hundred
+/// times a second or more, and a frame here can take longer than a report --
+/// so a compositor that read one movement per frame fell further behind the
+/// hand with every frame, until the queue was full and the kernel had to hold
+/// movements back. The pointer then trailed the hand by seconds. What is
+/// queued is now read in one go, the pointer follows every step of it, and
+/// what the movement *does* -- a window carried, a corner dragged -- happens
+/// once for the lot, at where the pointer ended up.
+///
+/// Presses and releases are never folded together: a movement whose buttons
+/// differ from the last is acted on where it happened, after whatever was
+/// owed with the old buttons, so a click is never moved and never lost.
 fn read_pointer(
     screen: &Screen,
     set: Handle,
@@ -3699,26 +3785,81 @@ fn read_pointer(
     cursor: &mut Pointer,
     focus: &mut usize,
     order: &mut [usize; CLIENTS],
-) -> Option<Region> {
-    let mut message = [0u8; 32];
-    let mut none = [Handle(0); 1];
-    let Ok(received) = nexus_user::receive(POINTER, &mut message, &mut none) else {
-        // The kernel has stopped sending; there is still a screen to composite.
-        nexus_user::unwatch(set, KEY_POINTER).ok();
-        return Some(Region::nothing());
-    };
-    if received.bytes < pointer::SIZE {
-        failed("compositor: FAILED: a pointer movement arrived in the wrong shape");
-        return None;
+) -> Option<(u32, Region)> {
+    let mut damage = Region::nothing();
+    let mut messages = 0u32;
+    // Movement read with unchanged buttons and not yet acted on.
+    let mut owed = false;
+    // The kernel bounds an inbox at 64 messages; anything that arrives while
+    // these are read is for the next turn round the loop.
+    for _ in 0..64 {
+        if messages > 0 && !pointer_ready(set) {
+            break;
+        }
+        let mut message = [0u8; 32];
+        let mut none = [Handle(0); 1];
+        let Ok(received) = nexus_user::receive(POINTER, &mut message, &mut none) else {
+            // The kernel has stopped sending; there is still a screen to
+            // composite.
+            nexus_user::unwatch(set, KEY_POINTER).ok();
+            break;
+        };
+        if received.bytes < pointer::SIZE {
+            failed("compositor: FAILED: a pointer movement arrived in the wrong shape");
+            return None;
+        }
+        messages += 1;
+        nudge(screen, cursor, read_i32(&message, 0), read_i32(&message, 4));
+        let buttons = read_u32(&message, 8);
+        if buttons == cursor.buttons {
+            owed = true;
+            continue;
+        }
+        if owed {
+            damage = damage.union(act_on_pointer(
+                screen,
+                tiles,
+                shell,
+                cursor,
+                focus,
+                order,
+                cursor.buttons,
+            )?);
+            owed = false;
+        }
+        damage = damage.union(act_on_pointer(
+            screen, tiles, shell, cursor, focus, order, buttons,
+        )?);
     }
+    if owed {
+        damage = damage.union(act_on_pointer(
+            screen,
+            tiles,
+            shell,
+            cursor,
+            focus,
+            order,
+            cursor.buttons,
+        )?);
+    }
+    Some((messages, damage))
+}
 
-    let dx = read_i32(&message, 0);
-    let dy = read_i32(&message, 4);
-    let buttons = read_u32(&message, 8);
-    let previous_pointer = cursor.drawn.map_or(Region::nothing(), |(x, y)| {
-        Region::of(x, y, CURSOR as u32, CURSOR as u32)
-    });
+/// Whether another pointer movement is already queued.
+fn pointer_ready(set: Handle) -> bool {
+    let mut ready = [0u64; 64];
+    matches!(
+        nexus_user::wait_any_until(set, &mut ready, 0),
+        Ok(count) if ready[..count].contains(&KEY_POINTER)
+    )
+}
 
+/// Move the pointer by one report's worth.
+///
+/// One report at a time, clamped each time, rather than summed and clamped
+/// once: a pointer pushed into an edge stops there, and coming back from it
+/// has to start at the edge rather than from wherever the sum had gone.
+fn nudge(screen: &Screen, cursor: &mut Pointer, dx: i32, dy: i32) {
     // Clamped to the rectangle this program owns. A pointer that could leave it
     // would be drawn over the kernel's panel, which this program does not own
     // and must not touch.
@@ -3735,15 +3876,25 @@ fn read_pointer(
         screen.y,
         screen.y + screen.height - CURSOR as u32,
     );
+}
 
+/// Do what the buttons say, with the pointer where it now is.
+///
+/// Returns what changed on screen besides the pointer itself, or `None` to
+/// stop.
+fn act_on_pointer(
+    screen: &Screen,
+    tiles: &mut [Option<Tile>; CLIENTS],
+    shell: &mut Option<Tile>,
+    cursor: &mut Pointer,
+    focus: &mut usize,
+    order: &mut [usize; CLIENTS],
+    buttons: u32,
+) -> Option<Region> {
+    cursor.buttons = buttons;
     let pressed = buttons & pointer::LEFT != 0;
     let put_away = buttons & pointer::RIGHT != 0;
-    // Pointer movement still damages its old and new positions, even when no
-    // client is drawing. Otherwise an idle desktop leaves a stale pointer and
-    // a later partial repaint strands its old pixels outside the damage.
-    let pointer_damage =
-        previous_pointer.union(Region::of(cursor.x, cursor.y, CURSOR as u32, CURSOR as u32));
-    let mut damage = pointer_damage;
+    let mut damage = Region::nothing();
 
     // The right button on a title bar puts a window away. Checked before the
     // left button's business, because the two are different acts and a window
@@ -3793,7 +3944,7 @@ fn read_pointer(
         }
         // Nothing yet: what a press in the strip changes is decided by the
         // desktop, and arrives as a command.
-        return Some(pointer_damage);
+        return Some(Region::nothing());
     }
 
     if pressed && !cursor.held {
@@ -4119,6 +4270,13 @@ fn repaint(
     // covers are freshly painted before it is drawn again. Without that, the
     // saved pixels underneath it would be saved from a framebuffer that already
     // had a pointer in it, and the pointer would smear.
+    //
+    // And before anything is drawn, the pointer comes off the screen: what it
+    // covered goes back where it was. A glass pane samples the framebuffer
+    // around what it repaints, and a pointer left there would be blurred into
+    // the glass; a pointer that has moved since would otherwise be left behind
+    // wherever the damage does not reach.
+    let uncovered = restore_cursor(screen, cursor);
     let mut damage = damage.union(Region::of(cursor.x, cursor.y, CURSOR as u32, CURSOR as u32));
     // The desktop owns one surface, projected to two places. Its former top
     // strip is now the screen's top bar, so its damage must follow it too.
@@ -4170,6 +4328,10 @@ fn repaint(
         bottom: damage.bottom.min(screen.screen_height),
     };
     if damage.is_empty() {
+        if pointing {
+            draw_cursor(screen, cursor);
+        }
+        flush(screen, uncovered);
         return;
     }
     clip::set(damage);
@@ -4178,10 +4340,6 @@ fn repaint(
         u64::from(damage.area()),
         core::sync::atomic::Ordering::Relaxed,
     );
-
-    // The saved pixels are from before this repaint and mean nothing after it,
-    // so the cursor is forgotten rather than restored.
-    cursor.drawn = None;
 
     // The background. A colour underneath in case the wallpaper has not drawn
     // yet, and then the wallpaper over it -- which is one program's surface
@@ -4259,13 +4417,32 @@ fn repaint(
     // Unconditional on purpose. A compositor that asked first whether it was on
     // a GPU would be a compositor that has to know, and the branch would be
     // wrong on whichever machine nobody tested.
+    flush(screen, damage);
+    // Where the pointer was, if the damage did not cover it: it has moved,
+    // and what it left behind has to reach the screen too.
+    if damage.union(uncovered) != damage {
+        flush(screen, uncovered);
+    }
+}
+
+/// Tell the display that a rectangle of the framebuffer has changed.
+fn flush(screen: &Screen, area: Region) {
+    let area = Region {
+        left: area.left.min(screen.screen_width),
+        top: area.top.min(screen.screen_height),
+        right: area.right.min(screen.screen_width),
+        bottom: area.bottom.min(screen.screen_height),
+    };
+    if area.is_empty() {
+        return;
+    }
     let handle = nexus_user::Handle(SCREEN_HANDLE.load(core::sync::atomic::Ordering::Acquire));
     nexus_user::display_flush(
         handle,
-        damage.left,
-        damage.top,
-        damage.right - damage.left,
-        damage.bottom - damage.top,
+        area.left,
+        area.top,
+        area.right - area.left,
+        area.bottom - area.top,
     )
     .ok();
 }
@@ -4656,6 +4833,50 @@ fn draw_cursor(screen: &Screen, cursor: &mut Pointer) {
         }
     }
     cursor.drawn = Some((cursor.x, cursor.y));
+}
+
+/// Take the pointer off the screen, putting back what it covered.
+///
+/// Returns where it was, or nothing if it was not drawn. The saved pixels are
+/// the scene as the last frame left it -- every repaint covers the pointer's
+/// rectangle before drawing it again -- so putting them back leaves exactly
+/// the screen there would have been without a pointer.
+fn restore_cursor(screen: &Screen, cursor: &mut Pointer) -> Region {
+    let Some((x, y)) = cursor.drawn.take() else {
+        return Region::nothing();
+    };
+    for row in 0..CURSOR {
+        // The same pixels `draw_cursor` covered and no others.
+        for column in 0..=row {
+            let offset = (((y as usize + row) * screen.stride as usize) + x as usize + column) * 4;
+            // SAFETY: the framebuffer is mapped writable and this is a pixel
+            // the cursor was drawn over, inside the rectangle this program
+            // owns.
+            unsafe {
+                core::ptr::write_volatile(
+                    (FRAMEBUFFER_AT + offset) as *mut u32,
+                    cursor.beneath[row * CURSOR + column],
+                );
+            }
+        }
+    }
+    Region::of(x, y, CURSOR as u32, CURSOR as u32)
+}
+
+/// Move the pointer without repainting anything else.
+fn move_cursor(screen: &Screen, cursor: &mut Pointer) {
+    let before = restore_cursor(screen, cursor);
+    draw_cursor(screen, cursor);
+    let after = Region::of(cursor.x, cursor.y, CURSOR as u32, CURSOR as u32);
+    // One rectangle when the two are close, which is nearly always; two when
+    // they are not, so a flick across the screen does not send the screen.
+    let both = before.union(after);
+    if both.area() <= 4 * after.area() {
+        flush(screen, both);
+    } else {
+        flush(screen, before);
+        flush(screen, after);
+    }
 }
 
 /// Read a little-endian `u32` out of a message.

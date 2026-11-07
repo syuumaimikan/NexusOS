@@ -187,6 +187,15 @@ static PACKETS: AtomicU64 = AtomicU64::new(0);
 static DESYNCHRONISED: AtomicU64 = AtomicU64::new(0);
 /// Packets whose movement did not fit.
 static OVERFLOWS: AtomicU64 = AtomicU64::new(0);
+/// Packets the reader's queue had no room for when they arrived.
+///
+/// Counted rather than hidden: a pointer that lags behind the hand is
+/// invisible in every other figure here, and this is the one that says
+/// whoever draws the pointer is not keeping up. None of them is lost -- see
+/// `OWED` -- but every one of them reached the screen late.
+static LATE: AtomicU64 = AtomicU64::new(0);
+/// Movement that could not be queued, carried into the next packet.
+static OWED: IrqSpinLock<Option<(i32, i32, u32)>> = IrqSpinLock::new(None);
 /// Whether the device answered at bring-up.
 static PRESENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -359,15 +368,40 @@ pub unsafe fn on_interrupt() {
         buttons |= wire::MIDDLE;
     }
 
-    let mut message = [0u8; wire::SIZE];
-    message[0..4].copy_from_slice(&movement.dx.to_le_bytes());
-    message[4..8].copy_from_slice(&movement.dy.to_le_bytes());
-    message[8..12].copy_from_slice(&buttons.to_le_bytes());
+    let mut dx = movement.dx;
+    let mut dy = movement.dy;
 
-    // A failure is dropped. A full queue means whoever is drawing the pointer
-    // is not keeping up with the hand moving it, which is a thing that happens;
-    // the movement is stale by the time it would be complained about.
-    endpoint.send(&message, alloc::vec::Vec::new()).ok();
+    // A full queue means whoever is drawing the pointer is not keeping up
+    // with the hand moving it. Dropping the packet used to be the answer, and
+    // it is the wrong one: every dropped delta is distance the pointer never
+    // travels, so it drifts away from the hand and never comes back. What
+    // could not be sent is owed instead, and added to the next movement.
+    let mut owed = OWED.lock();
+    if let Some((owed_dx, owed_dy, owed_buttons)) = owed.take() {
+        // Same buttons: one movement, sent as one. Different buttons: the
+        // owed one goes first if there is room, so the press or release it
+        // carried is not folded into a different one.
+        if owed_buttons == buttons || send(&endpoint, owed_dx, owed_dy, owed_buttons).is_err() {
+            dx = dx.saturating_add(owed_dx);
+            dy = dy.saturating_add(owed_dy);
+        }
+    }
+    if send(&endpoint, dx, dy, buttons).is_err() {
+        LATE.fetch_add(1, Ordering::Relaxed);
+        *owed = Some((dx, dy, buttons));
+    }
+}
+
+/// Queue one movement for the reader.
+fn send(endpoint: &crate::ipc::Endpoint, dx: i32, dy: i32, buttons: u32) -> Result<(), ()> {
+    let mut message = [0u8; wire::SIZE];
+    message[0..4].copy_from_slice(&dx.to_le_bytes());
+    message[4..8].copy_from_slice(&dy.to_le_bytes());
+    message[8..12].copy_from_slice(&buttons.to_le_bytes());
+    endpoint
+        .send(&message, alloc::vec::Vec::new())
+        .map(|_| ())
+        .map_err(|_| ())
 }
 
 /// Whether a mouse answered at bring-up.
@@ -376,13 +410,15 @@ pub fn is_present() -> bool {
     PRESENT.load(Ordering::Acquire)
 }
 
-/// Bytes, packets, resynchronisations and overflows.
+/// Bytes, packets, resynchronisations, overflows, and packets that found the
+/// reader's queue full and were carried into a later one.
 #[must_use]
-pub fn statistics() -> (u64, u64, u64, u64) {
+pub fn statistics() -> (u64, u64, u64, u64, u64) {
     (
         BYTES.load(Ordering::Relaxed),
         PACKETS.load(Ordering::Relaxed),
         DESYNCHRONISED.load(Ordering::Relaxed),
         OVERFLOWS.load(Ordering::Relaxed),
+        LATE.load(Ordering::Relaxed),
     )
 }

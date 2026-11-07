@@ -138,20 +138,16 @@ try {
         $writer.WriteLine('mouse_button 0')
         Start-Sleep -Milliseconds 200
 
-        # Resize it first, while its corner is where the layout put it. The
-        # first tile starts four pixels in from the left and top and is half the
-        # display wide, so its grip -- the last twelve pixels of it -- is a
-        # little under a thousand across and a little above the strip. Driving
-        # into the bottom left corner and coming back up and right lands there,
-        # without this script having to know where the pointer was.
+        # Resize it first, while its corner is where the layout put it.
+        # Tile 0 is placed at (160, 138) with size 700x600, so its corner grip
+        # (the last 12 pixels) is around (854, 732). Driving from top-left lands
+        # there reliably without needing absolute cursor positioning.
         Write-Host '==> Resizing a window by its corner' -ForegroundColor Cyan
-        Reset-Pointer -Dx -60 -Dy 60
-        # Aimed at the middle of the grip rather than its edge, and in small
-        # steps: under load the guest can miss a packet, and a movement made of
-        # one large delta loses all of it where one made of twenty loses a
-        # twentieth.
-        Move-Pointer -Dx 0 -Dy -11 -Steps 4    # y about 1155, inside the grip
-        Move-Pointer -Dx 50 -Dy 0 -Steps 19    # x about 950, likewise
+        Reset-Pointer -Dx -60 -Dy -60
+        Move-Pointer -Dx 50 -Dy 0 -Steps 17    # x=850
+        Move-Pointer -Dx 4 -Dy 0 -Steps 1      # x=854
+        Move-Pointer -Dx 0 -Dy 50 -Steps 14    # y=700
+        Move-Pointer -Dx 0 -Dy 32 -Steps 1     # y=732
         Start-Sleep -Milliseconds 150
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 200
@@ -160,17 +156,12 @@ try {
         Start-Sleep -Milliseconds 400
 
         # And carry a window. The title bar is the only part that can be taken
-        # hold of, and it is fourteen pixels of the top of the tile -- so the
-        # pointer goes to the top of the display, where it clamps, and comes
-        # back down by ten.
-        #
-        # Negative is upwards here. QEMU's monitor takes screen coordinates and
-        # its PS/2 emulation flips the sign on the way to the guest, because a
-        # mouse reports Y increasing upwards and a screen has it increasing
-        # downwards. Both flips are real and they are in different places.
+        # hold of; for Tile 0 (resized to 300 wide) it is at x=160..460, y=138..166.
+        # Moving to (300, 150) puts the pointer squarely in the bar.
         Write-Host '==> Carrying a window by its title bar' -ForegroundColor Cyan
-        Reset-Pointer -Dx 0 -Dy -60
-        Move-Pointer -Dx 0 -Dy 5 -Steps 2      # y about 10, inside the bar
+        Reset-Pointer -Dx -60 -Dy -60
+        Move-Pointer -Dx 50 -Dy 0 -Steps 6     # x=300
+        Move-Pointer -Dx 0 -Dy 50 -Steps 3     # y=150
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 200
         # Down and to the right until both the window and the pointer run into
@@ -181,11 +172,13 @@ try {
         Start-Sleep -Milliseconds 300
 
         # And put a window away. The second tile was never moved, so its title
-        # bar is still along the top of the right-hand half of the display.
+        # bar is at (510..1210, 208..236). Point (860, 220) is in the middle.
         Write-Host '==> Minimising a window and restoring it' -ForegroundColor Cyan
         Reset-Pointer -Dx -60 -Dy -60
-        Move-Pointer -Dx 60 -Dy 0 -Steps 20    # x about 1200, the second tile
-        Move-Pointer -Dx 0 -Dy 5 -Steps 2      # y about 10, its title bar
+        Move-Pointer -Dx 50 -Dy 0 -Steps 17    # x=850
+        Move-Pointer -Dx 10 -Dy 0 -Steps 1     # x=860
+        Move-Pointer -Dx 0 -Dy 50 -Steps 4     # y=200
+        Move-Pointer -Dx 0 -Dy 20 -Steps 1     # y=220
         # The right button, which is the one that puts a window away.
         $writer.WriteLine('mouse_button 2')
         Start-Sleep -Milliseconds 250
@@ -202,12 +195,8 @@ try {
         # height and right past the button that starts a program.
         Write-Host '==> Bringing a window back from the desktop' -ForegroundColor Cyan
         Reset-Pointer -Dx -60 -Dy 60
-        # Up into the middle of the tabs rather than just inside their bottom
-        # edge, in several small steps rather than one. A single delta that the
-        # guest misses under load leaves the pointer below the tabs entirely,
-        # where the click proves the button arrived and nothing about what it
-        # landed on -- which is exactly what it did.
-        Move-Pointer -Dx 0 -Dy -3 -Steps 5     # y about 1184: the middle of a tab
+        # Bottom left park puts cursor.y at 1190 (local dock y = 1190 - 1108 = 82, inside tab y: 77..87).
+        Move-Pointer -Dx 0 -Dy -1 -Steps 1     # local y about 81: exactly inside tab height (77..87)
 
         # Where the second tab is, read out of the machine rather than guessed.
         # The desktop says where its tabs are whenever that changes, and it
@@ -230,13 +219,14 @@ try {
         $writer.WriteLine('mouse_button 0')
         Start-Sleep -Milliseconds 400
 
-        # And back left onto the button that starts a program. Nothing on this
-        # machine could do that before: every process that has ever run was
-        # started at boot or by another program deciding to. This is a person
-        # pressing something.
+        # And back onto the button that starts a program (launcher icon in dock).
         Write-Host '==> Starting a program from the desktop' -ForegroundColor Cyan
-        Move-Pointer -Dx -60 -Dy 0 -Steps ([int]($centre / 60) + 2)   # back to the left edge
-        Move-Pointer -Dx 30 -Dy 0 -Steps 1     # x about 30: the launcher
+        Reset-Pointer -Dx -60 -Dy 60
+        # The launcher icon is in the dock at (dock_left+14 .. dock_left+86, y=1134..1182).
+        Move-Pointer -Dx 0 -Dy -16 -Steps 2    # y about 1158: the launcher icon
+        $launcherX = [int]$tabs.Groups[1].Value + 36
+        Move-Pointer -Dx 30 -Dy 0 -Steps ([int]($launcherX / 30))
+        Move-Pointer -Dx ($launcherX % 30) -Dy 0 -Steps 1
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 300
         $writer.WriteLine('mouse_button 0')
