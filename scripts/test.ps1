@@ -103,7 +103,7 @@ $HostLibraries = @(
     'nexus-abi', 'nexus-ai-core', 'nexus-config', 'nexus-crypto', 'nexus-dns', 'nexus-font',
     'nexus-html', 'nexus-http', 'nexus-i18n', 'nexus-image', 'nexus-ime', 'nexus-index',
     'nexus-inflate', 'nexus-json', 'nexus-look', 'nexus-machine', 'nexus-mm', 'nexus-net',
-    'nexus-netclient', 'nexus-pkg', 'nexus-shellwords', 'nexus-time', 'nexus-tls', 'nexus-update',
+    'nexus-netclient', 'nexus-nvidia', 'nexus-pkg', 'nexus-shellwords', 'nexus-time', 'nexus-tls', 'nexus-update',
     'nexus-user', 'nexus-utf8', 'nexus-window', 'nexus-lang', 'nexus-archive', 'nexus-render3d', 'nexus-netscan',
     'nexus-spirv'
 )
@@ -116,7 +116,7 @@ $HostTools = @('nexus-pack', 'nexus-collab', 'nexus-roots', 'nexus-linux-example
 # and their own `core`, so they are linted separately from everything else --
 # and they have to be, because `cargo clippy` for one target cannot also check
 # a crate built for another.
-$GuestPrograms = 'nexus-guest'
+$GuestPrograms = @('nexus-guest', 'nexus-probe')
 # And the i386 one, which is a third target again.
 $Guest32Programs = 'nexus-guest32'
 
@@ -193,11 +193,13 @@ Invoke-Step 'clippy' {
         # rebuilt for it. Linted here rather than with the host tools because a
         # `#![no_std]` crate for another target cannot be checked in the same
         # invocation as one for this machine.
-        Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', $GuestPrograms,
-            '--target', 'x86_64-unknown-linux-gnu',
-            '-Zbuild-std=core,compiler_builtins',
+        $arguments = @('+nightly', 'clippy')
+        foreach ($crate in $GuestPrograms) { $arguments += @('-p', $crate) }
+        $arguments += @('--target', 'x86_64-unknown-linux-gnu',
+            '-Zbuild-std=core,compiler_builtins,alloc',
             '-Zbuild-std-features=compiler-builtins-mem',
-            '--', '-D', 'warnings') 'clippy (linux guests)'
+            '--', '-D', 'warnings')
+        Invoke-Native 'cargo' $arguments 'clippy (linux guests)'
 
         Invoke-Native 'cargo' @('+nightly', 'clippy', '-p', $Guest32Programs,
             '--target', 'i686-unknown-linux-gnu',

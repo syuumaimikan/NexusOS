@@ -144,7 +144,7 @@ fn statfs64_write(size: u64, output: u64) -> u64 {
     fields[24..32].copy_from_slice(&(free / BLOCK).to_le_bytes()); // f_bavail
     fields[56..60].copy_from_slice(&255u32.to_le_bytes()); // f_namelen
     fields[60..64].copy_from_slice(&(BLOCK as u32).to_le_bytes()); // f_frsize
-    // SAFETY: the output is checked writable for exactly the ABI structure.
+                                                                   // SAFETY: the output is checked writable for exactly the ABI structure.
     unsafe { core::ptr::copy_nonoverlapping(fields.as_ptr(), at as *mut u8, fields.len()) };
     0
 }
@@ -621,9 +621,9 @@ fn sysinfo(out: u64) -> u64 {
     put(0, crate::arch::time::uptime_ms() / 1000); // uptime, seconds
     put(32, total); // totalram
     put(40, free); // freeram
-    // `mem_unit`, at the end: the multiplier for every memory field above.
-    // One, because the figures here are already bytes.
-    // SAFETY: inside the range checked above.
+                   // `mem_unit`, at the end: the multiplier for every memory field above.
+                   // One, because the figures here are already bytes.
+                   // SAFETY: inside the range checked above.
     unsafe { core::ptr::write_unaligned((at as *mut u8).add(80) as *mut u32, 1) };
     0
 }
@@ -683,7 +683,11 @@ fn madvise(_address: u64, _length: u64, advice: u64) -> u64 {
 /// how a lock-free algorithm silently stops being correct.
 fn membarrier(command: u64) -> u64 {
     const QUERY: u64 = 0;
-    if command == QUERY { 0 } else { error::EINVAL }
+    if command == QUERY {
+        0
+    } else {
+        error::EINVAL
+    }
 }
 
 /// `fsync(fd)` and `fdatasync(fd)`.
@@ -1315,9 +1319,9 @@ fn statfs_into(out: u64) -> u64 {
     fields[8..16].copy_from_slice(&BLOCK.to_le_bytes()); // f_bsize
     fields[16..24].copy_from_slice(&(total / BLOCK).to_le_bytes()); // f_blocks
     fields[24..32].copy_from_slice(&(free / BLOCK).to_le_bytes()); // f_bfree
-    // f_bavail: what an unprivileged program may use. The same as free, because
-    // this filesystem keeps no reserve and there is no privilege here to be
-    // outside of.
+                                                                   // f_bavail: what an unprivileged program may use. The same as free, because
+                                                                   // this filesystem keeps no reserve and there is no privilege here to be
+                                                                   // outside of.
     fields[32..40].copy_from_slice(&(free / BLOCK).to_le_bytes());
     // f_files and f_ffree are left zero rather than guessed. The volume knows
     // its inode counts, but reaching them from here would mean holding the

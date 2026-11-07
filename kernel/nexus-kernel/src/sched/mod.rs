@@ -64,7 +64,7 @@ use crate::kprintln;
 use crate::sync::IrqSpinLock;
 
 use context::context_switch;
-use thread::{Priority, TIME_SLICE_TICKS, Thread, ThreadEntry, ThreadId, ThreadState, UserStart};
+use thread::{Priority, Thread, ThreadEntry, ThreadId, ThreadState, UserStart, TIME_SLICE_TICKS};
 
 /// Scheduler state shared by every processor.
 struct Scheduler {

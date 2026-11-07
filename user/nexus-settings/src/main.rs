@@ -250,9 +250,9 @@ impl Settings {
             .as_deref()
             .map(|report| {
                 (
-                    format_hardware_status(report_value(&report, "wifi")),
-                    format_hardware_status(report_value(&report, "bluetooth")),
-                    format_hardware_status(report_value(&report, "graphics")),
+                    format_hardware_status(report_value(report, "wifi")),
+                    format_hardware_status(report_value(report, "bluetooth")),
+                    format_hardware_status(report_value(report, "graphics")),
                 )
             })
             .unwrap_or_else(|| {

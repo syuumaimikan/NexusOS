@@ -879,11 +879,9 @@ mod tests {
         let mut canvas = unsafe { Canvas::packed(pixels.as_mut_ptr().add(1) as usize, 32, 52) };
         canvas.set_text_style(font::Face::Smooth, true);
         canvas.glyph_scaled(0, 0, 'A', Colour(0xffffff), 3);
-        assert!(
-            pixels[1..end]
-                .iter()
-                .any(|&pixel| pixel > 0 && pixel < 0xffffff)
-        );
+        assert!(pixels[1..end]
+            .iter()
+            .any(|&pixel| pixel > 0 && pixel < 0xffffff));
         assert_eq!(pixels[0], 0x12345678);
         assert_eq!(pixels[end], 0x12345678);
         canvas.glyph_scaled(31, 51, 'A', Colour(0xffffff), 3);

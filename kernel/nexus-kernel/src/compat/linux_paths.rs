@@ -298,7 +298,7 @@ fn change(process: &Process, node: Arc<Node>) -> u64 {
     if !node.is_directory() {
         return ENOTDIR;
     }
-    let previous = core::mem::replace(&mut *process.working_directory.lock(), Some(node));
+    let previous = (*process.working_directory.lock()).replace(node);
     // Last-close cleanup may sleep on the filesystem. Drop outside the irq lock.
     drop(previous);
     0

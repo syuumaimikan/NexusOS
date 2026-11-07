@@ -242,7 +242,7 @@ fn gsp_metadata_is_bounded_and_selects_only_blackwell_signature() {
 
 #[test]
 fn radix_walk_recovers_noncontiguous_pages_across_leaf_boundary() {
-    use radix::{PAGE, Plan};
+    use radix::{Plan, PAGE};
     let plan = Plan::new(512 * PAGE + 13).unwrap();
     assert_eq!((plan.data_pages(), plan.table_pages()), (513, 4));
     let tables = [0x2000, 0x8000, 0xc000, 0x11000];
@@ -280,7 +280,7 @@ fn radix_walk_recovers_noncontiguous_pages_across_leaf_boundary() {
 
 #[test]
 fn radix_rejects_bad_geometry_addresses_and_sink_failures() {
-    use radix::{MAX_DATA, PAGE, Plan};
+    use radix::{Plan, MAX_DATA, PAGE};
     for size in [0, MAX_DATA + 1, usize::MAX] {
         assert!(Plan::new(size).is_err());
     }
@@ -292,19 +292,17 @@ fn radix_rejects_bad_geometry_addresses_and_sink_failures() {
         [1, 8192, 12288],
         [u64::MAX - 4095, 8192, 12288],
     ] {
-        assert!(
-            plan.write(&tables, &[16384], |_, _| {
+        assert!(plan
+            .write(&tables, &[16384], |_, _| {
                 called = true;
                 Ok(())
             })
-            .is_err()
-        );
+            .is_err());
     }
     assert!(!called);
-    assert!(
-        plan.write(&[4096, 8192, 12288], &[], |_, _| Ok(()))
-            .is_err()
-    );
+    assert!(plan
+        .write(&[4096, 8192, 12288], &[], |_, _| Ok(()))
+        .is_err());
     assert_eq!(
         plan.write(&[4096, 8192, 12288], &[16384], |_, _| Err(Error::Truncated)),
         Err(Error::Truncated)

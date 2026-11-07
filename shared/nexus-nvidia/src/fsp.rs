@@ -65,7 +65,7 @@ fn write<R: Registers>(io: &mut R, register: Register, value: u32) -> Result<(),
     io.write(register, value).map_err(Error::Io)
 }
 fn pointer<E>(value: u32) -> Result<u32, Error<E>> {
-    if value % 4 != 0 || value >= CHANNEL_SIZE as u32 {
+    if !value.is_multiple_of(4) || value >= CHANNEL_SIZE as u32 {
         return Err(Error::Bounds);
     }
     Ok(value)
@@ -122,12 +122,12 @@ pub fn receive<R: Registers>(
         return Err(Error::Bounds);
     }
     let length = (tail - head + 4) as usize;
-    if length < 8 || length > CHANNEL_SIZE {
+    if !(8..=CHANNEL_SIZE).contains(&length) {
         return Err(Error::Bounds);
     }
     write(io, Register::Control, 1 << 25)?;
     output.fill(0);
-    for chunk in output[..length].chunks_exact_mut(4) {
+    for chunk in output[..length].as_chunks_mut::<4>().0 {
         chunk.copy_from_slice(&read(io, Register::Data)?.to_le_bytes());
     }
     if cursor(read(io, Register::Control)?) != (length / 4) as u32 {
@@ -148,7 +148,7 @@ impl Response {
     /// NVIDIA PCI vendor type, FSP_RESPONSE, then three packed u32 fields.
     /// A valid FSP success is not proof that GSP-RM initialized or GPU rendered.
     pub fn parse(packet: &[u8]) -> Result<Self, Error<()>> {
-        if packet.len() < 20 || packet.len() > CHANNEL_SIZE || packet.len() % 4 != 0 {
+        if packet.len() < 20 || packet.len() > CHANNEL_SIZE || !packet.len().is_multiple_of(4) {
             return Err(Error::Bounds);
         }
         let word = |at: usize| u32::from_le_bytes(packet[at..at + 4].try_into().unwrap());

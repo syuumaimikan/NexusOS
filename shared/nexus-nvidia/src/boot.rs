@@ -37,7 +37,7 @@ pub struct Buffer {
 impl Buffer {
     pub fn check(self) -> Result<(), Error> {
         if self.address == 0
-            || self.address % 4096 != 0
+            || !self.address.is_multiple_of(4096)
             || self.size == 0
             || self.address.checked_add(self.size).ok_or(Error::Bounds)? > 1 << 52
         {
@@ -61,8 +61,8 @@ pub struct Sizing {
 impl Sizing {
     pub fn check(&self) -> Result<(), Error> {
         if !(88 * 1024 * 1024..=280 * 1024 * 1024).contains(&self.heap)
-            || self.heap % (1024 * 1024) != 0
-            || self.pmu_reserved % (128 * 1024) != 0
+            || !self.heap.is_multiple_of(1024 * 1024)
+            || !self.pmu_reserved.is_multiple_of(128 * 1024)
         {
             return Err(Error::Bounds);
         }
@@ -271,9 +271,7 @@ mod tests {
         let meta = wpr(&firmware, &sizing()).unwrap();
         assert_eq!(
             &meta[..16],
-            &[
-                0xb3, 0x60, 0x1a, 0x37, 0x21, 0xae, 0x3a, 0xdc, 1, 0, 0, 0, 0, 0, 0, 0
-            ]
+            &[0xb3, 0x60, 0x1a, 0x37, 0x21, 0xae, 0x3a, 0xdc, 1, 0, 0, 0, 0, 0, 0, 0]
         );
         assert_eq!(u64_at(&meta, 16), firmware.rm.address);
         // Host has no authenticated FB placement. All firmware-owned values,
@@ -331,7 +329,7 @@ mod tests {
         let regions = libos(&logs, buffer(0x1_4000_0000, PAGE)).unwrap();
         assert_eq!(&regions[..8], b"TINIGOL\0"); // SDK big-endian numeric ID, LE storage.
         assert_eq!(&regions[7 * 32..7 * 32 + 8], b"SGRAMR\0\0");
-        for entry in regions[..8 * 32].chunks_exact(32) {
+        for entry in regions[..8 * 32].as_chunks::<32>().0 {
             assert_eq!(&entry[24..32], &[1, 1, 0, 0, 0, 0, 0, 0]);
         }
         assert!(regions[256..].iter().all(|&byte| byte == 0));
@@ -347,14 +345,12 @@ mod tests {
         ] {
             assert!(bad.check().is_err());
         }
-        assert!(
-            Sizing {
-                heap: 137 << 20,
-                pmu_reserved: 4096
-            }
-            .check()
-            .is_err()
-        );
+        assert!(Sizing {
+            heap: 137 << 20,
+            pmu_reserved: 4096
+        }
+        .check()
+        .is_err());
         assert!(rm_args(buffer(4096, SHARED_SIZE - 1), buffer(8192, PAGE)).is_err());
         let mut logs = core::array::from_fn(|index| {
             buffer(0x100000 + (index as u64) * 0x10000, LOG_SIZES[index])

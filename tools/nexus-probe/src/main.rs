@@ -138,59 +138,237 @@ struct Ask {
 const ASKS: &[Ask] = &[
     // The control. Certainly implemented; a "missing" here means this program
     // is wrong, not the kernel.
-    Ask { number: 39, name: "getpid", args: [0, 0, 0, 0, 0], wanted_for: "the control" },
-
+    Ask {
+        number: 39,
+        name: "getpid",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "the control",
+    },
     // A C library's start-up and its allocator.
-    Ask { number: 25, name: "mremap", args: [0, 0, 0, 0, 0], wanted_for: "realloc of a mapping" },
-    Ask { number: 28, name: "madvise", args: [0, 0, 0, 0, 0], wanted_for: "malloc returning memory" },
-    Ask { number: 97, name: "getrlimit", args: [7, 0, 0, 0, 0], wanted_for: "how many files may be open" },
-    Ask { number: 302, name: "prlimit64", args: [0, 7, 0, 0, 0], wanted_for: "the same, as musl asks it" },
-    Ask { number: 157, name: "prctl", args: [0, 0, 0, 0, 0], wanted_for: "thread names, no-new-privs" },
-    Ask { number: 99, name: "sysinfo", args: [0, 0, 0, 0, 0], wanted_for: "how much memory there is" },
-    Ask { number: 324, name: "membarrier", args: [0, 0, 0, 0, 0], wanted_for: "a lock-free fast path" },
-
+    Ask {
+        number: 25,
+        name: "mremap",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "realloc of a mapping",
+    },
+    Ask {
+        number: 28,
+        name: "madvise",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "malloc returning memory",
+    },
+    Ask {
+        number: 97,
+        name: "getrlimit",
+        args: [7, 0, 0, 0, 0],
+        wanted_for: "how many files may be open",
+    },
+    Ask {
+        number: 302,
+        name: "prlimit64",
+        args: [0, 7, 0, 0, 0],
+        wanted_for: "the same, as musl asks it",
+    },
+    Ask {
+        number: 157,
+        name: "prctl",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "thread names, no-new-privs",
+    },
+    Ask {
+        number: 99,
+        name: "sysinfo",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "how much memory there is",
+    },
+    Ask {
+        number: 324,
+        name: "membarrier",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "a lock-free fast path",
+    },
     // Files, which Mesa uses for its shader cache and for /proc and /sys.
-    Ask { number: 72, name: "fcntl", args: [BAD_FD, 3, 0, 0, 0], wanted_for: "close-on-exec, non-blocking" },
-    Ask { number: 74, name: "fsync", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "a cache that survives" },
-    Ask { number: 19, name: "readv", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "scattered reads" },
-    Ask { number: 18, name: "pwrite64", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "writing at an offset" },
-    Ask { number: 89, name: "readlink", args: [0, 0, 0, 0, 0], wanted_for: "/proc/self/exe" },
-    Ask { number: 267, name: "readlinkat", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "the same, as a C library asks it" },
-    Ask { number: 80, name: "chdir", args: [0, 0, 0, 0, 0], wanted_for: "a working directory" },
-    Ask { number: 137, name: "statfs", args: [0, 0, 0, 0, 0], wanted_for: "how much room is left" },
-    Ask { number: 332, name: "statx", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "what a modern C library stats with" },
-    Ask { number: 6, name: "lstat", args: [0, 0, 0, 0, 0], wanted_for: "telling a link from a file" },
-
+    Ask {
+        number: 72,
+        name: "fcntl",
+        args: [BAD_FD, 3, 0, 0, 0],
+        wanted_for: "close-on-exec, non-blocking",
+    },
+    Ask {
+        number: 74,
+        name: "fsync",
+        args: [BAD_FD, 0, 0, 0, 0],
+        wanted_for: "a cache that survives",
+    },
+    Ask {
+        number: 19,
+        name: "readv",
+        args: [BAD_FD, 0, 0, 0, 0],
+        wanted_for: "scattered reads",
+    },
+    Ask {
+        number: 18,
+        name: "pwrite64",
+        args: [BAD_FD, 0, 0, 0, 0],
+        wanted_for: "writing at an offset",
+    },
+    Ask {
+        number: 89,
+        name: "readlink",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "/proc/self/exe",
+    },
+    Ask {
+        number: 267,
+        name: "readlinkat",
+        args: [BAD_FD, 0, 0, 0, 0],
+        wanted_for: "the same, as a C library asks it",
+    },
+    Ask {
+        number: 80,
+        name: "chdir",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "a working directory",
+    },
+    Ask {
+        number: 137,
+        name: "statfs",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "how much room is left",
+    },
+    Ask {
+        number: 332,
+        name: "statx",
+        args: [BAD_FD, 0, 0, 0, 0],
+        wanted_for: "what a modern C library stats with",
+    },
+    Ask {
+        number: 6,
+        name: "lstat",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "telling a link from a file",
+    },
     // Time and waiting.
-    Ask { number: 35, name: "nanosleep", args: [0, 0, 0, 0, 0], wanted_for: "sleeping at all" },
-    Ask { number: 230, name: "clock_nanosleep", args: [0, 0, 0, 0, 0], wanted_for: "sleeping until a time" },
-    Ask { number: 96, name: "gettimeofday", args: [0, 0, 0, 0, 0], wanted_for: "the time, the old way" },
-    Ask { number: 201, name: "time", args: [0, 0, 0, 0, 0], wanted_for: "the time, the oldest way" },
-
+    Ask {
+        number: 35,
+        name: "nanosleep",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "sleeping at all",
+    },
+    Ask {
+        number: 230,
+        name: "clock_nanosleep",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "sleeping until a time",
+    },
+    Ask {
+        number: 96,
+        name: "gettimeofday",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "the time, the old way",
+    },
+    Ask {
+        number: 201,
+        name: "time",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "the time, the oldest way",
+    },
     // Processes.
-    Ask { number: 61, name: "wait4", args: [BAD_FD, 0, 1, 0, 0], wanted_for: "collecting a child" },
-
+    Ask {
+        number: 61,
+        name: "wait4",
+        args: [BAD_FD, 0, 1, 0, 0],
+        wanted_for: "collecting a child",
+    },
     // Waiting on several things, which a windowing client does constantly.
-    Ask { number: 23, name: "select", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "the oldest way to wait on many" },
-    Ask { number: 270, name: "pselect6", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "how a C library spells select" },
-    Ask { number: 7, name: "poll", args: [0, 0, 0, 0, 0], wanted_for: "what a windowing client waits with" },
-    Ask { number: 290, name: "eventfd2", args: [0, 0, 0, 0, 0], wanted_for: "waking a thread from another" },
-
+    Ask {
+        number: 23,
+        name: "select",
+        args: [BAD_FD, 0, 0, 0, 0],
+        wanted_for: "the oldest way to wait on many",
+    },
+    Ask {
+        number: 270,
+        name: "pselect6",
+        args: [BAD_FD, 0, 0, 0, 0],
+        wanted_for: "how a C library spells select",
+    },
+    Ask {
+        number: 7,
+        name: "poll",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "what a windowing client waits with",
+    },
+    Ask {
+        number: 290,
+        name: "eventfd2",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "waking a thread from another",
+    },
     // Threads, the modern way. A C library built in the last few years uses
     // `clone3` and falls back to `clone`, so a machine with only the old one
     // works and is one refusal slower at every thread.
-    Ask { number: 435, name: "clone3", args: [0, 0, 0, 0, 0], wanted_for: "threads, as a new C library makes them" },
-
+    Ask {
+        number: 435,
+        name: "clone3",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "threads, as a new C library makes them",
+    },
     // The rest of what a program does with a file.
-    Ask { number: 79, name: "getcwd", args: [0, 0, 0, 0, 0], wanted_for: "where a program thinks it is" },
-    Ask { number: 16, name: "ioctl", args: [BAD_FD, 0, 0, 0, 0], wanted_for: "asking a device anything at all" },
-    Ask { number: 293, name: "pipe2", args: [0, 0, 0, 0, 0], wanted_for: "a pipe with flags" },
-    Ask { number: 292, name: "dup3", args: [BAD_FD, BAD_FD, 0, 0, 0], wanted_for: "putting a descriptor somewhere exact" },
-    Ask { number: 76, name: "truncate", args: [0, 0, 0, 0, 0], wanted_for: "shortening a file by name" },
-    Ask { number: 82, name: "rename", args: [0, 0, 0, 0, 0], wanted_for: "moving a file" },
-    Ask { number: 316, name: "renameat2", args: [BAD_FD, 0, BAD_FD, 0, 0], wanted_for: "the same, as a C library asks it" },
-    Ask { number: 85, name: "creat", args: [0, 0, 0, 0, 0], wanted_for: "making a file the old way" },
-    Ask { number: 133, name: "mknod", args: [0, 0, 0, 0, 0], wanted_for: "device nodes under /dev" },
+    Ask {
+        number: 79,
+        name: "getcwd",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "where a program thinks it is",
+    },
+    Ask {
+        number: 16,
+        name: "ioctl",
+        args: [BAD_FD, 0, 0, 0, 0],
+        wanted_for: "asking a device anything at all",
+    },
+    Ask {
+        number: 293,
+        name: "pipe2",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "a pipe with flags",
+    },
+    Ask {
+        number: 292,
+        name: "dup3",
+        args: [BAD_FD, BAD_FD, 0, 0, 0],
+        wanted_for: "putting a descriptor somewhere exact",
+    },
+    Ask {
+        number: 76,
+        name: "truncate",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "shortening a file by name",
+    },
+    Ask {
+        number: 82,
+        name: "rename",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "moving a file",
+    },
+    Ask {
+        number: 316,
+        name: "renameat2",
+        args: [BAD_FD, 0, BAD_FD, 0, 0],
+        wanted_for: "the same, as a C library asks it",
+    },
+    Ask {
+        number: 85,
+        name: "creat",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "making a file the old way",
+    },
+    Ask {
+        number: 133,
+        name: "mknod",
+        args: [0, 0, 0, 0, 0],
+        wanted_for: "device nodes under /dev",
+    },
 ];
 
 /// The entry point, which cannot be an ordinary function.
@@ -245,7 +423,14 @@ extern "C" fn probe() -> ! {
             if ask.number == 39 {
                 control_wrong = true;
             }
-            say(&["probe: MISSING ", ask.name, " (", shown, ") -- ", ask.wanted_for]);
+            say(&[
+                "probe: MISSING ",
+                ask.name,
+                " (",
+                shown,
+                ") -- ",
+                ask.wanted_for,
+            ]);
         } else {
             present += 1;
             say(&["probe: have ", ask.name, " (", shown, ")"]);

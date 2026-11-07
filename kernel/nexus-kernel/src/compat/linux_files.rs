@@ -1782,7 +1782,7 @@ pub fn getrandom(buffer: u64, count: u64) -> u64 {
     let mut bytes = alloc::vec![0u8; length];
     if !crate::random::bytes(&mut bytes) {
         return (-11i64) as u64; // EAGAIN, which is what Linux says when the
-        // pool is not ready
+                                // pool is not ready
     }
     // SAFETY: the range was checked to lie inside the user half and is exactly
     // as long as what is written into it.

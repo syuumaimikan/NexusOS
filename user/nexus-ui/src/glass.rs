@@ -98,7 +98,7 @@ fn subtract(sums: &mut [u32; 3], pixel: u32) {
     }
 }
 fn packed(sums: [u32; 3], taps: u32) -> u32 {
-    sums[0] / taps | (sums[1] / taps) << 8 | (sums[2] / taps) << 16
+    (sums[0] / taps) | ((sums[1] / taps) << 8) | ((sums[2] / taps) << 16)
 }
 
 #[cfg(test)]

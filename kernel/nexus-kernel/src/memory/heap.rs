@@ -14,8 +14,8 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 
 use nexus_abi::layout;
-use nexus_mm::PAGE_SIZE;
 use nexus_mm::heap::Heap;
+use nexus_mm::PAGE_SIZE;
 
 use super::paging;
 use crate::kprintln;

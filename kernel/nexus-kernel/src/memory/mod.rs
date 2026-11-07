@@ -5,8 +5,8 @@
 //! reaching physical memory through the direct map, and finding somewhere to
 //! put the allocator's own bitmap before an allocator exists — lives here.
 
-pub mod address_space;
 pub mod address_snapshot;
+pub mod address_space;
 pub mod heap;
 pub mod paging;
 

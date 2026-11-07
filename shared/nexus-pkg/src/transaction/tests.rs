@@ -61,9 +61,8 @@ impl Memory {
         self.next
     }
     fn parent_exists(&self, path: &str) -> bool {
-        path.rsplit_once('/').map_or(true, |(p, _)| {
-            self.nodes.get(p).is_some_and(|n| n.kind == Kind::Directory)
-        })
+        path.rsplit_once('/')
+            .is_none_or(|(p, _)| self.nodes.get(p).is_some_and(|n| n.kind == Kind::Directory))
     }
 }
 
@@ -388,9 +387,11 @@ fn bookkeeping_and_payload_roll_back_together_at_every_boundary() {
     let initial = normal.nodes.clone();
     install_with_extra(&mut normal, &package, &extra).unwrap();
     for boundary in 1..=normal.operations {
-        let mut fs = Memory::default();
-        fs.nodes = initial.clone();
-        fs.fail_at = Some(boundary);
+        let mut fs = Memory {
+            nodes: initial.clone(),
+            fail_at: Some(boundary),
+            ..Default::default()
+        };
         match install_with_extra(&mut fs, &package, &extra) {
             Err(Failure::Io {
                 recovery_failures, ..

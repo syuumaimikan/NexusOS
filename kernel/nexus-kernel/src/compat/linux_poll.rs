@@ -40,7 +40,7 @@ use crate::sync::IrqSpinLock;
 use crate::waitset::{WaitSet, Watched};
 
 use super::linux::error;
-use super::linux_files::{Descriptor, describe};
+use super::linux_files::{describe, Descriptor};
 
 /// The bits `poll` reports, as `poll.h` numbers them.
 pub mod event {
@@ -254,7 +254,11 @@ pub(super) fn ready_now(descriptor: u64) -> i16 {
                     _ => 0,
                 }
             } else if let Some(listener) = socket.listener() {
-                if listener.ready() { event::IN } else { 0 }
+                if listener.ready() {
+                    event::IN
+                } else {
+                    0
+                }
             } else if let Some(stream) = socket.stream() {
                 let mut bits = 0;
                 if stream.readable() {

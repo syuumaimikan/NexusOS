@@ -26,7 +26,7 @@ impl MemoryWindow {
         if base == 0
             || size < 16
             || !size.is_power_of_two()
-            || base % size != 0
+            || !base.is_multiple_of(size)
             || base.checked_add(size).ok_or(Error::Bounds)? > 1 << 52
         {
             return Err(Error::Bounds);

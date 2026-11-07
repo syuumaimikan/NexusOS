@@ -11,9 +11,9 @@ use crate::{
 use alloc::vec::Vec;
 use nexus_abi::layout;
 use nexus_nvidia::{
-    Span,
     gsp::{self, Read},
-    radix::{PAGE, Plan},
+    radix::{Plan, PAGE},
+    Span,
 };
 
 struct Pages {

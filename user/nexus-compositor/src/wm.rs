@@ -1,6 +1,6 @@
 //! Window-management policy. Decorations have no close/minimize/maximize
 //! buttons; these operations are compositor-owned keyboard actions.
-use super::{CLIENTS, MIN_SIZE, Screen, Tile, clamp, glass_window, raise, resize};
+use super::{clamp, glass_window, raise, resize, Screen, Tile, CLIENTS, MIN_SIZE};
 pub const TOP_RESERVED: u32 = 40;
 #[derive(Clone, Copy)]
 pub enum Action {

@@ -151,12 +151,12 @@ impl Prepared {
         }
         let shared = self.shared.buffer().address;
         for (index, pte) in self.shared.bytes()[..boot::PTE_COUNT * 8]
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .enumerate()
         {
-            if u64::from_le_bytes(pte.try_into().map_err(|_| Error::Memory)?)
-                != shared + (index * boot::PAGE) as u64
-            {
+            if u64::from_le_bytes(*pte) != shared + (index * boot::PAGE) as u64 {
                 return Err(Error::Memory);
             }
         }

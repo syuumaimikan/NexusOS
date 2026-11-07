@@ -2005,9 +2005,9 @@ fn serve(
                     Some(Typed::Terminal) => wanted = Some(Launched::Window(What::Terminal)),
                     Some(Typed::Settings) => wanted = Some(Launched::Window(What::Settings)),
                     Some(Typed::Wm(action)) => {
-                        wm::apply(action,screen,tiles,&mut focus,&mut order);
-                        announce(shell,tiles,focus,&mut reported);
-                        pending=pending.union(everything(screen));
+                        wm::apply(action, screen, tiles, &mut focus, &mut order);
+                        announce(shell, tiles, focus, &mut reported);
+                        pending = pending.union(everything(screen));
                     }
                     Some(Typed::Focus) => {
                         raise(&mut order, focus);
@@ -2205,10 +2205,15 @@ fn serve(
                         // below. Releasing it here permits the client to draw
                         // over it before the compositor has consumed its frame.
                         tile.acknowledge = true;
-                        if tile.resized && message[..received.bytes].starts_with(wire::DAMAGED)
-                            && received.bytes>=23 && read_u32(&message,7)==0 && read_u32(&message,11)==0
-                            && read_u32(&message,15)==tile.width && read_u32(&message,19)==tile.height {
-                            tile.resize_ready=true;
+                        if tile.resized
+                            && message[..received.bytes].starts_with(wire::DAMAGED)
+                            && received.bytes >= 23
+                            && read_u32(&message, 7) == 0
+                            && read_u32(&message, 11) == 0
+                            && read_u32(&message, 15) == tile.width
+                            && read_u32(&message, 19) == tile.height
+                        {
+                            tile.resize_ready = true;
                         }
                         // That window and no other, and -- when the client
                         // said so -- only the part of it that changed. This is
@@ -2233,17 +2238,32 @@ fn serve(
                     // The kernel bounds an inbox at 64 messages.
                     for _ in 0..64 {
                         let mut ready = [0u64; 64];
-                        let Ok(count) = nexus_user::wait_any_until(set, &mut ready, 0) else { break; };
-                        if !ready[..count].contains(&channel_key(index)) { break; }
+                        let Ok(count) = nexus_user::wait_any_until(set, &mut ready, 0) else {
+                            break;
+                        };
+                        if !ready[..count].contains(&channel_key(index)) {
+                            break;
+                        }
                         let mut message = [0u8; 32];
                         let mut none = [Handle(0); 1];
-                        let Ok(received) = nexus_user::receive(tile.channel, &mut message, &mut none) else { break; };
-                        if launcher_request(&message[..received.bytes.min(message.len())], &mut wanted, &mut requested_window) {
+                        let Ok(received) =
+                            nexus_user::receive(tile.channel, &mut message, &mut none)
+                        else {
+                            break;
+                        };
+                        if launcher_request(
+                            &message[..received.bytes.min(message.len())],
+                            &mut wanted,
+                            &mut requested_window,
+                        ) {
                             drained += 1;
                         }
                     }
                     if drained > 0 {
-                        nexus_user::log(&alloc::format!("compositor: handled {drained} queued launcher request(s) after exit")).ok();
+                        nexus_user::log(&alloc::format!(
+                            "compositor: handled {drained} queued launcher request(s) after exit"
+                        ))
+                        .ok();
                     }
                     // A replacement window may reuse this slot; it must not
                     // inherit the retired launcher's control protocol.
@@ -2444,8 +2464,14 @@ fn serve(
         for (index, tile) in tiles.iter_mut().enumerate() {
             if let Some(tile) = tile.as_mut() {
                 if tile.resize_ready && !asleep && !tile.minimised {
-                    nexus_user::log(&alloc::format!("compositor: resized frame presented for client {index}: {}x{}",tile.width,tile.height)).ok();
-                    tile.resize_ready=false;tile.resized=false;
+                    nexus_user::log(&alloc::format!(
+                        "compositor: resized frame presented for client {index}: {}x{}",
+                        tile.width,
+                        tile.height
+                    ))
+                    .ok();
+                    tile.resize_ready = false;
+                    tile.resized = false;
                 }
                 if core::mem::take(&mut tile.acknowledge)
                     && nexus_user::send(tile.channel, b"shown", &[]).is_err()
@@ -2653,7 +2679,11 @@ enum Asked {
 }
 
 /// Consume control messages in both the ordinary frame path and exit drain.
-fn launcher_request(asked: &[u8], wanted: &mut Option<Launched>, picked: &mut Option<usize>) -> bool {
+fn launcher_request(
+    asked: &[u8],
+    wanted: &mut Option<Launched>,
+    picked: &mut Option<usize>,
+) -> bool {
     if asked.len() == 8 && asked.starts_with(b"pick") {
         *picked = Some(read_u32(asked, 4) as usize);
         true
@@ -2661,7 +2691,8 @@ fn launcher_request(asked: &[u8], wanted: &mut Option<Launched>, picked: &mut Op
         nexus_user::log(&alloc::format!(
             "compositor: the launcher asked for {}",
             core::str::from_utf8(&asked[..4]).unwrap_or("<not text>")
-        )).ok();
+        ))
+        .ok();
         *wanted = Some(what);
         true
     } else {
@@ -3511,7 +3542,9 @@ fn read_key(
     // the focused client.
     if message[0] == key::SUPER {
         let chord = read_u32(&message, 1);
-        if let Some(action)=wm::chord(chord) {return Some(Typed::Wm(action));}
+        if let Some(action) = wm::chord(chord) {
+            return Some(Typed::Wm(action));
+        }
         match chord & 0xffff {
             0x20 => {
                 nexus_user::log("compositor: Super+Space opens the command bar").ok();
@@ -3835,7 +3868,7 @@ fn read_pointer(
                     let moved_x = clamp(wanted_x, screen.x, screen.x + screen.width - tile.width);
                     let moved_y = clamp(
                         wanted_y,
-                        screen.y+wm::TOP_RESERVED,
+                        screen.y + wm::TOP_RESERVED,
                         screen.taskbar_y().saturating_sub(tile.height),
                     );
                     if moved_x != tile.x || moved_y != tile.y {
@@ -3934,10 +3967,23 @@ fn resize(index: usize, tile: &mut Tile, width: u32, height: u32) -> Result<(), 
     for row in 0..height as usize {
         let to = staging + row * width as usize * 4;
         for column in 0..width as usize {
-            let pixel=nexus_ui::resample_pixel(tile.width,tile.height,width,height,column as u32,row as u32,|x,y| {
-                // SAFETY: sampled coordinates are bounded to the old surface.
-                unsafe {core::ptr::read_volatile((tile.mapped_at+(y as usize*tile.width as usize+x as usize)*4) as *const u32)}
-            });
+            let pixel = nexus_ui::resample_pixel(
+                tile.width,
+                tile.height,
+                width,
+                height,
+                column as u32,
+                row as u32,
+                |x, y| {
+                    // SAFETY: sampled coordinates are bounded to the old surface.
+                    unsafe {
+                        core::ptr::read_volatile(
+                            (tile.mapped_at + (y as usize * tile.width as usize + x as usize) * 4)
+                                as *const u32,
+                        )
+                    }
+                },
+            );
             // SAFETY: the new surface is mapped, exclusively initialized here,
             // and these coordinates are bounded to its requested dimensions.
             unsafe {
@@ -3987,8 +4033,8 @@ fn resize(index: usize, tile: &mut Tile, width: u32, height: u32) -> Result<(), 
     tile.surface = fresh;
     tile.width = width;
     tile.height = height;
-    tile.resized=true;
-    tile.resize_ready=false;
+    tile.resized = true;
+    tile.resize_ready = false;
     Ok(())
 }
 

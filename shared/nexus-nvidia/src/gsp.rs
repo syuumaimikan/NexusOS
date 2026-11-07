@@ -15,6 +15,9 @@ pub const UCODES_SHA: [u8; 32] = [
 
 pub trait Read {
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn read(&self, offset: usize, output: &mut [u8]) -> Result<(), Error>;
 }
 impl Read for [u8] {
@@ -156,7 +159,7 @@ pub fn check_ucodes(reader: &(impl Read + ?Sized)) -> Result<(), Error> {
     if &header[..8] != b"NVUCODES"
         || crate::word(&header, 8)? != 1
         || crate::word(&header, 12)? != 1293
-        || &header[16..24] != [0xa6, 0x03, 0xb7, 0xcd, 0xfe, 0xbe, 0x38, 0x2d]
+        || header[16..24] != [0xa6, 0x03, 0xb7, 0xcd, 0xfe, 0xbe, 0x38, 0x2d]
     {
         return Err(Error::Header);
     }

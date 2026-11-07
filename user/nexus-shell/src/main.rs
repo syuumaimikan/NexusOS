@@ -156,15 +156,8 @@ mod state {
 /// decides; neither trusts the other's.
 const MAX_WINDOWS: usize = 8;
 
-/// How wide the button that starts a program is.
-
 /// Pixels between things in the strip.
 const GAP: u32 = 4;
-
-/// How round the corners of a button or a tab are.
-///
-/// Five pixels on a thirty-two pixel button: enough to read as rounded at a
-/// glance and not so much that a short label sits in a lozenge.
 
 /// Everything this program knows about the desktop.
 struct Desktop {
@@ -304,50 +297,6 @@ impl Desktop {
     fn tab(&self, slot: usize) -> Rect {
         let left = self.dock_left() + 14;
         Rect::new(left + slot as u32 * 28, 77, 24, 10)
-    }
-
-    /// How many windows are put away.
-    fn away(&self) -> usize {
-        self.windows[..self.slots.min(MAX_WINDOWS)]
-            .iter()
-            .filter(|state| **state == state::AWAY)
-            .count()
-    }
-
-    /// Whether anything is running at all.
-    fn empty(&self) -> bool {
-        self.windows[..self.slots.min(MAX_WINDOWS)]
-            .iter()
-            .all(|state| *state == state::GONE)
-    }
-
-    /// How much of the strip's width the right-hand side keeps for itself.
-    ///
-    /// Measured rather than guessed, because what goes there is a clock in one
-    /// of two formats and a name somebody typed, and a fixed number would be
-    /// either too small for a long name or a gap on every machine without one.
-    /// Capped at a third: a strip is for windows, and a name long enough to
-    /// take half of it is a name that gets cut instead.
-    fn reserved(&self) -> u32 {
-        // The three power buttons as well as the way out. Without them the
-        // tabs are laid out as though the right-hand end were empty, and the
-        // last tab is drawn underneath them.
-        let mut width = self.leave().width
-            + self.shutdown().width
-            + self.restart().width
-            + self.sleep().width
-            + GAP * 5;
-        if let Some(text) = self.update_line() {
-            width += nexus_ui::measure(&text) + GAP * 3;
-        }
-        if !self.clock.is_empty() {
-            width += nexus_ui::measure(&self.clock) + GAP * 3;
-        }
-        if let Some(name) = &self.owner {
-            width +=
-                nexus_ui::measure(&nexus_i18n::format("shell.owner", &[("name", name)])) + GAP * 3;
-        }
-        width.min(self.width / 2)
     }
 
     /// What to say about updates, if there is anything to say.

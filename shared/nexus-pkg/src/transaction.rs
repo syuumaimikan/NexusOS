@@ -148,10 +148,10 @@ pub fn install_with_extra<F: Filesystem>(
     }
     validate_destinations(&paths).map_err(Failure::Refused)?;
     let mut files = Vec::new();
-    for index in 0..package.len() {
+    for (index, (path, _)) in paths.iter().enumerate().take(package.len()) {
         let entry = package.entry(index).expect("validated table");
         files.push((
-            paths[index].0.as_str(),
+            path.as_str(),
             package.contents(&entry).expect("validated extent"),
         ));
     }

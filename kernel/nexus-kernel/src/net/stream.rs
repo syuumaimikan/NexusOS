@@ -41,7 +41,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use nexus_net as wire;
-use nexus_net::{Ipv4, tcp_flag};
+use nexus_net::{tcp_flag, Ipv4};
 
 use crate::sync::IrqSpinLock;
 use crate::{arch, kprintln};

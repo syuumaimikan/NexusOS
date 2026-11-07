@@ -405,16 +405,12 @@ fn publish_hardware_inventory(devices: &[drivers::pci::Device]) {
     let attached = drivers::usb::ATTACHED.lock();
     let bluetooth = attached
         .iter()
-        .find(|attached| {
-            attached.device.vendor == 0x0e8d && attached.device.product == 0x0616
-        })
+        .find(|attached| attached.device.vendor == 0x0e8d && attached.device.product == 0x0616)
         .map(|_| String::from("MediaTek RZ616|0e8d:0616"))
         .or_else(|| {
             attached
                 .iter()
-                .find(|attached| {
-                    attached.device.class == 0xe0 && attached.device.subclass == 0x01
-                })
+                .find(|attached| attached.device.class == 0xe0 && attached.device.subclass == 0x01)
                 .map(|attached| {
                     alloc::format!(
                         "Bluetooth USB device|{:04x}:{:04x}",
@@ -1219,7 +1215,10 @@ fn self_test() {
     // repository's history. One of them did it once in seven boots.
     for (name, run) in [
         ("memory", memory_self_test as fn()),
-        ("private address snapshot", memory::address_snapshot::self_test),
+        (
+            "private address snapshot",
+            memory::address_snapshot::self_test,
+        ),
         ("the heap", heap_self_test),
         ("the scheduler", scheduler_self_test),
         ("TLB shootdown", tlb_self_test),

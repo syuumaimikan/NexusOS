@@ -104,8 +104,8 @@ fn initial_cot_wire_format_and_publish_order() {
         })
         .collect();
     assert_eq!(writes.len(), 217);
-    for (word, chunk) in writes.iter().zip(packet.chunks_exact(4)) {
-        assert_eq!(word.to_le_bytes(), chunk);
+    for (word, chunk) in writes.iter().zip(packet.as_chunks::<4>().0) {
+        assert_eq!(&word.to_le_bytes(), chunk);
     }
     // Last partial EMEM word must not reveal bytes after the input slice.
     let mut io = Trace::new();
@@ -122,21 +122,19 @@ fn no_doorbell_for_busy_invalid_or_incomplete_emem() {
         let mut io = Trace::new();
         io.queue = queue;
         assert_eq!(send(&mut io, &packet), Err(Error::Busy));
-        assert!(
-            io.events
-                .iter()
-                .all(|event| matches!(event, Event::Read(_)))
-        );
+        assert!(io
+            .events
+            .iter()
+            .all(|event| matches!(event, Event::Read(_))));
     }
     for bad in [1, 1024, u32::MAX] {
         let mut io = Trace::new();
         io.queue[1] = bad;
         assert_eq!(send(&mut io, &packet), Err(Error::Bounds));
-        assert!(
-            io.events
-                .iter()
-                .all(|event| matches!(event, Event::Read(_)))
-        );
+        assert!(io
+            .events
+            .iter()
+            .all(|event| matches!(event, Event::Read(_))));
     }
     let mut io = Trace::new();
     io.broken_cursor = true;
@@ -160,8 +158,8 @@ const ACK: [u8; 20] = [
 fn acknowledge_only_a_complete_read_and_validate_response() {
     let mut io = Trace::new();
     io.queue[3] = 16;
-    for (slot, chunk) in io.ram.iter_mut().zip(ACK.chunks_exact(4)) {
-        *slot = u32::from_le_bytes(chunk.try_into().unwrap());
+    for (slot, chunk) in io.ram.iter_mut().zip(ACK.as_chunks::<4>().0) {
+        *slot = u32::from_le_bytes(*chunk);
     }
     let mut packet = [0xa5; CHANNEL_SIZE];
     assert_eq!(receive(&mut io, &mut packet).unwrap(), Some(20));
@@ -206,11 +204,10 @@ fn acknowledge_only_a_complete_read_and_validate_response() {
         let mut io = Trace::new();
         io.queue = queue;
         assert_eq!(receive(&mut io, &mut packet), Err(Error::Bounds));
-        assert!(
-            io.events
-                .iter()
-                .all(|event| matches!(event, Event::Read(_)))
-        );
+        assert!(io
+            .events
+            .iter()
+            .all(|event| matches!(event, Event::Read(_))));
     }
 }
 #[test]

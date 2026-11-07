@@ -4,7 +4,7 @@
 use crate::{acpi::AcpiInfo, kprintln, memory, sync::IrqSpinLock};
 use alloc::vec::Vec;
 #[cfg(feature = "amdvi-dma-test")]
-use core::sync::atomic::{AtomicBool, Ordering, fence};
+use core::sync::atomic::{fence, AtomicBool, Ordering};
 use nexus_abi::layout;
 use nexus_nvidia::amdvi as abi;
 
@@ -76,11 +76,11 @@ impl Block {
         layout::phys_to_virt(self.physical) as *mut u8
     }
     fn read(&self, offset: usize) -> u64 {
-        assert!(offset % 8 == 0 && offset + 8 <= self.size());
+        assert!(offset.is_multiple_of(8) && offset + 8 <= self.size());
         unsafe { core::ptr::read_volatile(self.pointer().add(offset) as *const u64) }
     }
     fn write(&mut self, offset: usize, value: u64) {
-        assert!(offset % 8 == 0 && offset + 8 <= self.size());
+        assert!(offset.is_multiple_of(8) && offset + 8 <= self.size());
         unsafe {
             core::ptr::write_volatile(self.pointer().add(offset) as *mut u64, value);
         }
@@ -143,7 +143,7 @@ impl Domain {
     /// until this domain has been detached and invalidation has completed.
     /// No live mapping edits are allowed without a controller cache fence.
     pub unsafe fn map(&mut self, iova: u64, physical: u64, permissions: u64) -> Result<(), Error> {
-        if self.published || iova >= abi::IOVA_LIMIT || iova % 4096 != 0 {
+        if self.published || iova >= abi::IOVA_LIMIT || !iova.is_multiple_of(4096) {
             return Err(Error::Mapping);
         }
         abi::page_address(physical).map_err(|_| Error::Mapping)?;

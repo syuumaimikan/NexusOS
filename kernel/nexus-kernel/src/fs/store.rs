@@ -37,7 +37,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::gpt;
-use super::nexusfs::{FsError, Kind, MAX_FILE, Volume};
+use super::nexusfs::{FsError, Kind, Volume, MAX_FILE};
 use crate::drivers::virtio_blk;
 use crate::sync::{IrqSpinLock, SleepLock};
 
