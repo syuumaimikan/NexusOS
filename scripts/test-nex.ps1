@@ -141,15 +141,18 @@ try {
         Write-Host '==> Writing a program' -ForegroundColor Cyan
         Send-Text 'write hi.nex print(6 * 7)'
         Send-Keys @('ret')
-        Start-Sleep -Seconds 2
+        if (-not (Wait-For -Text 'term: ran write' -Seconds 30)) {
+            $failures += 'the shell never ran write'
+        }
+        Start-Sleep -Seconds 1
 
         Write-Host '==> Running it' -ForegroundColor Cyan
         Send-Text 'nex hi.nex'
         Send-Keys @('ret')
-        if (-not (Wait-For -Text 'from BIN/NEX.ELF at a process' -Seconds 60)) {
-            $failures += 'the shell never started BIN/NEX.ELF'
+        if (-not (Wait-For -Text 'BIN/NEX.ELF wrote' -Seconds 60)) {
+            $failures += 'the shell never ran BIN/NEX.ELF'
         }
-        Start-Sleep -Seconds 4
+        Start-Sleep -Seconds 2
 
         if ($Shot) {
             $Ppm = Join-Path $BuildDir 'nex.ppm'
@@ -167,7 +170,10 @@ try {
         Start-Sleep -Seconds 2
         Send-Text 'nex bad.nex'
         Send-Keys @('ret')
-        Start-Sleep -Seconds 4
+        if (-not (Wait-For -Text 'this divides by nothing' -Seconds 60)) {
+            $failures += 'the error was never reported'
+        }
+        Start-Sleep -Seconds 2
 
         $writer.WriteLine('quit')
         Start-Sleep -Milliseconds 800

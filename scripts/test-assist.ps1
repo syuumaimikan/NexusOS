@@ -99,11 +99,11 @@ try {
             }
         }
 
-        # The fifth button along the strip.
-        Write-Host '==> Pressing the assistant button on the strip' -ForegroundColor Cyan
+        # The assistant button in the dock (index 6: centered at x=1200, y=1158).
+        Write-Host '==> Pressing the assistant button on the dock' -ForegroundColor Cyan
         Move-Pointer -Dx -60 -Dy 60 -Steps 40 -Pause 20
-        Move-Pointer -Dx 0 -Dy -3 -Steps 5
-        Move-Pointer -Dx 61 -Dy 0 -Steps 8
+        Move-Pointer -Dx 0 -Dy -16 -Steps 2
+        Move-Pointer -Dx 40 -Dy 0 -Steps 30     # x about 1200: Assist icon
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')

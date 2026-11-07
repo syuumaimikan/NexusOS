@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Presses the button that turns the machine off, and checks that it stops.
 
@@ -126,25 +126,27 @@ function Invoke-PowerRun {
                 Write-Host "    Screenshot: $Picture" -ForegroundColor DarkGray
             }
 
-            # Into the bottom-right corner, where the pointer clamps, so nothing
-            # here has to know where it started. Then up into the strip and left
-            # by however many buttons.
+            # Into the top-right corner, where the pointer clamps, so nothing
+            # here has to know where it started. Then down into the top bar (y=22).
             foreach ($step in 1..60) {
-                $writer.WriteLine('mouse_move 60 60')
+                $writer.WriteLine('mouse_move 60 -60')
                 Start-Sleep -Milliseconds 15
             }
-            foreach ($step in 1..5) {
-                $writer.WriteLine('mouse_move 0 -3')
-                Start-Sleep -Milliseconds 25
+            $writer.WriteLine('mouse_move 0 22')
+            Start-Sleep -Milliseconds 25
+            # The buttons, right to left: log out (20px), off (95px), restart (140px), sleep (205px).
+            $offset = switch ($StepsLeft) {
+                0 { 20 }
+                1 { 95 }
+                2 { 140 }
+                3 { 205 }
+                default { 20 + $StepsLeft * 65 }
             }
-            # The buttons, right to left: log out, off, restart, sleep. Their
-            # widths come from the words in them, so this steps by a generous
-            # amount and relies on the buttons being adjacent.
-            foreach ($step in 1..$StepsLeft) {
-                foreach ($nudge in 1..6) {
-                    $writer.WriteLine('mouse_move -12 0')
-                    Start-Sleep -Milliseconds 20
-                }
+            while ($offset -gt 0) {
+                $nudge = [math]::Min(20, $offset)
+                $writer.WriteLine("mouse_move -$nudge 0")
+                Start-Sleep -Milliseconds 20
+                $offset -= $nudge
             }
             $writer.WriteLine('mouse_button 1')
             Start-Sleep -Milliseconds 250

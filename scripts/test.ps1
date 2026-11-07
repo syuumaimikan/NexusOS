@@ -261,6 +261,9 @@ Invoke-Step 'the collaboration tool' {
 Invoke-Step 'boot test' {
     # With the filesystem's destructive checks on. This is the one place they
     # belong: a disk that exists to be tested, in a run somebody is watching.
+    # A fresh disk is required for the first-run wizard on initial boot.
+    $disk = Join-Path $BuildDir 'nexus-disk.img'
+    if (Test-Path $disk) { Remove-Item $disk -Force }
     Invoke-Native 'powershell' @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'build.ps1'), '-DeepSelfTest') 'build'
     # One boot, on the disk the build just made, with somebody at the keyboard.
     #

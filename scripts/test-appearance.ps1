@@ -134,8 +134,8 @@ try {
 
         Write-Host '==> Opening a terminal' -ForegroundColor Cyan
         Move-Pointer -Dx -60 -Dy 60 -Steps 40 -Pause 20
-        Move-Pointer -Dx 0 -Dy -3 -Steps 5
-        Move-Pointer -Dx 20 -Dy 0 -Steps 8
+        Move-Pointer -Dx 0 -Dy -16 -Steps 2
+        Move-Pointer -Dx 40 -Dy 0 -Steps 22     # x about 880: Terminal icon
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')
@@ -200,10 +200,9 @@ try {
 $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
 
 foreach ($expected in @(
-        # Whatever style the machine happened to start on. The size is the
-        # claim worth checking here: the wallpaper is given the screen minus the
-        # strip, and a wallpaper that drew the whole screen would cover it.
-        'wall: 1920x1164 behind the windows,',
+        # Whatever style the machine happened to start on. The modern wallpaper
+        # covers the full screen (1920x1200) beneath the translucent top bar and dock.
+        'wall: 1920x1200 behind the windows,',
         'term: ran look',
         'term: ran set',
         # That the write actually landed, and not merely that the command ran.

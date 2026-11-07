@@ -363,6 +363,7 @@ fn kernel_main(boot_info: &BootInfo) -> ! {
     display::progress(1, BOOT_STEPS);
 
     self_test();
+    fs::cache::reset_statistics();
     publish_hardware_inventory(&devices);
     display::progress(2, BOOT_STEPS);
     inject_fault_if_requested();

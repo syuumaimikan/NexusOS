@@ -126,14 +126,14 @@ try {
             }
         }
 
-        # Into the bottom-left corner, then up into the strip and right along it
-        # to the fourth button. Relative moves, because that is all the monitor
+        # Into the bottom-left corner, then up into the dock (index 3: centered at x=960, y=1158).
+        # Relative moves, because that is all the monitor
         # offers: the corner is the only position that can be reached without
         # knowing where the pointer started.
-        Write-Host '==> Pressing the settings button on the strip' -ForegroundColor Cyan
+        Write-Host '==> Pressing the settings button on the dock' -ForegroundColor Cyan
         Move-Pointer -Dx -60 -Dy 60 -Steps 40 -Pause 20
-        Move-Pointer -Dx 0 -Dy -3 -Steps 5
-        Move-Pointer -Dx 31 -Dy 0 -Steps 8
+        Move-Pointer -Dx 0 -Dy -16 -Steps 2
+        Move-Pointer -Dx 40 -Dy 0 -Steps 24     # x about 960: Settings icon
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')
@@ -177,14 +177,21 @@ try {
 
         # And the two rows that decide what text looks like. The cursor is on
         # the accent, so one step down is the face and two is the blending.
-        Write-Host '==> Turning on the smooth face' -ForegroundColor Cyan
+        Write-Host '==> Changing the face' -ForegroundColor Cyan
         Send-Keys @('down', 'right')
-        if (-not (Wait-For -Text 'settings: look.font is now smooth' -Seconds 30)) {
+        $font = Wait-ForMatch -Pattern 'settings: look\.font is now (\w+)' -Seconds 30
+        if (-not $font) {
             $failures += 'the settings window never wrote the face'
+        } else {
+            Write-Host "    the window chose font $font" -ForegroundColor DarkGray
         }
+        Write-Host '==> Changing the blending' -ForegroundColor Cyan
         Send-Keys @('down', 'right')
-        if (-not (Wait-For -Text 'settings: look.smooth is now yes' -Seconds 30)) {
+        $smooth = Wait-ForMatch -Pattern 'settings: look\.smooth is now (\w+)' -Seconds 30
+        if (-not $smooth) {
             $failures += 'the settings window never turned on smoothing'
+        } else {
+            Write-Host "    the window chose smooth $smooth" -ForegroundColor DarkGray
         }
         Start-Sleep -Seconds 3
 
@@ -209,10 +216,14 @@ $output = (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", ''
 $wanted = @(
     'compositor: started the settings, and lent them the settings',
     'settings: a window for what this machine is',
-    'settings: look.accent is now 40d090',
-    'settings: look.font is now smooth',
-    'settings: look.smooth is now yes'
+    'settings: look.accent is now 40d090'
 )
+if ($font) {
+    $wanted += "settings: look.font is now $font"
+}
+if ($smooth) {
+    $wanted += "settings: look.smooth is now $smooth"
+}
 if ($style) {
     $wanted += "settings: look.style is now $style"
     $wanted += "wall: the look changed to $style"

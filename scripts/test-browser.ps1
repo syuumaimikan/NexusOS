@@ -99,13 +99,12 @@ try {
             }
         }
 
-        # The button that opens a page is in the strip along the bottom, just
-        # past the one that starts a program. Driven into the corner first,
-        # where the pointer clamps, so nothing here has to know where it was.
+        # The button that opens a page is in the dock (index 1: centered at x=800, y=1158).
+        # Driven into the corner first, where the pointer clamps, so nothing here has to know where it was.
         Write-Host '==> Pressing the button that opens a page' -ForegroundColor Cyan
         Move-Pointer -Dx -60 -Dy 60 -Steps 40 -Pause 20
-        Move-Pointer -Dx 0 -Dy -3 -Steps 5      # into the middle of the buttons
-        Move-Pointer -Dx 20 -Dy 0 -Steps 5      # x about 100: the Web button
+        Move-Pointer -Dx 0 -Dy -16 -Steps 2
+        Move-Pointer -Dx 40 -Dy 0 -Steps 20     # x about 800: the Web button
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')

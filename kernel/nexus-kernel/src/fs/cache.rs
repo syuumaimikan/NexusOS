@@ -252,3 +252,12 @@ pub fn hit_rate() -> u64 {
         total => hits * 100 / total,
     }
 }
+
+/// Reset hit, miss, write and eviction counters, so runtime reporting
+/// measures post-boot workload rather than destructive self-test streaming.
+pub fn reset_statistics() {
+    HITS.store(0, Ordering::Relaxed);
+    MISSES.store(0, Ordering::Relaxed);
+    WRITES.store(0, Ordering::Relaxed);
+    EVICTIONS.store(0, Ordering::Relaxed);
+}

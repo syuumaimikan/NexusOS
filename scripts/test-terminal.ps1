@@ -47,13 +47,33 @@ $FirmwareVars = Join-Path $BuildDir 'vars-terminal.fd'
 Copy-Item (Join-Path $QemuDir 'share\edk2-i386-vars.fd') $FirmwareVars -Force
 if (Test-Path $Log) { Remove-Item $Log -Force }
 
-$MonitorPort = Get-Random -Minimum 33000 -Maximum 34999
+function Get-FreePort {
+    param([int]$From, [int]$To)
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        $candidate = Get-Random -Minimum $From -Maximum $To
+        $listener = $null
+        try {
+            $listener = New-Object System.Net.Sockets.TcpListener(
+                [System.Net.IPAddress]::Loopback, $candidate)
+            $listener.Start()
+            return $candidate
+        } catch {
+            continue
+        } finally {
+            if ($listener) { $listener.Stop() }
+        }
+    }
+    throw "could not find a free port between $From and $To"
+}
+
+$MonitorPort = Get-FreePort -From 33000 -To 34999
+$HttpPort = Get-FreePort -From 18100 -To 18999
 $QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $Log `
-    -MonitorPort $MonitorPort -Headless
+    -MonitorPort $MonitorPort -HostHttpPort $HttpPort -Headless
 
 Write-Host "==> Booting NexusOS with a monitor on port $MonitorPort" -ForegroundColor Cyan
-$process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
+$process = Start-NexusQemu -Executable $QemuExe.Source -Arguments $QemuArgs -ErrorLog (Join-Path $BuildDir 'terminal-error.log')
 
 function Wait-For {
     param([string]$Text, [int]$Seconds)
@@ -96,13 +116,12 @@ try {
             }
         }
 
-        # The button that opens a terminal sits past the launcher and the one
-        # that opens a page. Driven into the corner first, where the pointer
-        # clamps, so nothing here has to know where it was.
+        # The button that opens a terminal sits in the dock (index 2: centered at x=880, y=1158).
+        # Driven into the corner first, where the pointer clamps, so nothing here has to know where it was.
         Write-Host '==> Pressing the button that opens a terminal' -ForegroundColor Cyan
         Move-Pointer -Dx -60 -Dy 60 -Steps 40 -Pause 20
-        Move-Pointer -Dx 0 -Dy -3 -Steps 5
-        Move-Pointer -Dx 20 -Dy 0 -Steps 8      # x about 160: past Open and Web
+        Move-Pointer -Dx 0 -Dy -16 -Steps 2
+        Move-Pointer -Dx 40 -Dy 0 -Steps 22     # x about 880: Terminal icon
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')
@@ -132,6 +151,9 @@ try {
         # the command reaches the right answer, not that the internet is up.
         Send-Keys @('l', 'o', 'o', 'k', 'u', 'p', 'spc', '1', '0', 'dot', '0', 'dot', '2', 'dot', '2', 'ret')
         Send-Keys @('s', 'c', 'a', 'n', 'spc', '1', '0', 'dot', '0', 'dot', '2', 'dot', '1', '5', 'spc', '8', '0', 'ret')
+        if (-not (Wait-For -Text 'term: ran scan' -Seconds 30)) {
+            Write-Host '    the shell never reported ran scan' -ForegroundColor Red
+        }
         # And Japanese. The command word is typed *before* the input method is
         # turned on, because `echo` in kana is not a command -- which is correct
         # behaviour and was a mistake in this test before it was a feature of
@@ -139,6 +161,9 @@ try {
         Send-Keys @('e', 'c', 'h', 'o', 'spc')
         Send-Keys @('f2')
         Send-Keys @('k', 'o', 'n', 'n', 'i', 'c', 'h', 'i', 'h', 'a', 'ret')
+        if (-not (Wait-For -Text 'term: ran echo' -Seconds 30)) {
+            Write-Host '    the shell never reported ran echo' -ForegroundColor Red
+        }
         Send-Keys @('f2')
         Send-Keys @('f2')
         Send-Keys @('n', 'o', 'p', 'e', 'ret')

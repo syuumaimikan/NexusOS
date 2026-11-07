@@ -148,6 +148,13 @@ try {
 
     if ($answer -eq 'machine already set up') {
         Write-Host '    already set up; nothing to answer' -ForegroundColor DarkGray
+        try {
+            $client = New-Object System.Net.Sockets.TcpClient('127.0.0.1', $MonitorPort)
+            $writer = New-Object System.IO.StreamWriter($client.GetStream())
+            $writer.AutoFlush = $true
+            $writer.WriteLine('quit')
+            $client.Close()
+        } catch { }
         exit 0
     }
     if ($null -eq $answer) {

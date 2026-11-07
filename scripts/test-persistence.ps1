@@ -88,13 +88,10 @@ function Invoke-Boot {
             if ($process.HasExited) { break }
             if (Test-Path $log) {
                 $sofar = (Get-Content $log -Raw -Encoding UTF8) -replace "`0", ''
-                # Wait for what this test actually reads, not for the kernel
-                # to finish starting. `init` does its filesystem work well
-                # after the boot thread retires, and stopping at that marker
-                # cut the guest off in the middle of it -- which reads as a
-                # filesystem that lost a file rather than as a test that did
-                # not wait.
-                if ($sofar -and ($sofar -match 'init: (made a directory and a file|read what a previous boot wrote)')) {
+                # Wait for init to finish its work rather than stopping at the
+                # first file write, which would cut the guest off in the middle
+                # of package installation and leave a stale lock on the disk.
+                if ($sofar -and ($sofar.Contains('init: something read a directory it was lent and answered') -or $sofar.Contains('init: FAILED') -or $sofar -match 'process p\d+ "init" exited')) {
                     break
                 }
             }

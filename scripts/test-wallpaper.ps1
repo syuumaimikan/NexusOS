@@ -120,8 +120,8 @@ try {
         # because what is being tested here is the wallpaper.
         Write-Host '==> Opening a terminal' -ForegroundColor Cyan
         foreach ($step in 1..40) { $writer.WriteLine('mouse_move -60 60'); Start-Sleep -Milliseconds 20 }
-        foreach ($step in 1..5) { $writer.WriteLine('mouse_move 0 -3'); Start-Sleep -Milliseconds 35 }
-        foreach ($step in 1..8) { $writer.WriteLine('mouse_move 20 0'); Start-Sleep -Milliseconds 35 }
+        foreach ($step in 1..2) { $writer.WriteLine('mouse_move 0 -16'); Start-Sleep -Milliseconds 35 }
+        foreach ($step in 1..22) { $writer.WriteLine('mouse_move 40 0'); Start-Sleep -Milliseconds 35 }
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')

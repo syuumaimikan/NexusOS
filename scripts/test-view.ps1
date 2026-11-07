@@ -109,11 +109,11 @@ try {
             }
         }
 
-        # The fifth button along the strip.
-        Write-Host '==> Pressing the pictures button on the strip' -ForegroundColor Cyan
+        # The pictures button in the dock (index 5: centered at x=1120, y=1158).
+        Write-Host '==> Pressing the pictures button on the dock' -ForegroundColor Cyan
         Move-Pointer -Dx -60 -Dy 60 -Steps 40 -Pause 20
-        Move-Pointer -Dx 0 -Dy -3 -Steps 5
-        Move-Pointer -Dx 51 -Dy 0 -Steps 8
+        Move-Pointer -Dx 0 -Dy -16 -Steps 2
+        Move-Pointer -Dx 40 -Dy 0 -Steps 28     # x about 1120: Pictures icon
         $writer.WriteLine('mouse_button 1')
         Start-Sleep -Milliseconds 250
         $writer.WriteLine('mouse_button 0')
