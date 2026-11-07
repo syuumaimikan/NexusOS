@@ -30,7 +30,9 @@
 #![no_std]
 #![no_main]
 
-use nexus_guest::{call, exit_group, expect, say, syscall1, syscall2, syscall3, syscall4};
+use nexus_guest::{
+    call, exit_group, expect, map_anonymous, say, syscall1, syscall2, syscall3, syscall4, syscall5,
+};
 
 nexus_guest::guest_main!(run);
 
@@ -212,6 +214,49 @@ fn run() -> ! {
 
     let _ = syscall1(call::CLOSE, reading);
     let _ = syscall1(call::CLOSE, set as u64);
+
+    // ---- mremap & mknod -------------------------------------------------
+    let Some(first) = map_anonymous(4096) else {
+        nexus_guest::fail(119);
+    };
+    let Some(blocker) = map_anonymous(4096) else {
+        nexus_guest::fail(119);
+    };
+    unsafe {
+        core::ptr::write_bytes(first, 0x5A, 4096);
+    }
+    let moved = syscall5(call::MREMAP, first as u64, 4096, 8192, 1, 0);
+    expect(moved > 0, 119);
+    let moved_ptr = moved as *mut u8;
+    unsafe {
+        expect(*moved_ptr == 0x5A && *moved_ptr.add(4095) == 0x5A, 119);
+        expect(*moved_ptr.add(4096) == 0, 119);
+        *moved_ptr.add(4096) = 0x3C;
+    }
+    let shrunk = syscall5(call::MREMAP, moved as u64, 8192, 4096, 0, 0);
+    expect(shrunk == moved, 119);
+    expect(syscall2(call::MUNMAP, shrunk as u64, 4096) == 0, 119);
+    expect(syscall2(call::MUNMAP, blocker as u64, 4096) == 0, 119);
+
+    const FIFO_PATH: &[u8] = b"/tmp/posix-mknod.fifo\0";
+    let _ = syscall1(call::UNLINK, FIFO_PATH.as_ptr() as u64);
+    expect(
+        syscall3(call::MKNOD, FIFO_PATH.as_ptr() as u64, 0o010600, 0) == 0,
+        119,
+    );
+    let fifo = syscall2(call::OPEN, FIFO_PATH.as_ptr() as u64, 2);
+    expect(fifo >= 0, 119);
+    expect(
+        syscall3(call::WRITE, fifo as u64, AGAIN.as_ptr() as u64, 1) == 1,
+        119,
+    );
+    one[0] = 0;
+    expect(
+        syscall3(call::READ, fifo as u64, one.as_mut_ptr() as u64, 1) == 1 && one[0] == b'!',
+        119,
+    );
+    expect(syscall1(call::CLOSE, fifo as u64) == 0, 119);
+    expect(syscall1(call::UNLINK, FIFO_PATH.as_ptr() as u64) == 0, 119);
 
     say("guest: descriptors, a pipe, poll and epoll all behaved");
     exit_group(0)

@@ -180,7 +180,11 @@ int main(int argc, char **argv, char **environment) {
     errno = 0;
     if (!check(write(1, guard, 1) == -1 && errno == EFAULT, 32)) return 32;
     if (!check(mprotect(guard, 4096, PROT_READ | PROT_WRITE) == 0 && guard[0] == 0x71, 33)) return 33;
-    if (!check(munmap(guard, 4096) == 0, 34)) return 34;
+    unsigned char *remapped = mremap(guard, 4096, 8192, MREMAP_MAYMOVE);
+    if (!check(remapped != MAP_FAILED && remapped[0] == 0x71 && remapped[4096] == 0, 34)) return 34;
+    remapped[4096] = 0x4e;
+    unsigned char *shrunk = mremap(remapped, 8192, 4096, 0);
+    if (!check(shrunk == remapped && shrunk[0] == 0x71 && munmap(shrunk, 4096) == 0, 34)) return 34;
     int fd = open("musl-probe.txt", O_CREAT | O_TRUNC | O_RDWR, 0600);
     if (!check(fd >= 3, 12)) return 12;
     const char contents[] = "a real musl program wrote these bytes";

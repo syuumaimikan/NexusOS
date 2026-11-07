@@ -59,8 +59,9 @@ for every Nexus program: a directory handle is the authority to reach what is
 under it, and a path that could climb out would make that authority mean
 nothing.
 
-The working directory is `/` and does not move. `chdir` is not translated, so
-`getcwd` answering `/` is the truth and not a placeholder.
+The working directory starts at `/` and moves when a program calls `chdir` or
+`fchdir`, while remaining confined to `linux/` so `getcwd` always reports the
+process's real directory inside the Linux root.
 
 ## The bug that cost the afternoon
 
@@ -433,98 +434,84 @@ i386 image is refused rather than entered unrelocated.
 
 ## What is translated
 
-| `openat`, `open` | with `O_CREAT`, `O_TRUNC`, `O_APPEND`, `O_EXCL`, `O_DIRECTORY` |
-| `read`, `write`, `close`, `lseek` | a position per descriptor, dropped when the process ends |
-| `pread64` | reads at an explicit nonnegative offset without changing that position |
-| `fstat`, `stat`, `newfstatat` | the 144-byte x86-64 `struct stat` |
+| `openat`, `open`, `creat` | with `O_CREAT`, `O_TRUNC`, `O_APPEND`, `O_EXCL`, `O_DIRECTORY`, `O_CLOEXEC` |
+| `read`, `write`, `readv`, `writev`, `close`, `lseek` | a position per descriptor, dropped when the process ends |
+| `pread64`, `pwrite64` | reads and writes at an explicit nonnegative offset without changing that position |
+| `fstat`, `stat`, `lstat`, `newfstatat`, `statx`, `statfs`, `fstatfs` | `struct stat`, `struct statx`, and filesystem block statistics |
 | `getdents64` | as many whole entries as fit, the rest next call |
-| `mkdirat`, `mkdir`, `unlinkat`, `unlink`, `rmdir` | |
-| `access`, `faccessat` | existence, which is the only question this can answer |
-| `getcwd`, `getrandom` | |
-| `mmap`, `munmap`, `mprotect`, `arch_prctl` | as before |
+| `mkdirat`, `mkdir`, `mknod`, `mknodat`, `unlinkat`, `unlink`, `rmdir`, `rename`, `renameat`, `renameat2`, `symlink`, `symlinkat`, `readlink`, `readlinkat` | directories, regular files, FIFOs (`S_IFIFO`), and symbolic links |
+| `access`, `faccessat`, `faccessat2`, `chmod`, `fchmod`, `fchmodat`, `umask` | mode bits and existence checks |
+| `chdir`, `fchdir`, `getcwd`, `getrandom` | working directory inside `linux/` and hardware randomness |
+| `mmap`, `munmap`, `mprotect`, `mremap`, `madvise`, `arch_prctl` | anonymous or file-backed, private or shared, `MREMAP_MAYMOVE` and `MREMAP_FIXED` |
 | `write`, `writev` to 1 and 2 | to the boot log, as before |
-| `uname`, `clock_gettime`, `getpid`, `gettid`, the identity calls | as before |
-| `mmap` | anonymous or file-backed, private, `MAP_FIXED` and `MAP_FIXED_NOREPLACE`, `PROT_EXEC`, at an offset |
-| `mprotect` | really changes the page tables; the contents survive it |
-| `clone` | `CLONE_VM\|THREAD\|SIGHAND\|FILES`, with `SETTLS`, `PARENT_SETTID`, `CHILD_SETTID`, `CHILD_CLEARTID` |
-| `futex` | `WAIT` and `WAKE`, private, with and without a timeout |
-| `set_robust_list`, `get_robust_list` | recorded; nothing walks the list at thread exit |
-| `sched_yield`, `sched_getaffinity`, `getcpu` | |
+| `uname`, `clock_gettime`, `clock_getres`, `clock_nanosleep`, `nanosleep`, `gettimeofday`, `time`, `sysinfo`, `getpid`, `getppid`, `gettid`, the identity calls | |
+| `fork`, `vfork`, `clone`, `clone3`, `wait4`, `waitid` | both threads (`CLONE_VM\|THREAD`) and full child processes with private address-space snapshots |
+| `futex` | `WAIT`, `WAKE`, `WAIT_BITSET`, `WAKE_BITSET`, `REQUEUE`, `CMP_REQUEUE` |
+| `set_robust_list`, `get_robust_list`, `rseq`, `membarrier` | recorded per thread |
+| `sched_yield`, `sched_getaffinity`, `getcpu`, `prctl`, `getrlimit`, `setrlimit`, `prlimit64` | |
 | `exit` | this thread; `exit_group` is the program |
-| `ioctl` on `/dev/nexus/display` | a window: size, present, event |
-| `dup`, `dup2`, `dup3` | including a duplicate of the log |
-| `pipe`, `pipe2` | a byte stream with two ends |
-| `poll`, `ppoll` | level-triggered, blocking on a wait set |
-| `epoll_create`, `epoll_create1`, `epoll_ctl`, `epoll_wait`, `epoll_pwait` | `EPOLLET` refused |
-| `socket`, `socketpair`, `bind`, `listen`, `accept`, `accept4`, `connect` | `AF_UNIX` streams only |
-| `send`, `recv`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg` | `SCM_RIGHTS` carries handles |
-| `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `kill`, `tgkill` | a handler really runs |
-| `execve` | one thread only; descriptors survive |
-| `memfd_create`, `ftruncate` | memory with a descriptor on it |
+| `ioctl` | `/dev/nexus/display`, `/dev/dri/card0` (`drm-shim`), `FIONBIO`, `FIONREAD`, terminal geometry |
+| `fcntl`, `dup`, `dup2`, `dup3`, `fsync`, `fdatasync`, `fallocate`, `truncate`, `ftruncate` | including `FD_CLOEXEC`, `F_DUPFD_CLOEXEC`, and file sizing |
+| `pipe`, `pipe2`, `eventfd`, `eventfd2`, `signalfd`, `signalfd4`, `timerfd_create`, `timerfd_settime`, `timerfd_gettime` | byte pipes and pollable event/signal/timer descriptors |
+| `poll`, `ppoll`, `select`, `pselect6` | level-triggered, blocking on a wait set |
+| `epoll_create`, `epoll_create1`, `epoll_ctl`, `epoll_wait`, `epoll_pwait` | including `EPOLLONESHOT`; `EPOLLET` refused |
+| `socket`, `socketpair`, `bind`, `listen`, `accept`, `accept4`, `connect`, `shutdown`, `getsockname`, `getpeername`, `setsockopt`, `getsockopt` | `AF_UNIX` streams and `AF_INET` TCP/UDP sockets |
+| `send`, `recv`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg` | `SCM_RIGHTS` carries handles on `AF_UNIX`; TCP streams and UDP datagrams on `AF_INET` |
+| `rt_sigaction`, `rt_sigprocmask`, `rt_sigpending`, `rt_sigsuspend`, `rt_sigtimedwait`, `rt_sigreturn`, `sigaltstack`, `kill`, `tgkill`, `tkill` | handlers, masks, alternate stacks, `SIGCHLD` on child exit, and `SIGPIPE` on closed pipes/sockets |
+| `execve` | one thread only; descriptors without `FD_CLOEXEC` survive |
+| `memfd_create` | memory with a descriptor on it |
 | `mmap` of a memory descriptor, `MAP_SHARED` | how a frame is passed between programs |
 
-Fields the machine has no answer for are zero rather than invented. There are
-no timestamps in a `struct stat` here, because a fabricated modification time
-makes `make` rebuild nothing.
+Fields the machine has no answer for are zero rather than invented.
 
 ## What is not
 
 `brk` is refused with `ENOMEM`, deliberately: every libc worth running falls
 back to `mmap`, and musl does not use `brk` at all.
 
-No `fork`. No signals raised by the *kernel*: a fault still ends the process,
-there is no `SIGPIPE` on a write to a pipe nobody reads, and no `SIGCHLD`. No
-`O_CLOEXEC`, no filesystem links or permissions, no `AF_INET` sockets, no
-datagram sockets, no `shutdown` of one direction, and no futex on memory shared
-between processes.
-
-Nothing thirty-two bit that passes a structure, and no thirty-two bit dynamic
-linking. No AVX: that needs `XCR0` and `xsave`, and a program built
-with `-mavx2` takes an invalid opcode. No page that is writable and executable
-at once, which means no just-in-time compiler.
+No signals raised by hardware faults: a page fault or illegal instruction still
+ends the process rather than delivering `SIGSEGV` or `SIGILL`. No futex on
+memory shared between distinct processes. No AVX (`XCR0` / `xsave`), and no
+page that is writable and executable at once (`W^X`), which means no
+just-in-time compiler unless it switches page permissions via `mprotect`.
 
 Each of those is real work and none of them is hidden behind a stub that returns
 success.
 
 ## Steam
 
-It was asked for, and it will not run. This is worth writing down once, in
-order, with what has changed marked:
+It was asked for, and Steam sign-in and GPU-accelerated rendering do not yet run
+end-to-end. Here is what has been built and what remains:
 
-- **glibc.** Steam is dynamically linked against it. That needs `PT_INTERP`
-  honoured, `ld-linux-x86-64.so.2` present, and then several hundred calls
-  glibc's startup touches. *The kernel now honours `PT_INTERP`*, and a great
-  many of those calls are now translated -- but no part of glibc is on this
-  machine, and building it needs a Linux toolchain this repository does not
-  have. Until one is here, "a dynamically linked program starts" means the
-  program in this repository and not one from a distribution.
-- **32-bit.** The Steam bootstrap is i386. *A static i386 program compiled here
-  now runs*: compatibility mode, `int 0x80`, the i386 call table and a
-  thirty-two bit auxiliary vector all work. What is missing is the calls that
-  pass structures, thread-local storage through a local descriptor table, and
-  thirty-two bit libraries — and the bootstrap is dynamically linked, so it
-  needs a thirty-two bit interpreter as well.
-- **X11 or Wayland.** Steam draws through one of them. *A Wayland client and a
-  Wayland compositor, both built for Linux, now negotiate a window through
-  `xdg-shell`, draw it, resize it, put a key into it and close it* -- with
-  `wl_shm`, `SCM_RIGHTS` and shared memory underneath, `wl_seat` for the
-  keyboard, `wl_output` for the screen, frame callbacks and buffer damage. That
-  is the set a real client needs before it will draw anything. What is missing
-  is that it has never been run against `libwayland` itself; an XKB keymap; a
-  pointer; subsurfaces, popups and regions; more than one client at a time; and
-  protocol errors. There is still no X server.
-- **OpenGL and Vulkan.** Steam's own interface is GPU-composited. There is no
-  Vulkan or OpenGL implementation here, and nothing in this direction has been
-  started. The virtio-gpu driver provides 2D scanout; the native CPU triangle
-  renderer does not expose either API.
+- **glibc (x86-64 and i386).** Both 64-bit (`ld-linux-x86-64.so.2`) and 32-bit
+  (`ld-linux.so.2`) glibc dynamic linkers, `libc.so.6`, `libpthread.so.0`, and
+  `libdl.so.2` are staged and run on the machine when built with `-WithGlibc32`.
+  `PT_INTERP` is honoured for both 64-bit and 32-bit `ET_DYN` binaries, and
+  32-bit TLS (`set_thread_area` / GDT entries and `%gs`), `stat64`/`statx`,
+  `clone3`, `fork`, `waitpid`, and `dlopen` are verified by
+  `scripts/test-posix-runtime.ps1 -WithGlibc32`.
+- **32-bit Steam bootstrap.** `scripts/test-steam.ps1` unpacks the official
+  `steam.deb` package, runs the `/usr/bin/steam` shell script through dash, and
+  reaches the 32-bit `ubuntu12_32/steam` ELF binary under `ld-linux.so.2`.
+- **X11 and Wayland.** A Wayland client and a Wayland compositor, both built for
+  Linux, negotiate a window through `xdg-shell`, draw it, resize it, put a key
+  into it and close it -- with `wl_shm`, `SCM_RIGHTS` and shared memory
+  underneath, `wl_seat` for the keyboard, `wl_output` for the screen, frame
+  callbacks and buffer damage, plus an X11 bridge (`tools/nexus-x11`) tested by
+  `scripts/test-x11.ps1`.
+- **OpenGL, Vulkan, and DRM shim.** Software OpenGL (`swrast` / `GLX` / `EGL`)
+  and software Vulkan (`lvp` / `VK_KHR_surface` / `VK_KHR_xcb_surface` /
+  `VK_KHR_wayland_surface`) present frames through `/dev/dri/card0` (`drm-shim`)
+  and `/dev/nexus/display`, verified by `scripts/test-mesa.ps1` and
+  `scripts/test-vulkan.ps1`. Physical GPU acceleration on the RTX 5060 is not
+  yet implemented.
 - **CEF.** The store is an embedded Chromium. That is tens of millions of lines
   of C++ expecting a full POSIX system, processes, and a GPU process. It also
   needs pages that are writable and executable, which this system does not make
   for anybody.
-- **Networking, audio, DRM.** PulseAudio or ALSA, and a licensing handshake with
-  Valve's servers. *Threads, futexes, signals and Unix sockets exist now*;
-  `AF_INET` sockets do not, and there is no audio interface a Linux program can
-  reach.
+- **Networking, audio, DRM.** Threads, futexes, signals, Unix sockets, and
+  `AF_INET` TCP/UDP sockets exist now; there is still no Linux audio interface
+  (PulseAudio or ALSA) and full Steam client sign-in has not been demonstrated.
 
 Any one of the unfinished ones is larger than this whole operating system.
 Saying "Steam works" after building a stub that draws a window would be the kind

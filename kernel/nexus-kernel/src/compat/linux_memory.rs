@@ -67,6 +67,11 @@ pub mod flag {
     pub const PROT_READ: u64 = 1;
     pub const PROT_WRITE: u64 = 2;
     pub const PROT_EXEC: u64 = 4;
+
+    /// `mremap` may relocate the mapping if it cannot grow in place.
+    pub const MREMAP_MAYMOVE: u64 = 1;
+    /// `mremap` must move the mapping to `new_address` (`MREMAP_MAYMOVE` required).
+    pub const MREMAP_FIXED: u64 = 2;
 }
 
 /// Where a mapping goes when the caller did not say.
@@ -529,6 +534,217 @@ pub fn munmap(address: u64, length: u64) -> u64 {
     };
     release(&process, address, length.div_ceil(PAGE));
     0
+}
+
+/// `mremap(old_address, old_size, new_size, flags, new_address)`.
+///
+/// Resizes or moves an existing private mapping without losing the bytes in its
+/// preserved pages. Shrinking releases the tail in place; growing extends in
+/// place when the following pages are free, or relocates the existing physical
+/// frames when `MREMAP_MAYMOVE` permits.
+pub fn mremap(old_address: u64, old_size: u64, new_size: u64, flags: u64, new_address: u64) -> u64 {
+    use core::sync::atomic::Ordering;
+    use flag as f;
+
+    if flags & !(f::MREMAP_MAYMOVE | f::MREMAP_FIXED) != 0 {
+        return error::EINVAL;
+    }
+    if flags & f::MREMAP_FIXED != 0 && flags & f::MREMAP_MAYMOVE == 0 {
+        return error::EINVAL;
+    }
+    if old_address == 0
+        || !old_address.is_multiple_of(PAGE)
+        || old_size == 0
+        || new_size == 0
+        || new_size > MAX_MMAP
+    {
+        return error::EINVAL;
+    }
+    let Some(process) = crate::sched::current_process() else {
+        return error::ENOSYS;
+    };
+
+    let old_pages = old_size.div_ceil(PAGE);
+    let new_pages = new_size.div_ceil(PAGE);
+    let limit = if process.personality == crate::process::Personality::Linux32 {
+        MMAP_LIMIT32
+    } else {
+        nexus_abi::layout::USER_SPACE_END
+    };
+    let Some(old_end) = old_address.checked_add(old_pages.saturating_mul(PAGE)) else {
+        return error::EINVAL;
+    };
+    if old_end > nexus_abi::layout::USER_SPACE_END {
+        return error::EINVAL;
+    }
+
+    let root = process.address_space.root();
+    let mut existing = Vec::new();
+    if existing.try_reserve_exact(old_pages as usize).is_err() {
+        return error::ENOMEM;
+    }
+    for page in 0..old_pages {
+        let virt = old_address + page * PAGE;
+        let Some(frame) = process.address_space.translate(virt) else {
+            return error::EFAULT;
+        };
+        let Some(pte_flags) = paging::flags_in(root, virt) else {
+            return error::EFAULT;
+        };
+        if pte_flags & paging::SHARED != 0 {
+            return error::EINVAL;
+        }
+        existing.push((frame, pte_flags));
+    }
+    let tail_flags = existing.last().map_or(
+        paging::PRESENT | paging::USER | paging::WRITABLE | paging::NO_EXECUTE,
+        |(_, fl)| *fl,
+    );
+
+    if flags & f::MREMAP_FIXED == 0 {
+        if new_pages == old_pages {
+            return old_address;
+        }
+        if new_pages < old_pages {
+            release(
+                &process,
+                old_address + new_pages * PAGE,
+                old_pages - new_pages,
+            );
+            return old_address;
+        }
+        let extra = new_pages - old_pages;
+        let in_place_end = old_end.saturating_add(extra * PAGE);
+        if in_place_end < limit && is_free(&process.address_space, old_end, extra) {
+            let Some(fresh) = allocate_zeroed_frames(extra) else {
+                return error::ENOMEM;
+            };
+            for (index, &frame) in fresh.iter().enumerate() {
+                let virt = old_end + (index as u64) * PAGE;
+                if unsafe { process.address_space.map(virt, frame, tail_flags) }.is_err() {
+                    for mapped in 0..index {
+                        let _ = unsafe {
+                            process
+                                .address_space
+                                .unmap(old_end + (mapped as u64) * PAGE)
+                        };
+                    }
+                    for &frame in &fresh {
+                        unsafe { crate::memory::free_frame(frame) };
+                    }
+                    return error::ENOMEM;
+                }
+            }
+            let mut cursor = NEXT.lock();
+            if let Some(next) = cursor.get_mut(&process.id.0) {
+                if *next < in_place_end {
+                    *next = in_place_end;
+                }
+            }
+            drop(cursor);
+            MAPPED.fetch_add(extra, Ordering::Relaxed);
+            return old_address;
+        }
+        if flags & f::MREMAP_MAYMOVE == 0 {
+            return error::ENOMEM;
+        }
+    }
+
+    let extra = new_pages.saturating_sub(old_pages);
+    let dest = if flags & f::MREMAP_FIXED != 0 {
+        if new_address == 0 || !new_address.is_multiple_of(PAGE) {
+            return error::EINVAL;
+        }
+        let Some(new_end) = new_address.checked_add(new_pages.saturating_mul(PAGE)) else {
+            return error::ENOMEM;
+        };
+        if new_end >= limit {
+            return error::ENOMEM;
+        }
+        if new_address < old_end && old_address < new_end {
+            return error::EINVAL;
+        }
+        new_address
+    } else {
+        let Some(placed) = place(&process, new_pages) else {
+            return error::ENOMEM;
+        };
+        placed
+    };
+
+    let fresh = if extra > 0 {
+        let Some(frames) = allocate_zeroed_frames(extra) else {
+            return error::ENOMEM;
+        };
+        frames
+    } else {
+        Vec::new()
+    };
+
+    if flags & f::MREMAP_FIXED != 0 {
+        release(&process, dest, new_pages);
+        PLACED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let keep = old_pages.min(new_pages) as usize;
+    for (index, &(frame, pte_flags)) in existing[..keep].iter().enumerate() {
+        let virt = dest + (index as u64) * PAGE;
+        if unsafe { process.address_space.map(virt, frame, pte_flags) }.is_err() {
+            for mapped in 0..index {
+                let _ = unsafe { process.address_space.unmap(dest + (mapped as u64) * PAGE) };
+            }
+            for &frame in &fresh {
+                unsafe { crate::memory::free_frame(frame) };
+            }
+            return error::ENOMEM;
+        }
+    }
+    for (index, &frame) in fresh.iter().enumerate() {
+        let virt = dest + ((keep + index) as u64) * PAGE;
+        if unsafe { process.address_space.map(virt, frame, tail_flags) }.is_err() {
+            for mapped in 0..(keep + index) {
+                let _ = unsafe { process.address_space.unmap(dest + (mapped as u64) * PAGE) };
+            }
+            for &frame in &fresh {
+                unsafe { crate::memory::free_frame(frame) };
+            }
+            return error::ENOMEM;
+        }
+    }
+
+    for page in 0..keep {
+        let _ = unsafe {
+            process
+                .address_space
+                .unmap(old_address + (page as u64) * PAGE)
+        };
+    }
+    if new_pages < old_pages {
+        release(
+            &process,
+            old_address + new_pages * PAGE,
+            old_pages - new_pages,
+        );
+    }
+    MAPPED.fetch_add(extra, Ordering::Relaxed);
+    dest
+}
+
+fn allocate_zeroed_frames(count: u64) -> Option<Vec<u64>> {
+    let mut frames = Vec::new();
+    frames.try_reserve_exact(count as usize).ok()?;
+    for _ in 0..count {
+        let Some(frame) = crate::memory::allocate_frame() else {
+            for allocated in frames {
+                unsafe { crate::memory::free_frame(allocated) };
+            }
+            return None;
+        };
+        let kernel = nexus_abi::layout::phys_to_virt(frame) as *mut u8;
+        unsafe { core::ptr::write_bytes(kernel, 0, PAGE as usize) };
+        frames.push(frame);
+    }
+    Some(frames)
 }
 
 /// `mprotect(address, length, protection)`.

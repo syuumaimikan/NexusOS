@@ -85,6 +85,11 @@ pub struct Pipe {
     /// How many ends of each kind are open. See the note at the top.
     readers: AtomicUsize,
     writers: AtomicUsize,
+    /// Monotonic counts of reader and writer opens, so a blocking FIFO open
+    /// notices a peer that opened, transferred data, and closed before the
+    /// waiting thread was scheduled.
+    reader_opens: AtomicUsize,
+    writer_opens: AtomicUsize,
 }
 
 /// One side of a pipe: the authority to read it, or to write it.
@@ -92,6 +97,8 @@ pub struct PipeEnd {
     pipe: Arc<Pipe>,
     reading: bool,
     writing: bool,
+    seen_readers: usize,
+    seen_writers: usize,
 }
 
 /// Why a read or a write could not be completed.
@@ -128,17 +135,23 @@ impl Pipe {
             watchers: Watchers::new(),
             readers: AtomicUsize::new(0),
             writers: AtomicUsize::new(0),
+            reader_opens: AtomicUsize::new(0),
+            writer_opens: AtomicUsize::new(0),
         })
     }
 
     /// Open one descriptor on an existing pipe.
     #[must_use]
     pub fn open(self: &Arc<Self>, reading: bool, writing: bool) -> Arc<PipeEnd> {
+        let seen_readers = self.reader_opens.load(Ordering::Acquire);
+        let seen_writers = self.writer_opens.load(Ordering::Acquire);
         if reading {
             self.readers.fetch_add(1, Ordering::AcqRel);
+            self.reader_opens.fetch_add(1, Ordering::AcqRel);
         }
         if writing {
             self.writers.fetch_add(1, Ordering::AcqRel);
+            self.writer_opens.fetch_add(1, Ordering::AcqRel);
         }
         self.readable.wake_all();
         self.writable.wake_all();
@@ -147,6 +160,8 @@ impl Pipe {
             pipe: Arc::clone(self),
             reading,
             writing,
+            seen_readers,
+            seen_writers,
         })
     }
 
@@ -209,8 +224,11 @@ impl PipeEnd {
         loop {
             let ready = if self.writing {
                 self.pipe.readers_open()
+                    || self.pipe.reader_opens.load(Ordering::Acquire) != self.seen_readers
             } else {
-                self.pipe.writers_open() || nonblocking
+                self.pipe.writers_open()
+                    || self.pipe.writer_opens.load(Ordering::Acquire) != self.seen_writers
+                    || nonblocking
             };
             if ready {
                 return Ok(());
@@ -229,8 +247,10 @@ impl PipeEnd {
             let seen = queue.generation();
             let ready = if self.writing {
                 self.pipe.readers_open()
+                    || self.pipe.reader_opens.load(Ordering::Acquire) != self.seen_readers
             } else {
                 self.pipe.writers_open()
+                    || self.pipe.writer_opens.load(Ordering::Acquire) != self.seen_writers
             };
             if !ready {
                 queue.wait_if_unchanged(seen);

@@ -6,13 +6,17 @@ SIGCHLD, CLONE_CHILD_SETTID and CLONE_CHILD_CLEARTID, with no CLONE_VM. The
 request needs a separate process and an independent address space. Returning
 a thread here would not satisfy the request.
 
-The current authoritative diagnostic is
-`build/steam-diagnostic-74cdfb2d63334a68a125ca01f3b60afd/serial.log`:
-the translated bootstrap still reports `CUpdateUIChildProcess: failed to fork
-child process`, and exits with 4294967192. Its two earlier socket option calls
-are level 6, option 1 (TCP_NODELAY), on local stream descriptors. Those calls
-remain unsupported; they are not evidence that implementing options alone
-would start the update UI. Steam sign-in remains unverified.
+The earlier diagnostic before `linux_fork` was wired
+(`build/steam-diagnostic-74cdfb2d63334a68a125ca01f3b60afd/serial.log`)
+recorded `CUpdateUIChildProcess: failed to fork child process` and exited with
+4294967192. `kernel/nexus-kernel/src/compat/linux_fork.rs` now wires native
+process `fork` and `wait4` across both x86-64 and i386, alongside `AF_INET`
+stream/datagram sockets and socket options (`TCP_NODELAY`, `SO_ERROR`,
+`SO_RCVTIMEO`, `SO_SNDTIMEO`, `SO_SNDBUF`, `SO_RCVBUF`, `SO_REUSEADDR`,
+`SO_KEEPALIVE`, `SO_LINGER`, `IP_TOS`, `IP_MTU_DISCOVER`). The official Steam
+bootstrap now forks its update-UI child process, downloads the client manifest
+over HTTP, reaps the child, and exits cleanly (`status=0`). Full Steam client
+sign-in and physical GPU acceleration remain unverified.
 
 `kernel/nexus-kernel/src/memory/address_snapshot.rs` now implements an eager
 copy of private 4 KiB user mappings at the same virtual addresses in a new
@@ -42,16 +46,19 @@ Windows PowerShell runtime/UI run also passes (libc64/i386, IPC/filesystem,
 CPU Vulkan, Mesa, native window controls and upstream Wayland):
 `build/address-snapshot-acceptance.log`.
 
-Before wiring the Linux fork entry point, the remaining work includes:
+`kernel/nexus-kernel/src/compat/linux_fork.rs` now completes the Linux fork and
+`wait4` path on top of `address_snapshot`:
 
-- Clone descriptor tables with the same numbers and rights, preserving shared
-  open descriptions/cursors while allowing independent close and CLOEXEC flags.
-- Inherit mmap/brk placement state, executable metadata, actual cwd, signal/TLS
-  state and all owners backing shared mappings; define source VM synchronisation.
-- Start only the calling thread in the new process, returning zero to it and
-  the child PID to its parent. Apply CHILD_SETTID/CLEARTID to the child's memory.
-- Record parent/child relationships and completion, implement waitpid/wait4
-  status/reaping and orphan cleanup, and preserve cancellation/exit semantics.
-- Prove all of these using actual libc children on NexusOS, then rerun the
-  official Steam bootstrap. i386 exec, signals, desktop services and physical
-  NVIDIA acceleration remain separate incomplete requirements.
+- Clones descriptor tables with identical handle numbers and rights, preserving
+  shared open file cursors and `O_NONBLOCK` state while allowing independent
+  `close` and `FD_CLOEXEC` flags.
+- Inherits `mmap` placement state, executable metadata, current working
+  directory, signal actions/masks, x86-64/i386 TLS state, and `MemoryObject`
+  shared mappings (`MAP_SHARED` `memfd`/surface views) alongside private pages.
+- Starts the calling thread in the child process returning `0` while returning
+  the child PID to the parent, applying `CLONE_CHILD_SETTID` and
+  `CLONE_CHILD_CLEARTID` to the child's address space.
+- Tracks parent/child relationships, exit status and `wait4`/`WNOHANG` reaping,
+  verified by real x86-64 and i386 libc `fork`/`waitpid` probes and the official
+  Steam bootstrap. Full i386 signal delivery, Steam sign-in and physical NVIDIA
+  acceleration remain separate incomplete requirements.

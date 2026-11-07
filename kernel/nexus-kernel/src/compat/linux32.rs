@@ -53,7 +53,9 @@ mod call {
     pub const UNLINK: u64 = 10;
     pub const CHDIR: u64 = 12;
     pub const TIME: u64 = 13;
+    pub const MKNOD: u64 = 14;
     pub const FCHDIR: u64 = 133;
+    pub const MREMAP: u64 = 163;
     pub const GETTIMEOFDAY: u64 = 78;
     pub const MKDIRAT: u64 = 296;
     pub const MKNODAT: u64 = 297;
@@ -409,6 +411,10 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             memory::mprotect(argument0, argument1, argument2)
         }
+        call::MREMAP => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            memory::mremap(argument0, argument1, argument2, argument3, argument4)
+        }
         // Refused for the same reason as at sixty-four bits: every libc worth
         // running falls back to `mmap`.
         call::BRK => {
@@ -503,6 +509,10 @@ pub fn dispatch(frame: &mut Frame) -> u64 {
         call::MKNODAT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             files::mknodat(argument0, argument1, argument2)
+        }
+        call::MKNOD => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::mknodat(files::AT_FDCWD as u32 as u64, argument0, argument1)
         }
         120 => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

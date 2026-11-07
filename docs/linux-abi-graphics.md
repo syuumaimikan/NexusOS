@@ -14,12 +14,14 @@ executable identity and live proc argument/environment bytes are implemented,
 including x86-64 execve metadata refresh and i386 directory reads. Native cwd,
 directory-relative paths and x86-64 relative execve also pass real libc probes.
 Persistent links and native random-source descriptors also pass both widths;
-the Steam bootstrap now proceeds beyond chdir/data-link/random failures to
-update-UI IPC initialisation. Legacy i386 stream socketcall and parallel group
-exit status are tested. Socket options, signals and
-several process/socket APIs are still incomplete.
-Steam and physical GPU rendering remain incomplete. The historical dependency analysis below is not a current
-acceptance report.
+all 36 calls in `tools/nexus-probe` (`probe: 36 of 36 present, 0 missing`,
+including `mremap` and `mknod`), native `fork`/`wait4`, `AF_INET` TCP/UDP
+sockets, socket options, `EPOLLONESHOT`, `FIONREAD`/`FIONBIO`, and
+`/proc/cpuinfo` are now implemented and verified. The official Steam bootstrap
+forks its update-UI child, downloads its manifest over HTTP, and exits cleanly
+(`status=0`). Full i386 signal delivery, Steam client sign-in, and physical GPU
+rendering remain incomplete. The historical dependency analysis below is not a
+current acceptance report.
 
 ```
 probe: have getpid (39)

@@ -61,6 +61,7 @@ mod call {
     pub const MPROTECT: u64 = 10;
     pub const MUNMAP: u64 = 11;
     pub const BRK: u64 = 12;
+    pub const MREMAP: u64 = 25;
     pub const RT_SIGACTION: u64 = 13;
     pub const RT_SIGPROCMASK: u64 = 14;
     pub const IOCTL: u64 = 16;
@@ -106,6 +107,7 @@ mod call {
     pub const MKDIR: u64 = 83;
     pub const UNLINK: u64 = 87;
     pub const RMDIR: u64 = 84;
+    pub const MKNOD: u64 = 133;
     pub const GETDENTS64: u64 = 217;
     pub const OPENAT: u64 = 257;
     pub const MKDIRAT: u64 = 258;
@@ -349,6 +351,10 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             files::mknodat(argument0, argument1, argument2)
         }
+        call::MKNOD => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            files::mknodat(files::AT_FDCWD as u32 as u64, argument0, argument1)
+        }
         call::MKDIR => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             files::mkdirat(files::AT_FDCWD as u32 as u64, argument0)
@@ -533,6 +539,10 @@ pub fn dispatch(number: u64, frame: &mut crate::arch::syscall::Frame) -> u64 {
         call::MPROTECT => {
             TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             memory::mprotect(argument0, argument1, argument2)
+        }
+        call::MREMAP => {
+            TRANSLATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            memory::mremap(argument0, argument1, argument2, _argument3, _argument4)
         }
 
         // Threads. `clone` is the one call here that needs the caller's whole

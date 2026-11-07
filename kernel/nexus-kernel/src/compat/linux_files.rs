@@ -942,8 +942,11 @@ pub fn openat(directory: u64, pointer: u64, flags: u64) -> u64 {
         }
         let reading = flags & flag::WRONLY == 0;
         let writing = flags & (flag::WRONLY | flag::RDWR) != 0;
-        let end = pipe.open(reading, writing);
         let nonblocking = flags & 0o4000 != 0;
+        if writing && !reading && nonblocking && !pipe.readers_open() {
+            return (-6i64) as u64; // ENXIO
+        }
+        let end = pipe.open(reading, writing);
         if let Err(error) = end.wait_for_peer(nonblocking) {
             return match error {
                 crate::pipe::PipeError::NoReader => (-6i64) as u64, // ENXIO
@@ -1695,15 +1698,15 @@ pub fn mkdirat(directory: u64, pointer: u64) -> u64 {
 /// `mknodat` for named FIFOs. Other special node types need device and
 /// permission machinery NexusOS does not expose yet and are explicitly denied.
 pub fn mknodat(directory: u64, pointer: u64, mode: u64) -> u64 {
+    let path = match path_of(pointer) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
     const TYPE_MASK: u64 = 0o170000;
     const FIFO: u64 = 0o010000;
     if mode & TYPE_MASK != FIFO {
         return (-1i64) as u64; // EPERM
     }
-    let path = match path_of(pointer) {
-        Ok(path) => path,
-        Err(error) => return error,
-    };
     let resolved = match super::linux_paths::resolve_entry(directory, &path) {
         Ok(resolved) => resolved,
         Err(error) => return error,
