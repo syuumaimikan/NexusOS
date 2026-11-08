@@ -74,6 +74,7 @@ members = [
     "user/nexus-setup",
     "user/nexus-idle",
     "user/nexus-game",
+    "user/nexus-steam",
 ]
 
 [workspace.package]

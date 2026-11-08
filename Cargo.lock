@@ -433,6 +433,17 @@ name = "nexus-spirv"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-steam"
+version = "0.1.0"
+dependencies = [
+ "nexus-abi",
+ "nexus-i18n",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-store"
 version = "0.1.0"
 dependencies = [

@@ -126,7 +126,7 @@ $Programs = @(
     'nexus-edit', 'nexus-files', 'nexus-find', 'nexus-hello', 'nexus-idle', 'nexus-init', 'nexus-install',
     'nexus-api', 'nexus-count', 'nexus-solid', 'nexus-netool', 'nexus-launch', 'nexus-ls', 'nexus-nex', 'nexus-settings',
     'nexus-setup', 'nexus-shell', 'nexus-store', 'nexus-term', 'nexus-text', 'nexus-ui',
-    'nexus-unpack', 'nexus-updater', 'nexus-view', 'nexus-wall', 'nexus-game'
+    'nexus-unpack', 'nexus-updater', 'nexus-view', 'nexus-wall', 'nexus-game', 'nexus-steam'
 )
 
 # The two that stand alone, each with its own target.

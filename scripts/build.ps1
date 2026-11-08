@@ -297,6 +297,11 @@ $GameElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-game"
 $StagedGame = Publish-Program -Elf $GameElf -ProgramDir $ProgramDir -Name 'game.elf'
 $gameSize = [math]::Round((Get-Item $StagedGame).Length / 1KB, 1)
 
+$SteamElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-steam"
+$StagedSteam = Publish-Program -Elf $SteamElf -ProgramDir $ProgramDir -Name 'steam.elf'
+$steamSize = [math]::Round((Get-Item $StagedSteam).Length / 1KB, 1)
+
+
 # A program built for Linux, emitted by a tool that writes out every byte of the
 # ELF with the field it belongs to named beside it. Nothing about it is
 # NexusOS's: it is ET_EXEC, EM_X86_64, ELFOSABI_SYSV with no interpreter, and
@@ -750,6 +755,7 @@ Write-Host ("  linux built: {0:N0} bytes of compiled Linux programs -> /usr/bin/
 Write-Host ("  linux i386 : {0:N0} bytes, ET_EXEC/EM_386 -> /usr/bin/thirty-two" -f $guest32Size)
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
 Write-Host "  game       : $gameSize KiB  -> BIN\GAME.ELF on the disk"
+Write-Host "  steam      : $steamSize KiB  -> BIN\STEAM.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''
 if ($SkipDiskImage) {

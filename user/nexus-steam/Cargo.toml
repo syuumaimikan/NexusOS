@@ -1,0 +1,20 @@
+[package]
+name = "nexus-steam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Steam client GUI application and gaming hub for NexusOS."
+
+[[bin]]
+name = "nexus-steam"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-window = { path = "../nexus-window" }
+nexus-abi = { path = "../../shared/nexus-abi" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+

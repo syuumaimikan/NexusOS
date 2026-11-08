@@ -372,6 +372,389 @@ pub enum WaitMode {
     WaitAll,
 }
 
+// ============================================================================
+// Win32 Registry In-Memory Emulation Engine
+// ============================================================================
+
+pub const MAX_REG_ENTRIES: usize = 32;
+
+/// A single Windows registry value entry.
+#[derive(Debug, Clone, Copy)]
+pub struct RegEntry {
+    pub root: u64,
+    pub path: [u8; 64],
+    pub name: [u8; 32],
+    pub val_type: u32,
+    pub val_str: [u8; 64],
+    pub val_dword: u32,
+    pub active: bool,
+}
+
+impl RegEntry {
+    pub const fn empty() -> Self {
+        Self {
+            root: 0,
+            path: [0u8; 64],
+            name: [0u8; 32],
+            val_type: REG_NONE,
+            val_str: [0u8; 64],
+            val_dword: 0,
+            active: false,
+        }
+    }
+}
+
+/// In-memory Windows Registry database.
+pub struct WinRegistry {
+    entries: [RegEntry; MAX_REG_ENTRIES],
+    count: usize,
+}
+
+impl WinRegistry {
+    /// Create a new Windows registry initialized with standard keys (Valve Steam, Windows).
+    #[must_use]
+    pub const fn new() -> Self {
+        let mut reg = Self {
+            entries: [RegEntry::empty(); MAX_REG_ENTRIES],
+            count: 0,
+        };
+
+        // Preload default Valve Steam keys
+        reg = reg.const_set_str(
+            HKEY_CURRENT_USER,
+            "Software\\Valve\\Steam",
+            "SteamPath",
+            "C:\\Program Files (x86)\\Steam",
+        );
+        reg = reg.const_set_str(
+            HKEY_CURRENT_USER,
+            "Software\\Valve\\Steam",
+            "Language",
+            "english",
+        );
+        reg = reg.const_set_dword(
+            HKEY_CURRENT_USER,
+            "Software\\Valve\\Steam",
+            "ActiveProcess",
+            1,
+        );
+
+        // Preload Windows CurrentVersion keys
+        reg = reg.const_set_str(
+            HKEY_LOCAL_MACHINE,
+            "Software\\Microsoft\\Windows\\CurrentVersion",
+            "ProgramFilesDir",
+            "C:\\Program Files",
+        );
+
+        reg
+    }
+
+    const fn const_set_str(mut self, root: u64, path: &str, name: &str, val: &str) -> Self {
+        if self.count >= MAX_REG_ENTRIES {
+            return self;
+        }
+        let mut entry = RegEntry::empty();
+        entry.root = root;
+        entry.val_type = REG_SZ;
+        entry.active = true;
+
+        let p_bytes = path.as_bytes();
+        let mut i = 0;
+        while i < p_bytes.len() && i < 63 {
+            entry.path[i] = p_bytes[i];
+            i += 1;
+        }
+
+        let n_bytes = name.as_bytes();
+        let mut j = 0;
+        while j < n_bytes.len() && j < 31 {
+            entry.name[j] = n_bytes[j];
+            j += 1;
+        }
+
+        let v_bytes = val.as_bytes();
+        let mut k = 0;
+        while k < v_bytes.len() && k < 63 {
+            entry.val_str[k] = v_bytes[k];
+            k += 1;
+        }
+
+        self.entries[self.count] = entry;
+        self.count += 1;
+        self
+    }
+
+    const fn const_set_dword(mut self, root: u64, path: &str, name: &str, val: u32) -> Self {
+        if self.count >= MAX_REG_ENTRIES {
+            return self;
+        }
+        let mut entry = RegEntry::empty();
+        entry.root = root;
+        entry.val_type = REG_DWORD;
+        entry.val_dword = val;
+        entry.active = true;
+
+        let p_bytes = path.as_bytes();
+        let mut i = 0;
+        while i < p_bytes.len() && i < 63 {
+            entry.path[i] = p_bytes[i];
+            i += 1;
+        }
+
+        let n_bytes = name.as_bytes();
+        let mut j = 0;
+        while j < n_bytes.len() && j < 31 {
+            entry.name[j] = n_bytes[j];
+            j += 1;
+        }
+
+        self.entries[self.count] = entry;
+        self.count += 1;
+        self
+    }
+
+    /// Query string value.
+    #[must_use]
+    pub fn get_str(&self, root: u64, path: &str, name: &str) -> Option<&str> {
+        let p_bytes = path.as_bytes();
+        let n_bytes = name.as_bytes();
+        for i in 0..self.count {
+            let e = &self.entries[i];
+            if e.active && e.root == root && e.val_type == REG_SZ {
+                let e_path_len = e.path.iter().position(|&b| b == 0).unwrap_or(e.path.len());
+                let e_name_len = e.name.iter().position(|&b| b == 0).unwrap_or(e.name.len());
+                if ascii_case_eq(&e.path[..e_path_len], p_bytes)
+                    && ascii_case_eq(&e.name[..e_name_len], n_bytes)
+                {
+                    let val_len = e
+                        .val_str
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(e.val_str.len());
+                    return core::str::from_utf8(&e.val_str[..val_len]).ok();
+                }
+            }
+        }
+        None
+    }
+
+    /// Query DWORD value.
+    #[must_use]
+    pub fn get_dword(&self, root: u64, path: &str, name: &str) -> Option<u32> {
+        let p_bytes = path.as_bytes();
+        let n_bytes = name.as_bytes();
+        for i in 0..self.count {
+            let e = &self.entries[i];
+            if e.active && e.root == root && e.val_type == REG_DWORD {
+                let e_path_len = e.path.iter().position(|&b| b == 0).unwrap_or(e.path.len());
+                let e_name_len = e.name.iter().position(|&b| b == 0).unwrap_or(e.name.len());
+                if ascii_case_eq(&e.path[..e_path_len], p_bytes)
+                    && ascii_case_eq(&e.name[..e_name_len], n_bytes)
+                {
+                    return Some(e.val_dword);
+                }
+            }
+        }
+        None
+    }
+
+    /// Set string value.
+    pub fn set_str(&mut self, root: u64, path: &str, name: &str, val: &str) -> bool {
+        let p_bytes = path.as_bytes();
+        let n_bytes = name.as_bytes();
+        for i in 0..self.count {
+            let e = &mut self.entries[i];
+            if e.active && e.root == root {
+                let e_path_len = e.path.iter().position(|&b| b == 0).unwrap_or(e.path.len());
+                let e_name_len = e.name.iter().position(|&b| b == 0).unwrap_or(e.name.len());
+                if ascii_case_eq(&e.path[..e_path_len], p_bytes)
+                    && ascii_case_eq(&e.name[..e_name_len], n_bytes)
+                {
+                    e.val_type = REG_SZ;
+                    e.val_str = [0u8; 64];
+                    let v_bytes = val.as_bytes();
+                    let len = v_bytes.len().min(63);
+                    e.val_str[..len].copy_from_slice(&v_bytes[..len]);
+                    return true;
+                }
+            }
+        }
+        if self.count >= MAX_REG_ENTRIES {
+            return false;
+        }
+        let mut entry = RegEntry::empty();
+        entry.root = root;
+        entry.val_type = REG_SZ;
+        entry.active = true;
+        let p_len = p_bytes.len().min(63);
+        entry.path[..p_len].copy_from_slice(&p_bytes[..p_len]);
+        let n_len = n_bytes.len().min(31);
+        entry.name[..n_len].copy_from_slice(&n_bytes[..n_len]);
+        let v_bytes = val.as_bytes();
+        let v_len = v_bytes.len().min(63);
+        entry.val_str[..v_len].copy_from_slice(&v_bytes[..v_len]);
+        self.entries[self.count] = entry;
+        self.count += 1;
+        true
+    }
+}
+
+impl Default for WinRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Win32 Message Queue Architecture
+// ============================================================================
+
+pub const MAX_MSG_QUEUE: usize = 16;
+
+/// Thread-local Win32 Message Queue ring buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct WinMessageQueue {
+    queue: [WinMsg; MAX_MSG_QUEUE],
+    head: usize,
+    tail: usize,
+    count: usize,
+}
+
+impl WinMessageQueue {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            queue: [WinMsg {
+                hwnd: 0,
+                message: WM_NULL,
+                w_param: 0,
+                l_param: 0,
+                time: 0,
+                pt: WinPoint { x: 0, y: 0 },
+            }; MAX_MSG_QUEUE],
+            head: 0,
+            tail: 0,
+            count: 0,
+        }
+    }
+
+    /// Post a message to the queue (`PostMessage`).
+    pub fn post(&mut self, msg: WinMsg) -> bool {
+        if self.count >= MAX_MSG_QUEUE {
+            return false;
+        }
+        self.queue[self.tail] = msg;
+        self.tail = (self.tail + 1) % MAX_MSG_QUEUE;
+        self.count += 1;
+        true
+    }
+
+    /// Peek a message from the queue (`PeekMessage`), optionally removing it.
+    pub fn peek(&mut self, remove: bool) -> Option<WinMsg> {
+        if self.count == 0 {
+            return None;
+        }
+        let msg = self.queue[self.head];
+        if remove {
+            self.head = (self.head + 1) % MAX_MSG_QUEUE;
+            self.count -= 1;
+        }
+        Some(msg)
+    }
+
+    /// Number of queued messages.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Returns true if message queue is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
+impl Default for WinMessageQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Direct3D 9 to Vulkan / OpenGL Abstraction Layer
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum D3dFormat {
+    X8R8G8B8,
+    A8R8G8B8,
+    D24S8,
+}
+
+/// Simulated Direct3D 9 Device backed by Vulkan / Softpipe rasterization.
+pub struct D3d9Device {
+    pub width: u32,
+    pub height: u32,
+    pub format: D3dFormat,
+    pub in_scene: bool,
+    pub draw_call_count: u32,
+}
+
+impl D3d9Device {
+    #[must_use]
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            format: D3dFormat::X8R8G8B8,
+            in_scene: false,
+            draw_call_count: 0,
+        }
+    }
+
+    /// Direct3D9 `BeginScene`.
+    pub fn begin_scene(&mut self) -> HResult {
+        if self.in_scene {
+            return E_FAIL;
+        }
+        self.in_scene = true;
+        S_OK
+    }
+
+    /// Direct3D9 `EndScene`.
+    pub fn end_scene(&mut self) -> HResult {
+        if !self.in_scene {
+            return E_FAIL;
+        }
+        self.in_scene = false;
+        S_OK
+    }
+
+    /// Direct3D9 `DrawPrimitive`.
+    pub fn draw_primitive(
+        &mut self,
+        _primitive_type: u32,
+        _start_vertex: u32,
+        primitive_count: u32,
+    ) -> HResult {
+        if !self.in_scene {
+            return E_FAIL;
+        }
+        self.draw_call_count += primitive_count;
+        S_OK
+    }
+
+    /// Direct3D9 `Present`.
+    pub fn present(&mut self) -> HResult {
+        if self.in_scene {
+            return E_FAIL;
+        }
+        S_OK
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +806,91 @@ mod tests {
         assert!(ascii_case_eq(b"kernel32.dll", b"KERNEL32.DLL"));
         assert!(ascii_case_eq(b"Ntdll.Dll", b"ntdll.dll"));
         assert!(!ascii_case_eq(b"user32.dll", b"gdi32.dll"));
+    }
+
+    #[test]
+    fn test_win_registry() {
+        let mut reg = WinRegistry::new();
+        // Check default Steam path
+        assert_eq!(
+            reg.get_str(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath"),
+            Some("C:\\Program Files (x86)\\Steam")
+        );
+        assert_eq!(
+            reg.get_str(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "Language"),
+            Some("english")
+        );
+        assert_eq!(
+            reg.get_dword(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "ActiveProcess"),
+            Some(1)
+        );
+
+        // Set custom key and query
+        assert!(reg.set_str(
+            HKEY_CURRENT_USER,
+            "Software\\Valve\\Steam",
+            "CustomKey",
+            "NexusGaming"
+        ));
+        assert_eq!(
+            reg.get_str(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "CustomKey"),
+            Some("NexusGaming")
+        );
+    }
+
+    #[test]
+    fn test_win_message_queue() {
+        let mut mq = WinMessageQueue::new();
+        assert!(mq.is_empty());
+        assert_eq!(mq.len(), 0);
+
+        let msg1 = WinMsg {
+            hwnd: 1,
+            message: WM_KEYDOWN,
+            w_param: 0x41, // 'A'
+            l_param: 0,
+            time: 100,
+            pt: WinPoint { x: 50, y: 50 },
+        };
+        let msg2 = WinMsg {
+            hwnd: 1,
+            message: WM_KEYUP,
+            w_param: 0x41,
+            l_param: 0,
+            time: 150,
+            pt: WinPoint { x: 50, y: 50 },
+        };
+
+        assert!(mq.post(msg1));
+        assert!(mq.post(msg2));
+        assert_eq!(mq.len(), 2);
+
+        // Peek without removal
+        let peeked = mq.peek(false).expect("should peek msg1");
+        assert_eq!(peeked.message, WM_KEYDOWN);
+        assert_eq!(mq.len(), 2);
+
+        // Pop with removal
+        let popped1 = mq.peek(true).expect("should pop msg1");
+        assert_eq!(popped1.message, WM_KEYDOWN);
+        assert_eq!(mq.len(), 1);
+
+        let popped2 = mq.peek(true).expect("should pop msg2");
+        assert_eq!(popped2.message, WM_KEYUP);
+        assert_eq!(mq.len(), 0);
+        assert!(mq.is_empty());
+    }
+
+    #[test]
+    fn test_d3d9_device_flow() {
+        let mut dev = D3d9Device::new(1024, 768);
+        assert!(!dev.in_scene);
+        assert_eq!(dev.begin_scene(), S_OK);
+        assert!(dev.in_scene);
+        assert_eq!(dev.draw_primitive(1, 0, 12), S_OK);
+        assert_eq!(dev.draw_call_count, 12);
+        assert_eq!(dev.end_scene(), S_OK);
+        assert!(!dev.in_scene);
+        assert_eq!(dev.present(), S_OK);
     }
 }

@@ -1299,16 +1299,24 @@ impl Terminal {
                     "  [ACH_SPACE_ACE]    Space Ace        - Attained 1,000 points in one sortie",
                 );
             }
+            Some("gui") | Some("client") | Some("app") => {
+                self.note("Launching Steam Graphical Client (BIN/STEAM.ELF)...");
+                self.run_program("BIN/STEAM.ELF", "");
+            }
             Some("test") | Some("diagnose") => {
                 self.note("Running Steamworks Spacewar diagnostic simulation...");
                 self.run_program("BIN/GAME.ELF", "");
             }
-            Some("play") | Some("run") | None => {
+            Some("play") | Some("run") => {
                 self.note("Launching Steam Game: Spacewar (AppID 480)...");
                 self.run_program("BIN/GAME.ELF", "");
             }
+            None => {
+                self.note("Launching Steam Graphical Client (BIN/STEAM.ELF)...");
+                self.run_program("BIN/STEAM.ELF", "");
+            }
             Some(other) => {
-                self.trouble(&alloc::format!("steam: unknown option '{other}'. Try 'info', 'list', 'achievements', or 'play'."));
+                self.trouble(&alloc::format!("steam: unknown option '{other}'. Try 'gui', 'play', 'info', 'list', or 'achievements'."));
             }
         }
     }
