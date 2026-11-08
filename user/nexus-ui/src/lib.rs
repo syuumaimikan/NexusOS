@@ -420,6 +420,123 @@ impl Canvas {
         }
     }
 
+    /// Draw an anti-aliased line using Xiaolin Wu's algorithm.
+    pub fn line_aa(&mut self, mut x0: i32, mut y0: i32, mut x1: i32, mut y1: i32, colour: Colour) {
+        let steep = (y1 - y0).abs() > (x1 - x0).abs();
+        if steep {
+            core::mem::swap(&mut x0, &mut y0);
+            core::mem::swap(&mut x1, &mut y1);
+        }
+        if x0 > x1 {
+            core::mem::swap(&mut x0, &mut x1);
+            core::mem::swap(&mut y0, &mut y1);
+        }
+
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let gradient = if dx == 0 {
+            0i64
+        } else {
+            ((dy as i64) << 16) / dx as i64
+        };
+
+        let mut intery = (y0 as i64) << 16;
+
+        for x in x0..=x1 {
+            let y = (intery >> 16) as i32;
+            let fpart = ((intery & 0xffff) >> 8) as u8;
+            let rfpart = 255 - fpart;
+
+            if steep {
+                if y >= 0 && x >= 0 {
+                    self.blend(y as u32, x as u32, colour, rfpart);
+                    self.blend((y + 1) as u32, x as u32, colour, fpart);
+                }
+            } else if x >= 0 && y >= 0 {
+                self.blend(x as u32, y as u32, colour, rfpart);
+                self.blend(x as u32, (y + 1) as u32, colour, fpart);
+            }
+            intery += gradient;
+        }
+    }
+
+    /// Draw a smooth anti-aliased circle outline with subpixel sampling.
+    pub fn circle_aa(&mut self, cx: i32, cy: i32, radius: u32, colour: Colour) {
+        if radius == 0 {
+            if cx >= 0 && cy >= 0 {
+                self.blend(cx as u32, cy as u32, colour, 255);
+            }
+            return;
+        }
+        let r = radius as i32;
+        let r_min = (r - 1).max(0);
+        let r_max = r + 1;
+        for dy in -r_max..=r_max {
+            for dx in -r_max..=r_max {
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq >= (r_min - 1) * (r_min - 1) && dist_sq <= (r_max + 1) * (r_max + 1) {
+                    let mut hits = 0u32;
+                    let target_sub_r = r * 4;
+                    for sy in 0..4 {
+                        let sub_y = dy * 4 + sy - 2;
+                        for sx in 0..4 {
+                            let sub_x = dx * 4 + sx - 2;
+                            let sub_dist_sq = sub_x * sub_x + sub_y * sub_y;
+                            let diff = (sub_dist_sq - target_sub_r * target_sub_r).abs();
+                            if diff < target_sub_r * 4 {
+                                hits += 1;
+                            }
+                        }
+                    }
+                    if hits > 0 {
+                        let alpha = ((hits * 255) / 16) as u8;
+                        let px = cx + dx;
+                        let py = cy + dy;
+                        if px >= 0 && py >= 0 {
+                            self.blend(px as u32, py as u32, colour, alpha);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw a filled anti-aliased disk with subpixel supersampling.
+    pub fn fill_circle_aa(&mut self, cx: i32, cy: i32, radius: u32, colour: Colour) {
+        let r = radius as i32;
+        let r_sq_inner = (r - 1) * (r - 1);
+        let r_sq_outer = (r + 1) * (r + 1);
+        for dy in -r - 1..=r + 1 {
+            for dx in -r - 1..=r + 1 {
+                let dist_sq = dx * dx + dy * dy;
+                let px = cx + dx;
+                let py = cy + dy;
+                if px < 0 || py < 0 {
+                    continue;
+                }
+                if dist_sq <= r_sq_inner {
+                    self.set(px as u32, py as u32, colour);
+                } else if dist_sq <= r_sq_outer {
+                    let mut hits = 0u32;
+                    let target_sub_sq = (r * 4) * (r * 4);
+                    for sy in 0..4 {
+                        let sub_y = dy * 4 + sy - 2;
+                        for sx in 0..4 {
+                            let sub_x = dx * 4 + sx - 2;
+                            if sub_x * sub_x + sub_y * sub_y <= target_sub_sq {
+                                hits += 1;
+                            }
+                        }
+                    }
+                    if hits > 0 {
+                        let alpha = ((hits * 255) / 16) as u8;
+                        self.blend(px as u32, py as u32, colour, alpha);
+                    }
+                }
+            }
+        }
+    }
+
     /// Draw one glyph with its top-left corner at `x`, `y`, and say how far to
     /// advance.
     ///

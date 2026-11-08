@@ -826,6 +826,8 @@ Invoke-Step 'the language' {
         (Join-Path $PSScriptRoot 'configure-disk.ps1')) 'first-run setup'
     Invoke-Native 'powershell' @('-NoProfile', '-File',
         (Join-Path $PSScriptRoot 'test-nex.ps1')) 'Nex tests'
+    Invoke-Native 'powershell' @('-NoProfile', '-File',
+        (Join-Path $PSScriptRoot 'test-dev.ps1')) 'developer tools'
 }
 
 Invoke-Step 'kanji conversion' {

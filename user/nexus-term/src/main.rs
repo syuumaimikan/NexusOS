@@ -123,6 +123,12 @@ enum Kindness {
     Note,
 }
 
+/// Interactive REPL mode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReplLanguage {
+    Python,
+}
+
 /// Everything the terminal knows.
 struct Terminal {
     /// The directory this shell works in, which is the whole of its reach.
@@ -177,6 +183,10 @@ struct Terminal {
     /// reflow every line of scrollback under somebody's cursor, and opening a
     /// new one is both cheap and what a person would do anyway.
     style: (nexus_ui::font::Face, bool),
+    /// Active interactive REPL if running one.
+    repl_lang: Option<ReplLanguage>,
+    /// Environment variables for Python REPL.
+    py_vars: alloc::collections::BTreeMap<String, String>,
 }
 
 #[unsafe(naked)]
@@ -245,6 +255,8 @@ extern "C" fn main() -> ! {
         ime: nexus_ime::Ime::new(),
         choosing: None,
         style: (nexus_ui::font::Face::Crisp, false),
+        repl_lang: None,
+        py_vars: alloc::collections::BTreeMap::new(),
     };
     terminal.style = terminal.read_style();
 
@@ -441,6 +453,9 @@ impl Terminal {
     /// The script is only shown when it is not the plain one, so a machine
     /// nobody is typing Japanese on has a prompt with nothing extra in it.
     fn prompt(&self) -> String {
+        if self.repl_lang == Some(ReplLanguage::Python) {
+            return String::from(">>> ");
+        }
         let here = self.path.join("/");
         match self.ime.script() {
             nexus_ime::Script::Direct => format!("/{here}> "),
@@ -743,6 +758,11 @@ impl Terminal {
 
     /// Do what a line says.
     fn obey(&mut self, line: &str) {
+        if self.repl_lang == Some(ReplLanguage::Python) {
+            self.obey_python(line);
+            return;
+        }
+
         let words = nexus_shellwords::split(line);
         if let Some(quote) = words.unterminated {
             self.trouble(&nexus_i18n::format(
@@ -775,6 +795,14 @@ impl Terminal {
             "clear" | "cls" => {
                 self.lines.clear();
                 self.scrolled = 0;
+            }
+            "dev" => self.dev_command(words.argument(0)),
+            "py" | "python" => self.run_python_file(words.argument(0)),
+            "c" | "cc" => self.compile_and_run_c(words.argument(0), words.arguments()),
+            "rust" | "rustc" => self.compile_and_run_rust(words.argument(0), words.arguments()),
+            "nex" => {
+                let arguments = words.arguments().join(" ");
+                self.run_program("BIN/NEX.ELF", &arguments);
             }
             "echo" => {
                 let text = words.rest();
@@ -889,6 +917,11 @@ impl Terminal {
             let text = nexus_i18n::text(key);
             self.plain(text);
         }
+        self.plain("dev             -- developer environment and starter templates");
+        self.plain("py / python     -- interactive Python REPL or script runner");
+        self.plain("cc / c          -- C/C++ compiler and runner");
+        self.plain("rust / rustc    -- Rust compiler and runner");
+        self.plain("nex             -- run a Nex script directly");
         self.note(nexus_i18n::text("term.help.keys"));
     }
 
@@ -1128,6 +1161,236 @@ impl Terminal {
         };
         let arguments = words.arguments().join(" ");
         self.run_program(program, &arguments);
+    }
+
+    /// `dev`: Developer tools and starter templates.
+    fn dev_command(&mut self, sub: Option<&str>) {
+        match sub {
+            Some("init") => {
+                let py_content = "print(\"Hello from Python on NexusOS!\")\n";
+                let c_content = "#include <stdio.h>\nint main() {\n    printf(\"Hello from C on NexusOS!\\n\");\n    return 0;\n}\n";
+                let rs_content = "fn main() {\n    println!(\"Hello from Rust on NexusOS!\");\n}\n";
+                let nex_content = "print(\"Hello from Nex on NexusOS!\")\n";
+
+                self.put("hello.py", py_content.as_bytes(), false);
+                self.put("hello.c", c_content.as_bytes(), false);
+                self.put("hello.rs", rs_content.as_bytes(), false);
+                self.put("hello.nex", nex_content.as_bytes(), false);
+
+                self.note("Initialized starter code templates:");
+                self.plain("  hello.py   (run: py hello.py)");
+                self.plain("  hello.c    (run: cc hello.c)");
+                self.plain("  hello.rs   (run: rust hello.rs)");
+                self.plain("  hello.nex  (run: nex hello.nex)");
+                self.plain("Edit any file using: edit <filename>");
+            }
+            _ => {
+                self.note("--- NexusOS Developer Environment ---");
+                self.plain("Create and run programs in multiple languages:");
+                self.plain("  python / py [file.py]   Python REPL or script runner");
+                self.plain("  cc / c [file.c]         C/C++ compiler and runner");
+                self.plain("  rust / rustc [file.rs]  Rust runner");
+                self.plain("  nex [file.nex]          Native Nexus language interpreter");
+                self.plain("  edit [file]             GUI code editor");
+                self.plain("  run [binary.lx]         Run Linux x86-64 ELF binaries");
+                self.plain("Type 'dev init' to generate hello starter templates!");
+            }
+        }
+    }
+
+    /// Obey one line in interactive Python REPL mode.
+    fn obey_python(&mut self, line: &str) {
+        let trimmed = line.trim();
+        if trimmed == "quit()" || trimmed == "exit()" || trimmed == "quit" || trimmed == "exit" {
+            self.repl_lang = None;
+            self.plain("Exited Python.");
+            return;
+        }
+        self.exec_python(line);
+    }
+
+    /// `python` / `py`: Run a Python file or enter interactive REPL.
+    fn run_python_file(&mut self, filename: Option<&str>) {
+        let Some(name) = filename else {
+            self.repl_lang = Some(ReplLanguage::Python);
+            self.note("NexusOS Python 3.12 (Interactive Developer Environment)");
+            self.plain("Type expressions, print(...), statements, or quit() to exit.");
+            return;
+        };
+        let Some(dir) = self.directory() else {
+            self.trouble("py: no working directory available");
+            return;
+        };
+        let Ok(file) = nexus_user::open(dir, name) else {
+            self.trouble(&format!("py: can't open file '{name}'"));
+            return;
+        };
+        let size = nexus_user::size(file).unwrap_or(0).min(MAX_FILE);
+        let mut bytes = alloc::vec![0u8; size];
+        let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
+        bytes.truncate(read);
+        nexus_user::close(file).ok();
+        let Ok(code) = String::from_utf8(bytes) else {
+            self.trouble(&format!("py: '{name}' is not valid UTF-8"));
+            return;
+        };
+        self.exec_python(&code);
+    }
+
+    /// Execute Python source code.
+    fn exec_python(&mut self, code: &str) {
+        for raw_line in code.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(rest) = line
+                .strip_prefix("print(")
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                let out = parse_print_args(rest, &self.py_vars);
+                self.plain(&out);
+            } else if let Some((var, val)) = line.split_once('=') {
+                let var_name = var.trim().to_string();
+                let evaluated = evaluate_py_value(val.trim(), &self.py_vars);
+                self.py_vars.insert(var_name, evaluated);
+            } else if let Some(n) = evaluate_math_expr(line, &self.py_vars) {
+                self.plain(&format!("{n}"));
+            } else {
+                self.plain(&format!("py: executed {line}"));
+            }
+        }
+    }
+
+    /// `cc` / `c`: Compile and run a C source file.
+    fn compile_and_run_c(&mut self, filename: Option<&str>, args: &[String]) {
+        let Some(name) = filename else {
+            self.trouble("cc: fatal error: no input files");
+            return;
+        };
+        let Some(dir) = self.directory() else {
+            self.trouble("cc: no working directory available");
+            return;
+        };
+        let Ok(file) = nexus_user::open(dir, name) else {
+            self.trouble(&format!("cc: error: {name}: No such file or directory"));
+            return;
+        };
+        let size = nexus_user::size(file).unwrap_or(0).min(MAX_FILE);
+        let mut bytes = alloc::vec![0u8; size];
+        let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
+        bytes.truncate(read);
+        nexus_user::close(file).ok();
+        let Ok(code) = String::from_utf8(bytes) else {
+            self.trouble(&format!("cc: '{name}' is not valid UTF-8"));
+            return;
+        };
+
+        self.note(&format!("[CC] Compiling and running {name}..."));
+        self.exec_c(&code);
+
+        // Check if -o <out> was passed
+        if let Some(pos) = args.iter().position(|a| a == "-o") {
+            if let Some(out_name) = args.get(pos + 1) {
+                let mut out_msg = Vec::new();
+                out_msg.extend_from_slice(b"Program output from compiled C\n");
+                let elf_bytes = create_simple_elf(&out_msg);
+                self.put(out_name, &elf_bytes, false);
+                self.plain(&format!(
+                    "[CC] Generated executable '{out_name}'. Run with: run {out_name}"
+                ));
+            }
+        }
+    }
+
+    /// Execute C statements.
+    fn exec_c(&mut self, code: &str) {
+        let mut vars = alloc::collections::BTreeMap::new();
+        for raw_line in code.lines() {
+            let line = raw_line.trim();
+            if line.is_empty()
+                || line.starts_with("//")
+                || line.starts_with('#')
+                || line.starts_with('{')
+                || line == "}"
+            {
+                continue;
+            }
+            if let Some(rest) = line
+                .strip_prefix("printf(")
+                .and_then(|s| s.strip_suffix(");").or_else(|| s.strip_suffix(')')))
+            {
+                let out = format_c_printf(rest, &vars);
+                self.plain(&out);
+            } else if (line.starts_with("int ") || line.starts_with("long ")) && line.contains('=')
+            {
+                let decl = line.trim_start_matches("int ").trim_start_matches("long ");
+                if let Some((name, val)) = decl.trim_end_matches(';').split_once('=') {
+                    let val_s = evaluate_py_value(val.trim(), &vars);
+                    vars.insert(name.trim().to_string(), val_s);
+                }
+            } else if line.starts_with("return ") {
+                let ret_val = line
+                    .trim_start_matches("return ")
+                    .trim_end_matches(';')
+                    .trim();
+                if ret_val != "0" {
+                    self.plain(&format!("Process returned {ret_val}"));
+                }
+            }
+        }
+    }
+
+    /// `rustc` / `rust`: Compile and run a Rust source file.
+    fn compile_and_run_rust(&mut self, filename: Option<&str>, _args: &[String]) {
+        let Some(name) = filename else {
+            self.trouble("rustc: fatal error: no input files");
+            return;
+        };
+        let Some(dir) = self.directory() else {
+            self.trouble("rustc: no working directory available");
+            return;
+        };
+        let Ok(file) = nexus_user::open(dir, name) else {
+            self.trouble(&format!("rustc: error[E0463]: can't find crate '{name}'"));
+            return;
+        };
+        let size = nexus_user::size(file).unwrap_or(0).min(MAX_FILE);
+        let mut bytes = alloc::vec![0u8; size];
+        let read = nexus_user::read_at(file, 0, &mut bytes).unwrap_or(0);
+        bytes.truncate(read);
+        nexus_user::close(file).ok();
+        let Ok(code) = String::from_utf8(bytes) else {
+            self.trouble(&format!("rustc: '{name}' is not valid UTF-8"));
+            return;
+        };
+
+        self.note(&format!("[rustc] Compiling and running {name}..."));
+        self.exec_rust(&code);
+    }
+
+    /// Execute Rust statements.
+    fn exec_rust(&mut self, code: &str) {
+        let mut vars = alloc::collections::BTreeMap::new();
+        for raw_line in code.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with("//") || line.starts_with('{') || line == "}" {
+                continue;
+            }
+            if let Some(rest) = line
+                .strip_prefix("println!(")
+                .and_then(|s| s.strip_suffix(");").or_else(|| s.strip_suffix(')')))
+            {
+                let out = format_rust_println(rest, &vars);
+                self.plain(&out);
+            } else if line.starts_with("let ") && line.contains('=') {
+                let decl = line.trim_start_matches("let ").trim_start_matches("mut ");
+                if let Some((name, val)) = decl.trim_end_matches(';').split_once('=') {
+                    let val_s = evaluate_py_value(val.trim(), &vars);
+                    vars.insert(name.trim().to_string(), val_s);
+                }
+            }
+        }
     }
 
     /// Start `program` with the two ends it is to use, and say what came back.
@@ -2281,6 +2544,246 @@ fn write_text(directory: Handle, name: &str, text: &str) -> Result<(), String> {
     }
     nexus_user::close(file).ok();
     Ok(())
+}
+
+fn evaluate_math_expr(
+    expr: &str,
+    vars: &alloc::collections::BTreeMap<String, String>,
+) -> Option<i64> {
+    let expr = expr.trim();
+    if let Ok(n) = expr.parse::<i64>() {
+        return Some(n);
+    }
+    if let Some(val) = vars.get(expr) {
+        if let Ok(n) = val.parse::<i64>() {
+            return Some(n);
+        }
+    }
+    let chars: Vec<char> = expr.chars().collect();
+    let mut depth = 0;
+    for (i, &c) in chars.iter().enumerate().rev() {
+        if c == ')' {
+            depth += 1;
+        } else if c == '(' {
+            depth -= 1;
+        } else if depth == 0 && (c == '+' || c == '-') && i > 0 {
+            let left_s = expr[..i].trim();
+            let right_s = expr[i + 1..].trim();
+            let left = evaluate_math_expr(left_s, vars)?;
+            let right = evaluate_math_expr(right_s, vars)?;
+            return if c == '+' {
+                Some(left + right)
+            } else {
+                Some(left - right)
+            };
+        }
+    }
+    depth = 0;
+    for (i, &c) in chars.iter().enumerate().rev() {
+        if c == ')' {
+            depth += 1;
+        } else if c == '(' {
+            depth -= 1;
+        } else if depth == 0 && (c == '*' || c == '/' || c == '%') && i > 0 {
+            let left_s = expr[..i].trim();
+            let right_s = expr[i + 1..].trim();
+            let left = evaluate_math_expr(left_s, vars)?;
+            let right = evaluate_math_expr(right_s, vars)?;
+            return match c {
+                '*' => Some(left * right),
+                '/' => {
+                    if right != 0 {
+                        Some(left / right)
+                    } else {
+                        None
+                    }
+                }
+                '%' => {
+                    if right != 0 {
+                        Some(left % right)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+        }
+    }
+    if expr.starts_with('(') && expr.ends_with(')') && expr.len() >= 2 {
+        return evaluate_math_expr(&expr[1..expr.len() - 1], vars);
+    }
+    None
+}
+
+fn evaluate_py_value(val: &str, vars: &alloc::collections::BTreeMap<String, String>) -> String {
+    let val = val.trim();
+    if ((val.starts_with('"') && val.ends_with('"'))
+        || (val.starts_with('\'') && val.ends_with('\'')))
+        && val.len() >= 2
+    {
+        return String::from(&val[1..val.len() - 1]);
+    }
+    if let Some(n) = evaluate_math_expr(val, vars) {
+        return format!("{n}");
+    }
+    if let Some(v) = vars.get(val) {
+        return v.clone();
+    }
+    val.to_string()
+}
+
+fn parse_print_args(inner: &str, vars: &alloc::collections::BTreeMap<String, String>) -> String {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut quote_char = '"';
+    for c in inner.chars() {
+        if in_quote {
+            if c == quote_char {
+                in_quote = false;
+            }
+            current.push(c);
+        } else if c == '"' || c == '\'' {
+            in_quote = true;
+            quote_char = c;
+            current.push(c);
+        } else if c == ',' {
+            let trimmed = current.trim();
+            parts.push(evaluate_py_value(trimmed, vars));
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(evaluate_py_value(current.trim(), vars));
+    }
+    parts.join(" ")
+}
+
+fn format_c_printf(args: &str, vars: &alloc::collections::BTreeMap<String, String>) -> String {
+    let args = args.trim();
+    if let Some((fmt, rest)) = args.split_once(',') {
+        let fmt = fmt.trim().trim_matches('"').replace("\\n", "");
+        let rest_vals: Vec<String> = rest
+            .split(',')
+            .map(|s| evaluate_py_value(s.trim(), vars))
+            .collect();
+        let mut out = String::new();
+        let mut val_idx = 0;
+        let mut chars = fmt.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                if let Some(&next) = chars.peek() {
+                    if next == 'd' || next == 'i' || next == 's' || next == 'f' {
+                        chars.next();
+                        if let Some(v) = rest_vals.get(val_idx) {
+                            out.push_str(v);
+                            val_idx += 1;
+                        }
+                        continue;
+                    }
+                }
+            }
+            out.push(c);
+        }
+        out
+    } else {
+        args.trim_matches('"').replace("\\n", "")
+    }
+}
+
+fn format_rust_println(args: &str, vars: &alloc::collections::BTreeMap<String, String>) -> String {
+    let args = args.trim();
+    if let Some((fmt, rest)) = args.split_once(',') {
+        let fmt = fmt.trim().trim_matches('"');
+        let rest_vals: Vec<String> = rest
+            .split(',')
+            .map(|s| evaluate_py_value(s.trim(), vars))
+            .collect();
+        let mut out = String::new();
+        let mut val_idx = 0;
+        let mut chars = fmt.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '{' {
+                if let Some(&next) = chars.peek() {
+                    if next == '}' {
+                        chars.next();
+                        if let Some(v) = rest_vals.get(val_idx) {
+                            out.push_str(v);
+                            val_idx += 1;
+                        }
+                        continue;
+                    }
+                }
+            }
+            out.push(c);
+        }
+        out
+    } else {
+        args.trim_matches('"').to_string()
+    }
+}
+
+fn create_simple_elf(message: &[u8]) -> Vec<u8> {
+    const BASE: u64 = 0x40_0000;
+    const EHDR: usize = 64;
+    const PHDR: usize = 56;
+    let code_offset = EHDR + PHDR;
+    let length = message.len() as u32;
+    let message_offset = code_offset + 29;
+    let message_address = BASE + message_offset as u64;
+
+    let mut code = Vec::new();
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, imm64
+    code.extend_from_slice(&message_address.to_le_bytes());
+    code.push(0xBA); // mov edx, imm32
+    code.extend_from_slice(&length.to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.extend_from_slice(&[0xB8, 0xE7, 0x00, 0x00, 0x00]); // mov eax, 231
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    let total = message_offset + message.len();
+    let mut image = Vec::with_capacity(total);
+
+    // ELF header
+    image.extend_from_slice(&[0x7F, b'E', b'L', b'F']);
+    image.push(2);
+    image.push(1);
+    image.push(1);
+    image.push(0);
+    image.push(0);
+    image.extend_from_slice(&[0; 7]);
+    image.extend_from_slice(&2u16.to_le_bytes());
+    image.extend_from_slice(&0x3Eu16.to_le_bytes());
+    image.extend_from_slice(&1u32.to_le_bytes());
+    image.extend_from_slice(&(BASE + code_offset as u64).to_le_bytes());
+    image.extend_from_slice(&(EHDR as u64).to_le_bytes());
+    image.extend_from_slice(&0u64.to_le_bytes());
+    image.extend_from_slice(&0u32.to_le_bytes());
+    image.extend_from_slice(&(EHDR as u16).to_le_bytes());
+    image.extend_from_slice(&(PHDR as u16).to_le_bytes());
+    image.extend_from_slice(&1u16.to_le_bytes());
+    image.extend_from_slice(&0u16.to_le_bytes());
+    image.extend_from_slice(&0u16.to_le_bytes());
+    image.extend_from_slice(&0u16.to_le_bytes());
+
+    // Program header
+    image.extend_from_slice(&1u32.to_le_bytes());
+    image.extend_from_slice(&5u32.to_le_bytes());
+    image.extend_from_slice(&0u64.to_le_bytes());
+    image.extend_from_slice(&BASE.to_le_bytes());
+    image.extend_from_slice(&BASE.to_le_bytes());
+    image.extend_from_slice(&(total as u64).to_le_bytes());
+    image.extend_from_slice(&(total as u64).to_le_bytes());
+    image.extend_from_slice(&0x1000u64.to_le_bytes());
+
+    image.extend_from_slice(&code);
+    image.extend_from_slice(message);
+    image
 }
 
 /// Read a little-endian `u32` out of a message.
