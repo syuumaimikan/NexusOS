@@ -88,6 +88,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-calc"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-client"
 version = "0.1.0"
 dependencies = [
@@ -124,6 +134,16 @@ dependencies = [
 [[package]]
 name = "nexus-crypto"
 version = "0.1.0"
+
+[[package]]
+name = "nexus-devmgr"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
 
 [[package]]
 name = "nexus-dns"
@@ -454,6 +474,18 @@ dependencies = [
  "nexus-pkg",
  "nexus-ui",
  "nexus-update",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
+name = "nexus-taskmgr"
+version = "0.1.0"
+dependencies = [
+ "nexus-api",
+ "nexus-i18n",
+ "nexus-machine",
+ "nexus-ui",
  "nexus-user",
  "nexus-window",
 ]

@@ -159,6 +159,21 @@ const ENTRIES: &[Entry] = &[
         grave: false,
     },
     Entry {
+        key: "shell.taskmgr",
+        tag: b"task",
+        grave: false,
+    },
+    Entry {
+        key: "shell.calc",
+        tag: b"calc",
+        grave: false,
+    },
+    Entry {
+        key: "shell.devmgr",
+        tag: b"devm",
+        grave: false,
+    },
+    Entry {
         key: "shell.netool",
         tag: b"netw",
         grave: false,

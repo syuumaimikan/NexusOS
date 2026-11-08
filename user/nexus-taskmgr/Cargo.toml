@@ -1,0 +1,21 @@
+[package]
+name = "nexus-taskmgr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Graphical Task Manager, Resource Monitor, and Performance Dashboard for NexusOS."
+
+[[bin]]
+name = "nexus-taskmgr"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-window = { path = "../nexus-window" }
+nexus-machine = { path = "../../shared/nexus-machine" }
+nexus-api = { path = "../nexus-api" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+

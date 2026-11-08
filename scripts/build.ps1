@@ -301,6 +301,18 @@ $SteamElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-steam"
 $StagedSteam = Publish-Program -Elf $SteamElf -ProgramDir $ProgramDir -Name 'steam.elf'
 $steamSize = [math]::Round((Get-Item $StagedSteam).Length / 1KB, 1)
 
+$TaskmgrElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-taskmgr"
+$StagedTaskmgr = Publish-Program -Elf $TaskmgrElf -ProgramDir $ProgramDir -Name 'taskmgr.elf'
+$taskmgrSize = [math]::Round((Get-Item $StagedTaskmgr).Length / 1KB, 1)
+
+$CalcElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-calc"
+$StagedCalc = Publish-Program -Elf $CalcElf -ProgramDir $ProgramDir -Name 'calc.elf'
+$calcSize = [math]::Round((Get-Item $StagedCalc).Length / 1KB, 1)
+
+$DevmgrElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-devmgr"
+$StagedDevmgr = Publish-Program -Elf $DevmgrElf -ProgramDir $ProgramDir -Name 'devmgr.elf'
+$devmgrSize = [math]::Round((Get-Item $StagedDevmgr).Length / 1KB, 1)
+
 
 # A program built for Linux, emitted by a tool that writes out every byte of the
 # ELF with the field it belongs to named beside it. Nothing about it is
@@ -756,6 +768,9 @@ Write-Host ("  linux i386 : {0:N0} bytes, ET_EXEC/EM_386 -> /usr/bin/thirty-two"
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
 Write-Host "  game       : $gameSize KiB  -> BIN\GAME.ELF on the disk"
 Write-Host "  steam      : $steamSize KiB  -> BIN\STEAM.ELF on the disk"
+Write-Host "  taskmgr    : $taskmgrSize KiB  -> BIN\TASKMGR.ELF on the disk"
+Write-Host "  calc       : $calcSize KiB  -> BIN\CALC.ELF on the disk"
+Write-Host "  devmgr     : $devmgrSize KiB  -> BIN\DEVMGR.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''
 if ($SkipDiskImage) {

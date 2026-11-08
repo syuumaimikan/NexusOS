@@ -388,6 +388,12 @@ mod desk {
     pub const GAME: &[u8] = b"game";
     /// Start the Steam Client GUI application.
     pub const STEAM: &[u8] = b"stim";
+    /// Start the Task Manager.
+    pub const TASKMGR: &[u8] = b"task";
+    /// Start the Calculator.
+    pub const CALC: &[u8] = b"calc";
+    /// Start the Device Manager.
+    pub const DEVMGR: &[u8] = b"devm";
     /// Find out what is on the network.
     pub const NETOOL: &[u8] = b"netw";
     /// Ask the machine which Linux calls it does not have.
@@ -598,6 +604,9 @@ const SOLID: &[u8] = b"BIN/SOLID.ELF";
 const GAME: &[u8] = b"BIN/GAME.ELF";
 /// The Steam client application.
 const STEAM: &[u8] = b"BIN/STEAM.ELF";
+const TASKMGR: &[u8] = b"BIN/TASKMGR.ELF";
+const CALC: &[u8] = b"BIN/CALC.ELF";
+const DEVMGR: &[u8] = b"BIN/DEVMGR.ELF";
 /// The one that says what is on the network.
 ///
 /// Lent the network and nothing else -- no disk, no folder, nowhere to write.
@@ -2732,6 +2741,12 @@ enum What {
     Game,
     /// The graphical Steam client.
     Steam,
+    /// Task Manager & Resource Monitor.
+    TaskMgr,
+    /// Calculator & Programmer Tool.
+    Calc,
+    /// Device Manager.
+    DevMgr,
     /// A program built for Linux, given a surface and a channel like any other
     /// client and nothing else.
     ///
@@ -2840,6 +2855,9 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::SOLID => Launched::Window(What::Solid),
         tag if tag == desk::GAME => Launched::Window(What::Game),
         tag if tag == desk::STEAM => Launched::Window(What::Steam),
+        tag if tag == desk::TASKMGR => Launched::Window(What::TaskMgr),
+        tag if tag == desk::CALC => Launched::Window(What::Calc),
+        tag if tag == desk::DEVMGR => Launched::Window(What::DevMgr),
         tag if tag == desk::NETOOL => Launched::Window(What::Netool),
         tag if tag == desk::PROBE => Launched::Probe,
         tag if tag == desk::FILEPROBE => Launched::FileProbe,
@@ -3262,6 +3280,50 @@ fn open_window(
                 &lent,
             )?
         }
+        What::TaskMgr => {
+            let lending = nexus_user::rights::READ | nexus_user::rights::TRANSFER;
+            let machine = nexus_user::duplicate(MACHINE, lending).ok();
+            let mut lent = alloc::vec![];
+            if let Some(m) = machine {
+                lent.push(m);
+            }
+            start_program(
+                TASKMGR,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
+                0,
+                &lent,
+            )?
+        }
+        What::Calc => start_program(
+            CALC,
+            Placement {
+                index: slot,
+                x: screen.x + GAP + step,
+                y: screen.y + GAP + step,
+                width,
+                height,
+            },
+            0,
+            &[],
+        )?,
+        What::DevMgr => start_program(
+            DEVMGR,
+            Placement {
+                index: slot,
+                x: screen.x + GAP + step,
+                y: screen.y + GAP + step,
+                width,
+                height,
+            },
+            0,
+            &[],
+        )?,
         // A window for a program built for Linux. The same call as every other
         // client and the same endowments -- one surface, one channel -- which
         // is what makes the claim worth anything: if this needed a different
@@ -3649,6 +3711,15 @@ fn open_window(
             }
             What::Steam => {
                 "compositor: started the graphical Steam client application"
+            }
+            What::TaskMgr => {
+                "compositor: started the task manager and performance monitor"
+            }
+            What::Calc => {
+                "compositor: started the graphical calculator"
+            }
+            What::DevMgr => {
+                "compositor: started the hardware device manager"
             }
             What::Netool => {
                 "compositor: started the network tool, and lent it the network and nothing else"

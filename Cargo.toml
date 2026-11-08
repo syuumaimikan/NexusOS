@@ -75,6 +75,9 @@ members = [
     "user/nexus-idle",
     "user/nexus-game",
     "user/nexus-steam",
+    "user/nexus-taskmgr",
+    "user/nexus-calc",
+    "user/nexus-devmgr",
 ]
 
 [workspace.package]
