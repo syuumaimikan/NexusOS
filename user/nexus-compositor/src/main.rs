@@ -357,6 +357,8 @@ mod desk {
     pub const CLICK: &[u8] = b"clk";
     /// The interface language is now this.
     pub const LANGUAGE: &[u8] = b"lng";
+    /// Cycle active workspace.
+    pub const CYCLE_WORKSPACE: &[u8] = b"wksp";
 
     /// Bring this window back and give it focus.
     pub const SHOW: &[u8] = b"show";
@@ -1077,6 +1079,7 @@ struct Tile {
     minimised: bool,
     restored: Option<(u32, u32, u32, u32)>,
     title: &'static str,
+    workspace: u8,
 }
 
 impl Tile {
@@ -1121,7 +1124,7 @@ impl Tile {
     fn state(&self, focused: bool) -> u8 {
         if !self.live {
             desk::GONE
-        } else if self.minimised {
+        } else if self.workspace != wm::current_workspace() || self.minimised {
             desk::AWAY
         } else if focused {
             desk::FOCUSED
@@ -1885,6 +1888,7 @@ fn start_program(
             SETTINGS_WINDOW => "Appearance",
             _ => "Nexus",
         },
+        workspace: wm::current_workspace(),
     })
 }
 
@@ -1976,7 +1980,10 @@ fn serve(
     let mut commanded = 0u32;
     // What the desktop was last told, so it is told again only when it differs.
     // Seeded with a state no window can be in, so the first list always goes.
-    let mut reported = [u8::MAX; CLIENTS];
+    let mut reported = ReportedState {
+        states: [u8::MAX; CLIENTS],
+        workspace: u8::MAX,
+    };
     // Damage gathered over everything one wake-up brought, and composited once
     // at the end of it.
     //
@@ -2966,6 +2973,12 @@ fn ask_power(off: bool) -> bool {
     false
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ReportedState {
+    states: [u8; CLIENTS],
+    workspace: u8,
+}
+
 /// Tell the desktop which windows exist and what state each is in.
 ///
 /// Sent on every change rather than asked for, because the desktop has no way
@@ -2976,8 +2989,9 @@ fn announce(
     shell: &mut Option<Tile>,
     tiles: &[Option<Tile>; CLIENTS],
     focus: usize,
-    last: &mut [u8; CLIENTS],
+    last: &mut ReportedState,
 ) {
+    let cur_ws = wm::current_workspace();
     let mut states = [desk::GONE; CLIENTS];
     for (index, tile) in tiles.iter().enumerate() {
         states[index] = match tile {
@@ -2989,10 +3003,14 @@ fn announce(
     // a desktop told the same thing sixty times a second would redraw its strip
     // sixty times a second to show something that did not move -- which is the
     // cost this whole arrangement is supposed to avoid, moved one process along.
-    if states == *last {
+    let current_state = ReportedState {
+        states,
+        workspace: cur_ws,
+    };
+    if current_state == *last {
         return;
     }
-    *last = states;
+    *last = current_state;
 
     // The palette gets names and slot identifiers, never handles to windows.
     // This list follows process exit/minimise as well as window creation.
@@ -3022,9 +3040,10 @@ fn announce(
     }
 
     let Some(shell) = shell else { return };
-    let mut message = [0u8; desk::WINDOWS.len() + CLIENTS];
+    let mut message = [0u8; desk::WINDOWS.len() + CLIENTS + 1];
     message[..desk::WINDOWS.len()].copy_from_slice(desk::WINDOWS);
-    message[desk::WINDOWS.len()..].copy_from_slice(&states);
+    message[desk::WINDOWS.len()..desk::WINDOWS.len() + CLIENTS].copy_from_slice(&states);
+    message[desk::WINDOWS.len() + CLIENTS] = cur_ws;
     // A failure means the desktop has gone, which its process key will say.
     nexus_user::send(shell.channel, &message, &[]).ok();
 }
@@ -3120,6 +3139,19 @@ fn read_shell(
         return Some(Asked::Sleeping);
     }
 
+    if message.starts_with(desk::CYCLE_WORKSPACE) {
+        let cur = wm::current_workspace();
+        let next = (cur + 1) % 4;
+        wm::apply(
+            wm::Action::SwitchWorkspace(next),
+            screen,
+            tiles,
+            focus,
+            order,
+        );
+        return Some(Asked::Changed);
+    }
+
     if message.len() >= 8 && (message.starts_with(desk::SHOW) || message.starts_with(desk::HIDE)) {
         let slot = read_u32(message, 4) as usize;
         let show = message.starts_with(desk::SHOW);
@@ -3134,6 +3166,7 @@ fn read_shell(
         }
         tile.minimised = !show;
         if show {
+            wm::set_workspace(tile.workspace);
             raise(order, slot);
             *focus = slot;
             nexus_user::log("compositor: brought a window back because the desktop asked").ok();
@@ -3892,6 +3925,7 @@ fn read_key(
                 return Some(Typed::Nothing);
             }
             0x110..=0x113 => {
+                let cur_ws = wm::current_workspace();
                 let backwards = matches!(chord & 0xffff, 0x110 | 0x112);
                 for step in 1..=CLIENTS {
                     let candidate = if backwards {
@@ -3899,7 +3933,7 @@ fn read_key(
                     } else {
                         (*focus + step) % CLIENTS
                     };
-                    if matches!(tiles.get(candidate), Some(Some(tile)) if tile.live && !tile.minimised)
+                    if matches!(tiles.get(candidate), Some(Some(tile)) if tile.live && !tile.minimised && tile.workspace == cur_ws)
                     {
                         *focus = candidate;
                         nexus_user::log("compositor: Super+arrow moved focus").ok();
@@ -3968,11 +4002,12 @@ fn read_key(
     }
 
     if message[0] == key::TAB {
-        // Round-robin over the clients that are still alive. A focus that could
-        // land on a dead client would send its keys nowhere.
+        // Round-robin over the clients that are still alive on the current workspace.
+        let cur_ws = wm::current_workspace();
         for step in 1..=CLIENTS {
             let candidate = (*focus + step) % CLIENTS;
-            if matches!(tiles.get(candidate), Some(Some(tile)) if tile.live) {
+            if matches!(tiles.get(candidate), Some(Some(tile)) if tile.live && !tile.minimised && tile.workspace == cur_ws)
+            {
                 *focus = candidate;
                 break;
             }
@@ -4149,6 +4184,7 @@ fn act_on_pointer(
     let put_away = buttons & pointer::RIGHT != 0;
     let mut damage = Region::nothing();
 
+    let cur_ws = wm::current_workspace();
     // The right button on a title bar puts a window away. Checked before the
     // left button's business, because the two are different acts and a window
     // being minimised is not a window being raised.
@@ -4157,7 +4193,11 @@ fn act_on_pointer(
             let Some(Some(tile)) = tiles.get_mut(index) else {
                 continue;
             };
-            if tile.live && !tile.minimised && tile.title_contains(cursor.x, cursor.y) {
+            if tile.live
+                && !tile.minimised
+                && tile.workspace == cur_ws
+                && tile.title_contains(cursor.x, cursor.y)
+            {
                 tile.minimised = true;
                 cursor.dragging = None;
                 // Where it was, so that what was behind it comes back.
@@ -4178,7 +4218,11 @@ fn act_on_pointer(
     // Checked before the windows are: windows are clamped above the strip, so
     // nothing else can be there.
     let in_top_bar = cursor.y >= screen.y + 8 && cursor.y < screen.y + 30;
-    if pressed && !cursor.held && (cursor.y >= screen.taskbar_y() + 22 || in_top_bar) {
+    let dock_visible = !wm::is_dock_autohide_enabled() || cursor.y >= screen.taskbar_y();
+    if pressed
+        && !cursor.held
+        && ((dock_visible && cursor.y >= screen.taskbar_y() + 22) || in_top_bar)
+    {
         cursor.held = true;
         if let Some(shell) = shell {
             let mut message = [0u8; desk::CLICK.len() + 8];
@@ -4209,7 +4253,11 @@ fn act_on_pointer(
             let Some(tile) = tiles.get_mut(index).and_then(Option::as_mut) else {
                 continue;
             };
-            if !tile.live || tile.minimised || !tile.contains(cursor.x, cursor.y) {
+            if !tile.live
+                || tile.minimised
+                || tile.workspace != cur_ws
+                || !tile.contains(cursor.x, cursor.y)
+            {
                 continue;
             }
 
@@ -4571,12 +4619,11 @@ fn repaint(
     // Refresh the entire lower scene and sampling halo of every affected
     // glass pane before capturing it. Iterate to a fixed point when panes
     // overlap; sampling last frame's glass would accumulate blur on every key.
+    let cur_ws = wm::current_workspace();
     let mut panes = alloc::vec::Vec::new();
-    for tile in tiles
-        .iter()
-        .flatten()
-        .filter(|tile| tile.live && !tile.minimised && glass_window(tile))
-    {
+    for tile in tiles.iter().flatten().filter(|tile| {
+        tile.live && !tile.minimised && tile.workspace == cur_ws && glass_window(tile)
+    }) {
         panes.push(Region::of(tile.x, tile.y, tile.width, tile.height).halo(screen));
     }
     if shell.is_some() {
@@ -4644,7 +4691,7 @@ fn repaint(
         let Some(tile) = tiles.get(index).and_then(Option::as_ref) else {
             continue;
         };
-        if !tile.live || tile.minimised {
+        if !tile.live || tile.minimised || tile.workspace != cur_ws {
             continue;
         }
         shadow(screen, tile);
@@ -4661,15 +4708,18 @@ fn repaint(
     match shell {
         Some(shell) => {
             composite_slice(screen, shell, false, true, 0, 22, screen.y + 8);
-            composite_slice(
-                screen,
-                shell,
-                false,
-                true,
-                22,
-                shell.height.saturating_sub(22),
-                shell.y + 22,
-            );
+            let show_dock = !wm::is_dock_autohide_enabled() || cursor.y >= screen.taskbar_y();
+            if show_dock {
+                composite_slice(
+                    screen,
+                    shell,
+                    false,
+                    true,
+                    22,
+                    shell.height.saturating_sub(22),
+                    shell.y + 22,
+                );
+            }
         }
         // Nothing has it. Filled rather than left as it was, because the strip
         // is reserved space and the last thing drawn in it is not the truth

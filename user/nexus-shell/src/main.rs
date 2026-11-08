@@ -134,6 +134,8 @@ mod wire {
     pub const RESTART: &[u8] = b"rest";
     /// Put the screen out until somebody touches the machine.
     pub const SLEEP: &[u8] = b"slep";
+    /// Cycle active workspace.
+    pub const CYCLE_WORKSPACE: &[u8] = b"wksp";
 }
 
 /// What state a window can be in, as the compositor reports it.
@@ -206,6 +208,8 @@ struct Desktop {
     /// compare rather than a frame. Empty before the first draw, which no
     /// clock ever reads as, so the first tick always draws.
     clock: String,
+    /// Currently active workspace index (0..=3).
+    workspace: u8,
 }
 
 impl Desktop {
@@ -422,6 +426,7 @@ extern "C" fn main() -> ! {
         pending: 0,
         installed: 0,
         clock: String::new(),
+        workspace: 0,
     };
     let surface = handles[0];
 
@@ -672,6 +677,9 @@ fn run(desktop: &mut Desktop) {
             let count = (message.len() - 3).min(MAX_WINDOWS);
             desktop.windows = [state::GONE; MAX_WINDOWS];
             desktop.windows[..count].copy_from_slice(&message[3..3 + count]);
+            if message.len() > 3 + MAX_WINDOWS {
+                desktop.workspace = message[3 + MAX_WINDOWS];
+            }
             stale = true;
             continue;
         }
@@ -746,6 +754,14 @@ fn run(desktop: &mut Desktop) {
 /// program. Nothing is changed here: this program says what should happen and
 /// the compositor decides whether it does.
 fn clicked(desktop: &mut Desktop, x: u32, y: u32) -> Option<bool> {
+    let ws_pill = Rect::new(12, 2, 80, 18);
+    if ws_pill.contains(x, y) {
+        nexus_user::log("shell: workspace pill clicked, cycling workspace").ok();
+        return nexus_user::send(COMPOSITOR, wire::CYCLE_WORKSPACE, &[])
+            .ok()
+            .map(|_| false);
+    }
+
     if desktop.terminal().contains(x, y) {
         return nexus_user::send(COMPOSITOR, wire::TERMINAL, &[])
             .ok()
@@ -871,14 +887,21 @@ fn draw(desktop: &Desktop) {
     canvas.outline(top_bar, 1, Colour(0x25ffffff));
 
     // YASB Pill: Logo & Workspace
-    canvas.fill_rounded(Rect::new(12, 2, 60, 18), 6, Colour(0x15000000));
-    canvas.text(20, 3, "Nexus", ink);
+    canvas.fill_rounded(Rect::new(12, 2, 90, 18), 6, Colour(0x15000000));
+    canvas.text(18, 3, "Nexus", ink);
+    let ws_text = match desktop.workspace {
+        1 => "WS 2",
+        2 => "WS 3",
+        3 => "WS 4",
+        _ => "WS 1",
+    };
+    canvas.text(58, 3, ws_text, muted);
 
     // YASB Pill: Clock
     if !desktop.clock.is_empty() {
         let clock_w = nexus_ui::measure(&desktop.clock) + 16;
-        canvas.fill_rounded(Rect::new(76, 2, clock_w, 18), 6, Colour(0x12000000));
-        canvas.text(84, 3, &desktop.clock, muted);
+        canvas.fill_rounded(Rect::new(106, 2, clock_w, 18), 6, Colour(0x12000000));
+        canvas.text(114, 3, &desktop.clock, muted);
     }
 
     // YASB Pill: Network & Audio status chips

@@ -254,6 +254,19 @@ pub fn forget(process: u64) {
     }
 }
 
+pub(super) fn close_cloexec_descriptors(process: u64) {
+    let to_close: alloc::vec::Vec<u64> = {
+        let flags = FLAGS.lock();
+        flags
+            .iter()
+            .filter_map(|((owner, fd), fl)| (*owner == process && fl.close_on_exec).then_some(*fd))
+            .collect()
+    };
+    for fd in to_close {
+        super::linux_files::close(fd);
+    }
+}
+
 pub(super) fn remember_cloexec(process: u64, descriptor: u64, on: bool) {
     FLAGS
         .lock()

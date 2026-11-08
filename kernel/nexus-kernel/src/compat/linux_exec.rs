@@ -283,8 +283,9 @@ fn execve_values(
     // What the old program had arranged, which the new one has not. Handlers
     // first, because a handler is a function in a program that no longer
     // exists and entering it would be a jump into whatever is at that address
-    // now.
+    // now. Descriptors with close-on-exec set are closed before loading.
     super::linux_signal::forget(process.id.0);
+    super::linux_more::close_cloexec_descriptors(process.id.0);
     super::linux_memory::forget(process.id.0);
     super::linux_display::forget(process.id.0);
 

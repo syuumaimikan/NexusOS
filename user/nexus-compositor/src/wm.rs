@@ -19,6 +19,30 @@ pub enum LayoutMode {
 
 static CURRENT_LAYOUT: AtomicU8 = AtomicU8::new(0); // 0 = Grid, 1 = MasterStack, 2 = Columns
 static AUTO_TILE: AtomicBool = AtomicBool::new(false);
+static CURRENT_WORKSPACE: AtomicU8 = AtomicU8::new(0); // 0 = WS1, 1 = WS2, 2 = WS3, 3 = WS4
+static DOCK_AUTOHIDE: AtomicBool = AtomicBool::new(false);
+
+/// Current active workspace index (0..=3).
+pub fn current_workspace() -> u8 {
+    CURRENT_WORKSPACE.load(Ordering::Relaxed)
+}
+
+/// Set active workspace index clamped to 0..=3.
+pub fn set_workspace(ws: u8) {
+    CURRENT_WORKSPACE.store(ws.min(3), Ordering::Relaxed);
+}
+
+/// Whether dock auto-hide is enabled.
+pub fn is_dock_autohide_enabled() -> bool {
+    DOCK_AUTOHIDE.load(Ordering::Relaxed)
+}
+
+/// Toggle dock auto-hide mode and return new state.
+pub fn toggle_dock_autohide() -> bool {
+    let next = !DOCK_AUTOHIDE.load(Ordering::Relaxed);
+    DOCK_AUTOHIDE.store(next, Ordering::Relaxed);
+    next
+}
 
 /// Current active layout name for status bar display.
 #[allow(dead_code)]
@@ -46,26 +70,32 @@ pub enum Action {
     Move(i32, i32),
     Resize(i32, i32),
     Focus(bool),
+    SwitchWorkspace(u8),
+    SendToWorkspace(u8),
+    ToggleDockAutoHide,
 }
 
 pub fn chord(chord: u32) -> Option<Action> {
     let shifted = chord & 0x10000 != 0;
     Some(match (chord & 0xffff, shifted) {
-        (0x66, _) => Action::Maximize,                // Super+F
-        (0x6d, false) => Action::Minimize,            // Super+M
-        (0x6d, true) => Action::Restore,              // Super+Shift+M
-        (0x74, false) => Action::Tile,                // Super+T (Cycle layouts / tile)
-        (0x74, true) => Action::ToggleAutoTile,       // Super+Shift+T
-        (0x77, _) => Action::Swap,                    // Super+W
-        (0x110, true) => Action::Move(0, -24),        // Super+Shift+Up
-        (0x111, true) => Action::Move(0, 24),         // Super+Shift+Down
-        (0x112, true) => Action::Move(-24, 0),        // Super+Shift+Left
-        (0x113, true) => Action::Move(24, 0),         // Super+Shift+Right
-        (0x68, true) => Action::Resize(-24, 0),       // Super+Shift+H
-        (0x6c, true) => Action::Resize(24, 0),        // Super+Shift+L
-        (0x6b, true) => Action::Resize(0, -24),       // Super+Shift+K
-        (0x6a, true) => Action::Resize(0, 24),        // Super+Shift+J
-        (0x68 | 0x6b, false) => Action::Focus(true),  // Super+H / Super+K
+        (0x66, _) => Action::Maximize,           // Super+F
+        (0x6d, false) => Action::Minimize,       // Super+M
+        (0x6d, true) => Action::Restore,         // Super+Shift+M
+        (0x74, false) => Action::Tile,           // Super+T (Cycle layouts / tile)
+        (0x74, true) => Action::ToggleAutoTile,  // Super+Shift+T
+        (0x77, _) => Action::Swap,               // Super+W
+        (0x64, _) => Action::ToggleDockAutoHide, // Super+D / Super+Shift+D
+        (0x31..=0x34, false) => Action::SwitchWorkspace(((chord & 0xffff) - 0x31) as u8), // Super+1..4
+        (0x31..=0x34, true) => Action::SendToWorkspace(((chord & 0xffff) - 0x31) as u8), // Super+Shift+1..4
+        (0x110, true) => Action::Move(0, -24), // Super+Shift+Up
+        (0x111, true) => Action::Move(0, 24),  // Super+Shift+Down
+        (0x112, true) => Action::Move(-24, 0), // Super+Shift+Left
+        (0x113, true) => Action::Move(24, 0),  // Super+Shift+Right
+        (0x68, true) => Action::Resize(-24, 0), // Super+Shift+H
+        (0x6c, true) => Action::Resize(24, 0), // Super+Shift+L
+        (0x6b, true) => Action::Resize(0, -24), // Super+Shift+K
+        (0x6a, true) => Action::Resize(0, 24), // Super+Shift+J
+        (0x68 | 0x6b, false) => Action::Focus(true), // Super+H / Super+K
         (0x6a | 0x6c, false) => Action::Focus(false), // Super+J / Super+L
         _ => return None,
     })
@@ -89,7 +119,57 @@ pub fn apply(
 ) {
     let work_y = screen.y + TOP_RESERVED;
     let work_height = screen.usable_height().saturating_sub(TOP_RESERVED);
+    let cur_ws = current_workspace();
     match action {
+        Action::ToggleDockAutoHide => {
+            let enabled = toggle_dock_autohide();
+            if enabled {
+                nexus_user::log("wm: dock auto-hide enabled").ok();
+            } else {
+                nexus_user::log("wm: dock auto-hide disabled").ok();
+            }
+        }
+        Action::SwitchWorkspace(ws) => {
+            let target_ws = ws.min(3);
+            set_workspace(target_ws);
+            // Switch focus to front-most visible window in target workspace, if any
+            for &idx in order.iter().rev() {
+                if let Some(Some(t)) = tiles.get(idx) {
+                    if t.live && !t.minimised && t.workspace == target_ws {
+                        *focus = idx;
+                        break;
+                    }
+                }
+            }
+            nexus_user::log("wm: switched workspace").ok();
+        }
+        Action::SendToWorkspace(ws) => {
+            let target_ws = ws.min(3);
+            if let Some(tile) = tiles
+                .get_mut(*focus)
+                .and_then(Option::as_mut)
+                .filter(|t| t.live)
+            {
+                tile.workspace = target_ws;
+                nexus_user::log("wm: sent window to workspace").ok();
+            }
+            // If the moved window left current workspace, switch focus to another visible window here
+            let cur = current_workspace();
+            if tiles
+                .get(*focus)
+                .and_then(Option::as_ref)
+                .is_some_and(|t| t.workspace != cur)
+            {
+                for &idx in order.iter().rev() {
+                    if let Some(Some(t)) = tiles.get(idx) {
+                        if t.live && !t.minimised && t.workspace == cur {
+                            *focus = idx;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         Action::Focus(backwards) => {
             for step in 1..=CLIENTS {
                 let next = if backwards {
@@ -99,7 +179,7 @@ pub fn apply(
                 };
                 if tiles[next]
                     .as_ref()
-                    .is_some_and(|tile| tile.live && !tile.minimised)
+                    .is_some_and(|tile| tile.live && !tile.minimised && tile.workspace == cur_ws)
                 {
                     *focus = next;
                     raise(order, next);
@@ -109,7 +189,11 @@ pub fn apply(
             }
         }
         Action::Restore => {
-            for tile in tiles.iter_mut().flatten().filter(|tile| tile.live) {
+            for tile in tiles
+                .iter_mut()
+                .flatten()
+                .filter(|tile| tile.live && tile.workspace == cur_ws)
+            {
                 tile.minimised = false;
             }
             nexus_user::log("wm: restored hidden windows").ok();
@@ -129,9 +213,9 @@ pub fn apply(
             let current = *focus;
             let other = tiles.iter().enumerate().position(|(idx, tile)| {
                 idx != current
-                    && tile
-                        .as_ref()
-                        .is_some_and(|t| t.live && !t.minimised && !glass_window(t))
+                    && tile.as_ref().is_some_and(|t| {
+                        t.live && !t.minimised && t.workspace == cur_ws && !glass_window(t)
+                    })
             });
             if let Some(other_idx) = other {
                 if let (Some(t1), Some(t2)) = (&tiles[current], &tiles[other_idx]) {
@@ -151,10 +235,9 @@ pub fn apply(
             let mut slots = [0; CLIENTS];
             let mut count = 0;
             for (index, tile) in tiles.iter().enumerate() {
-                if tile
-                    .as_ref()
-                    .is_some_and(|tile| tile.live && !tile.minimised && !glass_window(tile))
-                {
+                if tile.as_ref().is_some_and(|tile| {
+                    tile.live && !tile.minimised && tile.workspace == cur_ws && !glass_window(tile)
+                }) {
                     slots[count] = index;
                     count += 1;
                 }
