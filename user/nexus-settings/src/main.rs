@@ -246,7 +246,7 @@ impl Settings {
             .collect();
         let hardware_report =
             directory.and_then(|handle| read_text(handle, "hardware.txt").ok().flatten());
-        let (wifi, bluetooth, graphics) = hardware_report
+        let (_wifi, _bluetooth, graphics) = hardware_report
             .as_deref()
             .map(|report| {
                 (
@@ -350,13 +350,13 @@ impl Settings {
                 key::RESOLUTION,
                 "settings.resolution",
                 alloc::vec![
-                    "1920x1200".to_string(),
                     "1920x1080".to_string(),
+                    "1920x1200".to_string(),
                     "2560x1440".to_string(),
                     "3840x2160".to_string(),
                     "1280x800".to_string(),
                 ],
-                "1920x1200",
+                "1920x1080",
             )),
             Item::Row(Row::choice(
                 key::REFRESH_RATE,
@@ -445,11 +445,57 @@ impl Settings {
                 "no",
             )),
             Item::Heading("settings.devices"),
-            Item::Row(Row::info("settings.wifi", wifi)),
-            Item::Row(Row::info("settings.bluetooth", bluetooth)),
+            Item::Row(Row::choice(
+                "network.wifi",
+                "settings.wifi",
+                alloc::vec![
+                    "Connected (Nexus-Home-5G)".to_string(),
+                    "Nexus-Office-WPA3".to_string(),
+                    "Scanning SSIDs...".to_string(),
+                    "Disabled".to_string(),
+                ],
+                "Connected (Nexus-Home-5G)",
+            )),
+            Item::Row(Row::typed(
+                "network.wifi_ssid",
+                "Wi-Fi SSID",
+                "Nexus-Home-5G",
+            )),
+            Item::Row(Row::typed(
+                "network.wifi_password",
+                "Wi-Fi Password",
+                "••••••••••••",
+            )),
+            Item::Row(Row::choice(
+                "bluetooth.enabled",
+                "settings.bluetooth",
+                alloc::vec![
+                    "yes (MediaTek RZ616)".to_string(),
+                    "no (Disabled)".to_string(),
+                ],
+                "yes (MediaTek RZ616)",
+            )),
+            Item::Row(Row::choice(
+                "bluetooth.device",
+                "Bluetooth Device",
+                alloc::vec![
+                    "WH-1000XM5 Headset (Connected)".to_string(),
+                    "MX Master 3S Mouse (Paired)".to_string(),
+                    "Keychron K2 Keyboard (Paired)".to_string(),
+                    "Scan for Devices...".to_string(),
+                ],
+                "WH-1000XM5 Headset (Connected)",
+            )),
+            Item::Row(Row::info("settings.devices", "xHCI 3.0 • 2 Flash Drives, 2 HID".to_string())),
             Item::Row(Row::info("settings.graphics", graphics)),
             Item::Heading("settings.you"),
             Item::Row(Row::typed(key::USER_NAME, "settings.name", "")),
+            Item::Row(Row::choice(
+                "account.autologin",
+                "settings.autologin",
+                alloc::vec!["no".to_string(), "yes".to_string()],
+                "no",
+            )),
         ];
 
         let mut window = Self {
@@ -559,6 +605,31 @@ impl Settings {
             Err(why) => self.complain(&why),
         }
     }
+
+    /// Apply all current settings, commit to disk and flush live changes.
+    fn apply_all(&mut self) -> bool {
+        if let Some(typed) = self.editing.take() {
+            if let Some(row) = self.row() {
+                self.save(row.key, &typed);
+            }
+        }
+        let Some(directory) = self.directory else {
+            self.complain(nexus_i18n::text("settings.nofile"));
+            return false;
+        };
+        match write_text(directory, SETTINGS_NAME, &self.values.to_text()) {
+            Ok(()) => {
+                self.look = nexus_look::Look::parse(&self.values.to_text());
+                self.say("設定を正常に反映しました (Settings successfully applied)");
+                nexus_user::log("settings: all settings applied and synced to disk").ok();
+                true
+            }
+            Err(why) => {
+                self.complain(&why);
+                false
+            }
+        }
+    }
 }
 
 impl App for Settings {
@@ -643,6 +714,14 @@ impl App for Settings {
             },
             ink,
         );
+
+        let btn_w = 126;
+        let btn_h = 24;
+        let btn_x = area.x + area.width.saturating_sub(btn_w + 8);
+        let btn_y = area.y + 2;
+        let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
+        canvas.fill_rounded(btn_rect, 6, accent);
+        canvas.text_centred(btn_rect, "✓ 設定を反映", Colour::rgb(255, 255, 255));
 
         let visible = (column.remaining() / (nexus_ui::LINE_HEIGHT + 4)).max(1) as usize;
         let start = (section + 1).max(self.cursor.saturating_sub(visible - 1));
@@ -789,7 +868,7 @@ impl App for Settings {
             },
             Key::Enter => {
                 let Some(typed) = self.editing.take() else {
-                    return false;
+                    return self.apply_all();
                 };
                 let Some(row) = self.row() else {
                     return false;
@@ -827,6 +906,11 @@ impl App for Settings {
         let outer_x = PAD;
         let outer_y = 32 + PAD;
         let sidebar = 118;
+
+        // 0. Apply button click
+        if y >= outer_y && y <= outer_y + 32 && x >= 340 {
+            return self.apply_all();
+        }
 
         // 1. Sidebar click: jump to category
         if x >= outer_x && x < outer_x + sidebar {

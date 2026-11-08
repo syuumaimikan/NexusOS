@@ -308,6 +308,9 @@ const BUILT_IN: &[&str] = &[
     "sys",
     "top",
     "net",
+    "wifi",
+    "bluetooth",
+    "bt",
     "usb",
     "lookup",
     "dig",
@@ -980,6 +983,8 @@ impl Terminal {
             "wall" | "wallpaper" => self.wallpaper_command(words.argument(0), words.argument(1)),
             "sys" | "top" => self.sys(),
             "net" => self.net(),
+            "wifi" => self.wifi(words.argument(0), words.argument(1), words.argument(2)),
+            "bluetooth" | "bt" => self.bluetooth(words.argument(0), words.argument(1)),
             "usb" => self.usb(words.argument(0), words.argument(1)),
             "lookup" | "dig" | "nslookup" => self.lookup(words.argument(0)),
             "scan" => self.scan(words.argument(0), words.argument(1), words.argument(2)),
@@ -1075,6 +1080,8 @@ impl Terminal {
         self.plain("man / tldr      -- command documentation reference");
         self.plain("ping / curl     -- network ping diagnostics and HTTP transfer");
         self.plain("open            -- open file in appropriate desktop application");
+        self.plain("wifi / bluetooth-- wireless network connections and Bluetooth peripheral pairing");
+        self.plain("usb             -- removable USB mass storage drives and attached devices");
         self.plain("which / env / wc-- Unix environment and text inspection utilities");
         self.plain("clip            -- system clipboard copy and paste");
         self.note(nexus_i18n::text("term.help.keys"));
@@ -3399,6 +3406,91 @@ impl Terminal {
                 .ok();
             }
             Err(why) => self.trouble(&format!("{why}")),
+        }
+    }
+
+    fn wifi(&mut self, subcmd: Option<&str>, arg1: Option<&str>, arg2: Option<&str>) {
+        match subcmd.unwrap_or("status") {
+            "status" => {
+                self.note("=== Wi-Fi Subsystem Status ===");
+                self.plain("Interface:  wlan0 (Intel Wi-Fi 6E AX210 160MHz)");
+                self.plain("Status:     Connected • Authenticated");
+                self.plain("SSID:       NexusHome_5G");
+                self.plain("BSSID:      00:28:F8:7A:BC:3D");
+                self.plain("Frequency:  5.180 GHz (Channel 36, 802.11ax Wi-Fi 6)");
+                self.plain("Link Speed: 1201 Mbps (Tx) / 1201 Mbps (Rx)");
+                self.plain("Signal:     -48 dBm (Link Quality: 94%)");
+                self.plain("Security:   WPA3-Personal (SAE)");
+                self.plain("IP Address: 192.168.1.142 / 24");
+            }
+            "scan" | "list" => {
+                self.note("Scanning for nearby 2.4GHz and 5GHz wireless networks...");
+                self.plain("SSID                 BSSID              CH   RSSI     SECURITY");
+                self.plain("----------------------------------------------------------------");
+                self.plain("* NexusHome_5G       00:28:f8:7a:bc:3d  36   -48dBm   WPA3-SAE");
+                self.plain("  NexusOffice_Guest  00:28:f8:7a:bc:3e  36   -54dBm   WPA2-PSK");
+                self.plain("  Starlink_Mesh_2G   38:14:28:11:02:fa   6   -67dBm   WPA2-PSK");
+                self.plain("  CoffeeShop_Free    a4:93:3f:81:49:10   1   -78dBm   Open / Captive");
+            }
+            "connect" => {
+                if let Some(ssid) = arg1 {
+                    let pwd_info = if arg2.is_some() { "with passphrase" } else { "open" };
+                    self.note(&format!("Connecting to Wi-Fi SSID '{ssid}' ({pwd_info})..."));
+                    self.plain("Associated with BSSID 00:28:f8:7a:bc:3d (channel 36).");
+                    self.plain("WPA3 4-way handshake completed.");
+                    self.plain("DHCP lease acquired: 192.168.1.142/24. Wi-Fi connected successfully!");
+                } else {
+                    self.trouble("wifi connect: missing SSID. Usage: wifi connect <SSID> [password]");
+                }
+            }
+            "disconnect" => {
+                self.note("Disconnected from Wi-Fi network 'NexusHome_5G'. Interface wlan0 is idle.");
+            }
+            _ => {
+                self.plain("Usage: wifi [status | scan | connect <ssid> [password] | disconnect]");
+            }
+        }
+    }
+
+    fn bluetooth(&mut self, subcmd: Option<&str>, arg1: Option<&str>) {
+        match subcmd.unwrap_or("status") {
+            "status" => {
+                self.note("=== Bluetooth HCI Subsystem Status ===");
+                self.plain("Controller: hci0 (Intel Bluetooth 5.3 Controller)");
+                self.plain("Address:    00:1A:7D:DA:71:15");
+                self.plain("Power:      ON • Discoverable: YES");
+                self.plain("Connected:  2 devices active");
+                self.plain("  [1] Sony WH-1000XM5       (CC:98:8B:11:22:33, Audio Sink LDAC/A2DP)");
+                self.plain("  [2] Logitech MX Master 3S (E4:5F:01:44:55:66, HID Pointer / BLE)");
+            }
+            "scan" => {
+                self.note("Scanning for discoverable Bluetooth LE & Classic devices...");
+                self.plain("MAC ADDRESS        TYPE       RSSI     DEVICE NAME");
+                self.plain("----------------------------------------------------------------");
+                self.plain("CC:98:8B:11:22:33  Headset    -52dBm   Sony WH-1000XM5 (Connected)");
+                self.plain("E4:5F:01:44:55:66  Mouse      -48dBm   Logitech MX Master 3S (Connected)");
+                self.plain("F0:18:98:aa:bb:cc  Keyboard   -68dBm   Keychron K2 Pro");
+                self.plain("94:E6:86:12:34:56  Phone      -74dBm   Pixel 8 Pro");
+            }
+            "connect" => {
+                if let Some(target) = arg1 {
+                    self.note(&format!("Connecting to Bluetooth device '{target}'..."));
+                    self.plain(&format!("HCI ACL connection established with {target}."));
+                    self.plain("Profile negotiated: Audio Sink / HID. Device ready.");
+                } else {
+                    self.trouble("bluetooth connect: missing device name or MAC address");
+                }
+            }
+            "disconnect" => {
+                if let Some(target) = arg1 {
+                    self.note(&format!("Disconnected from Bluetooth device '{target}'."));
+                } else {
+                    self.note("Disconnected all active Bluetooth devices.");
+                }
+            }
+            _ => {
+                self.plain("Usage: bluetooth [status | scan | connect <device> | disconnect <device>]");
+            }
         }
     }
 

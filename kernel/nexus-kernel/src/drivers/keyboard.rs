@@ -329,7 +329,8 @@ pub fn next_key() -> Option<Key> {
         0x7B => Key::Function(2),    // Muhenkan (non-conversion) key
         0x7D => Key::Character(if modifiers.shift { '|' } else { '\\' }), // Yen (¥) key
         0x73 => Key::Character(if modifiers.shift { '_' } else { '\\' }), // Ro (ろ) / backslash
-        0x29 if modifiers.alt => Key::Function(2), // Alt+` (Hankaku/Zenkaku toggle)
+        0x29 if modifiers.shift => Key::Character('~'),
+        0x29 if modifiers.alt || crate::i18n::current().tag == "ja-JP" => Key::Function(2), // Hankaku/Zenkaku toggle
         0x39 if modifiers.control => Key::Function(2), // Ctrl+Space (IME toggle)
         // The extended set, which is where the arrows and the page keys live.
         // Only meaningful with the prefix: the same scancodes without it are

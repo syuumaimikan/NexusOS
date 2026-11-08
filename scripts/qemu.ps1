@@ -370,7 +370,7 @@ function Get-NexusQemuArgs {
     $yres = if ($resMatch) { [int]$Matches[2] } else { 1200 }
     $arguments += @(
         '-vga', 'none',
-        '-device', "virtio-gpu-pci,id=nexusgpu,xres=$xres,yres=$yres,max_hostmem=268435456"
+        '-device', "virtio-gpu-pci,id=nexusgpu,xres=$xres,yres=$yres,max_hostmem=268435456,edid=on"
     )
 
     # A sound card, and nothing to play it through.

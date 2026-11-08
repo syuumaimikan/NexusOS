@@ -163,6 +163,11 @@ fn handle(key: Key) {
             kprintln!("[input] F1: interface language is now {}", locale.tag);
             announce_language();
         }
+        Key::Function(2) => {
+            let locale = i18n::next_locale();
+            kprintln!("[input] Hankaku/Zenkaku IME toggle: language is now {}", locale.tag);
+            announce_language();
+        }
         Key::Function(number) => {
             kprintln!("[input] F{number} is not bound to anything yet");
         }

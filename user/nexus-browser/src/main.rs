@@ -162,6 +162,8 @@ struct Line {
     x: u32,
     scale: u32,
     colour: Colour,
+    bg_colour: Option<Colour>,
+    underline: bool,
 }
 
 /// Everything the window knows.
@@ -755,6 +757,7 @@ impl Browser {
                     .take(nexus_html::MAX_BLOCKS)
                     .map(|line| Block::Preformatted(line.trim_end().to_string()))
                     .collect(),
+                script_output: alloc::vec::Vec::new(),
             }
         };
         self.links = self.document.links();
@@ -801,21 +804,29 @@ impl Browser {
         .ok();
     }
 
-    /// Display the Firefox-like Start & Speed Dial Home Page.
+    /// Display the Firefox-like Start & Speed Dial Home Page with HTML5, CSS and JS.
     fn show_home_page(&mut self) {
-        let home_html = "<!DOCTYPE html><html><head><title>Nexus Browser - Home</title></head><body>\
-            <h1>Nexus Browser (Firefox Edition)</h1>\
-            <p>Welcome to Nexus Browser. Enter a URL or search query in the address bar above to browse.</p>\
-            <h2>Speed Dial &amp; Quick Links</h2>\
+        let home_html = "<!DOCTYPE html><html><head><title>Nexus Browser - Home</title>\
+            <style>h1 { color: #58a6ff; } p { color: #e6edf3; }</style>\
+            <script>console.log(\"Nexus Browser v1.2: HTML5, CSS Styling, JavaScript active\");</script>\
+            </head><body>\
+            <h1 style=\"color: #58a6ff;\">Nexus Browser (Firefox Engine)</h1>\
+            <p style=\"color: #94a3b8;\">Web Engine with CSS Styling, HTML5 Interactive Controls, and JavaScript Execution.</p>\
+            <hr>\
+            <h2 style=\"color: #38bdf8;\">Speed Dial &amp; Quick Links</h2>\
             <ul>\
                 <li><a href=\"http://localhost/\">Local Host Web Service</a></li>\
                 <li><a href=\"https://html.duckduckgo.com/html/\">DuckDuckGo Search Engine</a></li>\
                 <li><a href=\"https://en.wikipedia.org/\">Wikipedia - The Free Encyclopedia</a></li>\
                 <li><a href=\"http://repo.nexus-os.org/\">NexusOS Linux Package Repository</a></li>\
             </ul>\
+            <h2 style=\"color: #22c55e;\">Interactive Form Elements &amp; Buttons</h2>\
+            <button value=\"Search Web (DuckDuckGo)\" href=\"https://html.duckduckgo.com/html/\"></button>\
+            <input type=\"text\" placeholder=\"Enter search query or URL...\">\
+            <hr>\
             <h2>Navigation &amp; Shortcuts</h2>\
-            <p>Press TAB to focus the address bar. Type a URL (e.g. example.com) or search term and press Enter.</p>\
-            <p>While viewing a page: Up/Down or PageUp/PageDown to scroll, digits + Enter to follow a numbered link, Backspace to go back.</p>\
+            <p>Press TAB to focus address bar. Type a URL or query and press Enter.</p>\
+            <p>While viewing a page: Up/Down or PageUp/PageDown to scroll, digits + Enter to follow a numbered link.</p>\
             </body></html>";
         self.document = nexus_html::parse(home_html);
         self.links = self.document.links();
@@ -1288,7 +1299,6 @@ impl Browser {
         let ink = Colour::rgb(0xDC, 0xE4, 0xF0);
         let dim = Colour::rgb(0x7C, 0x8A, 0xA4);
         let accent = Colour::rgb(0x58, 0xA6, 0xFF);
-        let heading = Colour::rgb(0xF0, 0xF4, 0xFF);
 
         canvas.fill(canvas.bounds(), ground);
 
@@ -1403,11 +1413,20 @@ impl Browser {
         for line in lines.iter().skip(self.scroll).take(rows) {
             let colour = line.colour;
             let x = area.x + line.x;
+            if let Some(bg) = line.bg_colour {
+                let text_w = nexus_ui::measure(&line.text) * line.scale;
+                let text_h = nexus_ui::LINE_HEIGHT * line.scale;
+                canvas.fill_rounded(Rect::new(x, y, text_w + 12, text_h), 4, bg);
+            }
             if line.scale > 1 {
-                canvas.text_scaled(x, y, &line.text, heading, line.scale);
+                canvas.text_scaled(x + 4, y, &line.text, colour, line.scale);
                 y += nexus_ui::LINE_HEIGHT * line.scale;
             } else {
-                canvas.text(x, y, &line.text, colour);
+                canvas.text(x + 4, y, &line.text, colour);
+                if line.underline {
+                    let w = nexus_ui::measure(&line.text);
+                    canvas.fill(Rect::new(x + 4, y + nexus_ui::LINE_HEIGHT - 2, w, 1), colour);
+                }
                 y += nexus_ui::LINE_HEIGHT;
             }
             if y + nexus_ui::LINE_HEIGHT > area.y + area.height {
@@ -1461,6 +1480,7 @@ impl Browser {
     fn lay_out(&self, width: u32) -> Vec<Line> {
         let ink = Colour::rgb(0xDC, 0xE4, 0xF0);
         let dim = Colour::rgb(0x7C, 0x8A, 0xA4);
+        let heading = Colour::rgb(0xF0, 0xF4, 0xFF);
         let mut lines: Vec<Line> = Vec::new();
         let mut link_number = 0usize;
 
@@ -1476,7 +1496,47 @@ impl Browser {
                         x: 0,
                         scale: 1,
                         colour: dim,
+                        bg_colour: None,
+                        underline: false,
                     });
+                }
+                Block::Button {
+                    text,
+                    color,
+                    bg_color,
+                    ..
+                } => {
+                    let btn_col = color.map(Colour).unwrap_or(Colour::rgb(0xff, 0xff, 0xff));
+                    let bg = bg_color.map(Colour).unwrap_or(Colour::rgb(0x25, 0x63, 0xeb));
+                    lines.push(Line {
+                        text: format!(" [ {text} ] "),
+                        x: 8,
+                        scale: 1,
+                        colour: btn_col,
+                        bg_colour: Some(bg),
+                        underline: false,
+                    });
+                    lines.push(blank());
+                }
+                Block::Input { placeholder, value } => {
+                    let display_val = if value.is_empty() {
+                        if placeholder.is_empty() {
+                            "..."
+                        } else {
+                            placeholder.as_str()
+                        }
+                    } else {
+                        value.as_str()
+                    };
+                    lines.push(Line {
+                        text: format!(" 🔲 {display_val} "),
+                        x: 8,
+                        scale: 1,
+                        colour: Colour::rgb(0x94, 0xa3, 0xb8),
+                        bg_colour: Some(Colour::rgb(0x16, 0x20, 0x32)),
+                        underline: false,
+                    });
+                    lines.push(blank());
                 }
                 Block::Preformatted(text) => {
                     for row in text.split('\n') {
@@ -1485,21 +1545,30 @@ impl Browser {
                             x: 16,
                             scale: 1,
                             colour: dim.blend(ink, 160),
+                            bg_colour: None,
+                            underline: false,
                         });
                     }
                     lines.push(blank());
                 }
                 Block::Heading(level, spans) => {
-                    // Only the top two levels are drawn larger. Six sizes on a
-                    // sixteen-pixel face is five sizes nobody can tell apart.
+                    // Only the top two levels are drawn larger.
                     let scale = if *level <= 2 { 2 } else { 1 };
                     let text = join(spans);
+                    let mut col = heading;
+                    if let Some(span) = spans.iter().find(|s| s.style.color.is_some()) {
+                        if let Some(c) = span.style.color {
+                            col = Colour(c);
+                        }
+                    }
                     for piece in nexus_ui::wrap(&text, width / scale) {
                         lines.push(Line {
                             text: piece.to_string(),
                             x: 0,
                             scale,
-                            colour: ink,
+                            colour: col,
+                            bg_colour: None,
+                            underline: false,
                         });
                     }
                     lines.push(blank());
@@ -1520,6 +1589,8 @@ impl Browser {
                             x: if index == 0 { indent } else { indent + 16 },
                             scale: 1,
                             colour: ink,
+                            bg_colour: None,
+                            underline: false,
                         });
                     }
                 }
@@ -1532,22 +1603,63 @@ impl Browser {
                             x: indent,
                             scale: 1,
                             colour: dim.blend(ink, 120),
+                            bg_colour: None,
+                            underline: false,
                         });
                     }
                     lines.push(blank());
                 }
                 Block::Paragraph(spans) => {
                     let text = self.number(spans, &mut link_number);
+                    let mut col = ink;
+                    let mut bg = None;
+                    let mut ul = false;
+                    if let Some(span) = spans.iter().find(|s| {
+                        s.style.color.is_some()
+                            || s.style.bg_color.is_some()
+                            || s.style.underline
+                    }) {
+                        if let Some(c) = span.style.color {
+                            col = Colour(c);
+                        }
+                        if let Some(b) = span.style.bg_color {
+                            bg = Some(Colour(b));
+                        }
+                        ul = span.style.underline;
+                    }
                     for piece in nexus_ui::wrap(&text, width) {
                         lines.push(Line {
                             text: piece.to_string(),
                             x: 0,
                             scale: 1,
-                            colour: ink,
+                            colour: col,
+                            bg_colour: bg,
+                            underline: ul,
                         });
                     }
                     lines.push(blank());
                 }
+            }
+        }
+        if !self.document.script_output.is_empty() {
+            lines.push(blank());
+            lines.push(Line {
+                text: "─── JavaScript Console & Script Output ───".to_string(),
+                x: 0,
+                scale: 1,
+                colour: Colour::rgb(0x38, 0xbd, 0xf8),
+                bg_colour: None,
+                underline: false,
+            });
+            for log in &self.document.script_output {
+                lines.push(Line {
+                    text: log.clone(),
+                    x: 8,
+                    scale: 1,
+                    colour: Colour::rgb(0xa5, 0xb4, 0xfc),
+                    bg_colour: Some(Colour::rgb(0x1e, 0x1b, 0x4b)),
+                    underline: false,
+                });
             }
         }
         lines
@@ -1588,6 +1700,8 @@ fn blank() -> Line {
         x: 0,
         scale: 1,
         colour: Colour::rgb(0, 0, 0),
+        bg_colour: None,
+        underline: false,
     }
 }
 

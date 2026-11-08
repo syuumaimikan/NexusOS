@@ -797,6 +797,13 @@ fn clicked(desktop: &mut Desktop, x: u32, y: u32) -> Option<bool> {
         return nexus_user::send(COMPOSITOR, wire::SETTINGS, &[]).ok().map(|_| true);
     }
 
+    let ime_x = audio_x + 60;
+    if net_x > 150 && ime_x + 40 < desktop.sleep().x && Rect::new(ime_x, 2, 36, 18).contains(x, y) {
+        let next_locale = nexus_i18n::next_locale();
+        nexus_user::log(&alloc::format!("shell: toggled IME language to {}", next_locale.tag)).ok();
+        return Some(true);
+    }
+
     if desktop.terminal().contains(x, y) {
         return nexus_user::send(COMPOSITOR, wire::TERMINAL, &[])
             .ok()
@@ -955,6 +962,14 @@ fn draw(desktop: &Desktop) {
                 desktop.volume.split_whitespace().next().unwrap_or("100%")
             };
             canvas.text(audio_x + 6, 3, &alloc::format!("{icon} {vol_str}"), muted);
+
+            let ime_x = audio_x + 60;
+            if ime_x + 36 < desktop.sleep().x {
+                canvas.fill_rounded(Rect::new(ime_x, 2, 32, 18), 6, Colour(0x12000000));
+                let is_jp = nexus_i18n::current().tag == "ja-JP";
+                let ime_label = if is_jp { "あ" } else { "A" };
+                canvas.text(ime_x + 10, 3, ime_label, muted);
+            }
         }
     }
 

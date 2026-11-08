@@ -62,6 +62,8 @@ param(
     [string]$BuildDirectory = 'build',
     [ValidateRange(0, 65535)][int]$HostHttpPort = 18080,
     [ValidateRange(0, 65535)][int]$MonitorPort = 0,
+    [switch]$FullScreen,
+    [switch]$NoScale,
     [switch]$Release,
     [switch]$Gdb
 )
@@ -73,8 +75,19 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'private-machine.ps1')
 . (Join-Path $PSScriptRoot 'maintenance.ps1')
 
+function Get-HostResolution {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        return "$($screen.Width)x$($screen.Height)"
+    } catch {
+        return '1920x1080'
+    }
+}
+
 function Get-ConfiguredResolution {
-    param([string]$DiskPath, [string]$Default = '1920x1200')
+    param([string]$DiskPath, [string]$Default = '')
+    if (-not $Default) { $Default = Get-HostResolution }
     if (-not (Test-Path -LiteralPath $DiskPath)) { return $Default }
     try {
         $fs = [System.IO.File]::Open($DiskPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
@@ -207,7 +220,7 @@ try {
     if (Test-Path -LiteralPath $SerialLog) { Remove-Item -LiteralPath $SerialLog -Force }
     if ($HostHttpPort -eq 0) { $HostHttpPort = Get-FreeMonitorPort -From 18100 -To 19000 }
     if (-not $PSBoundParameters.ContainsKey('Resolution')) {
-        $savedRes = Get-ConfiguredResolution -DiskPath $Disk -Default '1920x1200'
+        $savedRes = Get-ConfiguredResolution -DiskPath $Disk
         if ($savedRes) {
             $Resolution = $savedRes
             Write-Host "==> Configured display resolution: $Resolution" -ForegroundColor Cyan
@@ -221,6 +234,10 @@ $QemuArgs += @('-d', 'guest_errors')
 
 if ($Headless) {
     $QemuArgs += @('-display', 'none')
+} elseif ($FullScreen) {
+    $QemuArgs += @('-display', 'gtk,full-screen=on,zoom-to-fit=on')
+} elseif ($NoScale) {
+    $QemuArgs += @('-display', 'gtk,zoom-to-fit=off')
 } else {
     $QemuArgs += @('-display', 'gtk,zoom-to-fit=on')
 }

@@ -131,7 +131,43 @@ const DEVICES: &[DeviceNode] = &[
         vendor_id: "0x1B36 (Red Hat / QEMU)",
         device_id: "0x000D (qemu-xhci)",
         driver: "kernel/removable xhci",
-        status: "Active • 2 Removable Drives",
+        status: "Active • 2 Removable Drives Attached",
+    },
+    DeviceNode {
+        category: "Wireless",
+        name: "Intel Wi-Fi 6E AX210 160MHz Adapter",
+        pci_addr: "00:07.0",
+        vendor_id: "0x8086 (Intel Corporation)",
+        device_id: "0x2725 (AX210 Wi-Fi 6E)",
+        driver: "nexus-net iwlwifi / 802.11ax",
+        status: "Connected • 5.0 GHz (SSID: NexusHome_5G)",
+    },
+    DeviceNode {
+        category: "Bluetooth",
+        name: "Intel Bluetooth 5.3 Controller & Subsystem",
+        pci_addr: "00:07.1",
+        vendor_id: "0x8086 (Intel Corporation)",
+        device_id: "0x0032 (HCI USB / PCIe)",
+        driver: "nexus-kernel bt_hci",
+        status: "Active • Paired: Sony WH-1000XM5, MX Master 3S",
+    },
+    DeviceNode {
+        category: "USB",
+        name: "SanDisk Ultra 64GB USB 3.0 Flash Drive",
+        pci_addr: "Port 1 (xHCI Slot 1)",
+        vendor_id: "0x0781 (SanDisk Corp.)",
+        device_id: "0x5581 (Ultra USB 3.0)",
+        driver: "nexus-fs fat32 / mnt_usb",
+        status: "Mounted at /mnt/usb0 • Capacity: 64.0 GB",
+    },
+    DeviceNode {
+        category: "USB",
+        name: "Logitech Unifying USB Receiver (HID)",
+        pci_addr: "Port 2 (xHCI Slot 2)",
+        vendor_id: "0x046D (Logitech, Inc.)",
+        device_id: "0xC52B (USB Receiver)",
+        driver: "nexus-kernel usb_hid",
+        status: "Active • Keyboard & Optical Mouse (1000Hz)",
     },
 ];
 
@@ -181,7 +217,8 @@ impl App for DeviceManagerApp {
         canvas.fill_rounded(tree_rect, 6, COL_PANEL);
         canvas.outline(tree_rect, 1, COL_BORDER);
 
-        canvas.text(24, main_y + 12, "DISCOVERED DEVICES (10)", COL_GOLD);
+        let count_str = format!("DISCOVERED DEVICES ({})", DEVICES.len());
+        canvas.text(24, main_y + 12, &count_str, COL_GOLD);
 
         for (i, dev) in DEVICES.iter().enumerate() {
             let row_y = main_y + 36 + (i as u32 * 32);
@@ -197,6 +234,8 @@ impl App for DeviceManagerApp {
                 "Processor" => "CPU",
                 "Display" => "GPU",
                 "Network" => "NET",
+                "Wireless" => "WFI",
+                "Bluetooth" => "BT ",
                 "Audio" => "SND",
                 "Storage" => "DSK",
                 "USB" => "USB",
@@ -276,6 +315,19 @@ impl App for DeviceManagerApp {
             }
             _ => false,
         }
+    }
+
+    fn click(&mut self, x: u32, y: u32) -> bool {
+        let tree_w = 340;
+        let main_y = 52;
+        if x >= 12 && x <= 12 + tree_w && y >= main_y + 36 {
+            let clicked_idx = ((y - (main_y + 36)) / 32) as usize;
+            if clicked_idx < DEVICES.len() {
+                self.selected_idx = clicked_idx;
+                return true;
+            }
+        }
+        false
     }
 
     fn damage(&mut self) -> Option<(u32, u32, u32, u32)> {

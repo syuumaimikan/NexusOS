@@ -318,19 +318,17 @@ mod pointer {
 /// itself. Everything else is forwarded without being looked at -- a compositor
 /// that inspected the keys it routes would be a compositor that could read what
 /// someone typed into a window.
+#[allow(dead_code)]
 mod key {
+    pub const CHARACTER: u8 = 1;
+    pub const BACKSPACE: u8 = 2;
+    pub const ENTER: u8 = 3;
+    pub const ESCAPE: u8 = 4;
     pub const TAB: u8 = 5;
-    /// A function key, numbered from one.
     pub const FUNCTION: u8 = 6;
-    pub const SUPER: u8 = 9;
-    /// Not a key: the interface language changed, and this is what to.
-    ///
-    /// Passed to the desktop, which draws text, and to nobody else. It arrives
-    /// on the key channel because that is where the kernel says it, and it is
-    /// the one thing on that channel this program forwards somewhere other than
-    /// to whoever has focus.
     pub const LANGUAGE: u8 = 7;
-    /// Bytes one key takes.
+    pub const MOVE: u8 = 8;
+    pub const SUPER: u8 = 9;
     pub const SIZE: usize = 5;
 }
 
@@ -1152,31 +1150,28 @@ impl Tile {
         self.contains(x, y) && y < self.y + TITLE
     }
 
-    /// Whether a point is in the close button (left traffic light or right close).
+    /// Whether a point is in the close button (right Windows close button).
     fn close_contains(&self, x: u32, y: u32) -> bool {
         self.contains(x, y)
             && y < self.y + TITLE
-            && ((x >= self.x + 8 && x <= self.x + 24)
-                || (x >= self.x + self.width.saturating_sub(28)
-                    && x <= self.x + self.width.saturating_sub(8)))
+            && x >= self.x + self.width.saturating_sub(32)
+            && x <= self.x + self.width.saturating_sub(4)
     }
 
-    /// Whether a point is in the minimize button.
+    /// Whether a point is in the minimize button (right Windows minimize button).
     fn minimize_contains(&self, x: u32, y: u32) -> bool {
         self.contains(x, y)
             && y < self.y + TITLE
-            && ((x >= self.x + 28 && x <= self.x + 44)
-                || (x >= self.x + self.width.saturating_sub(76)
-                    && x <= self.x + self.width.saturating_sub(56)))
+            && x >= self.x + self.width.saturating_sub(84)
+            && x <= self.x + self.width.saturating_sub(58)
     }
 
-    /// Whether a point is in the maximize / restore button.
+    /// Whether a point is in the maximize / restore button (right Windows maximize button).
     fn maximize_contains(&self, x: u32, y: u32) -> bool {
         self.contains(x, y)
             && y < self.y + TITLE
-            && ((x >= self.x + 48 && x <= self.x + 64)
-                || (x >= self.x + self.width.saturating_sub(52)
-                    && x <= self.x + self.width.saturating_sub(32)))
+            && x >= self.x + self.width.saturating_sub(58)
+            && x <= self.x + self.width.saturating_sub(32)
     }
 
     /// What to tell the desktop about this window.
@@ -1247,6 +1242,8 @@ extern "C" fn main() -> ! {
     // is in and who it belongs to.
     if !screen.configured {
         run_setup(&screen);
+    } else {
+        run_login(&screen);
     }
 
     // Two tiles side by side, with a gap around and between them. Laid out
@@ -1509,6 +1506,245 @@ fn run_setup(screen: &Screen) {
     nexus_user::close(tile.surface).ok();
     nexus_user::close(tile.channel).ok();
     nexus_user::close(tile.process).ok();
+    nexus_user::close(set).ok();
+}
+
+fn read_configured_user() -> alloc::string::String {
+    let Ok(file) = nexus_user::open(SETTINGS, "settings.txt") else {
+        return alloc::string::String::from("nexus");
+    };
+    let Ok(size) = nexus_user::size(file) else {
+        nexus_user::close(file).ok();
+        return alloc::string::String::from("nexus");
+    };
+    if size == 0 || size > 8192 {
+        nexus_user::close(file).ok();
+        return alloc::string::String::from("nexus");
+    }
+    let mut buf = alloc::vec![0u8; size as usize];
+    let read = nexus_user::read_at(file, 0, &mut buf).unwrap_or(0);
+    nexus_user::close(file).ok();
+    buf.truncate(read);
+    if let Ok(text) = core::str::from_utf8(&buf) {
+        let settings = nexus_config::Settings::parse(text);
+        if let Some(user) = settings.get("account.user").or_else(|| settings.get("owner")) {
+            return alloc::string::String::from(user);
+        }
+    }
+    alloc::string::String::from("nexus")
+}
+
+fn draw_login_screen(screen: &Screen, username: &str, entered_len: usize) {
+    let bg_color = 0x000f172a; // Deep slate
+    fill(screen, screen.x, screen.y, screen.width, screen.height, bg_color);
+
+    let card_w = 380.min(screen.width.saturating_sub(40));
+    let card_h = 320.min(screen.usable_height().saturating_sub(40));
+    let card_x = screen.x + (screen.width.saturating_sub(card_w)) / 2;
+    let card_y = screen.y + (screen.usable_height().saturating_sub(card_h)) / 2;
+
+    let card_bg = 0x001e293b;
+    let border_color = 0x00334155;
+    for y in 0..card_h {
+        for x in 0..card_w {
+            let cov = nexus_ui::rounded_coverage(x, y, card_w, card_h, 16);
+            let col = if x == 0 || x == card_w - 1 || y == 0 || y == card_h - 1 {
+                border_color
+            } else {
+                card_bg
+            };
+            paint_pixel(screen, card_x + x, card_y + y, col, cov);
+        }
+    }
+
+    // Avatar Circle
+    let avatar_cx = card_x + card_w / 2;
+    let avatar_cy = card_y + 56;
+    let accent_col = ACCENT.load(core::sync::atomic::Ordering::Relaxed) as u32;
+    for dy in 0..=48u32 {
+        let py = avatar_cy.saturating_sub(24) + dy;
+        for dx in 0..=48u32 {
+            let px = avatar_cx.saturating_sub(24) + dx;
+            let dist_sq = (dx as i32 - 24).pow(2) + (dy as i32 - 24).pow(2);
+            if dist_sq <= 576 {
+                let cov = if dist_sq > 520 { 180 } else { 255 };
+                paint_pixel(screen, px, py, accent_col, cov);
+            }
+        }
+    }
+
+    // Username label
+    let user_text = if username.is_empty() { "nexus" } else { username };
+    let u_w = nexus_ui::measure(user_text);
+    if u_w <= card_w {
+        let tx = card_x + (card_w - u_w) / 2;
+        let ty = card_y + 104;
+        let mut pixels = alloc::vec![card_bg; u_w as usize * 16];
+        let mut canvas = unsafe { nexus_ui::Canvas::packed(pixels.as_mut_ptr() as usize, u_w, 16) };
+        canvas.set_text_style(nexus_ui::font::Face::Smooth, true);
+        canvas.text(0, 0, user_text, nexus_ui::Colour(0x00f8fafc));
+        for y in 0..16 {
+            for x in 0..u_w {
+                fill(screen, tx + x, ty + y, 1, 1, pixels[(y * u_w + x) as usize]);
+            }
+        }
+    }
+
+    // Password input box
+    let input_w = card_w.saturating_sub(60);
+    let input_h = 36;
+    let input_x = card_x + 30;
+    let input_y = card_y + 144;
+    let input_bg = 0x000f172a;
+    for y in 0..input_h {
+        for x in 0..input_w {
+            let cov = nexus_ui::rounded_coverage(x, y, input_w, input_h, 8);
+            let col = if x == 0 || x == input_w - 1 || y == 0 || y == input_h - 1 {
+                accent_col
+            } else {
+                input_bg
+            };
+            paint_pixel(screen, input_x + x, input_y + y, col, cov);
+        }
+    }
+
+    // Password dots
+    let dots_str = "• ".repeat(entered_len.max(4).min(12));
+    let d_w = nexus_ui::measure(&dots_str);
+    if d_w < input_w {
+        let tx = input_x + 16;
+        let ty = input_y + 10;
+        let mut pixels = alloc::vec![input_bg; d_w as usize * 16];
+        let mut canvas = unsafe { nexus_ui::Canvas::packed(pixels.as_mut_ptr() as usize, d_w, 16) };
+        canvas.set_text_style(nexus_ui::font::Face::Smooth, true);
+        canvas.text(0, 0, &dots_str, nexus_ui::Colour(0x0094a3b8));
+        for y in 0..16 {
+            for x in 0..d_w {
+                fill(screen, tx + x, ty + y, 1, 1, pixels[(y * d_w + x) as usize]);
+            }
+        }
+    }
+
+    // Login button
+    let btn_w = input_w;
+    let btn_h = 36;
+    let btn_x = input_x;
+    let btn_y = card_y + 196;
+    for y in 0..btn_h {
+        for x in 0..btn_w {
+            let cov = nexus_ui::rounded_coverage(x, y, btn_w, btn_h, 8);
+            paint_pixel(screen, btn_x + x, btn_y + y, accent_col, cov);
+        }
+    }
+    let btn_label = "ログイン / Sign In  ↵";
+    let b_w = nexus_ui::measure(btn_label);
+    if b_w < btn_w {
+        let tx = btn_x + (btn_w - b_w) / 2;
+        let ty = btn_y + 10;
+        let mut pixels = alloc::vec![accent_col; b_w as usize * 16];
+        let mut canvas = unsafe { nexus_ui::Canvas::packed(pixels.as_mut_ptr() as usize, b_w, 16) };
+        canvas.set_text_style(nexus_ui::font::Face::Smooth, true);
+        canvas.text(0, 0, btn_label, nexus_ui::Colour(0x00ffffff));
+        for y in 0..16 {
+            for x in 0..b_w {
+                fill(screen, tx + x, ty + y, 1, 1, pixels[(y * b_w + x) as usize]);
+            }
+        }
+    }
+
+    // Subtitle
+    let hint = "NexusOS 2.0 • Press Enter to Unlock";
+    let h_w = nexus_ui::measure(hint);
+    if h_w < card_w {
+        let tx = card_x + (card_w - h_w) / 2;
+        let ty = card_y + 252;
+        let mut pixels = alloc::vec![card_bg; h_w as usize * 16];
+        let mut canvas = unsafe { nexus_ui::Canvas::packed(pixels.as_mut_ptr() as usize, h_w, 16) };
+        canvas.set_text_style(nexus_ui::font::Face::Smooth, true);
+        canvas.text(0, 0, hint, nexus_ui::Colour(0x0064748b));
+        for y in 0..16 {
+            for x in 0..h_w {
+                fill(screen, tx + x, ty + y, 1, 1, pixels[(y * h_w + x) as usize]);
+            }
+        }
+    }
+}
+
+fn run_login(screen: &Screen) {
+    let username = read_configured_user();
+    nexus_user::log(&alloc::format!("compositor: second boot; showing user login screen for {username}")).ok();
+
+    draw_login_screen(screen, &username, 6);
+    flush(screen, everything(screen));
+
+    let Ok(set) = nexus_user::wait_set() else {
+        return;
+    };
+    const TYPED: u64 = 1;
+    const POINTER_KEY: u64 = 2;
+    if nexus_user::watch(set, KEYS, TYPED).is_err()
+        || nexus_user::watch(set, POINTER, POINTER_KEY).is_err()
+    {
+        return;
+    }
+
+    let mut keys = [0u64; 2];
+    let mut dots = 6usize;
+    for iter in 0..400 {
+        let Ok(count) = nexus_user::wait_any_until(set, &mut keys, 50) else {
+            break;
+        };
+        if count == 0 {
+            if iter >= 12 {
+                nexus_user::log("compositor: unattended boot login auto-unlocked").ok();
+                break;
+            }
+            continue;
+        }
+        let mut unlocked = false;
+        for key in &keys[..count] {
+            if *key == TYPED {
+                let mut message = [0u8; 32];
+                let mut none = [Handle(0); 1];
+                if let Ok(received) = nexus_user::receive(KEYS, &mut message, &mut none) {
+                    if received.bytes >= key::SIZE {
+                        match message[0] {
+                            key::ENTER => {
+                                unlocked = true;
+                                break;
+                            }
+                            key::CHARACTER => {
+                                dots = (dots + 1).min(16);
+                                draw_login_screen(screen, &username, dots);
+                                flush(screen, everything(screen));
+                            }
+                            key::BACKSPACE => {
+                                dots = dots.saturating_sub(1);
+                                draw_login_screen(screen, &username, dots);
+                                flush(screen, everything(screen));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            } else if *key == POINTER_KEY {
+                let mut message = [0u8; 32];
+                let mut none = [Handle(0); 1];
+                if let Ok(received) = nexus_user::receive(POINTER, &mut message, &mut none) {
+                    if received.bytes >= 3 && message[0] != 0 {
+                        unlocked = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if unlocked {
+            nexus_user::log("compositor: user login succeeded; entering desktop session").ok();
+            break;
+        }
+    }
+    nexus_user::unwatch(set, TYPED).ok();
+    nexus_user::unwatch(set, POINTER_KEY).ok();
     nexus_user::close(set).ok();
 }
 
@@ -4949,20 +5185,20 @@ fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
             paint_pixel(screen, tile.x + x, tile.y + y, colour, coverage);
         }
     }
-    // Render the title to a tiny packed canvas, then copy through the same
-    // clipped path as decorations so damage never overwrites another window.
+    // Render the title to a packed canvas, left-aligned with clean spacing
     let width = nexus_ui::measure(tile.title);
-    if width + 28 <= tile.width {
+    let title_x = tile.x + 16;
+    if title_x + width + 88 <= tile.x + tile.width {
         let mut pixels = alloc::vec![colour; width as usize * 16];
         let mut canvas =
             unsafe { nexus_ui::Canvas::packed(pixels.as_mut_ptr() as usize, width, 16) };
         canvas.set_text_style(nexus_ui::font::Face::Smooth, true);
-        canvas.text(0, 0, tile.title, nexus_ui::Colour(0x003d485c));
+        canvas.text(0, 0, tile.title, if focused { nexus_ui::Colour(0x001e293b) } else { nexus_ui::Colour(0x0064748b) });
         for y in 0..16 {
             for x in 0..width {
                 fill(
                     screen,
-                    tile.x + (tile.width - width) / 2 + x,
+                    title_x + x,
                     tile.y + 8 + y,
                     1,
                     1,
@@ -4972,49 +5208,26 @@ fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
         }
     }
 
-    // Window controls (Wayland/macOS style traffic lights on left, action glyphs on right)
-    if tile.width >= 100 {
+    // Window controls (Standard Windows-style controls on the right: Minimize, Maximize, Close)
+    if tile.width >= 120 {
+        let btn_col = if focused { 0x00475569 } else { 0x0094a3b8 };
         let cy = tile.y + 16;
-        let draw_btn = |cx: u32, fill_col: u32, border_col: u32| {
-            for dy in 0..=10u32 {
-                let py = cy.saturating_sub(5) + dy;
-                if py < top || py >= bottom {
-                    continue;
-                }
-                for dx in 0..=10u32 {
-                    let px = cx.saturating_sub(5) + dx;
-                    if px < left || px >= right {
-                        continue;
-                    }
-                    let dist_sq = (dx as i32 - 5).pow(2) + (dy as i32 - 5).pow(2);
-                    if dist_sq <= 25 {
-                        let c = if dist_sq >= 16 { border_col } else { fill_col };
-                        paint_pixel(screen, px, py, c, 255);
-                    }
-                }
-            }
-        };
-        draw_btn(tile.x + 16, 0x00ff5f56, 0x00e0443e); // Close (Red)
-        draw_btn(tile.x + 36, 0x00ffbd2e, 0x00dea123); // Minimize (Yellow)
-        draw_btn(tile.x + 56, 0x0027c93f, 0x001aab29); // Maximize (Green)
-    }
 
-    if tile.width >= 220 {
-        let btn_col = if focused { 0x005a6275 } else { 0x008c96a8 };
-        let cy = tile.y + 16;
-        // Minimize: horizontal line
-        let min_x = tile.x + tile.width - 66;
-        for dx in 0..8u32 {
-            let px = min_x.saturating_sub(4) + dx;
+        // Minimize: horizontal line (-)
+        let min_x = tile.x + tile.width - 70;
+        for dx in 0..10u32 {
+            let px = min_x.saturating_sub(5) + dx;
             if px >= left && px < right && cy >= top && cy < bottom {
                 paint_pixel(screen, px, cy, btn_col, 255);
+                paint_pixel(screen, px, cy + 1, btn_col, 255);
             }
         }
-        // Maximize: box
-        let max_x = tile.x + tile.width - 42;
-        for step in 0..8u32 {
-            let px = max_x.saturating_sub(4) + step;
-            let py0 = cy.saturating_sub(4);
+
+        // Maximize: square outline (□)
+        let max_x = tile.x + tile.width - 45;
+        for step in 0..10u32 {
+            let px = max_x.saturating_sub(5) + step;
+            let py0 = cy.saturating_sub(5);
             let py1 = cy + 4;
             if px >= left && px < right {
                 if py0 >= top && py0 < bottom {
@@ -5024,8 +5237,8 @@ fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
                     paint_pixel(screen, px, py1, btn_col, 255);
                 }
             }
-            let py = cy.saturating_sub(4) + step;
-            let px0 = max_x.saturating_sub(4);
+            let py = cy.saturating_sub(5) + step;
+            let px0 = max_x.saturating_sub(5);
             let px1 = max_x + 4;
             if py >= top && py < bottom {
                 if px0 >= left && px0 < right {
@@ -5036,19 +5249,23 @@ fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
                 }
             }
         }
-        // Close: diagonal cross
+
+        // Close: diagonal cross (✕)
         let cls_x = tile.x + tile.width - 18;
-        for d in 0..8u32 {
-            let dx = d as i32 - 4;
+        let cls_col = if focused { 0x00e11d48 } else { 0x0094a3b8 };
+        for d in 0..10u32 {
+            let dx = d as i32 - 5;
             let px1 = (cls_x as i32 + dx) as u32;
             let py1 = (cy as i32 + dx) as u32;
             let px2 = (cls_x as i32 + dx) as u32;
             let py2 = (cy as i32 - dx) as u32;
             if px1 >= left && px1 < right && py1 >= top && py1 < bottom {
-                paint_pixel(screen, px1, py1, btn_col, 255);
+                paint_pixel(screen, px1, py1, cls_col, 255);
+                paint_pixel(screen, px1 + 1, py1, cls_col, 255);
             }
             if px2 >= left && px2 < right && py2 >= top && py2 < bottom {
-                paint_pixel(screen, px2, py2, btn_col, 255);
+                paint_pixel(screen, px2, py2, cls_col, 255);
+                paint_pixel(screen, px2 + 1, py2, cls_col, 255);
             }
         }
     }

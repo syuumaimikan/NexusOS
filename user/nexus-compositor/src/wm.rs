@@ -65,6 +65,7 @@ pub fn is_auto_tile_enabled() -> bool {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub enum Action {
     Maximize,
     Minimize,
@@ -72,6 +73,11 @@ pub enum Action {
     Tile,
     ToggleAutoTile,
     Swap,
+    SnapLeft,
+    SnapRight,
+    Center,
+    Close,
+    ShowDesktop,
     Move(i32, i32),
     Resize(i32, i32),
     Focus(bool),
@@ -88,18 +94,25 @@ pub fn chord(chord: u32) -> Option<Action> {
         (0x6d, true) => Action::Restore,         // Super+Shift+M
         (0x74, false) => Action::Tile,           // Super+T (Cycle layouts / tile)
         (0x74, true) => Action::ToggleAutoTile,  // Super+Shift+T
-        (0x77, _) => Action::Swap,               // Super+W
-        (0x64, _) => Action::ToggleDockAutoHide, // Super+D / Super+Shift+D
+        (0x77 | 0x71, _) => Action::Close,       // Super+W / Super+Q (Close window)
+        (0x64, _) => Action::ShowDesktop,        // Super+D (Show Desktop / Toggle minimize all)
+        (0x63, true) => Action::Center,          // Super+Shift+C (Center window)
         (0x31..=0x34, false) => Action::SwitchWorkspace(((chord & 0xffff) - 0x31) as u8), // Super+1..4
         (0x31..=0x34, true) => Action::SendToWorkspace(((chord & 0xffff) - 0x31) as u8), // Super+Shift+1..4
-        (0x110, true) => Action::Move(0, -24), // Super+Shift+Up
-        (0x111, true) => Action::Move(0, 24),  // Super+Shift+Down
-        (0x112, true) => Action::Move(-24, 0), // Super+Shift+Left
-        (0x113, true) => Action::Move(24, 0),  // Super+Shift+Right
-        (0x68, true) => Action::Resize(-24, 0), // Super+Shift+H
-        (0x6c, true) => Action::Resize(24, 0), // Super+Shift+L
-        (0x6b, true) => Action::Resize(0, -24), // Super+Shift+K
-        (0x6a, true) => Action::Resize(0, 24), // Super+Shift+J
+        (0x110, false) => Action::Maximize,      // Super+Up (Maximize)
+        (0x111, false) => Action::Minimize,      // Super+Down (Minimize)
+        (0x112, false) => Action::SnapLeft,      // Super+Left (Snap Left)
+        (0x113, false) => Action::SnapRight,     // Super+Right (Snap Right)
+        (0x110, true) => Action::Move(0, -32),   // Super+Shift+Up
+        (0x111, true) => Action::Move(0, 32),    // Super+Shift+Down
+        (0x112, true) => Action::Move(-32, 0),   // Super+Shift+Left
+        (0x113, true) => Action::Move(32, 0),    // Super+Shift+Right
+        (0x68, true) => Action::Resize(-32, 0),  // Super+Shift+H
+        (0x6c, true) => Action::Resize(32, 0),   // Super+Shift+L
+        (0x6b, true) => Action::Resize(0, -32),  // Super+Shift+K
+        (0x6a, true) => Action::Resize(0, 32),   // Super+Shift+J
+        (0x09, false) => Action::Focus(false),   // Super+Tab (Next window)
+        (0x09, true) => Action::Focus(true),     // Super+Shift+Tab (Previous window)
         (0x68 | 0x6b, false) => Action::Focus(true), // Super+H / Super+K
         (0x6a | 0x6c, false) => Action::Focus(false), // Super+J / Super+L
         _ => return None,
@@ -348,6 +361,25 @@ pub fn apply(
                 nexus_user::log("wm: tiled visible windows").ok();
             }
         }
+        Action::ShowDesktop => {
+            let any_visible = tiles
+                .iter()
+                .flatten()
+                .any(|t| t.live && !t.minimised && t.workspace == cur_ws);
+            for tile in tiles
+                .iter_mut()
+                .flatten()
+                .filter(|t| t.live && t.workspace == cur_ws)
+            {
+                tile.minimised = any_visible;
+            }
+            nexus_user::log(if any_visible {
+                "wm: showed desktop"
+            } else {
+                "wm: restored windows from desktop"
+            })
+            .ok();
+        }
         action => {
             let Some(tile) = tiles
                 .get_mut(*focus)
@@ -357,6 +389,39 @@ pub fn apply(
                 return;
             };
             match action {
+                Action::Close => {
+                    nexus_user::send(tile.channel, b"close", &[]).ok();
+                    nexus_user::log("wm: closed active window via keyboard").ok();
+                }
+                Action::SnapLeft => {
+                    let width = (screen.width / 2).saturating_sub(12).max(MIN_SIZE);
+                    let height = work_height.saturating_sub(16).max(MIN_SIZE);
+                    if fit(*focus, tile, screen.x + 8, work_y + 8, width, height) {
+                        tile.restored = None;
+                        nexus_user::log("wm: snapped window to left half").ok();
+                    }
+                }
+                Action::SnapRight => {
+                    let width = (screen.width / 2).saturating_sub(12).max(MIN_SIZE);
+                    let height = work_height.saturating_sub(16).max(MIN_SIZE);
+                    if fit(
+                        *focus,
+                        tile,
+                        screen.x + screen.width / 2 + 4,
+                        work_y + 8,
+                        width,
+                        height,
+                    ) {
+                        tile.restored = None;
+                        nexus_user::log("wm: snapped window to right half").ok();
+                    }
+                }
+                Action::Center => {
+                    tile.x = screen.x + (screen.width.saturating_sub(tile.width)) / 2;
+                    tile.y = work_y + (work_height.saturating_sub(tile.height)) / 2;
+                    tile.restored = None;
+                    nexus_user::log("wm: centered focused window").ok();
+                }
                 Action::Minimize => {
                     tile.minimised = true;
                     nexus_user::log("wm: minimized focused window").ok();

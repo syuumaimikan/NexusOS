@@ -57,6 +57,9 @@ pub struct Style {
     pub italic: bool,
     /// Inside `<code>`, `<tt>` or `<kbd>`.
     pub fixed: bool,
+    pub underline: bool,
+    pub color: Option<u32>,
+    pub bg_color: Option<u32>,
 }
 
 /// One run of text, with how it is drawn and where it leads.
@@ -87,6 +90,18 @@ pub enum Block {
     Preformatted(String),
     /// A horizontal line.
     Rule,
+    /// An interactive button.
+    Button {
+        text: String,
+        href: Option<String>,
+        color: Option<u32>,
+        bg_color: Option<u32>,
+    },
+    /// An input field.
+    Input {
+        placeholder: String,
+        value: String,
+    },
 }
 
 impl Block {
@@ -96,7 +111,7 @@ impl Block {
         match self {
             Self::Heading(_, spans) | Self::Paragraph(spans) => spans,
             Self::Item { spans, .. } | Self::Quote(_, spans) => spans,
-            Self::Preformatted(_) | Self::Rule => &[],
+            Self::Preformatted(_) | Self::Rule | Self::Button { .. } | Self::Input { .. } => &[],
         }
     }
 
@@ -106,6 +121,14 @@ impl Block {
         match self {
             Self::Preformatted(text) => text.clone(),
             Self::Rule => String::new(),
+            Self::Button { text, .. } => text.clone(),
+            Self::Input { placeholder, value } => {
+                if value.is_empty() {
+                    placeholder.clone()
+                } else {
+                    value.clone()
+                }
+            }
             other => other
                 .spans()
                 .iter()
@@ -121,6 +144,7 @@ pub struct Document {
     /// What the page called itself, if it said.
     pub title: Option<String>,
     pub blocks: Vec<Block>,
+    pub script_output: Vec<String>,
 }
 
 impl Document {
@@ -672,6 +696,20 @@ pub fn parse(html: &str) -> Document {
         // `<` inside a script is not markup.
         if !tag.closing && is_raw(&tag.name) {
             let close = find_close(bytes, at, &tag.name);
+            let raw_content = if close <= bytes.len() {
+                &bytes[at..close]
+            } else {
+                &[]
+            };
+            if tag.name == "script" {
+                if let Ok(script_str) = core::str::from_utf8(raw_content) {
+                    execute_simple_js(&mut builder.document, script_str);
+                }
+            } else if tag.name == "style" {
+                if let Ok(style_str) = core::str::from_utf8(raw_content) {
+                    parse_stylesheet(style_str, &mut builder.style);
+                }
+            }
             at = if close >= bytes.len() {
                 bytes.len()
             } else {
@@ -744,6 +782,16 @@ fn collapse(text: &str) -> String {
 fn apply(builder: &mut Builder, tag: &Tag) {
     let name = tag.name.as_str();
 
+    if let Some(style_attr) = tag.attribute("style") {
+        if !tag.closing {
+            parse_css_style(style_attr, &mut builder.style);
+        } else {
+            builder.style.color = None;
+            builder.style.bg_color = None;
+            builder.style.underline = false;
+        }
+    }
+
     if is_break(name) {
         builder.flush();
         return;
@@ -756,7 +804,44 @@ fn apply(builder: &mut Builder, tag: &Tag) {
     match name {
         "b" | "strong" => builder.style.bold = !tag.closing,
         "i" | "em" | "cite" | "var" => builder.style.italic = !tag.closing,
+        "u" => builder.style.underline = !tag.closing,
         "code" | "tt" | "kbd" | "samp" => builder.style.fixed = !tag.closing,
+        "button" => {
+            builder.flush();
+            if !tag.closing {
+                let text = tag.attribute("value").unwrap_or("Button").to_string();
+                let href = tag
+                    .attribute("href")
+                    .or_else(|| tag.attribute("onclick"))
+                    .map(|s| s.to_string());
+                builder.document.blocks.push(Block::Button {
+                    text,
+                    href,
+                    color: builder.style.color,
+                    bg_color: builder.style.bg_color.or(Some(0x1e293b)),
+                });
+            }
+        }
+        "input" => {
+            builder.flush();
+            let input_type = tag.attribute("type").unwrap_or("text");
+            let placeholder = tag.attribute("placeholder").unwrap_or("").to_string();
+            let value = tag.attribute("value").unwrap_or("").to_string();
+            if input_type == "submit" || input_type == "button" {
+                let text = if value.is_empty() { "Submit" } else { &value };
+                builder.document.blocks.push(Block::Button {
+                    text: text.to_string(),
+                    href: tag.attribute("formaction").map(|s| s.to_string()),
+                    color: Some(0xffffff),
+                    bg_color: Some(0x2563eb),
+                });
+            } else {
+                builder.document.blocks.push(Block::Input {
+                    placeholder,
+                    value,
+                });
+            }
+        }
         "a" => {
             if tag.closing {
                 builder.links.pop();
@@ -842,6 +927,96 @@ fn apply(builder: &mut Builder, tag: &Tag) {
     // itself one enormous link.
     if tag.closing && starts_block(name) {
         builder.links.clear();
+    }
+}
+
+/// Parse hex or named colours.
+pub fn parse_colour(val: &str) -> Option<u32> {
+    let val = val.trim();
+    if let Some(hex) = val.strip_prefix('#') {
+        if hex.len() == 6 {
+            if let Ok(v) = u32::from_str_radix(hex, 16) {
+                return Some(v);
+            }
+        } else if hex.len() == 3 {
+            let r = u32::from_str_radix(&hex[0..1], 16).ok()?;
+            let g = u32::from_str_radix(&hex[1..2], 16).ok()?;
+            let b = u32::from_str_radix(&hex[2..3], 16).ok()?;
+            return Some((r * 17) << 16 | (g * 17) << 8 | (b * 17));
+        }
+    }
+    match val {
+        "black" => Some(0x000000),
+        "white" => Some(0xffffff),
+        "red" => Some(0xff4444),
+        "green" => Some(0x22c55e),
+        "blue" => Some(0x3b82f6),
+        "yellow" => Some(0xeab308),
+        "cyan" => Some(0x06b6d4),
+        "orange" => Some(0xf97316),
+        "purple" => Some(0xa855f7),
+        "gray" | "grey" => Some(0x9ca3af),
+        _ => None,
+    }
+}
+
+pub fn parse_css_style(style_attr: &str, style: &mut Style) {
+    for decl in style_attr.split(';') {
+        if let Some((prop, val)) = decl.split_once(':') {
+            let prop = prop.trim().to_ascii_lowercase();
+            let val = val.trim().to_ascii_lowercase();
+            match prop.as_str() {
+                "color" => style.color = parse_colour(&val),
+                "background-color" | "background" => style.bg_color = parse_colour(&val),
+                "font-weight" => {
+                    style.bold = val == "bold" || val == "700" || val == "800" || val == "900"
+                }
+                "font-style" => style.italic = val == "italic" || val == "oblique",
+                "text-decoration" => style.underline = val.contains("underline"),
+                "font-family" => style.fixed = val.contains("mono") || val.contains("courier"),
+                _ => {}
+            }
+        }
+    }
+}
+
+pub fn parse_stylesheet(css: &str, style: &mut Style) {
+    for block in css.split('}') {
+        if let Some((_selector, rules)) = block.split_once('{') {
+            parse_css_style(rules, style);
+        }
+    }
+}
+
+pub fn execute_simple_js(document: &mut Document, script: &str) {
+    for raw_line in script.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if let Some(inner) = line.strip_prefix("console.log(") {
+            if let Some(arg) = inner.strip_suffix(");").or_else(|| inner.strip_suffix(')')) {
+                let msg = arg.trim_matches(|c| c == '"' || c == '\'');
+                document.script_output.push(alloc::format!("JS: {msg}"));
+            }
+        } else if let Some(inner) = line.strip_prefix("alert(") {
+            if let Some(arg) = inner.strip_suffix(");").or_else(|| inner.strip_suffix(')')) {
+                let msg = arg.trim_matches(|c| c == '"' || c == '\'');
+                document.script_output.push(alloc::format!("Alert: {msg}"));
+            }
+        } else if let Some(inner) = line.strip_prefix("document.title =") {
+            let val = inner.trim().trim_end_matches(';').trim_matches(|c| c == '"' || c == '\'');
+            document.title = Some(val.to_string());
+        } else if let Some(inner) = line.strip_prefix("document.write(") {
+            if let Some(arg) = inner.strip_suffix(");").or_else(|| inner.strip_suffix(')')) {
+                let val = arg.trim_matches(|c| c == '"' || c == '\'');
+                document.blocks.push(Block::Paragraph(alloc::vec![Span {
+                    text: val.to_string(),
+                    style: Style::default(),
+                    link: None,
+                }]));
+            }
+        }
     }
 }
 
@@ -1098,6 +1273,30 @@ mod tests {
     fn a_doctype_is_skipped() {
         let document = parse("<!DOCTYPE html><p>text</p>");
         assert_eq!(texts(&document), vec!["text"]);
+    }
+
+    #[test]
+    fn css_and_js_interactive_features() {
+        let html = r#"
+            <html>
+                <head>
+                    <script>
+                        console.log("Welcome to Nexus Browser");
+                        document.title = "Interactive Page";
+                    </script>
+                </head>
+                <body>
+                    <p style="color: red; font-weight: bold;">Styled Text</p>
+                    <button value="Click Here" onclick="alert('Hello')"></button>
+                    <input type="text" placeholder="Type here...">
+                </body>
+            </html>
+        "#;
+        let doc = parse(html);
+        assert_eq!(doc.title.as_deref(), Some("Interactive Page"));
+        assert_eq!(doc.script_output, vec!["JS: Welcome to Nexus Browser"]);
+        assert!(doc.blocks.iter().any(|b| matches!(b, Block::Button { text, .. } if text == "Click Here")));
+        assert!(doc.blocks.iter().any(|b| matches!(b, Block::Input { placeholder, .. } if placeholder == "Type here...")));
     }
 
     #[test]
