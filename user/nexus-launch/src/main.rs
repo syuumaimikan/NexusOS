@@ -231,6 +231,44 @@ extern "C" fn main() -> ! {
     finish()
 }
 
+fn evaluate_calc(expr: &str) -> Option<i64> {
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return None;
+    }
+    let has_op = expr
+        .chars()
+        .any(|c| c == '+' || c == '-' || c == '*' || c == '/');
+    if !has_op {
+        return None;
+    }
+    for op in ['+', '-', '*', '/'] {
+        if let Some(pos) = expr.rfind(op) {
+            if pos == 0 {
+                continue;
+            }
+            let left_str = expr[..pos].trim();
+            let right_str = expr[pos + 1..].trim();
+            if let (Ok(left), Ok(right)) = (left_str.parse::<i64>(), right_str.parse::<i64>()) {
+                return match op {
+                    '+' => left.checked_add(right),
+                    '-' => left.checked_sub(right),
+                    '*' => left.checked_mul(right),
+                    '/' => {
+                        if right != 0 {
+                            left.checked_div(right)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
+}
+
 /// The window.
 struct Launcher {
     windows: Vec<OpenWindow>,
@@ -247,6 +285,8 @@ struct Launcher {
     /// What the machine looks like. Read once: this window is open for a few
     /// seconds and a person does not change the accent while using it.
     look: nexus_look::Look,
+    /// Calculated result if typed text is a math expression.
+    calc_result: Option<i64>,
 }
 
 impl Launcher {
@@ -259,6 +299,7 @@ impl Launcher {
             open: true,
             awaiting_acceptance: false,
             look: nexus_look::Look::default(),
+            calc_result: None,
         };
         launcher.narrow();
         launcher
@@ -266,6 +307,7 @@ impl Launcher {
 
     /// Work out which entries match what has been typed, best first.
     fn narrow(&mut self) {
+        self.calc_result = evaluate_calc(&self.typed);
         let wanted = self.typed.to_lowercase();
         let mut scored: Vec<(u8, usize)> = Vec::new();
 
@@ -467,6 +509,27 @@ impl App for Launcher {
         let mut y = field.y + field.height + PAD;
         let rows = area.height.saturating_sub(field.height + PAD + 28) / row;
         let start = self.at.saturating_sub(rows.saturating_sub(1) as usize);
+        if let Some(calc) = self.calc_result {
+            let here = Rect::new(area.x, y, area.width, row);
+            canvas.fill_rounded(here, 10, Colour(0x00f0f4fc));
+            canvas.fill_rounded(
+                Rect::new(here.x + 8, here.y + 7, 24, 24),
+                7,
+                Colour::rgb(70, 150, 230),
+            );
+            canvas.text(here.x + 15, here.y + 11, "=", Colour(0x00ffffff));
+            canvas.text(here.x + 44, here.y + 11, &alloc::format!("= {calc}"), ink);
+            if here.width > 240 {
+                canvas.text(
+                    here.x + here.width.saturating_sub(70),
+                    here.y + 11,
+                    "[Calc]",
+                    quiet,
+                );
+            }
+            y += row;
+        }
+
         for (place, index) in self.matching.iter().enumerate().skip(start) {
             if y + row > area.y + area.height.saturating_sub(28) {
                 break;
@@ -501,6 +564,14 @@ impl App for Launcher {
             canvas.text(here.x + 44, here.y + 11, name, colour);
             if !detail.is_empty() && here.width > 300 {
                 canvas.text(here.x + here.width - 136, here.y + 11, detail, quiet);
+            } else if here.width > 340 {
+                let badge = if dangerous { "[System]" } else { "[App]" };
+                canvas.text(
+                    here.x + here.width.saturating_sub(70),
+                    here.y + 11,
+                    badge,
+                    quiet,
+                );
             }
             y += row;
         }

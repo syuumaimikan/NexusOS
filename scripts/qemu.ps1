@@ -256,6 +256,7 @@ function Get-NexusQemuArgs {
         # so that a stale QEMU holding the port is a test that says so rather
         # than one that quietly talks to the wrong machine.
         [int]$HostHttpPort = 18080,
+        [string]$Resolution = '1920x1200',
         [switch]$Headless,
         [switch]$StopOnFault,
         [switch]$BootFromImage
@@ -363,9 +364,12 @@ function Get-NexusQemuArgs {
     # `1920x1164`, and as three input tests clicking where a window no longer
     # was. The display is part of what this machine *is*, so it is stated here
     # with the rest of it.
+    $resMatch = $Resolution -match '^(\d+)x(\d+)$'
+    $xres = if ($resMatch) { [int]$Matches[1] } else { 1920 }
+    $yres = if ($resMatch) { [int]$Matches[2] } else { 1200 }
     $arguments += @(
         '-vga', 'none',
-        '-device', 'virtio-gpu-pci,id=nexusgpu,xres=1920,yres=1200'
+        '-device', "virtio-gpu-pci,id=nexusgpu,xres=$xres,yres=$yres"
     )
 
     # A sound card, and nothing to play it through.

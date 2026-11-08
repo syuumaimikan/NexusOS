@@ -55,7 +55,8 @@ param(
     # One marker per batch, in the same order and with the same separator: each
     # batch is sent when its marker appears in the serial log.
     [string]$PressAfter = '',
-    [string]$Memory = '1G',
+    [string]$Memory = '2G',
+    [string]$Resolution = '1920x1200',
     [string]$BuildDirectory = 'build',
     [ValidateRange(0, 65535)][int]$HostHttpPort = 18080,
     [ValidateRange(0, 65535)][int]$MonitorPort = 0,
@@ -180,7 +181,7 @@ try {
     Write-Host "==> Guest HTTP service: http://127.0.0.1:$HostHttpPort" -ForegroundColor DarkGray
     $QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCodeLocal -FirmwareVars $FirmwareVars -SerialLog $SerialLog `
-    -Memory $Memory -MonitorPort $MonitorPort -HostHttpPort $HostHttpPort
+    -Memory $Memory -MonitorPort $MonitorPort -HostHttpPort $HostHttpPort -Resolution $Resolution
 $QemuArgs += @('-d', 'guest_errors')
 
 if ($Headless) {

@@ -866,21 +866,36 @@ fn draw(desktop: &Desktop) {
         canvas.text_centred(canvas.bounds(), what, ink);
         return;
     }
-    canvas.fill_rounded(
-        Rect::new(8, 0, desktop.width.saturating_sub(16), 22),
-        9,
-        Colour(0xa6f5f5ff),
-    );
+    let top_bar = Rect::new(8, 0, desktop.width.saturating_sub(16), 22);
+    canvas.fill_rounded(top_bar, 9, Colour(0xb2f5f5ff));
+    canvas.outline(top_bar, 1, Colour(0x25ffffff));
+
+    // YASB Pill: Logo & Workspace
+    canvas.fill_rounded(Rect::new(12, 2, 60, 18), 6, Colour(0x15000000));
     canvas.text(20, 3, "Nexus", ink);
+
+    // YASB Pill: Clock
     if !desktop.clock.is_empty() {
+        let clock_w = nexus_ui::measure(&desktop.clock) + 16;
+        canvas.fill_rounded(Rect::new(76, 2, clock_w, 18), 6, Colour(0x12000000));
         canvas.text(84, 3, &desktop.clock, muted);
     }
+
+    // YASB Pill: Network & Audio status chips
+    let net_x = 180.min(desktop.width.saturating_sub(320));
+    if net_x > 150 {
+        canvas.fill_rounded(Rect::new(net_x, 2, 70, 18), 6, Colour(0x12000000));
+        canvas.text(net_x + 6, 3, "🛜 Online", muted);
+    }
+
+    // YASB Pill: Power & Session Controls
     for (area, label) in [
         (desktop.sleep(), "shell.sleep"),
         (desktop.restart(), "shell.restart"),
         (desktop.shutdown(), "shell.shutdown"),
         (desktop.leave(), "shell.leave"),
     ] {
+        canvas.fill_rounded(area, 6, Colour(0x10000000));
         canvas.text_centred(area, nexus_i18n::text(label), muted);
     }
     let dock = Rect::new(desktop.dock_left(), 22, desktop.dock_width(), 68);

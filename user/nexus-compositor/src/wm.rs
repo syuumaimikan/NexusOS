@@ -1,37 +1,76 @@
-//! Window-management policy. Decorations have no close/minimize/maximize
-//! buttons; these operations are compositor-owned keyboard actions.
+//! Window-management policy. Komorebi-inspired tiling window manager
+//! with multiple layout modes (MasterStack, Grid, Columns), auto-tiling,
+//! and native window controls.
+
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
 use super::{clamp, glass_window, raise, resize, Screen, Tile, CLIENTS, MIN_SIZE};
+
 pub const TOP_RESERVED: u32 = 40;
+
+/// Available Komorebi-style tiling layout modes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum LayoutMode {
+    Grid,
+    MasterStack,
+    Columns,
+}
+
+static CURRENT_LAYOUT: AtomicU8 = AtomicU8::new(0); // 0 = Grid, 1 = MasterStack, 2 = Columns
+static AUTO_TILE: AtomicBool = AtomicBool::new(false);
+
+/// Current active layout name for status bar display.
+#[allow(dead_code)]
+pub fn current_layout_name() -> &'static str {
+    match CURRENT_LAYOUT.load(Ordering::Relaxed) {
+        1 => "Master",
+        2 => "Columns",
+        _ => "Grid",
+    }
+}
+
+/// Whether automatic tiling on window lifecycle events is active.
+pub fn is_auto_tile_enabled() -> bool {
+    AUTO_TILE.load(Ordering::Relaxed)
+}
+
 #[derive(Clone, Copy)]
 pub enum Action {
     Maximize,
     Minimize,
     Restore,
     Tile,
+    ToggleAutoTile,
+    Swap,
     Move(i32, i32),
     Resize(i32, i32),
     Focus(bool),
 }
+
 pub fn chord(chord: u32) -> Option<Action> {
     let shifted = chord & 0x10000 != 0;
     Some(match (chord & 0xffff, shifted) {
-        (0x66, _) => Action::Maximize,
-        (0x6d, false) => Action::Minimize,
-        (0x6d, true) => Action::Restore,
-        (0x74, _) => Action::Tile,
-        (0x110, true) => Action::Move(0, -24),
-        (0x111, true) => Action::Move(0, 24),
-        (0x112, true) => Action::Move(-24, 0),
-        (0x113, true) => Action::Move(24, 0),
-        (0x68, true) => Action::Resize(-24, 0),
-        (0x6c, true) => Action::Resize(24, 0),
-        (0x6b, true) => Action::Resize(0, -24),
-        (0x6a, true) => Action::Resize(0, 24),
-        (0x68 | 0x6b, false) => Action::Focus(true),
-        (0x6a | 0x6c, false) => Action::Focus(false),
+        (0x66, _) => Action::Maximize,                // Super+F
+        (0x6d, false) => Action::Minimize,            // Super+M
+        (0x6d, true) => Action::Restore,              // Super+Shift+M
+        (0x74, false) => Action::Tile,                // Super+T (Cycle layouts / tile)
+        (0x74, true) => Action::ToggleAutoTile,       // Super+Shift+T
+        (0x77, _) => Action::Swap,                    // Super+W
+        (0x110, true) => Action::Move(0, -24),        // Super+Shift+Up
+        (0x111, true) => Action::Move(0, 24),         // Super+Shift+Down
+        (0x112, true) => Action::Move(-24, 0),        // Super+Shift+Left
+        (0x113, true) => Action::Move(24, 0),         // Super+Shift+Right
+        (0x68, true) => Action::Resize(-24, 0),       // Super+Shift+H
+        (0x6c, true) => Action::Resize(24, 0),        // Super+Shift+L
+        (0x6b, true) => Action::Resize(0, -24),       // Super+Shift+K
+        (0x6a, true) => Action::Resize(0, 24),        // Super+Shift+J
+        (0x68 | 0x6b, false) => Action::Focus(true),  // Super+H / Super+K
+        (0x6a | 0x6c, false) => Action::Focus(false), // Super+J / Super+L
         _ => return None,
     })
 }
+
 fn fit(index: usize, tile: &mut Tile, x: u32, y: u32, width: u32, height: u32) -> bool {
     if resize(index, tile, width, height).is_err() || tile.width != width || tile.height != height {
         return false;
@@ -40,6 +79,7 @@ fn fit(index: usize, tile: &mut Tile, x: u32, y: u32, width: u32, height: u32) -
     tile.y = y;
     true
 }
+
 pub fn apply(
     action: Action,
     screen: &Screen,
@@ -74,6 +114,39 @@ pub fn apply(
             }
             nexus_user::log("wm: restored hidden windows").ok();
         }
+        Action::ToggleAutoTile => {
+            let next = !AUTO_TILE.load(Ordering::Relaxed);
+            AUTO_TILE.store(next, Ordering::Relaxed);
+            if next {
+                nexus_user::log("wm: automatic tiling enabled").ok();
+                apply(Action::Tile, screen, tiles, focus, order);
+            } else {
+                nexus_user::log("wm: automatic tiling disabled").ok();
+            }
+        }
+        Action::Swap => {
+            // Find another visible window and swap positions
+            let current = *focus;
+            let other = tiles.iter().enumerate().position(|(idx, tile)| {
+                idx != current
+                    && tile
+                        .as_ref()
+                        .is_some_and(|t| t.live && !t.minimised && !glass_window(t))
+            });
+            if let Some(other_idx) = other {
+                if let (Some(t1), Some(t2)) = (&tiles[current], &tiles[other_idx]) {
+                    let (x1, y1, w1, h1) = (t1.x, t1.y, t1.width, t1.height);
+                    let (x2, y2, w2, h2) = (t2.x, t2.y, t2.width, t2.height);
+                    if let Some(t1) = tiles[current].as_mut() {
+                        fit(current, t1, x2, y2, w2, h2);
+                    }
+                    if let Some(t2) = tiles[other_idx].as_mut() {
+                        fit(other_idx, t2, x1, y1, w1, h1);
+                    }
+                    nexus_user::log("wm: swapped window positions").ok();
+                }
+            }
+        }
         Action::Tile => {
             let mut slots = [0; CLIENTS];
             let mut count = 0;
@@ -89,29 +162,100 @@ pub fn apply(
             if count == 0 {
                 return;
             }
+
+            let mode_val = CURRENT_LAYOUT.load(Ordering::Relaxed);
             let gap = 12;
-            let columns = if count == 1 {
-                1
-            } else if count <= 4 {
-                2
-            } else {
-                3
-            };
-            let rows = count.div_ceil(columns);
-            let width = screen.width.saturating_sub(gap * (columns as u32 + 1)) / columns as u32;
-            let height = work_height.saturating_sub(gap * (rows as u32 + 1)) / rows as u32;
-            if width < MIN_SIZE || height < MIN_SIZE {
-                return;
-            }
+
             let mut complete = true;
-            for (position, &index) in slots[..count].iter().enumerate() {
-                if let Some(tile) = tiles[index].as_mut() {
-                    let x = screen.x + gap + (position % columns) as u32 * (width + gap);
-                    let y = work_y + gap + (position / columns) as u32 * (height + gap);
-                    complete &= fit(index, tile, x, y, width, height);
-                    tile.restored = None;
+
+            match mode_val {
+                1 => {
+                    // Master-Stack Layout: primary window on left (58%), remaining on right
+                    if count == 1 {
+                        let width = screen.width.saturating_sub(gap * 2);
+                        let height = work_height.saturating_sub(gap * 2);
+                        if let Some(tile) = tiles[slots[0]].as_mut() {
+                            complete &=
+                                fit(slots[0], tile, screen.x + gap, work_y + gap, width, height);
+                            tile.restored = None;
+                        }
+                    } else {
+                        let master_width = ((screen.width.saturating_sub(gap * 3)) * 58) / 100;
+                        let stack_width = screen
+                            .width
+                            .saturating_sub(gap * 3)
+                            .saturating_sub(master_width);
+                        let stack_count = count - 1;
+                        let stack_height = (work_height
+                            .saturating_sub(gap * (stack_count as u32 + 1)))
+                            / stack_count as u32;
+
+                        // Master window
+                        if let Some(tile) = tiles[slots[0]].as_mut() {
+                            let master_height = work_height.saturating_sub(gap * 2);
+                            complete &= fit(
+                                slots[0],
+                                tile,
+                                screen.x + gap,
+                                work_y + gap,
+                                master_width,
+                                master_height,
+                            );
+                            tile.restored = None;
+                        }
+
+                        // Stack windows
+                        for (pos, &idx) in slots[1..count].iter().enumerate() {
+                            if let Some(tile) = tiles[idx].as_mut() {
+                                let x = screen.x + gap * 2 + master_width;
+                                let y = work_y + gap + pos as u32 * (stack_height + gap);
+                                complete &= fit(idx, tile, x, y, stack_width, stack_height);
+                                tile.restored = None;
+                            }
+                        }
+                    }
+                }
+                2 => {
+                    // Columns layout: side-by-side equal columns
+                    let width =
+                        screen.width.saturating_sub(gap * (count as u32 + 1)) / count as u32;
+                    let height = work_height.saturating_sub(gap * 2);
+                    for (pos, &idx) in slots[..count].iter().enumerate() {
+                        if let Some(tile) = tiles[idx].as_mut() {
+                            let x = screen.x + gap + pos as u32 * (width + gap);
+                            let y = work_y + gap;
+                            complete &= fit(idx, tile, x, y, width, height);
+                            tile.restored = None;
+                        }
+                    }
+                }
+                _ => {
+                    // Grid Layout: balanced row/column matrix
+                    let columns = if count == 1 {
+                        1
+                    } else if count <= 4 {
+                        2
+                    } else {
+                        3
+                    };
+                    let rows = count.div_ceil(columns);
+                    let width =
+                        screen.width.saturating_sub(gap * (columns as u32 + 1)) / columns as u32;
+                    let height = work_height.saturating_sub(gap * (rows as u32 + 1)) / rows as u32;
+                    if width >= MIN_SIZE && height >= MIN_SIZE {
+                        for (position, &index) in slots[..count].iter().enumerate() {
+                            if let Some(tile) = tiles[index].as_mut() {
+                                let x =
+                                    screen.x + gap + (position % columns) as u32 * (width + gap);
+                                let y = work_y + gap + (position / columns) as u32 * (height + gap);
+                                complete &= fit(index, tile, x, y, width, height);
+                                tile.restored = None;
+                            }
+                        }
+                    }
                 }
             }
+
             if complete {
                 nexus_user::log("wm: tiled visible windows").ok();
             }

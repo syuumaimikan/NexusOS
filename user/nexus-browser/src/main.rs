@@ -188,6 +188,8 @@ struct Browser {
     here: Option<nexus_http::Url>,
     /// Where this window has been, so Backspace can go back.
     history: Vec<nexus_http::Url>,
+    /// Where this window can go forward.
+    forward: Vec<nexus_http::Url>,
 
     /// What a secure fetch is verified against.
     ///
@@ -548,6 +550,7 @@ impl Browser {
             links: Vec::new(),
             here: None,
             history: Vec::new(),
+            forward: Vec::new(),
             trust: None,
             fetch: None,
             status: nexus_i18n::text("browse.ready").to_string(),
@@ -635,6 +638,15 @@ impl Browser {
                     break;
                 }
                 stale = true;
+                continue;
+            }
+
+            if received.bytes >= 12 && bytes.starts_with(b"mclk") {
+                let click_x = read_u32(bytes, 4);
+                let click_y = read_u32(bytes, 8);
+                if self.mouse_click(click_x, click_y) {
+                    stale = true;
+                }
                 continue;
             }
 
@@ -834,7 +846,10 @@ impl Browser {
             return;
         };
         match nexus_http::resolve(&here, href) {
-            Ok(url) => self.go(url.to_text()),
+            Ok(url) => {
+                self.forward.clear();
+                self.go(url.to_text());
+            }
             Err(error) => self.status = format!("{error}"),
         }
     }
@@ -971,6 +986,7 @@ impl Browser {
             }
             key::ENTER => {
                 let address = self.typing.clone();
+                self.forward.clear();
                 self.go(address);
                 true
             }
@@ -1028,6 +1044,9 @@ impl Browser {
                     self.status = nexus_i18n::text("browse.noback").to_string();
                     return true;
                 };
+                if let Some(current) = self.here.take() {
+                    self.forward.push(current);
+                }
                 // Taken off the history rather than pushed onto it again: going
                 // back and then back again should reach the page before, not
                 // bounce between two.
@@ -1069,6 +1088,129 @@ impl Browser {
         self.scroll = at.clamp(0, last as i64) as usize;
     }
 
+    /// Act on a mouse click within the browser window.
+    fn mouse_click(&mut self, x: u32, y: u32) -> bool {
+        // Toolbar controls
+        if (PAD..PAD + BAR).contains(&y) {
+            let nav_width = 114;
+            if self.width > nav_width + PAD * 3 {
+                // Back button
+                if (PAD..PAD + 24).contains(&x) {
+                    if let Some(prev) = self.history.pop() {
+                        if let Some(curr) = self.here.take() {
+                            self.forward.push(curr);
+                        }
+                        self.go(prev.to_text());
+                        return true;
+                    }
+                    return false;
+                }
+                // Forward button
+                if (PAD + 28..PAD + 52).contains(&x) {
+                    if let Some(next) = self.forward.pop() {
+                        if let Some(curr) = self.here.take() {
+                            self.history.push(curr);
+                        }
+                        self.go(next.to_text());
+                        return true;
+                    }
+                    return false;
+                }
+                // Reload button
+                if (PAD + 56..PAD + 80).contains(&x) {
+                    if let Some(curr) = self.here.clone() {
+                        self.go(curr.to_text());
+                        return true;
+                    }
+                    return false;
+                }
+                // Home button
+                if (PAD + 84..PAD + 108).contains(&x) {
+                    let home = self.myself.map_or_else(
+                        || HOME.to_string(),
+                        |address| {
+                            format!(
+                                "http://{}.{}.{}.{}/",
+                                address[0], address[1], address[2], address[3]
+                            )
+                        },
+                    );
+                    self.forward.clear();
+                    self.go(home);
+                    return true;
+                }
+                // Address bar
+                let bar_x = PAD + nav_width;
+                let bar_w = self.width.saturating_sub(bar_x + PAD);
+                if (bar_x..bar_x + bar_w).contains(&x) {
+                    self.editing = true;
+                    self.picking.clear();
+                    return true;
+                }
+            } else {
+                // Narrow window: entire bar is address input
+                if (PAD..self.width.saturating_sub(PAD)).contains(&x) {
+                    self.editing = true;
+                    self.picking.clear();
+                    return true;
+                }
+            }
+        }
+
+        // Status bar scroll buttons [^] and [v]
+        let status_y = self.height.saturating_sub(STATUS + PAD / 2);
+        if (status_y..status_y + STATUS).contains(&y) {
+            if (self.width.saturating_sub(PAD + 50)..self.width.saturating_sub(PAD + 26))
+                .contains(&x)
+            {
+                self.scroll_by(-4);
+                return true;
+            }
+            if (self.width.saturating_sub(PAD + 24)..self.width.saturating_sub(PAD)).contains(&x) {
+                self.scroll_by(4);
+                return true;
+            }
+        }
+
+        // Page area clicks
+        let area_y = PAD + BAR + PAD / 2;
+        let area_h = self.height.saturating_sub(PAD * 2 + BAR + STATUS + PAD / 2);
+        let area_w = self.width.saturating_sub(PAD * 2);
+        if (area_y..area_y + area_h).contains(&y) && (PAD..PAD + area_w).contains(&x) {
+            self.editing = false;
+            let line_offset = (y - area_y) / nexus_ui::LINE_HEIGHT;
+            let lines = self.lay_out(area_w);
+            let line_idx = self.scroll + line_offset as usize;
+            if let Some(line) = lines.get(line_idx) {
+                let links_found = find_links_in_line(&line.text, PAD + line.x);
+                if !links_found.is_empty() {
+                    let mut best_target = links_found[0].0;
+                    let mut min_dist = u32::MAX;
+                    for (link_num, start_x, end_x) in &links_found {
+                        if (*start_x..=*end_x).contains(&x) {
+                            best_target = *link_num;
+                            break;
+                        }
+                        let dist = if x < *start_x {
+                            start_x - x
+                        } else {
+                            x.saturating_sub(*end_x)
+                        };
+                        if dist < min_dist {
+                            min_dist = dist;
+                            best_target = *link_num;
+                        }
+                    }
+                    self.follow(best_target);
+                    return true;
+                }
+            }
+            return true;
+        }
+
+        false
+    }
+
     /// How many lines of page fit on screen.
     fn rows(&self) -> u32 {
         self.height
@@ -1092,8 +1234,76 @@ impl Browser {
 
         canvas.fill(canvas.bounds(), ground);
 
-        // -- the address bar
-        let bar = Rect::new(PAD, PAD, self.width.saturating_sub(PAD * 2), BAR);
+        // -- toolbar: navigation buttons & address bar
+        let nav_width = 114;
+        let show_nav = self.width > nav_width + PAD * 3;
+        let (bar_x, bar_w) = if show_nav {
+            let btn_bg = Colour::rgb(0x16, 0x20, 0x32);
+            let btn_border = Colour::rgb(0x28, 0x36, 0x50);
+
+            // Back button
+            let back_rect = Rect::new(PAD, PAD, 24, BAR);
+            canvas.fill(back_rect, btn_bg);
+            canvas.outline(back_rect, 1, btn_border);
+            let back_colour = if self.history.is_empty() {
+                dim.blend(ground, 100)
+            } else {
+                ink
+            };
+            canvas.text(
+                PAD + 8,
+                PAD + (BAR - nexus_ui::LINE_HEIGHT) / 2,
+                "<",
+                back_colour,
+            );
+
+            // Forward button
+            let fwd_rect = Rect::new(PAD + 28, PAD, 24, BAR);
+            canvas.fill(fwd_rect, btn_bg);
+            canvas.outline(fwd_rect, 1, btn_border);
+            let fwd_colour = if self.forward.is_empty() {
+                dim.blend(ground, 100)
+            } else {
+                ink
+            };
+            canvas.text(
+                PAD + 28 + 8,
+                PAD + (BAR - nexus_ui::LINE_HEIGHT) / 2,
+                ">",
+                fwd_colour,
+            );
+
+            // Reload button
+            let rel_rect = Rect::new(PAD + 56, PAD, 24, BAR);
+            canvas.fill(rel_rect, btn_bg);
+            canvas.outline(rel_rect, 1, btn_border);
+            canvas.text(
+                PAD + 56 + 8,
+                PAD + (BAR - nexus_ui::LINE_HEIGHT) / 2,
+                "R",
+                ink,
+            );
+
+            // Home button
+            let home_rect = Rect::new(PAD + 84, PAD, 24, BAR);
+            canvas.fill(home_rect, btn_bg);
+            canvas.outline(home_rect, 1, btn_border);
+            canvas.text(
+                PAD + 84 + 8,
+                PAD + (BAR - nexus_ui::LINE_HEIGHT) / 2,
+                "H",
+                ink,
+            );
+
+            (
+                PAD + nav_width,
+                self.width.saturating_sub(PAD + nav_width + PAD),
+            )
+        } else {
+            (PAD, self.width.saturating_sub(PAD * 2))
+        };
+
+        let bar = Rect::new(bar_x, PAD, bar_w, BAR);
         canvas.fill(bar, Colour::rgb(0x14, 0x1C, 0x2C));
         canvas.outline(
             bar,
@@ -1151,7 +1361,7 @@ impl Browser {
         let status = Rect::new(
             PAD,
             self.height.saturating_sub(STATUS + PAD / 2),
-            self.width.saturating_sub(PAD * 2),
+            self.width.saturating_sub(PAD * 2 + 54),
             STATUS,
         );
         let mut text = self.status.clone();
@@ -1170,6 +1380,17 @@ impl Browser {
             trim_to_width(&text, status.width),
             dim,
         );
+
+        // Scroll helper buttons [^] and [v]
+        let btn_y = self.height.saturating_sub(STATUS + PAD / 2);
+        let up_rect = Rect::new(self.width.saturating_sub(PAD + 50), btn_y, 22, STATUS - 2);
+        let dn_rect = Rect::new(self.width.saturating_sub(PAD + 24), btn_y, 22, STATUS - 2);
+        canvas.fill(up_rect, Colour::rgb(0x16, 0x20, 0x32));
+        canvas.outline(up_rect, 1, Colour::rgb(0x28, 0x36, 0x50));
+        canvas.text(up_rect.x + 7, up_rect.y + 1, "^", ink);
+        canvas.fill(dn_rect, Colour::rgb(0x16, 0x20, 0x32));
+        canvas.outline(dn_rect, 1, Colour::rgb(0x28, 0x36, 0x50));
+        canvas.text(dn_rect.x + 7, dn_rect.y + 1, "v", ink);
     }
 
     /// Turn the document into lines that fit `width`.
@@ -1333,6 +1554,36 @@ fn trim_to_width(text: &str, width: u32) -> &str {
         }
     }
     &text[start..]
+}
+
+/// Locate link index markers like `[1]` in a rendered line.
+fn find_links_in_line(line_text: &str, line_x: u32) -> Vec<(usize, u32, u32)> {
+    let mut results = Vec::new();
+    let bytes = line_text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            let start = i;
+            let mut num = 0usize;
+            let mut has_digit = false;
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                num = num * 10 + (bytes[j] - b'0') as usize;
+                has_digit = true;
+                j += 1;
+            }
+            if has_digit && j < bytes.len() && bytes[j] == b']' {
+                let end = j + 1;
+                let prefix_w = nexus_ui::measure(&line_text[..start]);
+                let marker_w = nexus_ui::measure(&line_text[start..end]);
+                results.push((num, line_x + prefix_w, line_x + prefix_w + marker_w + 120));
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    results
 }
 
 /// Read a little-endian `u32` out of a message.

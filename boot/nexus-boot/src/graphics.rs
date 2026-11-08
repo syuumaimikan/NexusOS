@@ -13,14 +13,10 @@ use crate::uefi::{
     self, BootServices, GraphicsOutputModeInformation, GraphicsOutputProtocol, GraphicsPixelFormat,
 };
 
-/// Widest mode the bootloader will select.
-///
-/// Larger panels are perfectly usable, but an unnecessarily high boot
-/// resolution costs real time in the software compositor before GPU
-/// acceleration exists, so the loader stops here.
-const MAX_WIDTH: u32 = 1920;
+/// Widest mode the bootloader will select (supports up to 8K/4K/ultrawide displays).
+const MAX_WIDTH: u32 = 7680;
 /// Tallest mode the bootloader will select.
-const MAX_HEIGHT: u32 = 1200;
+const MAX_HEIGHT: u32 = 4320;
 
 /// A framebuffer report meaning "the firmware gave us nothing to draw on".
 const NO_FRAMEBUFFER: FramebufferInfo = FramebufferInfo {

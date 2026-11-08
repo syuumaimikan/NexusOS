@@ -1064,6 +1064,33 @@ impl Tile {
         self.contains(x, y) && y < self.y + TITLE
     }
 
+    /// Whether a point is in the close button (left traffic light or right close).
+    fn close_contains(&self, x: u32, y: u32) -> bool {
+        self.contains(x, y)
+            && y < self.y + TITLE
+            && ((x >= self.x + 8 && x <= self.x + 24)
+                || (x >= self.x + self.width.saturating_sub(28)
+                    && x <= self.x + self.width.saturating_sub(8)))
+    }
+
+    /// Whether a point is in the minimize button.
+    fn minimize_contains(&self, x: u32, y: u32) -> bool {
+        self.contains(x, y)
+            && y < self.y + TITLE
+            && ((x >= self.x + 28 && x <= self.x + 44)
+                || (x >= self.x + self.width.saturating_sub(76)
+                    && x <= self.x + self.width.saturating_sub(56)))
+    }
+
+    /// Whether a point is in the maximize / restore button.
+    fn maximize_contains(&self, x: u32, y: u32) -> bool {
+        self.contains(x, y)
+            && y < self.y + TITLE
+            && ((x >= self.x + 48 && x <= self.x + 64)
+                || (x >= self.x + self.width.saturating_sub(52)
+                    && x <= self.x + self.width.saturating_sub(32)))
+    }
+
     /// What to tell the desktop about this window.
     fn state(&self, focused: bool) -> u8 {
         if !self.live {
@@ -2327,6 +2354,9 @@ fn serve(
                 if tile.live {
                     tile.live = false;
                     ended += 1;
+                    if wm::is_auto_tile_enabled() {
+                        wm::apply(wm::Action::Tile, screen, tiles, &mut focus, &mut order);
+                    }
                 }
                 nexus_user::unwatch(set, *key).ok();
                 nexus_user::unwatch(set, channel_key(index)).ok();
@@ -3960,7 +3990,25 @@ fn act_on_pointer(
                 continue;
             }
 
-            if tile.grip_contains(cursor.x, cursor.y) {
+            if tile.close_contains(cursor.x, cursor.y) {
+                nexus_user::send(tile.channel, b"close", &[]).ok();
+                tile.live = false;
+                tile.minimised = true;
+                damage = damage.union(region_of(tile));
+                nexus_user::log("compositor: window closed via button").ok();
+                break;
+            } else if tile.minimize_contains(cursor.x, cursor.y) {
+                tile.minimised = true;
+                cursor.dragging = None;
+                damage = damage.union(region_of(tile));
+                nexus_user::log("compositor: window minimized via button").ok();
+                break;
+            } else if tile.maximize_contains(cursor.x, cursor.y) {
+                wm::apply(wm::Action::Maximize, screen, tiles, focus, order);
+                damage = everything(screen);
+                nexus_user::log("compositor: window maximized via button").ok();
+                break;
+            } else if tile.grip_contains(cursor.x, cursor.y) {
                 cursor.dragging = Some(Drag {
                     tile: index,
                     doing: Doing::Resizing,
@@ -3978,6 +4026,18 @@ fn act_on_pointer(
                     grab_y: cursor.y - tile.y,
                     announced: false,
                 });
+            } else {
+                // Client content click: forward to application
+                let local_x = cursor.x.saturating_sub(tile.x);
+                let local_y = cursor.y.saturating_sub(tile.y);
+                if local_y >= TITLE {
+                    let content_y = local_y - TITLE;
+                    let mut click_msg = [0u8; 12];
+                    click_msg[..4].copy_from_slice(b"mclk");
+                    click_msg[4..8].copy_from_slice(&local_x.to_le_bytes());
+                    click_msg[8..12].copy_from_slice(&content_y.to_le_bytes());
+                    nexus_user::send(tile.channel, &click_msg, &[]).ok();
+                }
             }
 
             // Raising changes what covers what, and the ring moves off
@@ -4537,6 +4597,87 @@ fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
             }
         }
     }
+
+    // Window controls (Wayland/macOS style traffic lights on left, action glyphs on right)
+    if tile.width >= 100 {
+        let cy = tile.y + 16;
+        let draw_btn = |cx: u32, fill_col: u32, border_col: u32| {
+            for dy in 0..=10u32 {
+                let py = cy.saturating_sub(5) + dy;
+                if py < top || py >= bottom {
+                    continue;
+                }
+                for dx in 0..=10u32 {
+                    let px = cx.saturating_sub(5) + dx;
+                    if px < left || px >= right {
+                        continue;
+                    }
+                    let dist_sq = (dx as i32 - 5).pow(2) + (dy as i32 - 5).pow(2);
+                    if dist_sq <= 25 {
+                        let c = if dist_sq >= 16 { border_col } else { fill_col };
+                        paint_pixel(screen, px, py, c, 255);
+                    }
+                }
+            }
+        };
+        draw_btn(tile.x + 16, 0x00ff5f56, 0x00e0443e); // Close (Red)
+        draw_btn(tile.x + 36, 0x00ffbd2e, 0x00dea123); // Minimize (Yellow)
+        draw_btn(tile.x + 56, 0x0027c93f, 0x001aab29); // Maximize (Green)
+    }
+
+    if tile.width >= 220 {
+        let btn_col = if focused { 0x005a6275 } else { 0x008c96a8 };
+        let cy = tile.y + 16;
+        // Minimize: horizontal line
+        let min_x = tile.x + tile.width - 66;
+        for dx in 0..8u32 {
+            let px = min_x.saturating_sub(4) + dx;
+            if px >= left && px < right && cy >= top && cy < bottom {
+                paint_pixel(screen, px, cy, btn_col, 255);
+            }
+        }
+        // Maximize: box
+        let max_x = tile.x + tile.width - 42;
+        for step in 0..8u32 {
+            let px = max_x.saturating_sub(4) + step;
+            let py0 = cy.saturating_sub(4);
+            let py1 = cy + 4;
+            if px >= left && px < right {
+                if py0 >= top && py0 < bottom {
+                    paint_pixel(screen, px, py0, btn_col, 255);
+                }
+                if py1 >= top && py1 < bottom {
+                    paint_pixel(screen, px, py1, btn_col, 255);
+                }
+            }
+            let py = cy.saturating_sub(4) + step;
+            let px0 = max_x.saturating_sub(4);
+            let px1 = max_x + 4;
+            if py >= top && py < bottom {
+                if px0 >= left && px0 < right {
+                    paint_pixel(screen, px0, py, btn_col, 255);
+                }
+                if px1 >= left && px1 < right {
+                    paint_pixel(screen, px1, py, btn_col, 255);
+                }
+            }
+        }
+        // Close: diagonal cross
+        let cls_x = tile.x + tile.width - 18;
+        for d in 0..8u32 {
+            let dx = d as i32 - 4;
+            let px1 = (cls_x as i32 + dx) as u32;
+            let py1 = (cy as i32 + dx) as u32;
+            let px2 = (cls_x as i32 + dx) as u32;
+            let py2 = (cy as i32 - dx) as u32;
+            if px1 >= left && px1 < right && py1 >= top && py1 < bottom {
+                paint_pixel(screen, px1, py1, btn_col, 255);
+            }
+            if px2 >= left && px2 < right && py2 >= top && py2 < bottom {
+                paint_pixel(screen, px2, py2, btn_col, 255);
+            }
+        }
+    }
 }
 
 /// Read a little-endian signed `i32` out of a message.
@@ -4743,12 +4884,28 @@ fn composite_slice(
         let destination =
             FRAMEBUFFER_AT + ((row as usize * screen.stride as usize) + x0 as usize) * 4;
 
-        for column in 0..(x1 - x0) as usize {
-            let local_y = row - destination_y + source_y;
-            // Decorations own this band; blend their edge only once.
-            if rounded && local_y < TITLE {
-                continue;
+        let local_y = row - destination_y + source_y;
+        // Decorations own this band; blend their edge only once.
+        if rounded && local_y < TITLE {
+            continue;
+        }
+        let in_corner_y = rounded && (local_y < 14 || local_y >= tile.height.saturating_sub(14));
+        if !glass && !in_corner_y {
+            let count = (x1 - x0) as usize;
+            unsafe {
+                let src_ptr = source as *const u32;
+                let dst_ptr = destination as *mut u32;
+                for i in 0..count {
+                    core::ptr::write_volatile(
+                        dst_ptr.add(i),
+                        core::ptr::read_volatile(src_ptr.add(i)),
+                    );
+                }
             }
+            continue;
+        }
+
+        for column in 0..(x1 - x0) as usize {
             let coverage = if rounded {
                 nexus_ui::rounded_coverage(
                     x0 - tile.x + column as u32,
