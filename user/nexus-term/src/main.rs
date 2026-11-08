@@ -797,6 +797,19 @@ impl Terminal {
                 self.scrolled = 0;
             }
             "dev" => self.dev_command(words.argument(0)),
+            "win" => {
+                if let Some(prog) = words.argument(0) {
+                    let win_prog = if prog.starts_with("win:") {
+                        prog.to_string()
+                    } else {
+                        alloc::format!("win:{prog}")
+                    };
+                    let arguments = words.arguments().join(" ");
+                    self.run_program(&win_prog, &arguments);
+                } else {
+                    self.trouble("win: expected a program path");
+                }
+            }
             "py" | "python" => self.run_python_file(words.argument(0)),
             "c" | "cc" => self.compile_and_run_c(words.argument(0), words.arguments()),
             "rust" | "rustc" => self.compile_and_run_rust(words.argument(0), words.arguments()),
@@ -1177,11 +1190,15 @@ impl Terminal {
                 self.put("hello.rs", rs_content.as_bytes(), false);
                 self.put("hello.nex", nex_content.as_bytes(), false);
 
+                let pe_bytes = create_simple_pe(b"Hello from Win32 PE on NexusOS!\n");
+                self.put("hello.exe", &pe_bytes, false);
+
                 self.note("Initialized starter code templates:");
                 self.plain("  hello.py   (run: py hello.py)");
                 self.plain("  hello.c    (run: cc hello.c)");
                 self.plain("  hello.rs   (run: rust hello.rs)");
                 self.plain("  hello.nex  (run: nex hello.nex)");
+                self.plain("  hello.exe  (run: win hello.exe)");
                 self.plain("Edit any file using: edit <filename>");
             }
             _ => {
@@ -1193,6 +1210,7 @@ impl Terminal {
                 self.plain("  nex [file.nex]          Native Nexus language interpreter");
                 self.plain("  edit [file]             GUI code editor");
                 self.plain("  run [binary.lx]         Run Linux x86-64 ELF binaries");
+                self.plain("  win [binary.exe]        Run Windows PE32+ binaries");
                 self.plain("Type 'dev init' to generate hello starter templates!");
             }
         }
@@ -2783,6 +2801,83 @@ fn create_simple_elf(message: &[u8]) -> Vec<u8> {
 
     image.extend_from_slice(&code);
     image.extend_from_slice(message);
+    image
+}
+
+fn create_simple_pe(message: &[u8]) -> Vec<u8> {
+    const IMAGE_BASE: u64 = 0x14000_0000;
+    const SECTION_RVA: u32 = 0x1000;
+    let length = message.len() as u32;
+    let message_rva = SECTION_RVA + 40;
+    let message_va = IMAGE_BASE + message_rva as u64;
+
+    let mut code = Vec::new();
+    // mov eax, 8 (NtWriteFile)
+    code.extend_from_slice(&[0xB8, 0x08, 0x00, 0x00, 0x00]);
+    // mov r10, 1 (stdout handle)
+    code.extend_from_slice(&[0x49, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00]);
+    // xor edx, edx
+    code.extend_from_slice(&[0x31, 0xD2]);
+    // movabs r8, message_va
+    code.extend_from_slice(&[0x49, 0xB8]);
+    code.extend_from_slice(&message_va.to_le_bytes());
+    // mov r9d, length
+    code.push(0x41);
+    code.push(0xB9);
+    code.extend_from_slice(&length.to_le_bytes());
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // mov eax, 0x2C (NtTerminateProcess)
+    code.extend_from_slice(&[0xB8, 0x2C, 0x00, 0x00, 0x00]);
+    // mov r10, -1
+    code.extend_from_slice(&[0x49, 0xC7, 0xC2, 0xFF, 0xFF, 0xFF, 0xFF]);
+    // xor edx, edx
+    code.extend_from_slice(&[0x31, 0xD2]);
+    // syscall
+    code.extend_from_slice(&[0x0F, 0x05]);
+
+    while code.len() < 40 {
+        code.push(0x90);
+    }
+    code.extend_from_slice(message);
+
+    let raw_data_size = code.len().div_ceil(512) * 512;
+    while code.len() < raw_data_size {
+        code.push(0);
+    }
+
+    let mut image = alloc::vec![0u8; 512 + raw_data_size];
+    image[0..2].copy_from_slice(b"MZ");
+    image[0x3C..0x40].copy_from_slice(&64u32.to_le_bytes());
+
+    let pe = 64;
+    image[pe..pe + 4].copy_from_slice(b"PE\0\0");
+    image[pe + 4..pe + 6].copy_from_slice(&0x8664u16.to_le_bytes());
+    image[pe + 6..pe + 8].copy_from_slice(&1u16.to_le_bytes());
+    image[pe + 20..pe + 22].copy_from_slice(&240u16.to_le_bytes());
+    image[pe + 22..pe + 24].copy_from_slice(&0x0022u16.to_le_bytes());
+
+    let opt = pe + 24;
+    image[opt..opt + 2].copy_from_slice(&0x020Bu16.to_le_bytes());
+    image[opt + 16..opt + 20].copy_from_slice(&SECTION_RVA.to_le_bytes());
+    image[opt + 24..opt + 32].copy_from_slice(&IMAGE_BASE.to_le_bytes());
+    image[opt + 32..opt + 36].copy_from_slice(&4096u32.to_le_bytes());
+    image[opt + 36..opt + 40].copy_from_slice(&512u32.to_le_bytes());
+    image[opt + 56..opt + 60].copy_from_slice(&8192u32.to_le_bytes());
+    image[opt + 60..opt + 64].copy_from_slice(&512u32.to_le_bytes());
+    image[opt + 68..opt + 70].copy_from_slice(&3u16.to_le_bytes());
+    image[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes());
+
+    let sec = opt + 240;
+    image[sec..sec + 5].copy_from_slice(b".text");
+    image[sec + 8..sec + 12].copy_from_slice(&4096u32.to_le_bytes());
+    image[sec + 12..sec + 16].copy_from_slice(&SECTION_RVA.to_le_bytes());
+    image[sec + 16..sec + 20].copy_from_slice(&(raw_data_size as u32).to_le_bytes());
+    image[sec + 20..sec + 24].copy_from_slice(&512u32.to_le_bytes());
+    image[sec + 36..sec + 40].copy_from_slice(&(0x6000_0020u32).to_le_bytes());
+
+    image[512..512 + code.len()].copy_from_slice(&code);
+
     image
 }
 

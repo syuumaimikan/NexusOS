@@ -380,12 +380,12 @@ pub unsafe fn load_pe<A, V>(
 ) -> Result<(u64, u64, u64, u64), PeError>
 where
     A: FnMut(usize) -> Option<u64>,
-    V: Fn(u64) -> usize,
+    V: Fn(u64) -> u64,
 {
     let info = parse_pe_info(image)?;
     let pages = (info.size_of_image as u64).div_ceil(PAGE_SIZE) as usize;
     let phys_base = allocate(pages).ok_or(PeError::OutOfMemory)?;
-    let virt_ptr = to_virtual(phys_base) as *mut u8;
+    let virt_ptr = to_virtual(phys_base) as usize as *mut u8;
 
     // Zero out entire allocated region (BSS + padding).
     unsafe {
@@ -440,12 +440,119 @@ where
     ))
 }
 
+/// Load and map a PE32+ image producing a standard `LoadedImage` for kernel page mapping.
+///
+/// # Safety
+///
+/// `allocate` and `to_virtual` must uphold the physical memory access contract.
+pub unsafe fn load_pe_at<A, V>(
+    image: &[u8],
+    bias: u64,
+    mut allocate: A,
+    to_virtual: V,
+) -> Result<crate::elf::LoadedImage, PeError>
+where
+    A: FnMut(usize) -> Option<u64>,
+    V: Fn(u64) -> u64,
+{
+    let info = parse_pe_info(image)?;
+    let pages = (info.size_of_image as u64).div_ceil(PAGE_SIZE) as usize;
+    let phys_base = allocate(pages).ok_or(PeError::OutOfMemory)?;
+    let virt_ptr = to_virtual(phys_base) as usize as *mut u8;
+
+    unsafe {
+        core::ptr::write_bytes(virt_ptr, 0, pages * PAGE_SIZE as usize);
+    }
+
+    let virt_base = if bias != 0 { bias } else { info.image_base };
+    let entry_point = virt_base + info.entry_point_rva as u64;
+
+    let pe_offset =
+        u32::from_le_bytes([image[0x3C], image[0x3D], image[0x3E], image[0x3F]]) as usize;
+    let opt_header = pe_offset + 24;
+    let size_of_headers = u32::from_le_bytes([
+        image[opt_header + 60],
+        image[opt_header + 61],
+        image[opt_header + 62],
+        image[opt_header + 63],
+    ]) as usize;
+
+    let headers_to_copy = size_of_headers.min(image.len());
+    unsafe {
+        core::ptr::copy_nonoverlapping(image.as_ptr(), virt_ptr, headers_to_copy);
+    }
+
+    let mut segments = [crate::elf::LoadedSegment {
+        virt_start: 0,
+        phys_start: 0,
+        size: 0,
+        flags: crate::elf::SegmentFlags {
+            readable: false,
+            writable: false,
+            executable: false,
+        },
+    }; crate::elf::MAX_SEGMENTS];
+    let mut segment_count = 0usize;
+
+    for_each_section(image, |sec| {
+        if sec.virtual_size == 0 && sec.size_of_raw_data == 0 {
+            return Ok(());
+        }
+        let dest_offset = sec.virtual_address as usize;
+        let copy_size = (sec.size_of_raw_data as usize).min(sec.virtual_size as usize);
+        if copy_size > 0 {
+            let src_offset = sec.pointer_to_raw_data as usize;
+            if src_offset + copy_size > image.len() {
+                return Err(PeError::SectionOutOfBounds);
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    image.as_ptr().add(src_offset),
+                    virt_ptr.add(dest_offset),
+                    copy_size,
+                );
+            }
+        }
+
+        if segment_count < crate::elf::MAX_SEGMENTS {
+            let aligned_vaddr = virt_base + sec.virtual_address as u64;
+            let aligned_size = (sec.virtual_size as u64).div_ceil(PAGE_SIZE) * PAGE_SIZE;
+            segments[segment_count] = crate::elf::LoadedSegment {
+                virt_start: aligned_vaddr,
+                phys_start: phys_base + sec.virtual_address as u64,
+                size: aligned_size.max(PAGE_SIZE),
+                flags: crate::elf::SegmentFlags {
+                    readable: sec.is_readable(),
+                    writable: sec.is_writable(),
+                    executable: sec.is_executable(),
+                },
+            };
+            segment_count += 1;
+        }
+        Ok(())
+    })?;
+
+    Ok(crate::elf::LoadedImage {
+        entry_point,
+        virt_base,
+        phys_base,
+        image_size: pages as u64 * PAGE_SIZE,
+        segments,
+        segment_count,
+        program_headers: 0,
+        program_header_size: 0,
+        program_header_count: 0,
+        bias,
+        relocatable: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn create_dummy_pe() -> [u8; 512] {
-        let mut buf = [0u8; 512];
+    fn create_dummy_pe() -> [u8; 1024] {
+        let mut buf = [0u8; 1024];
         // DOS Header
         buf[0..2].copy_from_slice(&DOS_MAGIC);
         buf[0x3C..0x40].copy_from_slice(&64u32.to_le_bytes()); // e_lfanew = 64
@@ -514,5 +621,22 @@ mod tests {
         })
         .expect("valid sections");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn loads_pe_into_loaded_image() {
+        let pe = create_dummy_pe();
+        let mut storage = [0u8; 8192];
+        let storage_ptr = storage.as_mut_ptr() as u64;
+
+        let loaded = unsafe { load_pe_at(&pe, 0, |_pages| Some(storage_ptr), |phys| phys) }
+            .expect("loaded image");
+
+        assert_eq!(loaded.virt_base, 0x0000000140000000);
+        assert_eq!(loaded.entry_point, 0x0000000140001000);
+        assert_eq!(loaded.image_size, 8192);
+        assert_eq!(loaded.segment_count, 1);
+        assert!(loaded.segments[0].flags.executable);
+        assert!(loaded.segments[0].flags.readable);
     }
 }

@@ -1658,99 +1658,90 @@ pub unsafe fn start_from_disk_as(
 
     let space = Arc::new(address_space::AddressSpace::new().map_err(UserError::Space)?);
 
-    // An `ET_DYN` image names no addresses and has to be told one; an `ET_EXEC`
-    // image names them all and has to be left alone. Asking the header is the
-    // only way to know which, and it is asked before anything is allocated.
-    // A thirty-two bit image is a different format, not a narrower one: a
-    // different header size, a different program header size, and the program
-    // header's fields in a different order. It goes to its own loader.
-    if nexus_abi::elf::elf32::is_thirty_two_bit(&image) != (personality == Personality::Linux32) {
-        kprintln!(
-            "[linux] {path} is {} and was asked for as {}",
-            if nexus_abi::elf::elf32::is_thirty_two_bit(&image) {
-                "a thirty-two bit image"
-            } else {
-                "a sixty-four bit image"
-            },
-            if personality == Personality::Linux32 {
-                "thirty-two bit"
-            } else {
-                "sixty-four bit"
-            }
-        );
-        return Err(UserError::Image(nexus_abi::elf::ElfError::WrongType));
-    }
+    let is_pe = personality == Personality::WinNt
+        || nexus_abi::pe::detect_binary_format(&image) == nexus_abi::pe::BinaryFormat::Pe64;
 
-    let movable = if personality == Personality::Linux32 {
-        nexus_abi::elf::elf32::kind(&image)
+    let (personality, loaded, interpreter) = if is_pe {
+        let loaded = unsafe { load_pe_into(&image, 0, &space) }?;
+        (Personality::WinNt, loaded, None)
     } else {
-        nexus_abi::elf::kind(&image)
-    }
-    .map_err(UserError::Image)?
-        == nexus_abi::elf::Kind::Movable;
-    if movable && personality == Personality::Nexus {
-        // This system's own programs are linked at an address. One that was not
-        // would need relocating, and nothing in this system relocates its own.
-        return Err(UserError::Image(nexus_abi::elf::ElfError::WrongBias));
-    }
-    let bias = if !movable {
-        0
-    } else if personality == Personality::Linux32 {
-        0x0800_0000
-    } else {
-        LINUX_EXECUTABLE_BASE
-    };
-
-    // SAFETY: the heap and the page allocator are running, and `space` was
-    // created a moment ago so nothing else is mapping into it.
-    let loaded = if personality == Personality::Linux32 {
-        unsafe { load32_into(&image, bias, &space) }
-    } else {
-        unsafe { load_into(&image, bias, &space) }
-    }
-    .map_err(UserError::Image)?;
-
-    // The program that has to load this one before it can run.
-    //
-    // A program with a `PT_INTERP` is dynamically linked: none of its calls into
-    // a shared library have been resolved, so entering it directly reaches a
-    // symbol table nobody filled in. What happens instead is that the named
-    // program -- the dynamic linker -- is loaded into the same address space,
-    // entered instead of the program, and told in the auxiliary vector where
-    // both images are. It finishes the job in user space and jumps to the real
-    // entry point.
-    //
-    // This is the whole of what the kernel does about dynamic linking, and it is
-    // deliberately the whole of it: relocation, symbol lookup and library search
-    // are the linker's work, and a kernel that did any of them would be a kernel
-    // that had to understand symbol versioning.
-    let interpreter = match if personality == Personality::Linux32 {
-        nexus_abi::elf::elf32::interpreter(&image).map_err(UserError::Image)?
-    } else if personality == Personality::Linux {
-        nexus_abi::elf::interpreter(&image).map_err(UserError::Image)?
-    } else {
-        None
-    } {
-        Some(needed) => {
-            let bytes = crate::compat::linux_files::read_file(needed).map_err(|reason| {
-                UserError::NoInterpreter(alloc::string::String::from(needed), reason)
-            })?;
-            // SAFETY: as above.
-            let loaded = if personality == Personality::Linux32 {
-                unsafe { load32_into(&bytes, 0x7000_0000, &space) }
-            } else {
-                unsafe { load_into(&bytes, LINUX_INTERPRETER_BASE, &space) }
-            }
-            .map_err(UserError::BadInterpreter)?;
+        if nexus_abi::elf::elf32::is_thirty_two_bit(&image) != (personality == Personality::Linux32)
+        {
             kprintln!(
-                "[linux] {name} needs {needed}: {} bytes loaded at {:#x}, entry {:#x}",
-                bytes.len(),
-                loaded.bias,
-                loaded.entry_point
+                "[linux] {path} is {} and was asked for as {}",
+                if nexus_abi::elf::elf32::is_thirty_two_bit(&image) {
+                    "a thirty-two bit image"
+                } else {
+                    "a sixty-four bit image"
+                },
+                if personality == Personality::Linux32 {
+                    "thirty-two bit"
+                } else {
+                    "sixty-four bit"
+                }
             );
-            Some(loaded)
+            return Err(UserError::Image(nexus_abi::elf::ElfError::WrongType));
         }
-        None => None,
+
+        let movable = if personality == Personality::Linux32 {
+            nexus_abi::elf::elf32::kind(&image)
+        } else {
+            nexus_abi::elf::kind(&image)
+        }
+        .map_err(UserError::Image)?
+            == nexus_abi::elf::Kind::Movable;
+        if movable && personality == Personality::Nexus {
+            // This system's own programs are linked at an address. One that was not
+            // would need relocating, and nothing in this system relocates its own.
+            return Err(UserError::Image(nexus_abi::elf::ElfError::WrongBias));
+        }
+        let bias = if !movable {
+            0
+        } else if personality == Personality::Linux32 {
+            0x0800_0000
+        } else {
+            LINUX_EXECUTABLE_BASE
+        };
+
+        // SAFETY: the heap and the page allocator are running, and `space` was
+        // created a moment ago so nothing else is mapping into it.
+        let loaded = if personality == Personality::Linux32 {
+            unsafe { load32_into(&image, bias, &space) }
+        } else {
+            unsafe { load_into(&image, bias, &space) }
+        }
+        .map_err(UserError::Image)?;
+
+        let interp = match if personality == Personality::Linux32 {
+            nexus_abi::elf::elf32::interpreter(&image).map_err(UserError::Image)?
+        } else if personality == Personality::Linux {
+            nexus_abi::elf::interpreter(&image).map_err(UserError::Image)?
+        } else {
+            None
+        } {
+            Some(needed) => {
+                let bytes = crate::compat::linux_files::read_file(needed).map_err(|reason| {
+                    UserError::NoInterpreter(alloc::string::String::from(needed), reason)
+                })?;
+                // SAFETY: as above.
+                let loaded = if personality == Personality::Linux32 {
+                    unsafe { load32_into(&bytes, 0x7000_0000, &space) }
+                } else {
+                    unsafe { load_into(&bytes, LINUX_INTERPRETER_BASE, &space) }
+                }
+                .map_err(UserError::BadInterpreter)?;
+                kprintln!(
+                    "[linux] {name} needs {needed}: {} bytes loaded at {:#x}, entry {:#x}",
+                    bytes.len(),
+                    loaded.bias,
+                    loaded.entry_point
+                );
+                Some(loaded)
+            }
+            None => None,
+        };
+
+        (personality, loaded, interp)
     };
 
     // The stack. Several pages rather than one: a program that reads a
@@ -1907,6 +1898,26 @@ pub(crate) unsafe fn load_into(
 
     // SAFETY: upheld by the caller.
     unsafe { map_image(space, &loaded) }?;
+    Ok(loaded)
+}
+
+/// Load a PE32+ (Windows 64-bit) image into physical frames and map it into `space`.
+pub(crate) unsafe fn load_pe_into(
+    image: &[u8],
+    bias: u64,
+    space: &Arc<address_space::AddressSpace>,
+) -> Result<nexus_abi::elf::LoadedImage, UserError> {
+    let loaded = unsafe {
+        nexus_abi::pe::load_pe_at(
+            image,
+            bias,
+            |pages| memory::allocate_block(order_for_pages(pages)),
+            layout::phys_to_virt,
+        )
+    }
+    .map_err(|_| UserError::Image(nexus_abi::elf::ElfError::BadMagic))?;
+
+    unsafe { map_image(space, &loaded) }.map_err(UserError::Image)?;
     Ok(loaded)
 }
 

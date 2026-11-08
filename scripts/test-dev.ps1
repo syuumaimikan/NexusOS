@@ -142,6 +142,14 @@ try {
         }
         Start-Sleep -Seconds 1
 
+        Write-Host '==> Running Win32 PE binary' -ForegroundColor Cyan
+        Send-Text 'win hello.exe'
+        Send-Keys @('ret')
+        if (-not (Wait-For -Text 'term: ran win' -Seconds 30)) {
+            $failures += 'the shell never ran win'
+        }
+        Start-Sleep -Seconds 1
+
         $writer.WriteLine('quit')
         Start-Sleep -Milliseconds 800
     } finally {
@@ -160,7 +168,8 @@ foreach ($expected in @(
         'term: ran dev',
         'term: ran py',
         'term: ran cc',
-        'term: ran rust'
+        'term: ran rust',
+        'term: ran win'
     )) {
     if ($output.Contains($expected)) {
         Write-Host "    ok   $expected" -ForegroundColor DarkGray

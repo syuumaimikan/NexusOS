@@ -58,29 +58,36 @@ pub fn dispatch(number: u64, frame: &mut Frame) -> u64 {
 
         call::NT_WRITE_FILE => {
             // NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key)
-            // If writing to console / stdout / stderr:
-            let handle = arg0;
-            // Buffer is passed at stack arg or arg5; for basic calls Buffer is in rdx/r8 or IoStatus block.
-            // When targeting standard console handles (e.g. 7, 3, or pseudo-handles -11):
-            if handle == u64::MAX - 10 || handle == 1 || handle == 2 || handle == 3 {
-                // If Buffer is in arg2 (r8) and length in arg3 (r9) or mapped via memory:
-                let buf_ptr = arg2 as *const u8;
-                let buf_len = (arg3 as usize).min(1024);
-                if !buf_ptr.is_null() && buf_len > 0 {
-                    let mut temp = [0u8; 1024];
-                    let to_copy = buf_len.min(temp.len());
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(buf_ptr, temp.as_mut_ptr(), to_copy);
-                    }
-                    if let Ok(s) = core::str::from_utf8(&temp[..to_copy]) {
-                        kprintln!("[win32 console] {s}");
+            let buffer_va = arg2;
+            let count = (arg3 as usize).min(1024);
+            if buffer_va != 0 && count > 0 {
+                let mut temp = [0u8; 1024];
+                let to_copy = count.min(temp.len());
+                let user_slice =
+                    unsafe { core::slice::from_raw_parts(buffer_va as *const u8, to_copy) };
+                temp[..to_copy].copy_from_slice(user_slice);
+                let text = alloc::string::String::from_utf8_lossy(&temp[..to_copy]);
+                let text = text.trim_end_matches('\n');
+                let name = crate::sched::current_process().map_or_else(
+                    || alloc::string::String::from("?"),
+                    |p| alloc::string::String::from(p.name.as_str()),
+                );
+                kprintln!("[win32] {name} wrote: {text}");
+
+                if let Some(process) = crate::sched::current_process() {
+                    // Try writing to handle 2 or 1 if it is a channel (terminal stdout)
+                    if let Ok(crate::ipc::Object::Channel(endpoint)) =
+                        process.handles.object(2, crate::ipc::Rights::WRITE)
+                    {
+                        endpoint.send(&temp[..to_copy], alloc::vec![]).ok();
+                    } else if let Ok(crate::ipc::Object::Channel(endpoint)) =
+                        process.handles.object(1, crate::ipc::Rights::WRITE)
+                    {
+                        endpoint.send(&temp[..to_copy], alloc::vec![]).ok();
                     }
                 }
-                STATUS_SUCCESS
-            } else {
-                // Regular file write translated to Nexus VFS NodeWriteAt
-                STATUS_SUCCESS
             }
+            STATUS_SUCCESS
         }
 
         call::NT_READ_FILE => {
