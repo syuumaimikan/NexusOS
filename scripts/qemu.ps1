@@ -267,6 +267,7 @@ function Get-NexusQemuArgs {
     }
 
     $arguments = @(
+        '-accel', 'tcg,thread=multi',
         '-machine', 'q35',
         # `+pdpe1gb` because the bootloader maps physical memory with gigabyte
         # pages when the processor has them, and a machine without the feature

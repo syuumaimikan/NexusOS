@@ -44,6 +44,8 @@
 #>
 [CmdletBinding()]
 param(
+    [switch]$Build,
+    [switch]$Clean,
     [switch]$Headless,
     [ValidateRange(1, 86400)][int]$Timeout = 20,
     [string]$Until = '',
@@ -55,7 +57,7 @@ param(
     # One marker per batch, in the same order and with the same separator: each
     # batch is sent when its marker appears in the serial log.
     [string]$PressAfter = '',
-    [string]$Memory = '2G',
+    [string]$Memory = '4G',
     [string]$Resolution = '1920x1200',
     [string]$BuildDirectory = 'build',
     [ValidateRange(0, 65535)][int]$HostHttpPort = 18080,
@@ -82,6 +84,10 @@ if (($Until -or $Press -or $PressAfter) -and -not $Headless) {
 }
 if ($Gdb -and $Headless -and $Until) { throw '-Gdb pauses execution and cannot be combined with -Until' }
 Invoke-NexusCleanup
+
+if ($Build -or $Clean) {
+    & (Join-Path $PSScriptRoot 'build.ps1') -Clean:$Clean -Release:$Release
+}
 
 if (-not (Test-Path (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI'))) {
     if ([IO.Path]::GetFullPath($BuildDir) -ne [IO.Path]::GetFullPath((Join-Path $RepoRoot 'build'))) {

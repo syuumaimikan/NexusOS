@@ -323,6 +323,14 @@ pub fn next_key() -> Option<Key> {
         0x3B..=0x44 => Key::Function(code - 0x3B + 1),
         0x57 => Key::Function(11),
         0x58 => Key::Function(12),
+        // Japanese 106/109 keyboard keys and universal IME switching chords
+        0x70 => Key::Function(2),    // Hiragana / Katakana key
+        0x79 => Key::Character(' '), // Henkan (conversion) key
+        0x7B => Key::Function(2),    // Muhenkan (non-conversion) key
+        0x7D => Key::Character(if modifiers.shift { '|' } else { '\\' }), // Yen (¥) key
+        0x73 => Key::Character(if modifiers.shift { '_' } else { '\\' }), // Ro (ろ) / backslash
+        0x29 if modifiers.alt => Key::Function(2), // Alt+` (Hankaku/Zenkaku toggle)
+        0x39 if modifiers.control => Key::Function(2), // Ctrl+Space (IME toggle)
         // The extended set, which is where the arrows and the page keys live.
         // Only meaningful with the prefix: the same scancodes without it are
         // the number pad, and a machine that read them either way would scroll

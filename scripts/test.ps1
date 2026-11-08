@@ -46,7 +46,8 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$SkipFaults
+    [switch]$SkipFaults,
+    [string]$Only = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -75,6 +76,7 @@ function Invoke-Native {
 
 function Invoke-Step {
     param([string]$Name, [scriptblock]$Body)
+    if ($Only -and $Name -notmatch $Only) { return }
     Write-Host ''
     Write-Host "==> $Name" -ForegroundColor Cyan
     try {

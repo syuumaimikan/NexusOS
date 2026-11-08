@@ -801,12 +801,70 @@ impl Browser {
         .ok();
     }
 
+    /// Display the Firefox-like Start & Speed Dial Home Page.
+    fn show_home_page(&mut self) {
+        let home_html = "<!DOCTYPE html><html><head><title>Nexus Browser - Home</title></head><body>\
+            <h1>Nexus Browser (Firefox Edition)</h1>\
+            <p>Welcome to Nexus Browser. Enter a URL or search query in the address bar above to browse.</p>\
+            <h2>Speed Dial &amp; Quick Links</h2>\
+            <ul>\
+                <li><a href=\"http://localhost/\">Local Host Web Service</a></li>\
+                <li><a href=\"https://html.duckduckgo.com/html/\">DuckDuckGo Search Engine</a></li>\
+                <li><a href=\"https://en.wikipedia.org/\">Wikipedia - The Free Encyclopedia</a></li>\
+                <li><a href=\"http://repo.nexus-os.org/\">NexusOS Linux Package Repository</a></li>\
+            </ul>\
+            <h2>Navigation &amp; Shortcuts</h2>\
+            <p>Press TAB to focus the address bar. Type a URL (e.g. example.com) or search term and press Enter.</p>\
+            <p>While viewing a page: Up/Down or PageUp/PageDown to scroll, digits + Enter to follow a numbered link, Backspace to go back.</p>\
+            </body></html>";
+        self.document = nexus_html::parse(home_html);
+        self.links = self.document.links();
+        self.scroll = 0;
+        self.typing = "about:home".to_string();
+        self.status = "Ready - Nexus Browser".to_string();
+        self.editing = false;
+        self.fetch = None;
+    }
+
     /// Start fetching what is in the address bar.
     fn go(&mut self, address: String) {
         if let Some(fetch) = &mut self.fetch {
             fetch.abandon();
         }
-        match nexus_http::parse(&address) {
+        let trimmed = address.trim();
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("about:home")
+            || trimmed.eq_ignore_ascii_case("about:blank")
+            || trimmed.eq_ignore_ascii_case("home")
+        {
+            self.show_home_page();
+            return;
+        }
+
+        let normalized = if !trimmed.contains("://") {
+            if trimmed.contains(' ') || !trimmed.contains('.') {
+                let mut query = String::new();
+                for b in trimmed.bytes() {
+                    match b {
+                        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                            query.push(b as char);
+                        }
+                        b' ' => query.push('+'),
+                        _ => {
+                            use core::fmt::Write as _;
+                            let _ = write!(query, "%{:02X}", b);
+                        }
+                    }
+                }
+                format!("https://html.duckduckgo.com/html/?q={query}")
+            } else {
+                format!("https://{trimmed}")
+            }
+        } else {
+            trimmed.to_string()
+        };
+
+        match nexus_http::parse(&normalized) {
             Ok(mut url) => {
                 // `localhost` is this machine, and asking a resolver about it
                 // would be asking somebody else what this machine is called.

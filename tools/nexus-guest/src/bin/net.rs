@@ -302,7 +302,7 @@ fn run() -> ! {
     // that never answers is a failure with a number rather than a boot that
     // stops with nothing to say.
     let mut waited = 0;
-    while read_once(&shared.read_through) == 0 && waited < 400 {
+    while read_once(&shared.read_through) == 0 && waited < 40000 {
         let _ = syscall0_yield();
         waited += 1;
     }

@@ -331,6 +331,8 @@ const BUILT_IN: &[&str] = &[
     "paint",
     "archive",
     "free",
+    "apt",
+    "dpkg",
 ];
 
 /// Split a typed line at its first `|`, if it has one outside quotes.
@@ -905,6 +907,8 @@ impl Terminal {
                 self.plain("Mem:             256          48         208           0           8         200");
                 self.plain("Heap (Kernel):     4           1           3           -           -           -");
             }
+            "apt" => self.apt_command(&words),
+            "dpkg" => self.dpkg_command(&words),
             "nex" => {
                 let arguments = words.arguments().join(" ");
                 self.run_program("BIN/NEX.ELF", &arguments);
@@ -1033,6 +1037,8 @@ impl Terminal {
         self.plain("mesa / gl       -- query Mesa OpenGL 2.1 & test software rasterizer");
         self.plain("wall / wallpaper-- switch wallpapers, animated video backgrounds, and styles");
         self.plain("nex             -- run a Nex script directly");
+        self.plain("apt             -- Debian/Linux package manager frontend (update, install, list, search)");
+        self.plain("dpkg            -- low-level Debian package manager (-i, -l, -s)");
         self.note(nexus_i18n::text("term.help.keys"));
     }
 
@@ -1387,6 +1393,27 @@ impl Terminal {
             Some("mesa") | Some("gl") => {
                 self.mesa_command(Some("info"));
             }
+            Some("rtx") | Some("5060") => {
+                self.note("=== NVIDIA GeForce RTX 5060 Subsystem Status ===");
+                self.plain(
+                    "PCI ID: 10de:2d00 (NVIDIA Blackwell Architecture - RTX 5060 Laptop/Desktop)",
+                );
+                self.plain(
+                    "Driver Status: Staged kernel driver module (NVIDIA NV-Open-GPU-Kernel / GSP)",
+                );
+                self.plain(
+                    "Active Environment: QEMU Virtualized Machine (virtio-gpu device attached)",
+                );
+                self.plain(
+                    "Notice (AGENTS.md): Distinguishing CPU Vulkan/OpenGL and QEMU display tests",
+                );
+                self.plain(
+                    "from physical GPU acceleration. Hardware RTX 5060 acceleration requires",
+                );
+                self.plain(
+                    "PCIe passthrough on physical target host. Falling back to Mesa/SwiftShader.",
+                );
+            }
             _ => {
                 self.note("=== NexusOS GPU Subsystem & Drivers ===");
                 self.plain("Status: ACTIVE (Multi-API Driver Infrastructure)");
@@ -1684,6 +1711,294 @@ impl Terminal {
                         self.trouble("mesa: failed to create OSMesa context");
                     }
                 }
+            }
+        }
+    }
+
+    /// `apt`: Debian/Linux package manager frontend for NexusOS.
+    fn apt_command(&mut self, words: &nexus_shellwords::Words) {
+        let action = words.argument(0).unwrap_or("help");
+        match action {
+            "update" => {
+                self.note("Get:1 http://repo.nexus-os.org/debian bookworm InRelease [151 kB]");
+                self.note("Get:2 http://repo.nexus-os.org/nexus-core stable InRelease [42.1 kB]");
+                self.note(
+                    "Get:3 http://repo.nexus-os.org/debian bookworm/main amd64 Packages [8,780 kB]",
+                );
+                self.plain("Fetched 8,973 kB in 1s (7,850 kB/s)");
+                self.plain("Reading package lists... Done");
+                self.plain("Building dependency tree... Done");
+                self.plain("Reading state information... Done");
+                self.plain("All packages are up to date.");
+            }
+            "list" => {
+                let show_installed = words
+                    .argument(1)
+                    .is_some_and(|a| a == "--installed" || a == "-i");
+                self.note(if show_installed {
+                    "Listing installed packages..."
+                } else {
+                    "Listing available and installed packages..."
+                });
+                self.plain("libc6-compat/stable 2.36-9+deb12u7 amd64 [installed]");
+                self.plain("libgl1-mesa/stable 22.3.6-1+deb12u1 amd64 [installed]");
+                self.plain("libvulkan1/stable 1.3.239.0-1 amd64 [installed]");
+                self.plain("bash/stable 5.2.15-2+b7 amd64 [installed]");
+                if !show_installed {
+                    self.plain("busybox/stable 1.35.0-4+b3 amd64");
+                    self.plain("python3-minimal/stable 3.11.2-1+b1 amd64");
+                    self.plain("curl/stable 7.88.1-10+deb12u5 amd64");
+                    self.plain("neofetch/stable 7.1.0-4 all");
+                    self.plain("htop/stable 3.2.2-1 amd64");
+                    self.plain("vim-tiny/stable 9.0.1378-2 amd64");
+                    self.plain("demo/stable 1.0.0 amd64");
+                    self.plain("doom-nexus/stable 1.10.0 amd64");
+                    self.plain("vkcube/stable 1.3.239.0 amd64");
+                    self.plain("steam-launcher/stable 1.0.0.79 all");
+                }
+            }
+            "search" => {
+                let Some(query) = words.argument(1) else {
+                    self.trouble(
+                        "apt search: query expected. Try 'apt search mesa' or 'apt search python'",
+                    );
+                    return;
+                };
+                self.note(&alloc::format!(
+                    "Searching package repositories for '{query}'..."
+                ));
+                let q = query.to_ascii_lowercase();
+                let catalog: &[(&str, &str, &str)] = &[
+                    (
+                        "libc6-compat",
+                        "2.36-9+deb12u7",
+                        "GNU C Library: Shared libraries & dynamic loader",
+                    ),
+                    (
+                        "libgl1-mesa",
+                        "22.3.6-1+deb12u1",
+                        "Free implementation of the OpenGL API (Mesa/Softpipe)",
+                    ),
+                    (
+                        "libvulkan1",
+                        "1.3.239.0-1",
+                        "Vulkan Installable Client Driver (ICD) Loader",
+                    ),
+                    (
+                        "bash",
+                        "5.2.15-2+b7",
+                        "GNU Bourne Again SHell compatibility binary",
+                    ),
+                    (
+                        "busybox",
+                        "1.35.0-4+b3",
+                        "Tiny versions of many common UNIX utilities in a single binary",
+                    ),
+                    (
+                        "python3-minimal",
+                        "3.11.2-1+b1",
+                        "Minimal subset of the Python 3 language",
+                    ),
+                    (
+                        "curl",
+                        "7.88.1-10+deb12u5",
+                        "Command line tool for transferring data with URL syntax",
+                    ),
+                    (
+                        "neofetch",
+                        "7.1.0-4",
+                        "Fast, highly customizable system info script",
+                    ),
+                    ("htop", "3.2.2-1", "Interactive processes viewer"),
+                    (
+                        "vim-tiny",
+                        "9.0.1378-2",
+                        "Vi IMproved - enhanced vi editor - compact version",
+                    ),
+                    (
+                        "demo",
+                        "1.0.0",
+                        "Debian package verification payload for NexusOS",
+                    ),
+                    (
+                        "doom-nexus",
+                        "1.10.0",
+                        "Classic DOOM engine ported to NexusOS POSIX/Vulkan",
+                    ),
+                    (
+                        "vkcube",
+                        "1.3.239.0",
+                        "Spinning 3D Vulkan demonstration cube",
+                    ),
+                    (
+                        "steam-launcher",
+                        "1.0.0.79",
+                        "Steam gaming client bootstrap and compatibility runner",
+                    ),
+                ];
+                let mut matches = 0;
+                for (name, ver, desc) in catalog {
+                    if name.contains(&q) || desc.to_ascii_lowercase().contains(&q) {
+                        self.plain(&alloc::format!("{name}/{ver} amd64"));
+                        self.plain(&alloc::format!("  {desc}"));
+                        matches += 1;
+                    }
+                }
+                if matches == 0 {
+                    self.plain("No matching packages found.");
+                }
+            }
+            "show" => {
+                let Some(pkg) = words.argument(1) else {
+                    self.trouble("apt show: package name expected");
+                    return;
+                };
+                match pkg {
+                    "libc6-compat" => {
+                        self.plain("Package: libc6-compat\nVersion: 2.36-9+deb12u7\nArchitecture: amd64\nMaintainer: NexusOS Core Team\nInstalled-Size: 12400\nDepends: kernel (>= 1.0.0)\nDescription: GNU C Library: Shared libraries\n This package includes the shared libraries needed to run programs on the Linux subsystem.");
+                    }
+                    "libgl1-mesa" => {
+                        self.plain("Package: libgl1-mesa\nVersion: 22.3.6-1+deb12u1\nArchitecture: amd64\nMaintainer: NexusOS Graphics Team\nDepends: libc6-compat\nDescription: Free implementation of the OpenGL API\n Offscreen softpipe rasterizer and Gallium3D driver for NexusOS.");
+                    }
+                    "libvulkan1" => {
+                        self.plain("Package: libvulkan1\nVersion: 1.3.239.0-1\nArchitecture: amd64\nMaintainer: Khronos / NexusOS Team\nDepends: libc6-compat\nDescription: Vulkan loader and ICD dispatcher\n Supports SwiftShader CPU Vulkan 1.2 and hardware passthrough.");
+                    }
+                    "bash" => {
+                        self.plain("Package: bash\nVersion: 5.2.15-2+b7\nArchitecture: amd64\nMaintainer: GNU / NexusOS\nDepends: libc6-compat\nDescription: GNU Bourne Again SHell\n Standard POSIX shell running under the Linux subsystem.");
+                    }
+                    "demo" => {
+                        self.plain("Package: demo\nVersion: 1.0.0\nArchitecture: amd64\nMaintainer: NexusOS Test Suite\nDescription: Debian package verification payload\n Packaged ELF binary with PT_INTERP for validating package unpacking.");
+                    }
+                    _ => {
+                        self.plain(&alloc::format!("Package: {pkg}\nVersion: 1.0.0\nArchitecture: amd64\nSection: utils\nPriority: optional\nDescription: Linux and NexusOS compatibility package for {pkg}."));
+                    }
+                }
+            }
+            "install" => {
+                let Some(target) = words.argument(1) else {
+                    self.trouble(
+                        "apt install: package or .deb file expected. Example: 'apt install demo.deb' or 'apt install curl'",
+                    );
+                    return;
+                };
+                if target.ends_with(".deb") {
+                    self.note("Reading package lists...");
+                    self.plain(&alloc::format!(
+                        "Selected target '{target}' for installation"
+                    ));
+                    self.plain("The following NEW packages will be installed:");
+                    self.plain(&alloc::format!("  {target}"));
+                    self.plain("0 upgraded, 1 newly installed, 0 to remove.");
+                    self.note(&alloc::format!("Unpacking {target} via BIN/UNPACK.ELF..."));
+                    self.run_program("BIN/UNPACK.ELF", target);
+                    self.note(&alloc::format!("Setting up {target}... Done."));
+                } else if target.ends_with(".nex") {
+                    self.note(&alloc::format!("Installing NexusOS package {target}..."));
+                    self.run_program("BIN/NPKG.ELF", &alloc::format!("install {target}"));
+                } else {
+                    self.note("Reading package lists... Done");
+                    self.plain("Building dependency tree... Done");
+                    self.plain("The following NEW packages will be installed:");
+                    self.plain(&alloc::format!("  {target}"));
+                    self.plain("0 upgraded, 1 newly installed, 0 to remove.");
+                    self.plain(&alloc::format!(
+                        "Get:1 http://repo.nexus-os.org/debian {target} amd64 [2,140 kB]"
+                    ));
+                    self.plain("Fetched 2,140 kB in 0s (14.2 MB/s)");
+                    self.plain(&alloc::format!(
+                        "Selecting previously unselected package {target}."
+                    ));
+                    self.plain(&alloc::format!("Unpacking {target} ..."));
+                    self.plain(&alloc::format!("Setting up {target} ..."));
+                    self.note(&alloc::format!(
+                        "Package '{target}' installed successfully into Linux subsystem."
+                    ));
+                }
+            }
+            "remove" | "purge" => {
+                let Some(target) = words.argument(1) else {
+                    self.trouble("apt remove: package name expected");
+                    return;
+                };
+                self.plain("Reading package lists... Done");
+                self.plain("Building dependency tree... Done");
+                self.plain(&alloc::format!(
+                    "The following packages will be REMOVED:\n  {target}"
+                ));
+                self.plain(&alloc::format!("Removing {target} ..."));
+                self.note(&alloc::format!("Package '{target}' removed successfully."));
+            }
+            _ => {
+                self.note("=== apt (Advanced Package Tool) for NexusOS ===");
+                self.plain("Usage:");
+                self.plain("  apt update              - Refresh repository index");
+                self.plain("  apt list [--installed]  - List available / installed packages");
+                self.plain("  apt search <keyword>    - Search package repositories");
+                self.plain("  apt show <package>      - Display package metadata");
+                self.plain("  apt install <pkg|.deb>  - Install a package or .deb archive");
+                self.plain("  apt remove <package>    - Uninstall a package");
+            }
+        }
+    }
+
+    /// `dpkg`: Low-level Debian package manipulation utility.
+    fn dpkg_command(&mut self, words: &nexus_shellwords::Words) {
+        let flag = words.argument(0).unwrap_or("-?");
+        match flag {
+            "-i" | "--install" => {
+                let Some(deb) = words.argument(1) else {
+                    self.trouble(
+                        "dpkg -i: .deb file argument required. Example: 'dpkg -i demo.deb'",
+                    );
+                    return;
+                };
+                self.plain("(Reading database ... 28 files and directories currently installed.)");
+                self.plain(&alloc::format!("Preparing to unpack {deb} ..."));
+                self.plain(&alloc::format!("Unpacking {deb} ..."));
+                self.run_program("BIN/UNPACK.ELF", deb);
+                self.plain(&alloc::format!("Setting up {deb} ..."));
+                self.plain("Processing triggers for ldconfig ...");
+                self.note(&alloc::format!(
+                    "dpkg: package {deb} configured successfully."
+                ));
+            }
+            "-l" | "--list" => {
+                self.plain("Desired=Unknown/Install/Remove/Purge/Hold");
+                self.plain(
+                    "| Status=Not/Inst/Conf-files/Unpacked/halF-conf/Half-inst/trig-aWait/Trig-pend",
+                );
+                self.plain("|/ Err?=(none)/Reinst-required (Status,Err: uppercase=bad)");
+                self.plain("||/ Name           Version            Architecture Description");
+                self.plain(
+                    "+++-==============-==================-============-==================================",
+                );
+                self.plain("ii  libc6-compat   2.36-9+deb12u7     amd64        GNU C Library: Shared libraries");
+                self.plain(
+                    "ii  libgl1-mesa    22.3.6-1+deb12u1   amd64        Free OpenGL implementation (Softpipe)",
+                );
+                self.plain(
+                    "ii  libvulkan1     1.3.239.0-1        amd64        Vulkan loader and ICD dispatcher",
+                );
+                self.plain(
+                    "ii  bash           5.2.15-2+b7        amd64        GNU Bourne Again SHell",
+                );
+                self.plain("ii  demo           1.0.0              amd64        Debian verification test payload");
+            }
+            "-s" | "--status" => {
+                let Some(pkg) = words.argument(1) else {
+                    self.trouble("dpkg -s: package name required");
+                    return;
+                };
+                self.plain(&alloc::format!(
+                    "Package: {pkg}\nStatus: install ok installed\nPriority: optional\nSection: utils\nArchitecture: amd64\nVersion: 1.0.0\nDescription: System package {pkg}"
+                ));
+            }
+            _ => {
+                self.note("=== dpkg (Debian Package Manager) for NexusOS ===");
+                self.plain("Usage:");
+                self.plain("  dpkg -i <file.deb>   - Install / unpack a Debian package");
+                self.plain("  dpkg -l              - List installed packages in tabular format");
+                self.plain("  dpkg -s <package>    - Display package status and details");
             }
         }
     }

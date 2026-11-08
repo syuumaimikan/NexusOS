@@ -68,6 +68,29 @@ pub mod key {
     /// And its gateway and resolver.
     pub const NETWORK_GATEWAY: &str = "network.gateway";
     pub const NETWORK_DNS: &str = "network.dns";
+
+    /// Display resolution e.g. "1920x1200", "1920x1080", "2560x1440".
+    pub const RESOLUTION: &str = "display.resolution";
+    /// Display refresh rate e.g. "60Hz", "120Hz", "144Hz".
+    pub const REFRESH_RATE: &str = "display.refresh_rate";
+    /// Display scale factor e.g. "100%", "125%", "150%".
+    pub const SCALE: &str = "display.scale";
+    /// Keyboard layout: "en-US", "ja-JP".
+    pub const KEYBOARD: &str = "input.keyboard";
+    /// Input mode (IME): "Direct", "Hiragana", "Katakana".
+    pub const IME_MODE: &str = "input.ime";
+    /// Audio master volume: "100%", "75%", "50%", "25%", "0%".
+    pub const VOLUME: &str = "audio.volume";
+    /// Startup sound chime: "enabled", "disabled".
+    pub const SOUND_CHIME: &str = "audio.chime";
+    /// Power management profile: "Performance", "Balanced", "Power Saver".
+    pub const POWER_PROFILE: &str = "power.profile";
+    /// Graphics driver backend: "auto", "vulkan", "mesa".
+    pub const GPU_BACKEND: &str = "gpu.backend";
+    /// Machine hostname.
+    pub const HOSTNAME: &str = "system.hostname";
+    /// Dock auto-hide mode: "no", "yes".
+    pub const DOCK_AUTOHIDE: &str = "desktop.dock_autohide";
 }
 
 /// A settings file, in memory.
