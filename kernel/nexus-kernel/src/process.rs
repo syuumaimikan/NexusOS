@@ -226,6 +226,8 @@ pub enum Personality {
     /// registers; and the call arrives through `int 0x80` rather than through
     /// the `syscall` instruction. See `compat::linux32`.
     Linux32,
+    /// Windows NT 64-bit native interface, translated by `compat::win32`.
+    WinNt,
 }
 
 /// The image actually installed by the loader, independently of its interpreter.
@@ -301,7 +303,7 @@ impl Process {
         personality: Personality,
     ) -> Arc<Self> {
         let handles = match personality {
-            Personality::Nexus => HandleTable::new(),
+            Personality::Nexus | Personality::WinNt => HandleTable::new(),
             Personality::Linux | Personality::Linux32 => {
                 HandleTable::starting_at(crate::compat::linux_files::FIRST_HANDLE)
             }

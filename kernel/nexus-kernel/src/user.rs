@@ -1109,7 +1109,10 @@ fn handle_spawn_request(
         Some(rest) => (crate::process::Personality::Linux32, rest),
         None => match path.strip_prefix("linux:") {
             Some(rest) => (crate::process::Personality::Linux, rest),
-            None => (crate::process::Personality::Nexus, path),
+            None => match path.strip_prefix("win:") {
+                Some(rest) => (crate::process::Personality::WinNt, rest),
+                None => (crate::process::Personality::Nexus, path),
+            },
         },
     };
 
@@ -1761,7 +1764,7 @@ pub unsafe fn start_from_disk_as(
     // rather than quietly writing over something.
     let stack_pages = match personality {
         Personality::Nexus => DISK_STACK_PAGES,
-        Personality::Linux | Personality::Linux32 => LINUX_STACK_PAGES,
+        Personality::Linux | Personality::Linux32 | Personality::WinNt => LINUX_STACK_PAGES,
     };
     // A thirty-two bit program's stack has to be somewhere a thirty-two bit
     // register can point at, and above its image rather than below it.
@@ -1809,6 +1812,10 @@ pub unsafe fn start_from_disk_as(
     let initial_stack = match personality {
         Personality::Nexus => InitialStack {
             pointer: DISK_STACK_TOP - INITIAL_STACK_OFFSET,
+            ..InitialStack::default()
+        },
+        Personality::WinNt => InitialStack {
+            pointer: DISK_STACK_TOP - 64, // 32-byte shadow space + 16-byte alignment
             ..InitialStack::default()
         },
         // SAFETY: the stack pages were just mapped into `space`, this kernel is

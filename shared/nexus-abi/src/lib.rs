@@ -13,7 +13,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod boot;
+pub mod dual_abi;
 pub mod elf;
 pub mod layout;
+pub mod pe;
 
 pub use boot::*;

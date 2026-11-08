@@ -27,3 +27,4 @@ pub mod linux_semaphore;
 pub mod linux_signal;
 pub mod linux_socket;
 pub mod linux_threads;
+pub mod win32;

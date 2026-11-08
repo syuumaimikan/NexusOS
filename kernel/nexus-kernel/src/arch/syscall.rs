@@ -748,6 +748,15 @@ extern "sysv64" fn dispatch(
         return answer;
     }
 
+    if matches!(
+        crate::sched::current_process().map(|process| process.personality),
+        Some(crate::process::Personality::WinNt)
+    ) {
+        let answer = crate::compat::win32::dispatch(number, unsafe { &mut *frame });
+        super::interrupts::disable();
+        return answer;
+    }
+
     let result = match Call::from_number(number) {
         Some(Call::Exit) => {
             match crate::sched::current_process() {
