@@ -50,7 +50,8 @@ param(
     [int]$Width = 240,
     [int]$Height = 180,
     [int]$Frames = 24,
-    [int]$Fps = 12
+    [int]$Fps = 12,
+    [string]$Kind = 'Logo'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -82,52 +83,98 @@ for ($frame = 0; $frame -lt $Frames; $frame++) {
         $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
         $graphics.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
 
-        $area = New-Object System.Drawing.Rectangle(0, 0, $Width, $Height)
-        $gradient = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-            $area, $top, $bottom, [System.Drawing.Drawing2D.LinearGradientMode]::Vertical)
-        $graphics.FillRectangle($gradient, $area)
-        $gradient.Dispose()
+        if ($Kind -eq 'Matrix') {
+            $bg = [System.Drawing.Color]::FromArgb(255, 3, 10, 6)
+            $graphics.Clear($bg)
 
-        $centreX = $Width / 2.0
-        $centreY = $Height / 2.0
-        $reach = [math]::Min($Width, $Height) * 0.34
+            $font = New-Object System.Drawing.Font('Consolas', [float]($Height / 14.0),
+                [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+            $format = New-Object System.Drawing.StringFormat
+            $format.Alignment = [System.Drawing.StringAlignment]::Center
 
-        # One full turn over the whole clip, so the last frame leads back into
-        # the first and the loop has no jump in it.
-        $turn = 2.0 * [math]::PI * $frame / $Frames
+            $numCols = 20
+            $colWidth = [float]($Width / [float]$numCols)
+            $rowHeight = [float]($Height / 14.0)
+            $glyphs = @('0', '1', 'N', 'E', 'X', 'U', 'S', '8', 'A', 'F', '2', 'C', '7', '4', 'B', '9')
 
-        $pen = New-Object System.Drawing.Pen($accent, [float]($Width / 100.0))
-        $dot = New-Object System.Drawing.SolidBrush($accent)
-        for ($spoke = 0; $spoke -lt 12; $spoke++) {
-            $angle = $turn + $spoke * [math]::PI / 6.0
-            $length = if ($spoke % 2 -eq 0) { $reach } else { $reach * 0.68 }
-            $x = $centreX + [math]::Cos($angle) * $length
-            $y = $centreY + [math]::Sin($angle) * $length
-            $graphics.DrawLine($pen, [float]$centreX, [float]$centreY, [float]$x, [float]$y)
-            $radius = $Width / 80.0
-            $graphics.FillEllipse($dot, [float]($x - $radius), [float]($y - $radius),
-                [float]($radius * 2), [float]($radius * 2))
+            for ($c = 0; $c -lt $numCols; $c++) {
+                $colSeed = $c * 37 + 13
+                $speed = 1 + ($colSeed % 3)
+                $trailLen = 6 + ($colSeed % 4)
+                $headPos = ($frame * $speed + ($colSeed % 14)) % 14
+                $x = ($c + 0.5) * $colWidth
+
+                for ($t = 0; $t -lt $trailLen; $t++) {
+                    $r = ($headPos - $t + 14) % 14
+                    $y = $r * $rowHeight
+                    $glyphIdx = ($c * 7 + $r * 11 + $frame) % $glyphs.Length
+                    $glyphChar = $glyphs[$glyphIdx]
+
+                    $color = if ($t -eq 0) {
+                        [System.Drawing.Color]::FromArgb(255, 230, 255, 240)
+                    } elseif ($t -eq 1) {
+                        [System.Drawing.Color]::FromArgb(255, 74, 222, 128)
+                    } elseif ($t -lt 4) {
+                        [System.Drawing.Color]::FromArgb(255, 34, 197, 94)
+                    } else {
+                        [System.Drawing.Color]::FromArgb(255, 21, 128, 61)
+                    }
+
+                    $brush = New-Object System.Drawing.SolidBrush($color)
+                    $graphics.DrawString($glyphChar, $font, $brush, [float]$x, [float]$y, $format)
+                    $brush.Dispose()
+                }
+            }
+            $font.Dispose()
+            $format.Dispose()
+        } else {
+            $area = New-Object System.Drawing.Rectangle(0, 0, $Width, $Height)
+            $gradient = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
+                $area, $top, $bottom, [System.Drawing.Drawing2D.LinearGradientMode]::Vertical)
+            $graphics.FillRectangle($gradient, $area)
+            $gradient.Dispose()
+
+            $centreX = $Width / 2.0
+            $centreY = $Height / 2.0
+            $reach = [math]::Min($Width, $Height) * 0.34
+
+            # One full turn over the whole clip, so the last frame leads back into
+            # the first and the loop has no jump in it.
+            $turn = 2.0 * [math]::PI * $frame / $Frames
+
+            $pen = New-Object System.Drawing.Pen($accent, [float]($Width / 100.0))
+            $dot = New-Object System.Drawing.SolidBrush($accent)
+            for ($spoke = 0; $spoke -lt 12; $spoke++) {
+                $angle = $turn + $spoke * [math]::PI / 6.0
+                $length = if ($spoke % 2 -eq 0) { $reach } else { $reach * 0.68 }
+                $x = $centreX + [math]::Cos($angle) * $length
+                $y = $centreY + [math]::Sin($angle) * $length
+                $graphics.DrawLine($pen, [float]$centreX, [float]$centreY, [float]$x, [float]$y)
+                $radius = $Width / 80.0
+                $graphics.FillEllipse($dot, [float]($x - $radius), [float]($y - $radius),
+                    [float]($radius * 2), [float]($radius * 2))
+            }
+
+            $core = [math]::Min($Width, $Height) * 0.07
+            $graphics.FillEllipse($dot, [float]($centreX - $core), [float]($centreY - $core),
+                [float]($core * 2), [float]($core * 2))
+            $pen.Dispose()
+            $dot.Dispose()
+
+            # The frame number, so that a screenshot of a playing recording can be
+            # told from a screenshot of a stopped one by looking at it.
+            $font = New-Object System.Drawing.Font('Segoe UI', [float]($Height / 12.0),
+                [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
+            $ink = New-Object System.Drawing.SolidBrush(
+                [System.Drawing.Color]::FromArgb(255, 230, 236, 245))
+            $format = New-Object System.Drawing.StringFormat
+            $format.Alignment = [System.Drawing.StringAlignment]::Center
+            $graphics.DrawString("$($frame + 1) / $Frames", $font, $ink,
+                [float]$centreX, [float]($Height * 0.86), $format)
+            $font.Dispose()
+            $ink.Dispose()
+            $format.Dispose()
         }
-
-        $core = [math]::Min($Width, $Height) * 0.07
-        $graphics.FillEllipse($dot, [float]($centreX - $core), [float]($centreY - $core),
-            [float]($core * 2), [float]($core * 2))
-        $pen.Dispose()
-        $dot.Dispose()
-
-        # The frame number, so that a screenshot of a playing recording can be
-        # told from a screenshot of a stopped one by looking at it.
-        $font = New-Object System.Drawing.Font('Segoe UI', [float]($Height / 12.0),
-            [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
-        $ink = New-Object System.Drawing.SolidBrush(
-            [System.Drawing.Color]::FromArgb(255, 230, 236, 245))
-        $format = New-Object System.Drawing.StringFormat
-        $format.Alignment = [System.Drawing.StringAlignment]::Center
-        $graphics.DrawString("$($frame + 1) / $Frames", $font, $ink,
-            [float]$centreX, [float]($Height * 0.86), $format)
-        $font.Dispose()
-        $ink.Dispose()
-        $format.Dispose()
 
         $stream = New-Object System.IO.MemoryStream
         $bitmap.Save($stream, $jpegCodec, $jpegSettings)

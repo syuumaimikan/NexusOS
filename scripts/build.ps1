@@ -531,12 +531,22 @@ $Picture = Join-Path $ProgramDir 'nexus.png'
 if ($LASTEXITCODE -ne 0) { throw "could not draw the picture (exit $LASTEXITCODE)" }
 $pictureSize = [math]::Round((Get-Item $Picture).Length / 1KB, 1)
 
+$Aurora = Join-Path $ProgramDir 'space.png'
+& powershell -NoProfile -File (Join-Path $PSScriptRoot 'make-picture.ps1') -Kind Aurora -OutputFile $Aurora | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "could not draw the aurora picture (exit $LASTEXITCODE)" }
+$auroraSize = [math]::Round((Get-Item $Aurora).Length / 1KB, 1)
+
 # And a recording, for the same reason and by the same route: `.AVI` is copied
 # out of the image's program directory into PICTURES alongside the stills.
 $Video = Join-Path $ProgramDir 'nexus.avi'
 & powershell -NoProfile -File (Join-Path $PSScriptRoot 'make-video.ps1') -OutputFile $Video | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "could not draw the recording (exit $LASTEXITCODE)" }
 $videoSize = [math]::Round((Get-Item $Video).Length / 1KB, 1)
+
+$MatrixVideo = Join-Path $ProgramDir 'rain.avi'
+& powershell -NoProfile -File (Join-Path $PSScriptRoot 'make-video.ps1') -Kind Matrix -OutputFile $MatrixVideo | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "could not draw the matrix recording (exit $LASTEXITCODE)" }
+$matrixVideoSize = [math]::Round((Get-Item $MatrixVideo).Length / 1KB, 1)
 
 # A Debian package, travelling the same way and landing where a downloaded one
 # would: the kernel copies `.DEB` out of the image's program directory into
@@ -721,7 +731,9 @@ Write-Host "  solid      : $solidSize KiB  -> BIN\SOLID.ELF on the disk"
 Write-Host "  netool     : $netoolSize KiB  -> BIN\NETOOL.ELF on the disk"
 Write-Host "  download   : $debSize bytes of Debian package -> DOWNLOAD\DEMO.DEB on the disk"
 Write-Host "  picture    : $pictureSize KiB  -> PICTURES\NEXUS.PNG on the disk"
+Write-Host "  aurora pic : $auroraSize KiB  -> PICTURES\SPACE.PNG on the disk"
 Write-Host "  recording  : $videoSize KiB  -> PICTURES\NEXUS.AVI on the disk"
+Write-Host "  matrix vid : $matrixVideoSize KiB  -> PICTURES\RAIN.AVI on the disk"
 Write-Host "  root store : $rootsSize KiB  -> SYSTEM\ROOTS.NXR on the disk"
 Write-Host "  usb stick  : $usbSize KiB, every sector numbered  -> plugged into qemu-xhci"
 Write-Host "  usb stick 2: $usbFsSize MiB, GPT with FAT32 and two files  -> plugged in beside it"

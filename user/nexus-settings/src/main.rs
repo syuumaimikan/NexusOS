@@ -297,11 +297,18 @@ impl Settings {
                 alloc::vec!["no".to_string(), "yes".to_string()],
                 "yes"
             )),
-            // A name rather than a list. The pictures on a machine are not
-            // something this window can enumerate -- it is lent the settings
-            // directory and nothing else, which is the right shape for what it
-            // does and means this is typed.
-            Item::Row(Row::typed(nexus_look::key::PICTURE, "settings.picture", "")),
+            Item::Row(Row::choice(
+                nexus_look::key::PICTURE,
+                "settings.picture",
+                alloc::vec![
+                    "none".to_string(),
+                    "nexus.png".to_string(),
+                    "nexus.avi".to_string(),
+                    "space.png".to_string(),
+                    "rain.avi".to_string(),
+                ],
+                "none",
+            )),
             Item::Row(Row::choice(
                 nexus_look::key::FIT,
                 "settings.fit",

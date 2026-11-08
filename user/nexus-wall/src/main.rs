@@ -491,7 +491,10 @@ impl Behind {
 /// "no name set", which is not a problem and would be noise repeated every
 /// time the settings are re-read.
 fn open_picture(pictures: Option<Handle>, look: &Look) -> Option<Behind> {
-    if look.picture.is_empty() {
+    if look.picture.is_empty()
+        || look.picture.eq_ignore_ascii_case("none")
+        || look.picture.eq_ignore_ascii_case("off")
+    {
         return None;
     }
     let root = pictures?;
@@ -766,21 +769,29 @@ fn draw_picture(
     let covered_right = (left + i64::from(across)).max(0).min(i64::from(width)) as u32;
     let covered_bottom = (top + i64::from(down)).max(0).min(i64::from(height)) as u32;
 
-    for row in 0..down {
-        let y = top + i64::from(row);
-        if y < 0 || y >= i64::from(height) {
-            continue;
-        }
-        let source_row = (u64::from(row) * u64::from(picture.height) / u64::from(down)) as u32;
-        for column in 0..across {
-            let x = left + i64::from(column);
-            if x < 0 || x >= i64::from(width) {
-                continue;
-            }
-            let source_column =
-                (u64::from(column) * u64::from(picture.width) / u64::from(across)) as u32;
-            if let Some(pixel) = picture.at(source_column, source_row) {
-                canvas.set(x as u32, y as u32, nexus_ui::Colour(pixel));
+    let pw = picture.width as usize;
+    let ph = picture.height as usize;
+    if pw == 0 || ph == 0 || picture.pixels.len() < pw * ph {
+        return None;
+    }
+
+    let start_row = (covered_top as i64 - top).max(0) as u32;
+    let end_row = (covered_bottom as i64 - top).min(down as i64) as u32;
+    let start_col = (covered_left as i64 - left).max(0) as u32;
+    let end_col = (covered_right as i64 - left).min(across as i64) as u32;
+
+    for row in start_row..end_row {
+        let y = (top + i64::from(row)) as u32;
+        let source_row = ((u64::from(row) * u64::from(picture.height)) / u64::from(down)) as usize;
+        let row_offset = source_row.min(ph.saturating_sub(1)) * pw;
+        let row_slice = &picture.pixels[row_offset..row_offset + pw];
+
+        for column in start_col..end_col {
+            let x = (left + i64::from(column)) as u32;
+            let source_col =
+                ((u64::from(column) * u64::from(picture.width)) / u64::from(across)) as usize;
+            if let Some(&pixel) = row_slice.get(source_col) {
+                canvas.set(x, y, nexus_ui::Colour(pixel));
             }
         }
     }

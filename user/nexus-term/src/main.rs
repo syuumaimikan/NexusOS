@@ -280,9 +280,39 @@ extern "C" fn main() -> ! {
 /// dropped the right-hand side of `help | count` would be worse than one that
 /// says it cannot do it.
 const BUILT_IN: &[&str] = &[
-    "help", "?", "clear", "cls", "echo", "pwd", "dir", "cd", "type", "write", "append", "mkdir",
-    "rm", "del", "run", "date", "beep", "set", "look", "sys", "top", "net", "usb", "lookup", "dig",
-    "nslookup", "scan", "uptime", "history",
+    "help",
+    "?",
+    "clear",
+    "cls",
+    "echo",
+    "pwd",
+    "dir",
+    "cd",
+    "type",
+    "write",
+    "append",
+    "mkdir",
+    "rm",
+    "del",
+    "run",
+    "date",
+    "beep",
+    "set",
+    "look",
+    "wall",
+    "wallpaper",
+    "sys",
+    "top",
+    "net",
+    "usb",
+    "lookup",
+    "dig",
+    "nslookup",
+    "scan",
+    "uptime",
+    "history",
+    "game",
+    "steam",
 ];
 
 /// Split a typed line at its first `|`, if it has one outside quotes.
@@ -851,6 +881,7 @@ impl Terminal {
             "beep" => self.beep(words.argument(0), words.argument(1)),
             "set" => self.set(words.argument(0), words.argument(1)),
             "look" => self.look(),
+            "wall" | "wallpaper" => self.wallpaper_command(words.argument(0), words.argument(1)),
             "sys" | "top" => self.sys(),
             "net" => self.net(),
             "usb" => self.usb(words.argument(0), words.argument(1)),
@@ -936,6 +967,7 @@ impl Terminal {
         self.plain("cc / c          -- C/C++ compiler and runner");
         self.plain("rust / rustc    -- Rust compiler and runner");
         self.plain("game / steam    -- Steamworks gaming subsystem and games (Spacewar AppID 480)");
+        self.plain("wall / wallpaper-- switch wallpapers, animated video backgrounds, and styles");
         self.plain("nex             -- run a Nex script directly");
         self.note(nexus_i18n::text("term.help.keys"));
     }
@@ -1860,6 +1892,188 @@ impl Terminal {
         self.plain(&text);
         let choices = nexus_i18n::format("term.look.styles", &[("styles", &styles.join(" "))]);
         self.note(&choices);
+        if !look.picture.is_empty() && !look.picture.eq_ignore_ascii_case("none") {
+            let kind = if look.picture.to_ascii_lowercase().ends_with(".avi") {
+                "Video Wallpaper (Motion-JPEG)"
+            } else {
+                "Picture Wallpaper"
+            };
+            self.plain(&alloc::format!(
+                "  wallpaper : {} [{kind}, fit: {}]",
+                look.picture,
+                look.fit.name()
+            ));
+        }
+        self.note(
+            "Type 'wallpaper' or 'wallpaper list' to switch wallpapers and video backgrounds.",
+        );
+    }
+
+    /// `wallpaper` / `wall`: Switch wallpapers, video backgrounds, styles, and fit.
+    fn wallpaper_command(&mut self, action: Option<&str>, value: Option<&str>) {
+        let Some(directory) = self.system() else {
+            self.trouble(nexus_i18n::text("term.nosettings"));
+            return;
+        };
+        let look = match read_text(directory, SETTINGS_NAME) {
+            Some(text) => nexus_look::Look::parse(&text),
+            None => nexus_look::Look::default(),
+        };
+        nexus_user::close(directory).ok();
+
+        match action {
+            None => {
+                self.note("=== Wallpaper Configuration (NexusOS) ===");
+                self.plain(&alloc::format!("  Style          : {}", look.style.name()));
+                let pic_status =
+                    if look.picture.is_empty() || look.picture.eq_ignore_ascii_case("none") {
+                        alloc::format!("(none - active procedural pattern '{}')", look.style.name())
+                    } else if look.picture.to_ascii_lowercase().ends_with(".avi") {
+                        alloc::format!("{} [Animated Video Wallpaper (Motion-JPEG)]", look.picture)
+                    } else {
+                        alloc::format!("{} [Static Picture Wallpaper]", look.picture)
+                    };
+                self.plain(&alloc::format!("  Picture/Video  : {pic_status}"));
+                self.plain(&alloc::format!("  Fit Mode       : {}", look.fit.name()));
+                self.plain(&alloc::format!(
+                    "  Colours        : top #{}, bottom #{}, accent #{}",
+                    look.top.to_text(),
+                    look.bottom.to_text(),
+                    look.accent.to_text()
+                ));
+                self.note("Commands:");
+                self.plain("  wallpaper list              -- list all available wallpapers, videos & styles");
+                self.plain(
+                    "  wallpaper set <name>        -- set wallpaper to a picture, video or style",
+                );
+                self.plain("  wallpaper video <file.avi>  -- set an animated video wallpaper");
+                self.plain("  wallpaper style <style>     -- set background style (stars, rings, landscape, etc.)");
+                self.plain(
+                    "  wallpaper fit <fill|whole|middle> -- set how wallpaper scales to screen",
+                );
+                self.plain(
+                    "  wallpaper clear / off       -- clear picture/video and restore pattern",
+                );
+            }
+            Some("list") | Some("ls") => {
+                self.note("=== Available Wallpapers & Animated Backgrounds ===");
+                self.plain("Animated Video Wallpapers (PICTURES/*.avi):");
+                self.plain(
+                    "  nexus.avi          - Rotating Nexus insignia (12 FPS Motion-JPEG loop)",
+                );
+                self.plain(
+                    "  rain.avi           - Cyberpunk falling digital matrix rain (12 FPS loop)",
+                );
+                self.plain("");
+                self.plain("Static Picture Wallpapers (PICTURES/*.png, *.jpg):");
+                self.plain("  nexus.png          - NexusOS emblem vector art (512x512 PNG)");
+                self.plain("  nexus.jpg          - NexusOS emblem JPEG artwork");
+                self.plain(
+                    "  space.png          - Arctic twilight aurora borealis wallpaper (512x512)",
+                );
+                self.plain("");
+                self.plain("Procedural Background Styles:");
+                self.plain("  landscape          - Soft rolling pastel hills with shaded depth");
+                self.plain("  stars              - Drifting, twinkling starfield animation");
+                self.plain("  rings              - Breathing concentric ripples animation");
+                self.plain("  gradient           - Smooth dynamic color gradient");
+                self.plain("  grid               - Perspective horizon vector grid");
+                self.plain("  plain              - Solid minimal color field");
+                self.plain("");
+                self.note(
+                    "Tip: Type 'wallpaper set <name>' or 'wallpaper video <name>' to activate!",
+                );
+            }
+            Some("video") | Some("movie") | Some("anim") => {
+                let Some(val) = value else {
+                    self.trouble("Usage: wallpaper video <name.avi> (e.g. 'wallpaper video nexus.avi' or 'wallpaper video rain.avi')");
+                    return;
+                };
+                let mut filename = alloc::string::String::from(val);
+                if !filename.to_ascii_lowercase().ends_with(".avi") {
+                    filename.push_str(".avi");
+                }
+                self.set(Some("look.picture"), Some(&filename));
+                self.note(&alloc::format!("Video wallpaper activated: {filename}. Wallpaper engine will stream frames behind all windows."));
+            }
+            Some("style") => {
+                let Some(style) = value else {
+                    self.trouble(
+                        "Usage: wallpaper style <landscape|stars|rings|gradient|grid|plain>",
+                    );
+                    return;
+                };
+                self.set(Some("look.style"), Some(style));
+                self.set(Some("look.picture"), Some(""));
+                self.note(&alloc::format!(
+                    "Background style set to '{style}'. Picture overlay cleared."
+                ));
+            }
+            Some("fit") => {
+                let Some(fit) = value else {
+                    self.trouble("Usage: wallpaper fit <fill|whole|middle>");
+                    return;
+                };
+                self.set(Some("look.fit"), Some(fit));
+            }
+            Some("clear") | Some("off") | Some("none") | Some("remove") => {
+                self.set(Some("look.picture"), Some(""));
+                self.note("Wallpaper picture cleared. Defaulting to background style.");
+            }
+            Some("set") => {
+                let Some(target) = value else {
+                    self.trouble("Usage: wallpaper set <name> (e.g. 'nexus.avi', 'wall_aurora.png', or 'stars')");
+                    return;
+                };
+                let lower = target.to_ascii_lowercase();
+                if matches!(
+                    lower.as_str(),
+                    "landscape" | "plain" | "gradient" | "stars" | "rings" | "grid"
+                ) {
+                    self.set(Some("look.style"), Some(&lower));
+                    self.set(Some("look.picture"), Some(""));
+                    self.note(&alloc::format!("Wallpaper style set to '{lower}'."));
+                } else {
+                    self.set(Some("look.picture"), Some(target));
+                    if lower.ends_with(".avi") {
+                        self.note(&alloc::format!(
+                            "Video wallpaper set to '{target}'. Wallpaper engine is playing!"
+                        ));
+                    } else {
+                        self.note(&alloc::format!("Picture wallpaper set to '{target}'."));
+                    }
+                }
+            }
+            Some(other) => {
+                // Direct shortcut: if user typed `wallpaper nexus.avi` or `wallpaper stars`
+                let lower = other.to_ascii_lowercase();
+                if matches!(
+                    lower.as_str(),
+                    "landscape" | "plain" | "gradient" | "stars" | "rings" | "grid"
+                ) {
+                    self.set(Some("look.style"), Some(&lower));
+                    self.set(Some("look.picture"), Some(""));
+                    self.note(&alloc::format!("Wallpaper style set to '{lower}'."));
+                } else if lower.ends_with(".avi")
+                    || lower.ends_with(".png")
+                    || lower.ends_with(".jpg")
+                    || lower.ends_with(".bmp")
+                {
+                    self.set(Some("look.picture"), Some(other));
+                    if lower.ends_with(".avi") {
+                        self.note(&alloc::format!(
+                            "Video wallpaper set to '{other}'. Wallpaper engine is playing!"
+                        ));
+                    } else {
+                        self.note(&alloc::format!("Picture wallpaper set to '{other}'."));
+                    }
+                } else {
+                    self.trouble(&alloc::format!(
+                        "Unknown wallpaper option '{other}'. Type 'wallpaper list' or 'wallpaper help'."
+                    ));
+                }
+            }
+        }
     }
 
     /// What the settings file says text should look like.
