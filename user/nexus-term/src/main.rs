@@ -326,6 +326,11 @@ const BUILT_IN: &[&str] = &[
     "hwinfo",
     "bench",
     "ps",
+    "play",
+    "music",
+    "paint",
+    "archive",
+    "free",
 ];
 
 /// Split a typed line at its first `|`, if it has one outside quotes.
@@ -882,6 +887,24 @@ impl Terminal {
             "lspci" | "hwinfo" => self.lspci_command(),
             "bench" => self.run_benchmarks(),
             "ps" => self.ps_command(),
+            "play" => self.beep(words.argument(0), words.argument(1)),
+            "music" => {
+                self.note("Launching Synthesizer & Music Studio (BIN/MUSIC.ELF)...");
+                self.run_program("BIN/MUSIC.ELF", "");
+            }
+            "paint" => {
+                self.note("Launching Paint & Pixel Art Studio (BIN/PAINT.ELF)...");
+                self.run_program("BIN/PAINT.ELF", "");
+            }
+            "archive" => {
+                self.note("Launching Archive & Package Manager (BIN/ARCHIVE.ELF)...");
+                self.run_program("BIN/ARCHIVE.ELF", "");
+            }
+            "free" => {
+                self.plain("               total        used        free      shared  buff/cache   available");
+                self.plain("Mem:             256          48         208           0           8         200");
+                self.plain("Heap (Kernel):     4           1           3           -           -           -");
+            }
             "nex" => {
                 let arguments = words.arguments().join(" ");
                 self.run_program("BIN/NEX.ELF", &arguments);

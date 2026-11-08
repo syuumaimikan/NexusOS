@@ -1,0 +1,12 @@
+[package]
+name = "nexus-archiver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-window = { path = "../nexus-window" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+nexus-archive = { path = "../../shared/nexus-archive" }
+

@@ -174,6 +174,21 @@ const ENTRIES: &[Entry] = &[
         grave: false,
     },
     Entry {
+        key: "shell.music",
+        tag: b"musi",
+        grave: false,
+    },
+    Entry {
+        key: "shell.paint",
+        tag: b"pain",
+        grave: false,
+    },
+    Entry {
+        key: "shell.archive",
+        tag: b"arch",
+        grave: false,
+    },
+    Entry {
         key: "shell.netool",
         tag: b"netw",
         grave: false,

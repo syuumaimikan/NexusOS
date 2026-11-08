@@ -313,6 +313,18 @@ $DevmgrElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-devmgr
 $StagedDevmgr = Publish-Program -Elf $DevmgrElf -ProgramDir $ProgramDir -Name 'devmgr.elf'
 $devmgrSize = [math]::Round((Get-Item $StagedDevmgr).Length / 1KB, 1)
 
+$MusicElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-music"
+$StagedMusic = Publish-Program -Elf $MusicElf -ProgramDir $ProgramDir -Name 'music.elf'
+$musicSize = [math]::Round((Get-Item $StagedMusic).Length / 1KB, 1)
+
+$PaintElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-paint"
+$StagedPaint = Publish-Program -Elf $PaintElf -ProgramDir $ProgramDir -Name 'paint.elf'
+$paintSize = [math]::Round((Get-Item $StagedPaint).Length / 1KB, 1)
+
+$ArchiveElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-archiver"
+$StagedArchive = Publish-Program -Elf $ArchiveElf -ProgramDir $ProgramDir -Name 'archive.elf'
+$archiveSize = [math]::Round((Get-Item $StagedArchive).Length / 1KB, 1)
+
 
 # A program built for Linux, emitted by a tool that writes out every byte of the
 # ELF with the field it belongs to named beside it. Nothing about it is
@@ -771,6 +783,9 @@ Write-Host "  steam      : $steamSize KiB  -> BIN\STEAM.ELF on the disk"
 Write-Host "  taskmgr    : $taskmgrSize KiB  -> BIN\TASKMGR.ELF on the disk"
 Write-Host "  calc       : $calcSize KiB  -> BIN\CALC.ELF on the disk"
 Write-Host "  devmgr     : $devmgrSize KiB  -> BIN\DEVMGR.ELF on the disk"
+Write-Host "  music      : $musicSize KiB  -> BIN\MUSIC.ELF on the disk"
+Write-Host "  paint      : $paintSize KiB  -> BIN\PAINT.ELF on the disk"
+Write-Host "  archive    : $archiveSize KiB  -> BIN\ARCHIVE.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''
 if ($SkipDiskImage) {

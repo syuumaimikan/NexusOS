@@ -47,6 +47,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-archiver"
+version = "0.1.0"
+dependencies = [
+ "nexus-archive",
+ "nexus-i18n",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-assist"
 version = "0.1.0"
 dependencies = [
@@ -327,6 +338,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-music"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-net"
 version = "0.1.0"
 
@@ -375,6 +396,16 @@ version = "0.1.0"
 dependencies = [
  "nexus-crypto",
  "nexus-pkg",
+]
+
+[[package]]
+name = "nexus-paint"
+version = "0.1.0"
+dependencies = [
+ "nexus-i18n",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
 ]
 
 [[package]]

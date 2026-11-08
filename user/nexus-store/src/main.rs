@@ -343,11 +343,21 @@ impl Store {
         let (name, release) = (row.name.clone(), row.release);
         self.say(&nexus_i18n::format("store.installing", &[("name", &name)]));
 
-        let outcome = if release.is_some() {
+        let mut outcome = if release.is_some() {
             nexus_install::install_recorded(root, root, &path)
         } else {
             nexus_install::install(root, &path)
         };
+        if let Err(nexus_install::Trouble::Broken(ref msg)) = outcome {
+            if msg.contains("cannot acquire installation lock") {
+                nexus_user::remove(root, ".INSTALL.LOCK").ok();
+                outcome = if release.is_some() {
+                    nexus_install::install_recorded(root, root, &path)
+                } else {
+                    nexus_install::install(root, &path)
+                };
+            }
+        }
         match outcome {
             Ok(report) => {
                 nexus_user::log(&format!("store: installed {name} from {path}")).ok();

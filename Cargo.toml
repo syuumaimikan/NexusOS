@@ -78,6 +78,9 @@ members = [
     "user/nexus-taskmgr",
     "user/nexus-calc",
     "user/nexus-devmgr",
+    "user/nexus-music",
+    "user/nexus-paint",
+    "user/nexus-archiver",
 ]
 
 [workspace.package]

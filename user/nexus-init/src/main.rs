@@ -811,6 +811,8 @@ fn run_one(program: &[u8], what: &str) {
 /// cross a channel: sending the only one would leave this program with no
 /// filesystem for the rest of the boot.
 fn install_a_package() {
+    nexus_user::remove(ROOT, ".INSTALL.LOCK").ok();
+
     // The good one, which must install.
     if !ask_to_install(b"PKG/DEMO.NEX", true) {
         return;

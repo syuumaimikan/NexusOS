@@ -394,6 +394,12 @@ mod desk {
     pub const CALC: &[u8] = b"calc";
     /// Start the Device Manager.
     pub const DEVMGR: &[u8] = b"devm";
+    /// Start the Synthesizer & Music Studio.
+    pub const MUSIC: &[u8] = b"musi";
+    /// Start the Paint & Pixel Art Studio.
+    pub const PAINT: &[u8] = b"pain";
+    /// Start the Archive & Package Manager.
+    pub const ARCHIVE: &[u8] = b"arch";
     /// Find out what is on the network.
     pub const NETOOL: &[u8] = b"netw";
     /// Ask the machine which Linux calls it does not have.
@@ -607,6 +613,9 @@ const STEAM: &[u8] = b"BIN/STEAM.ELF";
 const TASKMGR: &[u8] = b"BIN/TASKMGR.ELF";
 const CALC: &[u8] = b"BIN/CALC.ELF";
 const DEVMGR: &[u8] = b"BIN/DEVMGR.ELF";
+const MUSIC: &[u8] = b"BIN/MUSIC.ELF";
+const PAINT: &[u8] = b"BIN/PAINT.ELF";
+const ARCHIVE: &[u8] = b"BIN/ARCHIVE.ELF";
 /// The one that says what is on the network.
 ///
 /// Lent the network and nothing else -- no disk, no folder, nowhere to write.
@@ -2747,6 +2756,12 @@ enum What {
     Calc,
     /// Device Manager.
     DevMgr,
+    /// Synthesizer & Music Studio.
+    Music,
+    /// Paint & Pixel Art Studio.
+    Paint,
+    /// Archive & Package Manager.
+    Archive,
     /// A program built for Linux, given a surface and a channel like any other
     /// client and nothing else.
     ///
@@ -2858,6 +2873,9 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::TASKMGR => Launched::Window(What::TaskMgr),
         tag if tag == desk::CALC => Launched::Window(What::Calc),
         tag if tag == desk::DEVMGR => Launched::Window(What::DevMgr),
+        tag if tag == desk::MUSIC => Launched::Window(What::Music),
+        tag if tag == desk::PAINT => Launched::Window(What::Paint),
+        tag if tag == desk::ARCHIVE => Launched::Window(What::Archive),
         tag if tag == desk::NETOOL => Launched::Window(What::Netool),
         tag if tag == desk::PROBE => Launched::Probe,
         tag if tag == desk::FILEPROBE => Launched::FileProbe,
@@ -3324,6 +3342,69 @@ fn open_window(
             0,
             &[],
         )?,
+        What::Music => {
+            let lending =
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
+            let sound = nexus_user::duplicate(SOUND, lending).ok();
+            let mut lent = alloc::vec![];
+            if let Some(s) = sound {
+                lent.push(s);
+            }
+            start_program(
+                MUSIC,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
+                0,
+                &lent,
+            )?
+        }
+        What::Paint => {
+            let lending =
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
+            let files = nexus_user::duplicate(FILESYSTEM, lending).ok();
+            let mut lent = alloc::vec![];
+            if let Some(f) = files {
+                lent.push(f);
+            }
+            start_program(
+                PAINT,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
+                0,
+                &lent,
+            )?
+        }
+        What::Archive => {
+            let lending =
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
+            let files = nexus_user::duplicate(FILESYSTEM, lending).ok();
+            let mut lent = alloc::vec![];
+            if let Some(f) = files {
+                lent.push(f);
+            }
+            start_program(
+                ARCHIVE,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
+                0,
+                &lent,
+            )?
+        }
         // A window for a program built for Linux. The same call as every other
         // client and the same endowments -- one surface, one channel -- which
         // is what makes the claim worth anything: if this needed a different
@@ -3720,6 +3801,15 @@ fn open_window(
             }
             What::DevMgr => {
                 "compositor: started the hardware device manager"
+            }
+            What::Music => {
+                "compositor: started the synthesizer and music studio"
+            }
+            What::Paint => {
+                "compositor: started the paint and pixel art studio"
+            }
+            What::Archive => {
+                "compositor: started the archive and package manager"
             }
             What::Netool => {
                 "compositor: started the network tool, and lent it the network and nothing else"
