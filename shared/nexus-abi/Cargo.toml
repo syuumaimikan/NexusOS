@@ -9,4 +9,8 @@ description = "Shared ABI types for NexusOS: boot handoff, memory map, syscall n
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["alloc"]
+alloc = []
+
 [dependencies]

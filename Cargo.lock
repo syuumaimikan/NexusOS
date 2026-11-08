@@ -450,6 +450,7 @@ dependencies = [
 name = "nexus-term"
 version = "0.1.0"
 dependencies = [
+ "nexus-abi",
  "nexus-api",
  "nexus-config",
  "nexus-dns",

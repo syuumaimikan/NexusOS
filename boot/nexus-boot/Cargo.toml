@@ -21,4 +21,4 @@ bench = false
 doctest = false
 
 [dependencies]
-nexus-abi = { path = "../../shared/nexus-abi" }
+nexus-abi = { path = "../../shared/nexus-abi", default-features = false }

@@ -15,6 +15,8 @@
 pub mod boot;
 pub mod dual_abi;
 pub mod elf;
+#[cfg(feature = "alloc")]
+pub mod gpu;
 pub mod layout;
 pub mod pe;
 pub mod steam;

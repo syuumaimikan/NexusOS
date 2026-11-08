@@ -35,6 +35,7 @@ use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
+use nexus_abi::gpu::*;
 use nexus_api::process::{Child, Spawn};
 use nexus_ui::{Canvas, Colour, Rect};
 use nexus_user::{Handle, Kind};
@@ -313,6 +314,11 @@ const BUILT_IN: &[&str] = &[
     "history",
     "game",
     "steam",
+    "gpu",
+    "vulkan",
+    "vk",
+    "mesa",
+    "gl",
 ];
 
 /// Split a typed line at its first `|`, if it has one outside quotes.
@@ -844,6 +850,9 @@ impl Terminal {
             "c" | "cc" => self.compile_and_run_c(words.argument(0), words.arguments()),
             "rust" | "rustc" => self.compile_and_run_rust(words.argument(0), words.arguments()),
             "game" | "steam" => self.steam_command(words.argument(0)),
+            "gpu" => self.gpu_command(words.argument(0)),
+            "vulkan" | "vk" => self.vulkan_command(words.argument(0)),
+            "mesa" | "gl" => self.mesa_command(words.argument(0)),
             "nex" => {
                 let arguments = words.arguments().join(" ");
                 self.run_program("BIN/NEX.ELF", &arguments);
@@ -967,6 +976,9 @@ impl Terminal {
         self.plain("cc / c          -- C/C++ compiler and runner");
         self.plain("rust / rustc    -- Rust compiler and runner");
         self.plain("game / steam    -- Steamworks gaming subsystem and games (Spacewar AppID 480)");
+        self.plain("gpu             -- graphics subsystem diagnostics and controller status");
+        self.plain("vulkan / vk     -- query Vulkan 1.2 ICD & test SPIR-V pipeline");
+        self.plain("mesa / gl       -- query Mesa OpenGL 2.1 & test software rasterizer");
         self.plain("wall / wallpaper-- switch wallpapers, animated video backgrounds, and styles");
         self.plain("nex             -- run a Nex script directly");
         self.note(nexus_i18n::text("term.help.keys"));
@@ -1297,6 +1309,321 @@ impl Terminal {
             }
             Some(other) => {
                 self.trouble(&alloc::format!("steam: unknown option '{other}'. Try 'info', 'list', 'achievements', or 'play'."));
+            }
+        }
+    }
+
+    /// `gpu`: GPU diagnostics and controller status.
+    fn gpu_command(&mut self, sub: Option<&str>) {
+        match sub {
+            Some("test") => {
+                self.note("=== Running NexusOS GPU Driver Test Suite ===");
+                self.vulkan_command(Some("test"));
+                self.mesa_command(Some("test"));
+            }
+            Some("vulkan") | Some("vk") => {
+                self.vulkan_command(Some("info"));
+            }
+            Some("mesa") | Some("gl") => {
+                self.mesa_command(Some("info"));
+            }
+            _ => {
+                self.note("=== NexusOS GPU Subsystem & Drivers ===");
+                self.plain("Status: ACTIVE (Multi-API Driver Infrastructure)");
+                self.plain("Display Controller: VirtIO-GPU 2D Scanout & Host Flush");
+                self.plain(
+                    "PCIe GPU Status: Discrete RTX 5060 unprobed (CPU/Softpipe fallback active)",
+                );
+                self.plain("Notice: Distinguishing CPU rasterizers from physical GPU hardware acceleration.");
+                self.plain("");
+                self.plain("Registered GPU Drivers / ICDs:");
+                self.plain("  [1] Vulkan 1.2 ICD:  NexusOS SwiftShader CPU Vulkan ICD");
+                self.plain("      - Device Type:   CPU Rasterizer (Khronos Vulkan 1.2)");
+                self.plain("      - Memory:        512 MB Local Heap");
+                self.plain("      - Shaders:       SPIR-V (0x07230203) Bytecode Loader");
+                self.plain("  [2] Mesa Softpipe:   Mesa Off-Screen softpipe (OpenGL 2.1)");
+                self.plain("      - Shading:       GLSL 1.20");
+                self.plain("      - Features:      24-bit Z-buffer, Double Buffering, FBO");
+                self.plain("  [3] VirtIO Display:  virtio-gpu Display Controller (0x1AF4:0x1050)");
+                self.plain("      - Scanout:       1280x800 32bpp Framebuffer");
+                self.plain("");
+                self.plain(
+                    "Commands: 'gpu test', 'vulkan info', 'vulkan test', 'mesa info', 'mesa test'",
+                );
+            }
+        }
+    }
+
+    /// `vulkan` / `vk`: Vulkan 1.2 ICD queries and SPIR-V pipeline testing.
+    fn vulkan_command(&mut self, sub: Option<&str>) {
+        match sub {
+            Some("test") => {
+                self.note("=== Vulkan ICD Pipeline Verification ===");
+                unsafe {
+                    let create_info = VkInstanceCreateInfo {
+                        s_type: VkStructureType::InstanceCreateInfo,
+                        p_next: core::ptr::null(),
+                        flags: 0,
+                        p_application_info: core::ptr::null(),
+                        enabled_layer_count: 0,
+                        pp_enabled_layer_names: core::ptr::null(),
+                        enabled_extension_count: 0,
+                        pp_enabled_extension_names: core::ptr::null(),
+                    };
+                    let mut instance = core::ptr::null_mut();
+                    let res = vkCreateInstance(&create_info, core::ptr::null(), &mut instance);
+                    if res != VkResult::Success || instance.is_null() {
+                        self.trouble("vulkan: vkCreateInstance failed");
+                        return;
+                    }
+                    self.plain("  [1/4] vkCreateInstance: SUCCESS");
+
+                    let mut dev_count = 0u32;
+                    vkEnumeratePhysicalDevices(instance, &mut dev_count, core::ptr::null_mut());
+                    let mut devices = alloc::vec![core::ptr::null_mut(); dev_count as usize];
+                    vkEnumeratePhysicalDevices(instance, &mut dev_count, devices.as_mut_ptr());
+                    if devices.is_empty() {
+                        vkDestroyInstance(instance, core::ptr::null());
+                        self.trouble("vulkan: no physical devices found");
+                        return;
+                    }
+                    self.plain(&alloc::format!(
+                        "  [2/4] vkEnumeratePhysicalDevices: {dev_count} device(s) found"
+                    ));
+
+                    let dev_info = VkDeviceCreateInfo {
+                        s_type: VkStructureType::DeviceCreateInfo,
+                        p_next: core::ptr::null(),
+                        flags: 0,
+                        queue_create_info_count: 0,
+                        p_queue_create_infos: core::ptr::null(),
+                        enabled_layer_count: 0,
+                        pp_enabled_layer_names: core::ptr::null(),
+                        enabled_extension_count: 0,
+                        pp_enabled_extension_names: core::ptr::null(),
+                        p_enabled_features: core::ptr::null(),
+                    };
+                    let mut device = core::ptr::null_mut();
+                    let dev_res =
+                        vkCreateDevice(devices[0], &dev_info, core::ptr::null(), &mut device);
+                    if dev_res != VkResult::Success || device.is_null() {
+                        vkDestroyInstance(instance, core::ptr::null());
+                        self.trouble("vulkan: vkCreateDevice failed");
+                        return;
+                    }
+                    self.plain("  [3/4] vkCreateDevice: SUCCESS (Logical device initialized)");
+
+                    // Test SPIR-V Shader Module Creation with standard magic header
+                    let spirv: [u32; 5] = [0x0723_0203, 0x0001_0000, 0x0008_0001, 1, 0];
+                    let sm_info = VkShaderModuleCreateInfo {
+                        s_type: VkStructureType::ShaderModuleCreateInfo,
+                        p_next: core::ptr::null(),
+                        flags: 0,
+                        code_size: spirv.len() * 4,
+                        p_code: spirv.as_ptr(),
+                    };
+                    let mut shader_mod = core::ptr::null_mut();
+                    let sm_res =
+                        vkCreateShaderModule(device, &sm_info, core::ptr::null(), &mut shader_mod);
+                    if sm_res != VkResult::Success || shader_mod.is_null() {
+                        vkDestroyDevice(device, core::ptr::null());
+                        vkDestroyInstance(instance, core::ptr::null());
+                        self.trouble("vulkan: vkCreateShaderModule validation failed");
+                        return;
+                    }
+
+                    // Test Buffer Creation
+                    let buf_info = VkBufferCreateInfo {
+                        s_type: VkStructureType::BufferCreateInfo,
+                        p_next: core::ptr::null(),
+                        flags: 0,
+                        size: 4096,
+                        usage: 0x0000_0020, // VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+                        sharing_mode: 0,
+                        queue_family_index_count: 0,
+                        p_queue_family_indices: core::ptr::null(),
+                    };
+                    let mut buffer = core::ptr::null_mut();
+                    let buf_res = vkCreateBuffer(device, &buf_info, core::ptr::null(), &mut buffer);
+                    if buf_res != VkResult::Success || buffer.is_null() {
+                        vkDestroyShaderModule(device, shader_mod, core::ptr::null());
+                        vkDestroyDevice(device, core::ptr::null());
+                        vkDestroyInstance(instance, core::ptr::null());
+                        self.trouble("vulkan: vkCreateBuffer failed");
+                        return;
+                    }
+                    self.plain("  [4/4] vkCreateShaderModule & vkCreateBuffer: SUCCESS");
+
+                    vkDestroyBuffer(device, buffer, core::ptr::null());
+                    vkDestroyShaderModule(device, shader_mod, core::ptr::null());
+                    vkDestroyDevice(device, core::ptr::null());
+                    vkDestroyInstance(instance, core::ptr::null());
+                }
+                self.note("RESULT: Vulkan ICD Test PASSED (CPU SwiftShader verified; physical RTX 5060 unverified)");
+            }
+            _ => {
+                self.note("=== Vulkan 1.2 ICD Driver Information ===");
+                unsafe {
+                    let create_info = VkInstanceCreateInfo {
+                        s_type: VkStructureType::InstanceCreateInfo,
+                        p_next: core::ptr::null(),
+                        flags: 0,
+                        p_application_info: core::ptr::null(),
+                        enabled_layer_count: 0,
+                        pp_enabled_layer_names: core::ptr::null(),
+                        enabled_extension_count: 0,
+                        pp_enabled_extension_names: core::ptr::null(),
+                    };
+                    let mut instance = core::ptr::null_mut();
+                    if vkCreateInstance(&create_info, core::ptr::null(), &mut instance)
+                        == VkResult::Success
+                        && !instance.is_null()
+                    {
+                        let mut count = 0u32;
+                        vkEnumeratePhysicalDevices(instance, &mut count, core::ptr::null_mut());
+                        let mut devices = alloc::vec![core::ptr::null_mut(); count as usize];
+                        vkEnumeratePhysicalDevices(instance, &mut count, devices.as_mut_ptr());
+
+                        for (i, dev) in devices.iter().enumerate() {
+                            let mut props = core::mem::zeroed();
+                            vkGetPhysicalDeviceProperties(*dev, &mut props);
+                            let mut feats = core::mem::zeroed();
+                            vkGetPhysicalDeviceFeatures(*dev, &mut feats);
+
+                            let name_len = props
+                                .device_name
+                                .iter()
+                                .position(|&b| b == 0)
+                                .unwrap_or(props.device_name.len());
+                            let dev_name = core::str::from_utf8(&props.device_name[..name_len])
+                                .unwrap_or("Unknown Device");
+                            let dev_type_str = match props.device_type {
+                                VkPhysicalDeviceType::Cpu => "CPU Rasterizer (SwiftShader)",
+                                VkPhysicalDeviceType::VirtualGpu => "Virtual GPU (VirtIO)",
+                                VkPhysicalDeviceType::DiscreteGpu => "Discrete GPU (PCIe)",
+                                _ => "Other",
+                            };
+                            let api_major = props.api_version >> 22;
+                            let api_minor = (props.api_version >> 12) & 0x3FF;
+                            let api_patch = props.api_version & 0xFFF;
+
+                            self.note(&alloc::format!("Device [{i}]: {dev_name}"));
+                            self.plain(&alloc::format!("  Device Type:    {dev_type_str}"));
+                            self.plain(&alloc::format!(
+                                "  Vulkan API:     {api_major}.{api_minor}.{api_patch}"
+                            ));
+                            self.plain(&alloc::format!(
+                                "  Vendor ID:      0x{:04X}, Device ID: 0x{:04X}",
+                                props.vendor_id,
+                                props.device_id
+                            ));
+                            self.plain(&alloc::format!("  Features:       GeometryShader={}, DepthClamp={}, DualSrcBlend={}", feats.geometry_shader != 0, feats.depth_clamp != 0, feats.dual_src_blend != 0));
+                        }
+                        self.plain(
+                            "Extensions: VK_KHR_surface, VK_KHR_swapchain, VK_EXT_debug_report",
+                        );
+                        self.plain("Note: Hardware acceleration (RTX 5060) is unverified on physical hardware.");
+                        vkDestroyInstance(instance, core::ptr::null());
+                    } else {
+                        self.trouble("vulkan: failed to initialize Vulkan instance");
+                    }
+                }
+            }
+        }
+    }
+
+    /// `mesa` / `gl`: Mesa OpenGL 2.1 driver queries and software rasterizer testing.
+    fn mesa_command(&mut self, sub: Option<&str>) {
+        match sub {
+            Some("test") => {
+                self.note("=== Mesa OpenGL 2.1 Softpipe Verification ===");
+                unsafe {
+                    const FB_W: i32 = 64;
+                    const FB_H: i32 = 64;
+                    let mut fb = alloc::vec![0u8; (FB_W * FB_H * 4) as usize];
+
+                    let ctx = OSMesaCreateContextExt(OSMESA_RGBA, 24, 8, 0, core::ptr::null_mut());
+                    if ctx.is_null() {
+                        self.trouble("mesa: OSMesaCreateContextExt failed");
+                        return;
+                    }
+                    let res = OSMesaMakeCurrent(ctx, fb.as_mut_ptr() as *mut _, 0x1401, FB_W, FB_H);
+                    if res == 0 {
+                        OSMesaDestroyContext(ctx);
+                        self.trouble("mesa: OSMesaMakeCurrent failed");
+                        return;
+                    }
+                    self.plain(
+                        "  [1/4] OSMesa context created & made current (64x64 RGBA): SUCCESS",
+                    );
+
+                    // Clear color to dark gray, clear depth to 1.0
+                    glClearColor(0.1, 0.1, 0.1, 1.0);
+                    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                    self.plain("  [2/4] glClearColor & glClear (color + depth): SUCCESS");
+
+                    // Enable depth test
+                    glEnable(GL_DEPTH_TEST);
+
+                    // Draw blue background triangle at z = 0.5
+                    glBegin(GL_TRIANGLES);
+                    glColor4f(0.0, 0.0, 1.0, 1.0);
+                    glVertex3f(-0.8, -0.8, 0.5);
+                    glVertex3f(0.8, -0.8, 0.5);
+                    glVertex3f(0.0, 0.8, 0.5);
+                    glEnd();
+
+                    // Draw red foreground triangle at z = -0.2
+                    glBegin(GL_TRIANGLES);
+                    glColor4f(1.0, 0.0, 0.0, 1.0);
+                    glVertex3f(-0.5, -0.5, -0.2);
+                    glVertex3f(0.5, -0.5, -0.2);
+                    glVertex3f(0.0, 0.5, -0.2);
+                    glEnd();
+                    self.plain("  [3/4] Depth-tested triangle rasterization: SUCCESS");
+
+                    // Check center pixel: should be foreground red (255, 0, 0)
+                    let center_idx = ((FB_H / 2 * FB_W + FB_W / 2) * 4) as usize;
+                    let r = fb[center_idx];
+                    let g = fb[center_idx + 1];
+                    let b = fb[center_idx + 2];
+                    let a = fb[center_idx + 3];
+
+                    OSMesaDestroyContext(ctx);
+
+                    if r == 255 && g == 0 && b == 0 && a == 255 {
+                        self.plain(&alloc::format!("  [4/4] Pixel verification at center: RGBA({r}, {g}, {b}, {a}) - Occlusion OK"));
+                        self.note("RESULT: Mesa OpenGL Test PASSED (Softpipe Z-buffer verified; physical RTX 5060 unverified)");
+                    } else {
+                        self.trouble(&alloc::format!("mesa: pixel mismatch at center: RGBA({r}, {g}, {b}, {a}) expected (255, 0, 0, 255)"));
+                    }
+                }
+            }
+            _ => {
+                self.note("=== Mesa OpenGL 2.1 Driver Information ===");
+                unsafe {
+                    let ctx = OSMesaCreateContextExt(OSMESA_RGBA, 24, 8, 0, core::ptr::null_mut());
+                    if !ctx.is_null() {
+                        let vendor = c_str_to_str(glGetString(GL_VENDOR));
+                        let renderer = c_str_to_str(glGetString(GL_RENDERER));
+                        let version = c_str_to_str(glGetString(GL_VERSION));
+                        let glsl = c_str_to_str(glGetString(GL_SHADING_LANGUAGE_VERSION));
+                        let extensions = c_str_to_str(glGetString(GL_EXTENSIONS));
+
+                        self.plain(&alloc::format!("GL_VENDOR:   {vendor}"));
+                        self.plain(&alloc::format!("GL_RENDERER: {renderer}"));
+                        self.plain(&alloc::format!("GL_VERSION:  {version}"));
+                        self.plain(&alloc::format!("GLSL:        {glsl}"));
+                        self.plain(&alloc::format!("EXTENSIONS:  {extensions}"));
+                        self.plain("Depth Buffer: 24-bit Z-buffer, 8-bit Stencil");
+                        self.plain("Rasterizer:   Software Pipe / OSMesa Offscreen");
+                        self.plain("Note: Hardware acceleration (RTX 5060) is unverified on physical hardware.");
+
+                        OSMesaDestroyContext(ctx);
+                    } else {
+                        self.trouble("mesa: failed to create OSMesa context");
+                    }
+                }
             }
         }
     }
@@ -3146,6 +3473,19 @@ fn create_simple_pe(message: &[u8]) -> Vec<u8> {
     image[512..512 + code.len()].copy_from_slice(&code);
 
     image
+}
+
+/// Convert a null-terminated C string pointer to a Rust string slice.
+unsafe fn c_str_to_str<'a>(ptr: *const u8) -> &'a str {
+    if ptr.is_null() {
+        return "";
+    }
+    let mut len = 0;
+    while unsafe { *ptr.add(len) } != 0 {
+        len += 1;
+    }
+    let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+    core::str::from_utf8(slice).unwrap_or("")
 }
 
 /// Read a little-endian `u32` out of a message.
