@@ -220,6 +220,14 @@ pub trait App {
         true
     }
 
+    /// Called when a mouse click occurs in the window's client content area.
+    /// `x` and `y` are relative to the client content area.
+    /// Returns whether anything on screen changed.
+    fn click(&mut self, x: u32, y: u32) -> bool {
+        let _ = (x, y);
+        false
+    }
+
     /// A compositor extension with no transferred handles. Ordinary apps
     /// ignore it; the command bar can consume window metadata.
     fn message(&mut self, bytes: &[u8]) -> bool {
@@ -689,6 +697,14 @@ impl Window {
             self.height = height;
             app.resized(self.width, self.height);
             return Heard::Changed;
+        }
+
+        if received.handles == 0 && bytes.len() >= 12 && bytes.starts_with(b"mclk") {
+            let x = read_u32(bytes, 4);
+            let y = read_u32(bytes, 8);
+            if app.click(x, y) {
+                return Heard::Changed;
+            }
         }
 
         match Key::of(bytes) {

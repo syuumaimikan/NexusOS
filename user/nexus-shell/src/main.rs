@@ -126,6 +126,10 @@ mod wire {
     pub const PICTURES: &[u8] = b"pics";
     /// Start the agent.
     pub const ASSIST: &[u8] = b"asst";
+    /// Start the calculator.
+    pub const CALC: &[u8] = b"calc";
+    /// Start the network inspector.
+    pub const NETOOL: &[u8] = b"netw";
     /// End the session.
     pub const QUIT: &[u8] = b"quit";
     /// Turn the machine off.
@@ -210,6 +214,8 @@ struct Desktop {
     clock: String,
     /// Currently active workspace index (0..=3).
     workspace: u8,
+    /// Audio volume level text from settings.
+    volume: String,
 }
 
 impl Desktop {
@@ -395,11 +401,11 @@ extern "C" fn main() -> ! {
     }
 
     let settings = (received.handles >= 2).then(|| handles[1]);
-    let (owner, zone, language) = match settings {
+    let (owner, zone, language, volume) = match settings {
         Some(directory) => read_settings(directory),
         None => {
             nexus_user::log("shell: started without a settings directory; no clock, no name").ok();
-            (None, &nexus_time::ZONES[0], None)
+            (None, &nexus_time::ZONES[0], None, "100%".to_string())
         }
     };
 
@@ -427,6 +433,7 @@ extern "C" fn main() -> ! {
         installed: 0,
         clock: String::new(),
         workspace: 0,
+        volume,
     };
     let surface = handles[0];
 
@@ -487,12 +494,12 @@ fn read_look(directory: Option<Handle>) -> Option<Look> {
     Some(Look::parse(&text))
 }
 
-fn read_settings(directory: Handle) -> (Option<String>, &'static Zone, Option<String>) {
+fn read_settings(directory: Handle) -> (Option<String>, &'static Zone, Option<String>, String) {
     let utc = &nexus_time::ZONES[0];
 
     let Some(text) = read_text(directory, SETTINGS_NAME) else {
         nexus_user::log("shell: no settings to read; showing the strip without a name").ok();
-        return (None, utc, None);
+        return (None, utc, None, "100%".to_string());
     };
     let settings = Settings::parse(&text);
 
@@ -508,8 +515,9 @@ fn read_settings(directory: Handle) -> (Option<String>, &'static Zone, Option<St
         .get(key::LANGUAGE)
         .filter(|tag| nexus_i18n::LOCALES.iter().any(|locale| locale.tag == *tag))
         .map(String::from);
+    let volume = settings.get(key::VOLUME).unwrap_or("100%").to_string();
 
-    (owner, zone, language)
+    (owner, zone, language, volume)
 }
 
 /// A whole text file out of a directory, if it is there and readable.
@@ -599,6 +607,13 @@ fn run(desktop: &mut Desktop) {
             if now != desktop.look {
                 desktop.look = now;
                 stale = true;
+            }
+            if let Some(directory) = desktop.settings {
+                let (_, _, _, vol) = read_settings(directory);
+                if vol != desktop.volume {
+                    desktop.volume = vol;
+                    stale = true;
+                }
             }
 
             let seen = desktop.updates();
@@ -762,6 +777,26 @@ fn clicked(desktop: &mut Desktop, x: u32, y: u32) -> Option<bool> {
             .map(|_| false);
     }
 
+    if !desktop.clock.is_empty() {
+        let clock_w = nexus_ui::measure(&desktop.clock) + 16;
+        if Rect::new(106, 2, clock_w, 18).contains(x, y) {
+            nexus_user::log("shell: clock clicked, opening calculator").ok();
+            return nexus_user::send(COMPOSITOR, wire::CALC, &[]).ok().map(|_| true);
+        }
+    }
+
+    let net_x = 180.min(desktop.width.saturating_sub(320));
+    if net_x > 150 && Rect::new(net_x, 2, 70, 18).contains(x, y) {
+        nexus_user::log("shell: network chip clicked, opening network tool").ok();
+        return nexus_user::send(COMPOSITOR, wire::NETOOL, &[]).ok().map(|_| true);
+    }
+
+    let audio_x = net_x + 76;
+    if net_x > 150 && audio_x + 60 < desktop.sleep().x && Rect::new(audio_x, 2, 54, 18).contains(x, y) {
+        nexus_user::log("shell: audio chip clicked, opening settings").ok();
+        return nexus_user::send(COMPOSITOR, wire::SETTINGS, &[]).ok().map(|_| true);
+    }
+
     if desktop.terminal().contains(x, y) {
         return nexus_user::send(COMPOSITOR, wire::TERMINAL, &[])
             .ok()
@@ -909,6 +944,18 @@ fn draw(desktop: &Desktop) {
     if net_x > 150 {
         canvas.fill_rounded(Rect::new(net_x, 2, 70, 18), 6, Colour(0x12000000));
         canvas.text(net_x + 6, 3, "🛜 Online", muted);
+
+        let audio_x = net_x + 76;
+        if audio_x + 60 < desktop.sleep().x {
+            canvas.fill_rounded(Rect::new(audio_x, 2, 54, 18), 6, Colour(0x12000000));
+            let icon = if desktop.volume.starts_with('0') { "🔇" } else { "🔊" };
+            let vol_str = if desktop.volume.starts_with('0') {
+                "0%"
+            } else {
+                desktop.volume.split_whitespace().next().unwrap_or("100%")
+            };
+            canvas.text(audio_x + 6, 3, &alloc::format!("{icon} {vol_str}"), muted);
+        }
     }
 
     // YASB Pill: Power & Session Controls

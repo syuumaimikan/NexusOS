@@ -822,6 +822,75 @@ impl App for Settings {
             _ => false,
         }
     }
+
+    fn click(&mut self, x: u32, y: u32) -> bool {
+        let outer_x = PAD;
+        let outer_y = 32 + PAD;
+        let sidebar = 118;
+
+        // 1. Sidebar click: jump to category
+        if x >= outer_x && x < outer_x + sidebar {
+            let mut cur_y = outer_y + 10;
+            for (idx, item) in self.items.iter().enumerate() {
+                if let Item::Heading(_) = item {
+                    if y >= cur_y && y < cur_y + 36 {
+                        if let Some(target) = self.next_row(idx + 1, 1) {
+                            self.cursor = target;
+                            self.editing = None;
+                            return true;
+                        }
+                    }
+                    cur_y += 40;
+                }
+            }
+            return false;
+        }
+
+        // 2. Content area click
+        let section = self.items[..=self.cursor]
+            .iter()
+            .rposition(|item| matches!(item, Item::Heading(_)))
+            .unwrap_or(0);
+        let end = self
+            .items
+            .iter()
+            .enumerate()
+            .skip(section + 1)
+            .find(|(_, item)| matches!(item, Item::Heading(_)))
+            .map_or(self.items.len(), |(index, _)| index);
+
+        let content_start_y = outer_y + nexus_ui::LINE_HEIGHT + 6 + 4;
+        let line_height = nexus_ui::LINE_HEIGHT + 4;
+        let visible = 12;
+        let start = (section + 1).max(self.cursor.saturating_sub(visible - 1));
+
+        if y >= content_start_y {
+            let line_offset = ((y - content_start_y) / line_height) as usize;
+            let target_idx = start + line_offset;
+            if target_idx < end {
+                if let Some(Item::Row(row)) = self.items.get(target_idx) {
+                    let value_at = outer_x + sidebar + PAD + VALUE_AT.min(200);
+                    if self.cursor == target_idx {
+                        if !row.choices.is_empty() {
+                            if x < value_at {
+                                return self.step(-1);
+                            } else {
+                                return self.step(1);
+                            }
+                        }
+                    } else {
+                        self.cursor = target_idx;
+                        self.editing = None;
+                        if !row.choices.is_empty() && x >= value_at {
+                            return self.step(1);
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 impl Settings {

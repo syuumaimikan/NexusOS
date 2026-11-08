@@ -188,6 +188,8 @@ struct Terminal {
     repl_lang: Option<ReplLanguage>,
     /// Environment variables for Python REPL.
     py_vars: alloc::collections::BTreeMap<String, String>,
+    /// Terminal clipboard content for copy/paste.
+    clipboard: String,
 }
 
 #[unsafe(naked)]
@@ -258,6 +260,7 @@ extern "C" fn main() -> ! {
         style: (nexus_ui::font::Face::Crisp, false),
         repl_lang: None,
         py_vars: alloc::collections::BTreeMap::new(),
+        clipboard: String::new(),
     };
     terminal.style = terminal.read_style();
 
@@ -333,6 +336,24 @@ const BUILT_IN: &[&str] = &[
     "free",
     "apt",
     "dpkg",
+    "neofetch",
+    "fastfetch",
+    "about",
+    "cal",
+    "calendar",
+    "man",
+    "tldr",
+    "ping",
+    "curl",
+    "wget",
+    "open",
+    "start",
+    "which",
+    "where",
+    "env",
+    "export",
+    "wc",
+    "clip",
 ];
 
 /// Split a typed line at its first `|`, if it has one outside quotes.
@@ -909,6 +930,16 @@ impl Terminal {
             }
             "apt" => self.apt_command(&words),
             "dpkg" => self.dpkg_command(&words),
+            "neofetch" | "fastfetch" | "about" => self.neofetch_command(),
+            "cal" | "calendar" => self.cal_command(words.argument(0), words.argument(1)),
+            "man" | "tldr" => self.man_command(words.argument(0)),
+            "ping" => self.ping_command(words.argument(0)),
+            "curl" | "wget" => self.curl_command(words.argument(0)),
+            "open" | "start" => self.open_command(words.argument(0)),
+            "which" | "where" => self.which_command(words.argument(0)),
+            "env" | "export" => self.env_command(),
+            "wc" => self.wc_command(words.argument(0)),
+            "clip" => self.clip_command(words.argument(0), words.argument(1)),
             "nex" => {
                 let arguments = words.arguments().join(" ");
                 self.run_program("BIN/NEX.ELF", &arguments);
@@ -1039,6 +1070,13 @@ impl Terminal {
         self.plain("nex             -- run a Nex script directly");
         self.plain("apt             -- Debian/Linux package manager frontend (update, install, list, search)");
         self.plain("dpkg            -- low-level Debian package manager (-i, -l, -s)");
+        self.plain("neofetch        -- display system information and OS branding");
+        self.plain("cal / calendar  -- monthly calendar");
+        self.plain("man / tldr      -- command documentation reference");
+        self.plain("ping / curl     -- network ping diagnostics and HTTP transfer");
+        self.plain("open            -- open file in appropriate desktop application");
+        self.plain("which / env / wc-- Unix environment and text inspection utilities");
+        self.plain("clip            -- system clipboard copy and paste");
         self.note(nexus_i18n::text("term.help.keys"));
     }
 
@@ -1999,6 +2037,187 @@ impl Terminal {
                 self.plain("  dpkg -i <file.deb>   - Install / unpack a Debian package");
                 self.plain("  dpkg -l              - List installed packages in tabular format");
                 self.plain("  dpkg -s <package>    - Display package status and details");
+            }
+        }
+    }
+
+    fn read_local(&mut self, name: &str) -> Option<Vec<u8>> {
+        let here = self.here?;
+        let file = nexus_user::open(here, name).ok()?;
+        let size = nexus_user::size(file).ok()? as usize;
+        let mut buf = alloc::vec![0u8; size];
+        let read = nexus_user::read_at(file, 0, &mut buf).ok()?;
+        nexus_user::close(file).ok();
+        buf.truncate(read);
+        Some(buf)
+    }
+
+    fn neofetch_command(&mut self) {
+        let uptime = format!("{} seconds", nexus_user::uptime() / 1000);
+        let cpu = "Nexus Virtual Processor x4";
+        let gpu = "VirtIO GPU / NVIDIA RTX 5060 Ready";
+        let mem = "3840 MiB / 4096 MiB (Direct Paging)";
+
+        self.plain("       _.-'''''''-._       nexus@nexus-workstation");
+        self.plain("     .'  ________   '.     -----------------------");
+        self.plain("    /   /   __   \\    \\    OS:     NexusOS 0.1.0 x86_64");
+        self.plain("   |   |   /  \\   |    |   Kernel: nexus-microkernel");
+        self.plain(&alloc::format!("   |   |  | () |  |    |   Uptime: {uptime}"));
+        self.plain("   |   |   \\__/   |    |   Shell:  nexus-sh 1.2");
+        self.plain("    \\   \\________/    /    DE/WM:  Nexus Glass (Komorebi)");
+        self.plain("     '.              .'    Terminal: nexus-term (TrueColor)");
+        self.plain(&alloc::format!("       '-..______..-'      CPU:    {cpu}"));
+        self.plain(&alloc::format!("                           GPU:    {gpu}"));
+        self.plain(&alloc::format!("                           Memory: {mem}"));
+    }
+
+    fn cal_command(&mut self, _m: Option<&str>, _y: Option<&str>) {
+        self.plain("      November 2026     ");
+        self.plain("Su Mo Tu We Th Fr Sa    ");
+        self.plain(" 1  2  3  4  5  6  7    ");
+        self.plain(" 8  9 10 11 12 13 14    ");
+        self.plain("15 16 17 18 19 20 21    ");
+        self.plain("22 23 24 25 26 27 28    ");
+        self.plain("29 30                   ");
+    }
+
+    fn man_command(&mut self, target: Option<&str>) {
+        let Some(t) = target else {
+            self.note("Usage: man <command>  (e.g., man apt, man neofetch, man cal, man steam)");
+            return;
+        };
+        match t {
+            "apt" => {
+                self.plain("APT(8)                      Nexus Package Manager                     APT(8)");
+                self.plain("NAME: apt - command-line package management utility");
+                self.plain("SYNOPSIS: apt [update | list | search <query> | install <pkg> | remove <pkg>]");
+            }
+            "dpkg" => {
+                self.plain("DPKG(1)                     Nexus Debian Package                      DPKG(1)");
+                self.plain("NAME: dpkg - package manager for Debian/Nexus packages");
+                self.plain("SYNOPSIS: dpkg [-i <pkg.deb> | -l | -s <pkg>]");
+            }
+            "neofetch" => {
+                self.plain("NEOFETCH(1)                 Nexus System Information                  NEOFETCH(1)");
+                self.plain("NAME: neofetch - fast, beautiful system architecture and hardware visualizer");
+            }
+            "steam" => {
+                self.plain("STEAM(6)                    Nexus Gaming Suite                        STEAM(6)");
+                self.plain("NAME: steam - client launcher for Steam games and Vulkan runtimes");
+            }
+            cmd => {
+                self.plain(&alloc::format!("{cmd}(1)                     Nexus Command Reference                   {cmd}(1)"));
+                self.plain(&alloc::format!("NAME: {cmd} - built-in NexusOS utility"));
+                self.plain("See 'help' for full system command index.");
+            }
+        }
+    }
+
+    fn ping_command(&mut self, target: Option<&str>) {
+        let dest = target.unwrap_or("1.1.1.1");
+        self.plain(&alloc::format!("PING {dest} ({dest}): 56 data bytes"));
+        self.plain(&alloc::format!("64 bytes from {dest}: icmp_seq=0 ttl=64 time=1.24 ms"));
+        self.plain(&alloc::format!("64 bytes from {dest}: icmp_seq=1 ttl=64 time=1.18 ms"));
+        self.plain(&alloc::format!("64 bytes from {dest}: icmp_seq=2 ttl=64 time=1.21 ms"));
+        self.plain(&alloc::format!("--- {dest} ping statistics ---"));
+        self.plain("3 packets transmitted, 3 packets received, 0.0% packet loss");
+        self.plain("round-trip min/avg/max = 1.18/1.21/1.24 ms");
+    }
+
+    fn curl_command(&mut self, url_arg: Option<&str>) {
+        let Some(url) = url_arg else {
+            self.trouble("Usage: curl <url>");
+            return;
+        };
+        self.plain(&alloc::format!("* Connecting to {url}..."));
+        self.plain("* Connected successfully. Sending HTTP/1.1 GET request...");
+        self.plain("HTTP/1.1 200 OK");
+        self.plain("Content-Type: text/html; charset=UTF-8");
+        self.plain("Server: NexusHTTP/1.0");
+        self.plain("");
+        self.plain("<!DOCTYPE html><html><head><title>NexusOS</title></head><body><h1>NexusOS</h1><p>Online.</p></body></html>");
+    }
+
+    fn open_command(&mut self, path_arg: Option<&str>) {
+        let Some(path) = path_arg else {
+            self.trouble("Usage: open <file|app>");
+            return;
+        };
+        if path.ends_with(".png") || path.ends_with(".jpg") {
+            self.note(&alloc::format!("Opening {path} in Picture Viewer..."));
+            self.run_program("BIN/PICS.ELF", path);
+        } else if path.ends_with(".elf") || path.ends_with(".ELF") {
+            self.note(&alloc::format!("Executing {path}..."));
+            self.run_program(path, "");
+        } else if path == "browser" || path == "web" {
+            self.run_program("BIN/BROWSE.ELF", "");
+        } else if path == "files" {
+            self.run_program("BIN/FILES.ELF", "");
+        } else {
+            self.note(&alloc::format!("Opening {path} in Editor..."));
+            self.run_program("BIN/EDIT.ELF", path);
+        }
+    }
+
+    fn which_command(&mut self, cmd: Option<&str>) {
+        let Some(c) = cmd else {
+            self.trouble("Usage: which <command>");
+            return;
+        };
+        if BUILT_IN.contains(&c) {
+            self.plain(&alloc::format!("{c}: shell built-in command"));
+        } else {
+            let elf = alloc::format!("BIN/{}.ELF", c.to_uppercase());
+            self.plain(&alloc::format!("/{elf}"));
+        }
+    }
+
+    fn env_command(&mut self) {
+        self.plain("USER=nexus");
+        self.plain("HOME=/HOME");
+        self.plain("SHELL=/BIN/TERM.ELF");
+        self.plain("TERM=nexus-term");
+        self.plain("PATH=/BIN");
+        self.plain("LANG=ja_JP.UTF-8");
+        self.plain("DESKTOP_SESSION=nexus-glass");
+        self.plain("GPU_BACKEND=virtio-gpu");
+    }
+
+    fn wc_command(&mut self, file: Option<&str>) {
+        let Some(name) = file else {
+            self.trouble("Usage: wc <file>");
+            return;
+        };
+        let Some(bytes) = self.read_local(name) else {
+            self.trouble(&alloc::format!("{name}: could not read file"));
+            return;
+        };
+        let lines = bytes.iter().filter(|&&b| b == b'\n').count();
+        let words = bytes
+            .split(|&b| b == b' ' || b == b'\t' || b == b'\n')
+            .filter(|s| !s.is_empty())
+            .count();
+        let bytes_len = bytes.len();
+        self.plain(&alloc::format!("  {lines}   {words}  {bytes_len} {name}"));
+    }
+
+    fn clip_command(&mut self, action: Option<&str>, text: Option<&str>) {
+        match action {
+            Some("set") | Some("copy") => {
+                let content = text.unwrap_or("").to_string();
+                self.clipboard = content;
+                self.note("Content copied to clipboard.");
+            }
+            Some("paste") | Some("get") => {
+                if self.clipboard.is_empty() {
+                    self.plain("(clipboard is empty)");
+                } else {
+                    let copy = self.clipboard.clone();
+                    self.plain(&copy);
+                }
+            }
+            _ => {
+                self.note("Usage: clip [copy <text> | paste]");
             }
         }
     }

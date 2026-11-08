@@ -47,10 +47,9 @@ pub const PAGE_SIZE: u64 = 4096;
 /// framebuffer` and the machine booted with no screen at all: a display this
 /// kernel could drive, refused by its own allocator.
 ///
-/// Two orders rather than one, so that the next size up -- 2560x1600, at 16
-/// megabytes exactly -- also fits. The cost is two more free lists and two more
-/// words of per-order bookkeeping.
-pub const MAX_ORDER: usize = 12;
+/// Two orders rather than one, so that 2560x1600 (16 MiB) and 3840x2160 4K
+/// (32 MiB, order 13) fit comfortably with room for future displays.
+pub const MAX_ORDER: usize = 14;
 
 /// Sentinel for "no block", used in place of a null physical address because
 /// physical address zero is a real frame.

@@ -73,6 +73,28 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'private-machine.ps1')
 . (Join-Path $PSScriptRoot 'maintenance.ps1')
 
+function Get-ConfiguredResolution {
+    param([string]$DiskPath, [string]$Default = '1920x1200')
+    if (-not (Test-Path -LiteralPath $DiskPath)) { return $Default }
+    try {
+        $fs = [System.IO.File]::Open($DiskPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $buf = New-Object byte[] (2 * 1024 * 1024)
+        $null = $fs.Seek(256 * 1024 * 1024, [System.IO.SeekOrigin]::Begin)
+        for ($i = 0; $i -lt 50; $i++) {
+            $read = $fs.Read($buf, 0, $buf.Length)
+            if ($read -le 0) { break }
+            $str = [System.Text.Encoding]::ASCII.GetString($buf, 0, $read)
+            $m = [regex]::Match($str, 'display\.resolution\s*=\s*([0-9]+x[0-9]+)')
+            if ($m.Success) {
+                $fs.Close()
+                return $m.Groups[1].Value
+            }
+        }
+        $fs.Close()
+    } catch { }
+    return $Default
+}
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = if ([IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory } else { Join-Path $RepoRoot $BuildDirectory }
 $EspDir = Join-Path $BuildDir 'esp'
@@ -184,6 +206,13 @@ try {
     $diskCheck.Dispose()
     if (Test-Path -LiteralPath $SerialLog) { Remove-Item -LiteralPath $SerialLog -Force }
     if ($HostHttpPort -eq 0) { $HostHttpPort = Get-FreeMonitorPort -From 18100 -To 19000 }
+    if (-not $PSBoundParameters.ContainsKey('Resolution')) {
+        $savedRes = Get-ConfiguredResolution -DiskPath $Disk -Default '1920x1200'
+        if ($savedRes) {
+            $Resolution = $savedRes
+            Write-Host "==> Configured display resolution: $Resolution" -ForegroundColor Cyan
+        }
+    }
     Write-Host "==> Guest HTTP service: http://127.0.0.1:$HostHttpPort" -ForegroundColor DarkGray
     $QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCodeLocal -FirmwareVars $FirmwareVars -SerialLog $SerialLog `
@@ -193,7 +222,7 @@ $QemuArgs += @('-d', 'guest_errors')
 if ($Headless) {
     $QemuArgs += @('-display', 'none')
 } else {
-    $QemuArgs += @('-display', 'gtk')
+    $QemuArgs += @('-display', 'gtk,zoom-to-fit=on')
 }
 
 if ($Gdb) {

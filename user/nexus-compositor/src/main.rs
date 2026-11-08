@@ -523,6 +523,65 @@ fn remember_language(message: &[u8]) {
     }
 }
 
+static LAST_SETTINGS_HASH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static KEYBOARD_JP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+fn poll_compositor_settings() -> bool {
+    let Ok(file) = nexus_user::open(SETTINGS, "settings.txt") else {
+        return false;
+    };
+    let Ok(size) = nexus_user::size(file) else {
+        nexus_user::close(file).ok();
+        return false;
+    };
+    if size == 0 || size > 8192 {
+        nexus_user::close(file).ok();
+        return false;
+    }
+    let mut buf = alloc::vec![0u8; size as usize];
+    let read = nexus_user::read_at(file, 0, &mut buf).unwrap_or(0);
+    nexus_user::close(file).ok();
+    buf.truncate(read);
+
+    let mut hash = 0xcbf29ce484222325u64;
+    for &b in &buf {
+        hash = (hash ^ (b as u64)).wrapping_mul(0x100000001b3);
+    }
+    if LAST_SETTINGS_HASH.swap(hash, core::sync::atomic::Ordering::Relaxed) == hash {
+        return false;
+    }
+
+    let Ok(text) = core::str::from_utf8(&buf) else {
+        return false;
+    };
+    let settings = nexus_config::Settings::parse(text);
+    let mut changed = false;
+
+    if let Some(accent_hex) = settings.get("look.accent") {
+        if let Some(col) = nexus_look::Colour::parse(accent_hex) {
+            let packed = col.packed();
+            if ACCENT.swap(packed, core::sync::atomic::Ordering::Relaxed) != packed {
+                changed = true;
+            }
+        }
+    }
+
+    if let Some(autohide) = settings.get("desktop.dock_autohide") {
+        let want_autohide = autohide == "yes";
+        if wm::is_dock_autohide_enabled() != want_autohide {
+            wm::set_dock_autohide(want_autohide);
+            changed = true;
+        }
+    }
+
+    if let Some(kb) = settings.get("system.keyboard") {
+        let is_jp = kb.starts_with("ja");
+        KEYBOARD_JP.store(is_jp, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    changed
+}
+
 /// Tell a client the interface language, if one has been announced.
 fn tell_language(channel: Handle) {
     let index = LANGUAGE.load(core::sync::atomic::Ordering::Relaxed);
@@ -2091,6 +2150,10 @@ fn serve(
             pending = pending.union(everything(screen));
         }
 
+        if poll_compositor_settings() {
+            pending = pending.union(everything(screen));
+        }
+
         for key in &keys[..count] {
             if *key == KEY_KEYBOARD {
                 match read_key(set, tiles, shell, &mut focus) {
@@ -2115,6 +2178,7 @@ fn serve(
                         wanted = Some(Launched::Window(What::Launcher));
                     }
                     Some(Typed::Linux) => wanted = Some(Launched::Window(What::Linux)),
+                    Some(Typed::Window(what)) => wanted = Some(Launched::Window(what)),
                     Some(Typed::Terminal) => wanted = Some(Launched::Window(What::Terminal)),
                     Some(Typed::Settings) => wanted = Some(Launched::Window(What::Settings)),
                     Some(Typed::Wm(action)) => {
@@ -2807,6 +2871,8 @@ enum Typed {
     WaylandClient,
     /// The key that runs a SPIR-V shader into a window.
     Shader,
+    /// Open a specific system window by its capability.
+    Window(What),
 }
 
 /// What reading from the desktop turned out to be.
@@ -3115,6 +3181,31 @@ fn read_shell(
 
     if message == desk::ASSIST {
         return open_window(screen, set, tiles, focus, order, What::Assistant);
+    }
+
+    if message == desk::CALC {
+        return open_window(screen, set, tiles, focus, order, What::Calc);
+    }
+    if message == desk::NETOOL {
+        return open_window(screen, set, tiles, focus, order, What::Netool);
+    }
+    if message == desk::STEAM {
+        return open_window(screen, set, tiles, focus, order, What::Steam);
+    }
+    if message == desk::TASKMGR {
+        return open_window(screen, set, tiles, focus, order, What::TaskMgr);
+    }
+    if message == desk::MUSIC {
+        return open_window(screen, set, tiles, focus, order, What::Music);
+    }
+    if message == desk::PAINT {
+        return open_window(screen, set, tiles, focus, order, What::Paint);
+    }
+    if message == desk::ARCHIVE {
+        return open_window(screen, set, tiles, focus, order, What::Archive);
+    }
+    if message == desk::DEVMGR {
+        return open_window(screen, set, tiles, focus, order, What::DevMgr);
     }
 
     if message == desk::QUIT {
@@ -3913,6 +4004,16 @@ fn read_key(
                 return Some(Typed::Terminal);
             }
             0x63 => return Some(Typed::Settings),
+            0x72 => return Some(Typed::Launch),
+            0x65 => return Some(Typed::Window(What::Files)),
+            0x62 => return Some(Typed::Window(What::Browser)),
+            0x74 => return Some(Typed::Terminal),
+            0x61 => return Some(Typed::Window(What::Assistant)),
+            0x6d => return Some(Typed::Window(What::Music)),
+            0x70 => return Some(Typed::Window(What::Paint)),
+            0x73 => return Some(Typed::Window(What::Steam)),
+            0x78 => return Some(Typed::Window(What::TaskMgr)),
+            0x6b => return Some(Typed::Window(What::Calc)),
             0x71 if chord & 0x10000 != 0 => {
                 if let Some(tile) = tiles
                     .get(*focus)

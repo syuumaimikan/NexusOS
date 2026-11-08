@@ -37,6 +37,11 @@ pub fn is_dock_autohide_enabled() -> bool {
     DOCK_AUTOHIDE.load(Ordering::Relaxed)
 }
 
+/// Set dock auto-hide mode explicitly.
+pub fn set_dock_autohide(enabled: bool) {
+    DOCK_AUTOHIDE.store(enabled, Ordering::Relaxed);
+}
+
 /// Toggle dock auto-hide mode and return new state.
 pub fn toggle_dock_autohide() -> bool {
     let next = !DOCK_AUTOHIDE.load(Ordering::Relaxed);
