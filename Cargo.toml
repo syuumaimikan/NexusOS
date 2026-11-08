@@ -73,6 +73,7 @@ members = [
     "user/nexus-assist",
     "user/nexus-setup",
     "user/nexus-idle",
+    "user/nexus-game",
 ]
 
 [workspace.package]

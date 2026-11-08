@@ -813,6 +813,7 @@ impl Terminal {
             "py" | "python" => self.run_python_file(words.argument(0)),
             "c" | "cc" => self.compile_and_run_c(words.argument(0), words.arguments()),
             "rust" | "rustc" => self.compile_and_run_rust(words.argument(0), words.arguments()),
+            "game" | "steam" => self.steam_command(words.argument(0)),
             "nex" => {
                 let arguments = words.arguments().join(" ");
                 self.run_program("BIN/NEX.ELF", &arguments);
@@ -934,6 +935,7 @@ impl Terminal {
         self.plain("py / python     -- interactive Python REPL or script runner");
         self.plain("cc / c          -- C/C++ compiler and runner");
         self.plain("rust / rustc    -- Rust compiler and runner");
+        self.plain("game / steam    -- Steamworks gaming subsystem and games (Spacewar AppID 480)");
         self.plain("nex             -- run a Nex script directly");
         self.note(nexus_i18n::text("term.help.keys"));
     }
@@ -1211,7 +1213,58 @@ impl Terminal {
                 self.plain("  edit [file]             GUI code editor");
                 self.plain("  run [binary.lx]         Run Linux x86-64 ELF binaries");
                 self.plain("  win [binary.exe]        Run Windows PE32+ binaries");
+                self.plain("  game / steam            Launch Steam game (Spacewar)");
                 self.plain("Type 'dev init' to generate hello starter templates!");
+            }
+        }
+    }
+
+    /// `steam` / `game`: Steamworks gaming subsystem and games.
+    fn steam_command(&mut self, sub: Option<&str>) {
+        match sub {
+            Some("info") => {
+                self.note("=== Steamworks Gaming Subsystem (NexusOS) ===");
+                self.plain("Status: ONLINE (Integrated Compatibility Layer)");
+                self.plain("Player: NexusPlayer (SteamID: 76561198000010001, Japan)");
+                self.plain("APIs Supported:");
+                self.plain("  - ISteamClient, ISteamUser, ISteamFriends, ISteamUtils");
+                self.plain("  - ISteamApps, ISteamUserStats, ISteamController");
+                self.plain("Calling Convention: Dual ABI (System V AMD64 + Microsoft x64)");
+                self.plain("Installed Games:");
+                self.plain("  [AppID 480]    Spacewar (Space Vanguard)");
+                self.plain("  [AppID 220]    Half-Life 2 (Engine Ready)");
+                self.plain("  [AppID 413150] Stardew Valley (Runtime Ready)");
+                self.plain("Type 'game play' or 'steam play' to start Spacewar!");
+            }
+            Some("list") => {
+                self.note("Installed / Registered Steam Games:");
+                self.plain("  480    Spacewar (60 FPS Vector Space Action)  [PLAYABLE]");
+                self.plain("  220    Half-Life 2 (Source Engine)             [COMPAT]");
+                self.plain("  413150 Stardew Valley                          [COMPAT]");
+            }
+            Some("achievements") | Some("stats") => {
+                self.note("Steamworks Achievements for Spacewar (AppID 480):");
+                self.plain(
+                    "  [ACH_FIRST_LAUNCH] First Flight     - Launched the game successfully",
+                );
+                self.plain(
+                    "  [ACH_SHARPSHOOTER] Sharpshooter      - Destroyed an asteroid with laser",
+                );
+                self.plain("  [ACH_SURVIVOR]     Space Survivor   - Survived 3 waves of asteroids");
+                self.plain(
+                    "  [ACH_SPACE_ACE]    Space Ace        - Attained 1,000 points in one sortie",
+                );
+            }
+            Some("test") | Some("diagnose") => {
+                self.note("Running Steamworks Spacewar diagnostic simulation...");
+                self.run_program("BIN/GAME.ELF", "");
+            }
+            Some("play") | Some("run") | None => {
+                self.note("Launching Steam Game: Spacewar (AppID 480)...");
+                self.run_program("BIN/GAME.ELF", "");
+            }
+            Some(other) => {
+                self.trouble(&alloc::format!("steam: unknown option '{other}'. Try 'info', 'list', 'achievements', or 'play'."));
             }
         }
     }

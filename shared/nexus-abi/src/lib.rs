@@ -17,5 +17,6 @@ pub mod dual_abi;
 pub mod elf;
 pub mod layout;
 pub mod pe;
+pub mod steam;
 
 pub use boot::*;

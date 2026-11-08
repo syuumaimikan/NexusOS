@@ -293,6 +293,10 @@ $IdleElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-idle"
 $StagedIdle = Publish-Program -Elf $IdleElf -ProgramDir $ProgramDir -Name 'idle.elf'
 $idleSize = [math]::Round((Get-Item $StagedIdle).Length / 1KB, 1)
 
+$GameElf = Join-Path $RepoRoot "target/x86_64-nexus-user/$Profile/nexus-game"
+$StagedGame = Publish-Program -Elf $GameElf -ProgramDir $ProgramDir -Name 'game.elf'
+$gameSize = [math]::Round((Get-Item $StagedGame).Length / 1KB, 1)
+
 # A program built for Linux, emitted by a tool that writes out every byte of the
 # ELF with the field it belongs to named beside it. Nothing about it is
 # NexusOS's: it is ET_EXEC, EM_X86_64, ELFOSABI_SYSV with no interpreter, and
@@ -733,6 +737,7 @@ Write-Host "  linux draw : $drawSize bytes, a window through the compositor -> /
 Write-Host ("  linux built: {0:N0} bytes of compiled Linux programs -> /usr/bin/ in the Linux root" -f $guestTotal)
 Write-Host ("  linux i386 : {0:N0} bytes, ET_EXEC/EM_386 -> /usr/bin/thirty-two" -f $guest32Size)
 Write-Host "  idle       : $idleSize KiB  -> BIN\IDLE.ELF on the disk"
+Write-Host "  game       : $gameSize KiB  -> BIN\GAME.ELF on the disk"
 Write-Host "  ESP tree   : $EspDir"
 Write-Host ''
 if ($SkipDiskImage) {

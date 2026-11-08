@@ -1,0 +1,20 @@
+[package]
+name = "nexus-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Steamworks-compatible interactive Spacewar game for NexusOS."
+
+[[bin]]
+name = "nexus-game"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+nexus-user = { path = "../nexus-user" }
+nexus-ui = { path = "../nexus-ui" }
+nexus-window = { path = "../nexus-window" }
+nexus-abi = { path = "../../shared/nexus-abi" }
+nexus-i18n = { path = "../../shared/nexus-i18n" }
+

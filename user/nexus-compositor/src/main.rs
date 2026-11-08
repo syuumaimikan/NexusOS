@@ -384,6 +384,8 @@ mod desk {
     pub const UNPACK: &[u8] = b"unpk";
     /// Draw a solid, in three dimensions, with the processor.
     pub const SOLID: &[u8] = b"sold";
+    /// Start the Steamworks-compatible interactive game.
+    pub const GAME: &[u8] = b"game";
     /// Find out what is on the network.
     pub const NETOOL: &[u8] = b"netw";
     /// Ask the machine which Linux calls it does not have.
@@ -590,6 +592,8 @@ const ASSISTANT: &[u8] = b"BIN/ASSIST.ELF";
 /// it puts on that surface was worked out by the processor. See
 /// `docs/three-d.md`.
 const SOLID: &[u8] = b"BIN/SOLID.ELF";
+/// The Steamworks game client.
+const GAME: &[u8] = b"BIN/GAME.ELF";
 /// The one that says what is on the network.
 ///
 /// Lent the network and nothing else -- no disk, no folder, nowhere to write.
@@ -2720,6 +2724,8 @@ enum What {
     /// because there is nothing to lend: this system has no graphics interface
     /// to hand out, and the program's whole claim is that it does not need one.
     Solid,
+    /// An interactive Steamworks game.
+    Game,
     /// A program built for Linux, given a surface and a channel like any other
     /// client and nothing else.
     ///
@@ -2826,6 +2832,7 @@ fn launched(asked: &[u8]) -> Option<Launched> {
         tag if tag == desk::ASSIST => Launched::Window(What::Assistant),
         tag if tag == desk::UNPACK => Launched::Unpack,
         tag if tag == desk::SOLID => Launched::Window(What::Solid),
+        tag if tag == desk::GAME => Launched::Window(What::Game),
         tag if tag == desk::NETOOL => Launched::Window(What::Netool),
         tag if tag == desk::PROBE => Launched::Probe,
         tag if tag == desk::FILEPROBE => Launched::FileProbe,
@@ -3206,6 +3213,27 @@ fn open_window(
             0,
             &[],
         )?,
+        What::Game => {
+            let lending =
+                nexus_user::rights::READ | nexus_user::rights::WRITE | nexus_user::rights::TRANSFER;
+            let sound = nexus_user::duplicate(SOUND, lending).ok();
+            let mut lent = alloc::vec![];
+            if let Some(s) = sound {
+                lent.push(s);
+            }
+            start_program(
+                GAME,
+                Placement {
+                    index: slot,
+                    x: screen.x + GAP + step,
+                    y: screen.y + GAP + step,
+                    width,
+                    height,
+                },
+                0,
+                &lent,
+            )?
+        }
         // A window for a program built for Linux. The same call as every other
         // client and the same endowments -- one surface, one channel -- which
         // is what makes the claim worth anything: if this needed a different
@@ -3587,6 +3615,9 @@ fn open_window(
             }
             What::Solid => {
                 "compositor: started the three-dimensional drawing, and gave it a surface"
+            }
+            What::Game => {
+                "compositor: started the interactive game client with Steamworks compatibility"
             }
             What::Netool => {
                 "compositor: started the network tool, and lent it the network and nothing else"

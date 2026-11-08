@@ -161,6 +161,17 @@ name = "nexus-font"
 version = "0.1.0"
 
 [[package]]
+name = "nexus-game"
+version = "0.1.0"
+dependencies = [
+ "nexus-abi",
+ "nexus-i18n",
+ "nexus-ui",
+ "nexus-user",
+ "nexus-window",
+]
+
+[[package]]
 name = "nexus-guest"
 version = "0.1.0"
 dependencies = [

@@ -149,6 +149,11 @@ const ENTRIES: &[Entry] = &[
         grave: false,
     },
     Entry {
+        key: "shell.game",
+        tag: b"game",
+        grave: false,
+    },
+    Entry {
         key: "shell.netool",
         tag: b"netw",
         grave: false,
