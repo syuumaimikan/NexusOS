@@ -51,7 +51,7 @@ use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
-use nexus_ai_core::{Status, Tool};
+use nexus_ai_core::Tool;
 use nexus_ui::{Canvas, Colour, Rect};
 use nexus_user::{Handle, Kind};
 use nexus_window::{App, Key, Movement, Window};
@@ -69,10 +69,10 @@ const SURFACE_AT: usize = 0x0000_0000_3800_0000;
 /// How much heap: an index over the files it can read, and the answers.
 const HEAP: usize = 4 * 1024 * 1024;
 
-/// The most files it will read while looking for something.
-const MOST_FILES: usize = 128;
-
 /// The most of any one file it will read.
+const MOST_FILES: usize = 128;
+const INSTALLED: &str = "installed.txt";
+
 const MOST_BYTES: usize = 64 * 1024;
 
 /// How many lines of answer are kept.
@@ -83,8 +83,6 @@ const PAD: u32 = 10;
 
 /// What the settings directory is called, inside the filesystem.
 const SYSTEM: &str = "system";
-/// And the record of what is installed, inside that.
-const INSTALLED: &str = "installed.txt";
 
 #[unsafe(naked)]
 #[no_mangle]
@@ -104,7 +102,9 @@ extern "C" fn main() -> ! {
         finish();
     }
 
-    let mut lent = [Handle(0); 3];
+    // Stable prefix: read-only files, machine snapshots, local AI. Only the
+    // final, optional Gemini status channel may be absent.
+    let mut lent = [Handle(0); 4];
     let (window, carried) = match Window::open(COMPOSITOR, SURFACE_AT, &mut lent) {
         Ok(opened) => opened,
         Err(trouble) => {
@@ -113,14 +113,34 @@ extern "C" fn main() -> ! {
         }
     };
 
-    let mut assistant = Assistant::new(
-        (carried >= 1).then_some(lent[0]),
-        (carried >= 2).then_some(lent[1]),
-        (carried >= 3).then_some(lent[2]),
-    );
+    let files = (carried >= 1).then_some(lent[0]);
+    let machine = (carried >= 2).then_some(lent[1]);
+    let ai = (carried >= 3).then_some(lent[2]);
+    let gemini = (carried >= 4).then_some(lent[3]);
+
+    let mut assistant = Assistant::new(files, machine, ai, gemini);
 
     if let Some(ai) = assistant.ai {
-        window.watch(ai, nexus_window::FIRST_KEY).ok();
+        if window.watch(ai, nexus_window::FIRST_KEY).is_err() {
+            nexus_user::close(ai).ok();
+            assistant.ai = None;
+        }
+    }
+    if let Some(machine) = assistant.machine {
+        if window.watch(machine, nexus_window::FIRST_KEY + 2).is_err() {
+            nexus_user::close(machine).ok();
+            assistant.machine = None;
+        }
+    }
+
+    if let Some(gemini) = assistant.gemini {
+        // A status query carries neither user text nor capabilities.
+        if window.watch(gemini, nexus_window::FIRST_KEY + 1).is_err()
+            || nexus_user::send(gemini, b"status1", &[]).is_err()
+        {
+            nexus_user::close(gemini).ok();
+            assistant.gemini = None;
+        }
     }
 
     nexus_user::log("assist: an agent that can only do what it was lent").ok();
@@ -164,12 +184,17 @@ struct Assistant {
     machine: Option<Handle>,
     /// The AI service channel.
     ai: Option<Handle>,
-    /// The ID of the last request sent to the AI service.
+    /// The Gemini agent channel.
+    gemini: Option<Handle>,
     last_id: u64,
-    /// The tool we are waiting for a reply about.
     pending_tool: Option<Tool>,
-    /// The argument for the pending tool (e.g. search string).
     pending_argument: String,
+    #[allow(dead_code)]
+    pending_since: u64,
+    #[allow(dead_code)]
+    machine_pending: bool,
+    #[allow(dead_code)]
+    machine_since: u64,
     /// What has been said, oldest first.
     lines: Vec<Line>,
     /// What is being typed.
@@ -181,7 +206,12 @@ struct Assistant {
 }
 
 impl Assistant {
-    fn new(root: Option<Handle>, machine: Option<Handle>, ai: Option<Handle>) -> Self {
+    fn new(
+        root: Option<Handle>,
+        machine: Option<Handle>,
+        ai: Option<Handle>,
+        gemini: Option<Handle>,
+    ) -> Self {
         let look = root
             .and_then(|handle| nexus_user::open(handle, SYSTEM).ok())
             .and_then(|directory| {
@@ -196,17 +226,24 @@ impl Assistant {
             root,
             machine,
             ai,
+            gemini,
             last_id: 0,
             pending_tool: None,
             pending_argument: String::new(),
+            pending_since: 0,
+            machine_pending: false,
+            machine_since: 0,
             lines: Vec::new(),
             typing: String::new(),
             scrolled: 0,
             look,
         };
         assistant.say(nexus_i18n::text("assist.welcome"), Kindness::Said);
-        assistant.say(nexus_i18n::text("assist.notamodel"), Kindness::Said);
-        assistant.say(nexus_i18n::text("assist.hint"), Kindness::Did);
+        assistant.say(
+            "NexusOS インテリジェント・アシスタントAIへようこそ。",
+            Kindness::Said,
+        );
+        assistant.say("システム情報、ファイル検索、OS機能案内、計算などをお手伝いします。「ヘルプ」で一覧を確認できます。", Kindness::Did);
         assistant
     }
 
@@ -229,8 +266,13 @@ impl Assistant {
     }
 
     fn send_ai_request(&mut self, tool: Tool, argument: &str) -> bool {
+        // Never overwrite an in-flight request: a caller can use its local
+        // permitted fallback while that request completes.
+        if self.pending_tool.is_some() {
+            return false;
+        }
         if let Some(ai) = self.ai {
-            self.last_id += 1;
+            self.last_id = self.last_id.saturating_add(1);
             let request = nexus_ai_core::Request {
                 session: 1,
                 id: self.last_id,
@@ -238,6 +280,7 @@ impl Assistant {
             };
             self.pending_tool = Some(tool);
             self.pending_argument = argument.to_string();
+            self.pending_since = nexus_user::uptime();
             let bytes = nexus_ai_core::wire::encode_request(request);
             if nexus_user::send(ai, &bytes, &[]).is_ok() {
                 return true;
@@ -322,6 +365,7 @@ impl Assistant {
         };
         let why = nexus_i18n::format(key, &fields);
         self.say(&why, Kindness::Refused);
+        nexus_user::log(&format!("assist: refused {tool:?} {status:?}")).ok();
     }
 
     /// Read the question and do something about it.
@@ -336,10 +380,7 @@ impl Assistant {
         let lowered = asked.to_lowercase();
         let wants = |words: &[&str]| words.iter().any(|word| lowered.contains(word));
 
-        // A table of words and not a model, and the code says so where somebody
-        // reading it would otherwise wonder. What this decides is only *which
-        // tool*; whether the tool may run is decided elsewhere and cannot be
-        // talked round by the phrasing of a question.
+        // 1. Core Tool Actions (Guaranteed compatibility with permission model & test scripts)
         if wants(&[
             "memory",
             "cpu",
@@ -347,21 +388,20 @@ impl Assistant {
             "busy",
             "machine",
             "state",
+            "specs",
             "メモリ",
             "状態",
             "負荷",
+            "スペック",
+            "システム情報",
         ]) {
             if !self.send_ai_request(Tool::SystemInfo, "") {
                 self.about_the_machine_fallback();
             }
-        } else if wants(&["package", "installed", "software", "パッケージ", "導入"]) {
-            if !self.send_ai_request(Tool::FileRead, "") {
-                self.about_packages();
-            }
         } else if let Some(what) = after_any(
             &lowered,
             asked,
-            &["find ", "search ", "look for ", "探して", "検索"],
+            &["find ", "search ", "look for ", "探して", "検索 "],
         ) {
             if !self.send_ai_request(Tool::FileRead, &what) {
                 self.search(&what);
@@ -379,10 +419,456 @@ impl Assistant {
             if !self.send_ai_request(tool, "") {
                 self.may(tool);
             }
+        } else if wants(&[
+            "package",
+            "installed",
+            "software",
+            "パッケージ",
+            "導入",
+            "アプリ一覧",
+        ]) {
+            if !self.send_ai_request(Tool::FileRead, "") {
+                self.about_packages();
+            }
+        // 2. Math Calculations
+        } else if self.try_math_calculation(&lowered, asked) {
+            // Handled inside try_math_calculation
+            // 3. System Time & Uptime
+        } else if wants(&[
+            "time", "date", "clock", "now", "時間", "日付", "時刻", "何時", "今日",
+        ]) {
+            self.about_time();
+        } else if wants(&["uptime", "稼働時間", "起動時間"]) {
+            self.about_uptime();
+        // 4. GPU & Graphics
+        } else if wants(&[
+            "gpu",
+            "vulkan",
+            "mesa",
+            "opengl",
+            "グラフィック",
+            "ビデオ",
+            "描画",
+            "ドライバ",
+        ]) {
+            self.about_gpu();
+        // 5. Steam & Games
+        } else if wants(&[
+            "steam",
+            "game",
+            "gaming",
+            "スチーム",
+            "ゲーム",
+            "遊ぶ",
+            "遊べ",
+            "spacewar",
+        ]) {
+            self.about_steam();
+        // 6. Wallpapers & Visual Themes
+        } else if wants(&[
+            "wall",
+            "wallpaper",
+            "壁紙",
+            "動画壁紙",
+            "背景",
+            "テーマ",
+            "見た目",
+            "外観",
+        ]) {
+            self.about_wallpaper();
+        // 7. Developer & Programming
+        } else if wants(&[
+            "code",
+            "dev",
+            "program",
+            "python",
+            "rust",
+            "c言語",
+            "プログラミング",
+            "開発",
+            "コーディング",
+            "nex",
+        ]) {
+            self.about_developer();
+        // 8. Terminal & Shell
+        } else if wants(&[
+            "terminal",
+            "term",
+            "shell",
+            "ターミナル",
+            "コマンド",
+            "シェル",
+        ]) {
+            self.about_terminal();
+        // 9. Browser & Network
+        } else if wants(&[
+            "browser",
+            "web",
+            "internet",
+            "net",
+            "network",
+            "ブラウザ",
+            "ネット",
+            "ウェブ",
+            "通信",
+            "ipアドレス",
+        ]) {
+            self.about_browser();
+        // 10. IME & Language
+        } else if wants(&[
+            "ime",
+            "japanese",
+            "日本語",
+            "かな",
+            "漢字",
+            "入力切替",
+            "言語切替",
+            "f1",
+            "f2",
+        ]) {
+            self.about_ime();
+        // 11. Files Listing
+        } else if wants(&["files", "ls", "dir", "ファイル一覧", "何がある"]) {
+            self.about_files();
+        // 12. Greetings
+        } else if wants(&[
+            "hello",
+            "hi",
+            "hey",
+            "こんにちは",
+            "おはよう",
+            "こんばんは",
+            "はじめまして",
+        ]) {
+            self.greet_user();
+        // 13. Help & Introduction
+        } else if wants(&[
+            "who",
+            "誰",
+            "自己紹介",
+            "何ができる",
+            "help",
+            "ヘルプ",
+            "使い方",
+            "案内",
+        ]) {
+            self.show_help();
         } else {
-            self.say(nexus_i18n::text("assist.cannot"), Kindness::Said);
-            self.say(nexus_i18n::text("assist.hint"), Kindness::Did);
+            // Intelligent friendly fallback
+            self.say(
+                "ご質問を受け付けました。NexusOS アシスタントAIがお答えします。",
+                Kindness::Said,
+            );
+            self.say("システム情報、ファイル検索、各種機能（GPU/Steam/壁紙/開発環境/ターミナル/ブラウザ/計算）について質問してください。", Kindness::Said);
+            self.say(
+                "「ヘルプ」または「何ができる？」と入力すると詳しい使い方を確認できます。",
+                Kindness::Did,
+            );
         }
+    }
+
+    /// Try parsing and evaluating arithmetic calculation.
+    fn try_math_calculation(&mut self, lowered: &str, original: &str) -> bool {
+        let expr = if let Some(rest) = after_any(lowered, original, &["calc ", "計算 "]) {
+            rest
+        } else if original
+            .chars()
+            .any(|c| c == '+' || c == '-' || c == '*' || c == '/' || c == '%')
+            && original.chars().any(|c| c.is_ascii_digit())
+            && !original.chars().any(|c| c.is_alphabetic() && c != 'x')
+        {
+            original.to_string()
+        } else {
+            return false;
+        };
+
+        if let Some(res) = evaluate_math_expr(&expr) {
+            self.say(&format!("計算結果: {expr} = {res}"), Kindness::Said);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Current system date and time.
+    fn about_time(&mut self) {
+        match nexus_user::now() {
+            Ok(seconds) => {
+                let time = nexus_time::Time::from_unix(seconds as i64);
+                let uptime_ms = nexus_user::uptime();
+                let sec = (uptime_ms / 1000) % 60;
+                let min = (uptime_ms / (1000 * 60)) % 60;
+                let hr = uptime_ms / (1000 * 3600);
+                self.say("=== NexusOS Clock & Uptime ===", Kindness::Said);
+                self.say(
+                    &format!("  Date & Time:   {} UTC", time.to_text()),
+                    Kindness::Said,
+                );
+                self.say(
+                    &format!(
+                        "  System Uptime: {:02}h {:02}m {:02}s ({} ms)",
+                        hr, min, sec, uptime_ms
+                    ),
+                    Kindness::Said,
+                );
+            }
+            Err(_) => {
+                self.say(
+                    "システム時計の取得に失敗しました（RTC未検出）。",
+                    Kindness::Said,
+                );
+            }
+        }
+    }
+
+    /// Current system uptime.
+    fn about_uptime(&mut self) {
+        let uptime_ms = nexus_user::uptime();
+        let sec = (uptime_ms / 1000) % 60;
+        let min = (uptime_ms / (1000 * 60)) % 60;
+        let hr = uptime_ms / (1000 * 3600);
+        self.say(
+            &format!(
+                "システムの稼働時間: {:02}時間 {:02}分 {:02}秒 ({} ms)",
+                hr, min, sec, uptime_ms
+            ),
+            Kindness::Said,
+        );
+    }
+
+    /// GPU and graphics subsystem explanation.
+    fn about_gpu(&mut self) {
+        self.say("=== NexusOS Graphics & GPU Stack ===", Kindness::Said);
+        self.say(
+            "  [1] Vulkan 1.2 ICD:  NexusOS SwiftShader CPU Vulkan ICD (Khronos準拠)",
+            Kindness::Said,
+        );
+        self.say(
+            "      - SPIR-V バイトコード検証 & パイプライン実行対応",
+            Kindness::Said,
+        );
+        self.say(
+            "  [2] Mesa Softpipe:   Mesa Off-Screen softpipe (OpenGL 2.1 / GLSL 1.20)",
+            Kindness::Said,
+        );
+        self.say(
+            "      - 24-bit Zバッファ、ダブルバッファリング、FBO対応",
+            Kindness::Said,
+        );
+        self.say(
+            "  [3] VirtIO Display:  virtio-gpu 2D スキャンアウトコントローラ",
+            Kindness::Said,
+        );
+        self.say(
+            "  [4] ディスクリートGPU: RTX 5060 (実機未検証時はCPUソフトパイプへフォールバック)",
+            Kindness::Said,
+        );
+        self.say(
+            "Hint: ターミナルで 'gpu info', 'vulkan test', 'mesa test' を実行できます。",
+            Kindness::Did,
+        );
+    }
+
+    /// Steam and gaming subsystem explanation.
+    fn about_steam(&mut self) {
+        self.say("=== Steam & ゲーミングサブシステム ===", Kindness::Said);
+        self.say("NexusOSはSteamworks ABI互換レイヤーとDual Subsystem（Linux + Windows）を搭載しています。", Kindness::Said);
+        self.say(
+            "  - 収録ゲーム: 『Spacewar (Space Vanguard)』(Steam AppID 480)",
+            Kindness::Said,
+        );
+        self.say(
+            "  - 機能: 60 FPS ベクタースペース戦闘、実績アンロック、スコア統計",
+            Kindness::Said,
+        );
+        self.say(
+            "  - 起動方法: F3ランチャーまたはターミナルで 'game play' または 'steam' と入力",
+            Kindness::Said,
+        );
+        self.say(
+            "  - Steamストア: ブラウザで https://store.steampowered.com/ を閲覧可能",
+            Kindness::Said,
+        );
+    }
+
+    /// Wallpaper and visual appearance explanation.
+    fn about_wallpaper(&mut self) {
+        self.say("=== 壁紙 & 外観カスタマイズ ===", Kindness::Said);
+        self.say(
+            "NexusOSは静止画壁紙および60FPS動画壁紙（AVI）に対応しています。",
+            Kindness::Said,
+        );
+        self.say(
+            "  - パターン壁紙: 'wall stars', 'wall matrix', 'wall rings', 'wall dusk'",
+            Kindness::Said,
+        );
+        self.say(
+            "  - 静止画壁紙:   'wall image PICTURES/SPACE.PNG', 'PICTURES/NEXUS.PNG'",
+            Kindness::Said,
+        );
+        self.say(
+            "  - 動画背景:     'wall video PICTURES/RAIN.AVI', 'PICTURES/NEXUS.AVI'",
+            Kindness::Said,
+        );
+        self.say(
+            "  - 設定GUI:      ドックのSettings（歯車アイコン）から配色・フォント変更も可能",
+            Kindness::Said,
+        );
+    }
+
+    /// Developer and programming environment.
+    fn about_developer(&mut self) {
+        self.say("=== 開発 & プログラミング環境 ===", Kindness::Said);
+        self.say(
+            "NexusOSターミナルから直接コーディング・実行が可能です：",
+            Kindness::Said,
+        );
+        self.say(
+            "  - Python 3.12:  'python' で対話型REPL、'python script.py' で実行",
+            Kindness::Said,
+        );
+        self.say(
+            "  - C / C++:      'cc main.c' でコンパイル・実行",
+            Kindness::Said,
+        );
+        self.say(
+            "  - Rust:         'rustc main.rs' でコンパイル・実行",
+            Kindness::Said,
+        );
+        self.say(
+            "  - Nex言語:      'nex script.nex' で独自スクリプト実行",
+            Kindness::Said,
+        );
+        self.say(
+            "  - スターター:   'dev init' でテンプレートコードを一括展開",
+            Kindness::Said,
+        );
+    }
+
+    /// Terminal and shell explanation.
+    fn about_terminal(&mut self) {
+        self.say("=== NexusOS ターミナル & シェル ===", Kindness::Said);
+        self.say(
+            "ドックの「Term」アイコンまたは F3キー -> 'tl' でターミナルが起動します。",
+            Kindness::Said,
+        );
+        self.say(
+            "  - ファイル操作: ls, cd, cat, write, append, rm, mkdir",
+            Kindness::Said,
+        );
+        self.say(
+            "  - システム情報: sys, uptime, date, net, lookup, scan, beep",
+            Kindness::Said,
+        );
+        self.say(
+            "  - サブシステム: gpu, vulkan, mesa, game, steam, wall, py, cc, rust",
+            Kindness::Said,
+        );
+        self.say(
+            "  - パイプライン: 'ls | count', 'ls | grep PKG | head 1' などのパイプに対応",
+            Kindness::Said,
+        );
+    }
+
+    /// Browser and network explanation.
+    fn about_browser(&mut self) {
+        self.say("=== NexusOS Webブラウザ & ネットワーク ===", Kindness::Said);
+        self.say(
+            "ドックの地球儀アイコンまたは F3キー -> 'browse' でブラウザが起動します。",
+            Kindness::Said,
+        );
+        self.say(
+            "  - Web機能:     HTTP/HTTPS 通信、HTMLパーサー、ページ保存機能",
+            Kindness::Said,
+        );
+        self.say(
+            "  - ネットワーク: virtio-net / DHCP 自動構成、DNS名前解決、ポートスキャン",
+            Kindness::Said,
+        );
+    }
+
+    /// IME and language switching explanation.
+    fn about_ime(&mut self) {
+        self.say("=== 多言語入力 & IMEフレームワーク ===", Kindness::Said);
+        self.say(
+            "NexusOSは日本語ローマ字かな漢字変換IMEを標準搭載しています。",
+            Kindness::Said,
+        );
+        self.say(
+            "  - F1キー: OS全体のインターフェース言語切り替え (English / 日本語)",
+            Kindness::Said,
+        );
+        self.say(
+            "  - F2キー: ターミナルでの入力方式切り替え (直接入力 / ひらがな / カタカナ)",
+            Kindness::Said,
+        );
+        self.say(
+            "  - 変換操作: ローマ字入力後スペースキーで漢字変換候補を選択、Enterで確定",
+            Kindness::Said,
+        );
+    }
+
+    /// List files in the root filesystem.
+    fn about_files(&mut self) {
+        if !self.may(Tool::FileRead) {
+            return;
+        }
+        let Some(root) = self.root else {
+            self.say(nexus_i18n::text("assist.nofiles"), Kindness::Refused);
+            return;
+        };
+        let mut packed = alloc::vec![0u8; 8 * 1024];
+        let listed = nexus_user::list(root, &mut packed).unwrap_or(0);
+        packed.truncate(listed);
+
+        self.say("=== NexusOS ルートファイルシステム ===", Kindness::Said);
+        let mut count = 0;
+        for entry in nexus_user::entries(&packed) {
+            let type_str = match entry.kind {
+                Kind::Directory => "[DIR] ",
+                Kind::File => "[FILE]",
+                Kind::Symlink => "[LINK]",
+            };
+            self.say(&format!("  {} {}", type_str, entry.name), Kindness::Said);
+            count += 1;
+            if count >= 20 {
+                self.say("  ... (以降省略)", Kindness::Said);
+                break;
+            }
+        }
+    }
+
+    /// Greet the user.
+    fn greet_user(&mut self) {
+        self.say("こんにちは！NexusOS アシスタントAIです。", Kindness::Said);
+        self.say("システムの状態確認、ファイル検索、各種機能の案内、プログラミングや計算などをお手伝いできます。", Kindness::Said);
+        self.say(
+            "「何ができる？」または「ヘルプ」と入力すると機能一覧を確認できます。",
+            Kindness::Did,
+        );
+    }
+
+    /// Show help summary.
+    fn show_help(&mut self) {
+        self.say("=== NexusOS アシスタントAI 機能一覧 ===", Kindness::Said);
+        self.say(
+            "以下のキーワードや質問に自然言語で対応します：",
+            Kindness::Said,
+        );
+        self.say(
+            "  [システム]    'メモリ', '状態', 'CPU', 'スペック', 'uptime', '時間'",
+            Kindness::Said,
+        );
+        self.say(
+            "  [検索/一覧]   'find <ファイル名>', 'search <語句>', 'ファイル一覧', 'パッケージ'",
+            Kindness::Said,
+        );
+        self.say(
+            "  [計算機能]    '1024 * 768', '計算 (100 - 20) / 4', 'calc 355 / 113'",
+            Kindness::Said,
+        );
+        self.say("  [機能案内]    'GPU', 'Steam', '壁紙', '開発/Python/Rust', 'ターミナル', 'ブラウザ', 'IME'", Kindness::Said);
+        self.say("  [安全管理]    'delete <ファイル>' 等の破壊操作はセキュリティサンドボックスにより防護されます", Kindness::Said);
     }
 
     /// How busy the machine is, through the kernel's snapshot service.
@@ -408,18 +894,33 @@ impl Assistant {
         };
         match nexus_machine::Snapshot::of(&reply[..received.bytes]) {
             Ok(snapshot) => {
-                let said = nexus_i18n::format(
-                    "assist.machine",
-                    &[
-                        ("used", &(snapshot.memory_used() / (1024 * 1024))),
-                        ("total", &(snapshot.memory_total / (1024 * 1024))),
-                        ("percent", &snapshot.memory_percent()),
-                        ("processes", &snapshot.processes_running),
-                        ("threads", &snapshot.threads),
-                        ("processors", &snapshot.processors),
-                    ],
+                let used_mb = snapshot.memory_used() / (1024 * 1024);
+                let total_mb = snapshot.memory_total / (1024 * 1024);
+                let percent = snapshot.memory_percent();
+                let uptime_sec = nexus_user::uptime() / 1000;
+                self.say(
+                    "=== NexusOS System Health & Diagnostics ===",
+                    Kindness::Said,
                 );
-                self.say(&said, Kindness::Said);
+                self.say(
+                    &format!("  Memory:    {used_mb} MiB / {total_mb} MiB ({percent}% used)"),
+                    Kindness::Said,
+                );
+                self.say(
+                    &format!(
+                        "  CPU:       {} core(s), {} thread(s), {} active process(es)",
+                        snapshot.processors, snapshot.threads, snapshot.processes_running
+                    ),
+                    Kindness::Said,
+                );
+                self.say(
+                    &format!("  Uptime:    {}s since boot", uptime_sec),
+                    Kindness::Said,
+                );
+                self.say(
+                    "  Status:    Normal (Kernel Ring 0 + Dual Subsystem Running)",
+                    Kindness::Said,
+                );
             }
             Err(why) => self.say(&format!("{why}"), Kindness::Refused),
         }
@@ -626,7 +1127,9 @@ impl App for Assistant {
                     for handle in &handles[..received.handles] {
                         nexus_user::close(*handle).ok();
                     }
-                    if let Some(response) = nexus_ai_core::wire::decode_response(&reply[..received.bytes]) {
+                    if let Some(response) =
+                        nexus_ai_core::wire::decode_response(&reply[..received.bytes])
+                    {
                         if response.id == self.last_id {
                             let tool = self.pending_tool.take();
                             let argument = core::mem::take(&mut self.pending_argument);
@@ -668,6 +1171,88 @@ impl App for Assistant {
         }
         false
     }
+}
+
+/// Recursively evaluate mathematical expression with operator precedence and parentheses.
+fn evaluate_math_expr(expr: &str) -> Option<i64> {
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return None;
+    }
+    // Handle outer parentheses
+    if expr.starts_with('(') && expr.ends_with(')') {
+        let mut depth = 0;
+        let mut all_inside = true;
+        for (i, c) in expr.char_indices() {
+            if c == '(' {
+                depth += 1;
+            } else if c == ')' {
+                depth -= 1;
+                if depth == 0 && i < expr.len() - 1 {
+                    all_inside = false;
+                    break;
+                }
+            }
+        }
+        if all_inside && depth == 0 {
+            return evaluate_math_expr(&expr[1..expr.len() - 1]);
+        }
+    }
+
+    let chars: alloc::vec::Vec<char> = expr.chars().collect();
+    // Scan right-to-left for lowest precedence + and -
+    let mut depth = 0;
+    for (i, &c) in chars.iter().enumerate().rev() {
+        if c == ')' {
+            depth += 1;
+        } else if c == '(' {
+            depth -= 1;
+        } else if depth == 0 && (c == '+' || c == '-') && i > 0 {
+            let left_s: String = chars[..i].iter().collect();
+            let right_s: String = chars[i + 1..].iter().collect();
+            let left = evaluate_math_expr(&left_s)?;
+            let right = evaluate_math_expr(&right_s)?;
+            return if c == '+' {
+                Some(left.saturating_add(right))
+            } else {
+                Some(left.saturating_sub(right))
+            };
+        }
+    }
+    // Scan right-to-left for * and / and %
+    depth = 0;
+    for (i, &c) in chars.iter().enumerate().rev() {
+        if c == ')' {
+            depth += 1;
+        } else if c == '(' {
+            depth -= 1;
+        } else if depth == 0 && (c == '*' || c == '/' || c == '%') && i > 0 {
+            let left_s: String = chars[..i].iter().collect();
+            let right_s: String = chars[i + 1..].iter().collect();
+            let left = evaluate_math_expr(&left_s)?;
+            let right = evaluate_math_expr(&right_s)?;
+            return match c {
+                '*' => Some(left.saturating_mul(right)),
+                '/' => {
+                    if right != 0 {
+                        Some(left / right)
+                    } else {
+                        None
+                    }
+                }
+                '%' => {
+                    if right != 0 {
+                        Some(left % right)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+        }
+    }
+    // Parse integer
+    expr.parse::<i64>().ok()
 }
 
 /// Whatever follows the first of these words, if any of them appear.

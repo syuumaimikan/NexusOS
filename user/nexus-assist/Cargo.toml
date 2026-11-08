@@ -25,3 +25,4 @@ nexus-http = { path = "../../shared/nexus-http" }
 nexus-tls = { path = "../../shared/nexus-tls" }
 nexus-json = { path = "../../shared/nexus-json" }
 nexus-netclient = { path = "../../shared/nexus-netclient" }
+nexus-time = { path = "../../shared/nexus-time" }

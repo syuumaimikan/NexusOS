@@ -58,6 +58,7 @@ dependencies = [
  "nexus-look",
  "nexus-machine",
  "nexus-netclient",
+ "nexus-time",
  "nexus-tls",
  "nexus-ui",
  "nexus-update",
