@@ -2805,7 +2805,7 @@ fn create_simple_elf(message: &[u8]) -> Vec<u8> {
 }
 
 fn create_simple_pe(message: &[u8]) -> Vec<u8> {
-    const IMAGE_BASE: u64 = 0x14000_0000;
+    const IMAGE_BASE: u64 = 0x0001_4000_0000;
     const SECTION_RVA: u32 = 0x1000;
     let length = message.len() as u32;
     let message_rva = SECTION_RVA + 40;

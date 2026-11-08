@@ -378,13 +378,15 @@ mod tests {
 
     #[test]
     fn test_calling_convention_thunk_mapping() {
-        let mut sysv = ThunkRegisters::default();
-        sysv.rdi = 10;
-        sysv.rsi = 20;
-        sysv.rdx = 30;
-        sysv.rcx = 40;
-        sysv.r8 = 50;
-        sysv.r9 = 60;
+        let sysv = ThunkRegisters {
+            rdi: 10,
+            rsi: 20,
+            rdx: 30,
+            rcx: 40,
+            r8: 50,
+            r9: 60,
+            ..Default::default()
+        };
 
         let (msx64, s4, s5) = sysv.sysv_to_msx64();
         assert_eq!(msx64.rcx, 10);
