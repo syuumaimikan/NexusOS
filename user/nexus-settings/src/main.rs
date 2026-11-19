@@ -246,7 +246,7 @@ impl Settings {
             .collect();
         let hardware_report =
             directory.and_then(|handle| read_text(handle, "hardware.txt").ok().flatten());
-        let (_wifi, _bluetooth, graphics) = hardware_report
+        let (wifi, bluetooth, graphics) = hardware_report
             .as_deref()
             .map(|report| {
                 (
@@ -445,48 +445,8 @@ impl Settings {
                 "no",
             )),
             Item::Heading("settings.devices"),
-            Item::Row(Row::choice(
-                "network.wifi",
-                "settings.wifi",
-                alloc::vec![
-                    "Connected (Nexus-Home-5G)".to_string(),
-                    "Nexus-Office-WPA3".to_string(),
-                    "Scanning SSIDs...".to_string(),
-                    "Disabled".to_string(),
-                ],
-                "Connected (Nexus-Home-5G)",
-            )),
-            Item::Row(Row::typed(
-                "network.wifi_ssid",
-                "Wi-Fi SSID",
-                "Nexus-Home-5G",
-            )),
-            Item::Row(Row::typed(
-                "network.wifi_password",
-                "Wi-Fi Password",
-                "••••••••••••",
-            )),
-            Item::Row(Row::choice(
-                "bluetooth.enabled",
-                "settings.bluetooth",
-                alloc::vec![
-                    "yes (MediaTek RZ616)".to_string(),
-                    "no (Disabled)".to_string(),
-                ],
-                "yes (MediaTek RZ616)",
-            )),
-            Item::Row(Row::choice(
-                "bluetooth.device",
-                "Bluetooth Device",
-                alloc::vec![
-                    "WH-1000XM5 Headset (Connected)".to_string(),
-                    "MX Master 3S Mouse (Paired)".to_string(),
-                    "Keychron K2 Keyboard (Paired)".to_string(),
-                    "Scan for Devices...".to_string(),
-                ],
-                "WH-1000XM5 Headset (Connected)",
-            )),
-            Item::Row(Row::info("settings.devices", "xHCI 3.0 • 2 Flash Drives, 2 HID".to_string())),
+            Item::Row(Row::info("settings.wifi", wifi)),
+            Item::Row(Row::info("settings.bluetooth", bluetooth)),
             Item::Row(Row::info("settings.graphics", graphics)),
             Item::Heading("settings.you"),
             Item::Row(Row::typed(key::USER_NAME, "settings.name", "")),
