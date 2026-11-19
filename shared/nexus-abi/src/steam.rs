@@ -1,10 +1,10 @@
 //! Steamworks Compatibility Layer & Gaming Subsystem ABI.
 //!
-//! Provides the data structures, interface models, and compatibility shims
-//! that emulate the Valve Steamworks API (both Linux `libsteam_api.so` and
-//! Windows `steam_api64.dll`). This enables games with Steamworks integration
-//! (such as Spacewar, retro games, and standalone titles) to initialize, query
-//! user persona and stats, unlock achievements, and execute smoothly on NexusOS.
+//! This crate contains local data structures and an explicitly incomplete shim.
+//! It is not Valve's Steamworks runtime and must never claim that a user is
+//! signed in, owns an AppID, or has a live Steam connection. Unsupported
+//! authentication and ownership queries fail closed until a genuine client
+//! integration exists.
 
 /// Steam 64-bit ID structure.
 ///
@@ -36,10 +36,6 @@ impl CSteamID {
             | ((universe as u64) << 56);
         Self(raw)
     }
-
-    /// Default Nexus player Steam ID (Universe: Public, Type: Individual, ID: 10001).
-    pub const NEXUS_PLAYER: Self =
-        Self::new(10001, 1, Self::TYPE_INDIVIDUAL, Self::UNIVERSE_PUBLIC);
 
     /// Convert to raw 64-bit unsigned integer.
     #[must_use]
@@ -280,28 +276,14 @@ impl SteamContext {
             value: 0,
         };
 
-        let mut persona = [0u8; 32];
-        let p_src = b"NexusPlayer\0";
-        let mut i = 0;
-        while i < p_src.len() && i < 32 {
-            persona[i] = p_src[i];
-            i += 1;
-        }
-
-        let mut country = [0u8; 4];
-        country[0] = b'J';
-        country[1] = b'P';
-        country[2] = 0;
-        country[3] = 0;
-
         Self {
-            appid: APPID_SPACEWAR,
+            appid: 0,
             initialized: false,
-            steam_id: CSteamID::NEXUS_PLAYER,
-            persona_name: persona,
-            ip_country: country,
-            pipe: 1,
-            user: 1,
+            steam_id: CSteamID(0),
+            persona_name: [0u8; 32],
+            ip_country: [0u8; 4],
+            pipe: 0,
+            user: 0,
             achievements: [EMPTY_ACH; MAX_ACHIEVEMENTS],
             achievement_count: 0,
             stats: [EMPTY_STAT; MAX_STATS],
@@ -476,26 +458,17 @@ pub fn steam_context() -> &'static mut SteamContext {
 
 /// Initialize the Steamworks API (`SteamAPI_Init`).
 ///
-/// Returns true on success. Reads `steam_appid.txt` or defaults to AppID 480 (Spacewar).
+/// The Valve runtime is not integrated, so initialization fails rather than
+/// falsely reporting an authenticated Steam session.
 #[no_mangle]
 pub extern "C" fn SteamAPI_Init() -> bool {
-    let ctx = steam_context();
-    ctx.init_with_appid(ctx.appid)
+    false
 }
 
 /// Initialize the Steamworks API Flat version (`SteamAPI_InitFlat`).
 #[no_mangle]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn SteamAPI_InitFlat(out_err_msg: *mut u8) -> bool {
-    let ctx = steam_context();
-    let ok = ctx.init_with_appid(ctx.appid);
-    if !ok && !out_err_msg.is_null() {
-        unsafe {
-            let msg = b"Failed to init Steamworks\0";
-            core::ptr::copy_nonoverlapping(msg.as_ptr(), out_err_msg, msg.len());
-        }
-    }
-    ok
+pub extern "C" fn SteamAPI_InitFlat(_out_err_msg: *mut u8) -> bool {
+    false
 }
 
 /// Shutdown the Steamworks API (`SteamAPI_Shutdown`).
@@ -507,20 +480,18 @@ pub extern "C" fn SteamAPI_Shutdown() {
 
 /// Check if application restart is necessary (`SteamAPI_RestartAppIfNecessary`).
 ///
-/// In Steam, if the game was not launched via Steam client, it returns true and
-/// relaunches via `steam://run/<appid>`. In our compatibility layer, we return
-/// false so the game starts immediately without requiring external relaunch.
+/// The genuine Steam client is not integrated, so refuse to imply that the
+/// caller is already under Steam's launch/authentication path.
 #[no_mangle]
 pub extern "C" fn SteamAPI_RestartAppIfNecessary(own_appid: AppId) -> bool {
-    let ctx = steam_context();
-    ctx.appid = own_appid;
-    false
+    let _ = own_appid;
+    true
 }
 
 /// Returns true if Steam is running (`SteamAPI_IsSteamRunning`).
 #[no_mangle]
 pub extern "C" fn SteamAPI_IsSteamRunning() -> bool {
-    true
+    false
 }
 
 /// Run queued Steamworks callbacks (`SteamAPI_RunCallbacks`).
@@ -548,13 +519,13 @@ pub extern "C" fn SteamAPI_GetHSteamPipe() -> HSteamPipe {
 /// ISteamUser::GetSteamID
 #[no_mangle]
 pub extern "C" fn SteamAPI_ISteamUser_GetSteamID() -> u64 {
-    steam_context().steam_id.to_u64()
+    0
 }
 
 /// ISteamUser::BLoggedOn
 #[no_mangle]
 pub extern "C" fn SteamAPI_ISteamUser_BLoggedOn() -> bool {
-    true
+    false
 }
 
 /// ISteamFriends::GetPersonaName
@@ -579,20 +550,20 @@ pub extern "C" fn SteamAPI_ISteamUtils_GetIPCountry() -> *const u8 {
 #[no_mangle]
 pub extern "C" fn SteamAPI_ISteamApps_BIsSubscribedApp(appid: AppId) -> bool {
     let _ = appid;
-    true
+    false
 }
 
 /// ISteamApps::BIsDlcInstalled
 #[no_mangle]
 pub extern "C" fn SteamAPI_ISteamApps_BIsDlcInstalled(appid: AppId) -> bool {
     let _ = appid;
-    true
+    false
 }
 
 /// ISteamUserStats::RequestCurrentStats
 #[no_mangle]
 pub extern "C" fn SteamAPI_ISteamUserStats_RequestCurrentStats() -> bool {
-    true
+    false
 }
 
 /// ISteamUserStats::GetAchievement
@@ -607,7 +578,7 @@ pub fn steam_set_achievement(name: &str) -> bool {
 
 /// ISteamUserStats::StoreStats
 pub fn steam_store_stats() -> bool {
-    true
+    false
 }
 
 #[cfg(test)]
@@ -634,7 +605,8 @@ mod tests {
         assert!(ctx.init_with_appid(APPID_SPACEWAR));
         assert!(ctx.initialized);
         assert_eq!(ctx.appid, 480);
-        assert_eq!(ctx.persona_name_str(), "NexusPlayer");
+        assert_eq!(ctx.persona_name_str(), "");
+        assert_eq!(ctx.steam_id, CSteamID(0));
 
         // Verify default Spacewar achievements are registered
         assert_eq!(ctx.achievement_count, 4);
@@ -667,13 +639,21 @@ mod tests {
 
     #[test]
     fn test_steam_api_stubs() {
-        assert!(!SteamAPI_RestartAppIfNecessary(480));
-        assert!(SteamAPI_IsSteamRunning());
-        assert!(SteamAPI_Init());
-        assert_eq!(SteamAPI_ISteamUtils_GetAppID(), 480);
-        assert!(SteamAPI_ISteamUser_BLoggedOn());
-        assert_eq!(SteamAPI_GetHSteamUser(), 1);
-        assert_eq!(SteamAPI_GetHSteamPipe(), 1);
+        assert!(SteamAPI_RestartAppIfNecessary(480));
+        assert!(!SteamAPI_IsSteamRunning());
+        assert!(!SteamAPI_Init());
+        let mut flat_error_canary = 0xA5;
+        assert!(!SteamAPI_InitFlat(&mut flat_error_canary));
+        assert_eq!(flat_error_canary, 0xA5);
+        assert_eq!(SteamAPI_ISteamUtils_GetAppID(), 0);
+        assert!(!SteamAPI_ISteamUser_BLoggedOn());
+        assert_eq!(SteamAPI_ISteamUser_GetSteamID(), 0);
+        assert_eq!(SteamAPI_GetHSteamUser(), 0);
+        assert_eq!(SteamAPI_GetHSteamPipe(), 0);
+        assert!(!SteamAPI_ISteamApps_BIsSubscribedApp(APPID_SPACEWAR));
+        assert!(!SteamAPI_ISteamApps_BIsDlcInstalled(APPID_SPACEWAR));
+        assert!(!SteamAPI_ISteamUserStats_RequestCurrentStats());
+        assert!(!steam_store_stats());
         SteamAPI_Shutdown();
     }
 }

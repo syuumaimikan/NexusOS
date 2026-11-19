@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Steamworks-compatible interactive Spacewar game for NexusOS."
+description = "Local Spacewar-style arcade demo for NexusOS, with no Steam integration."
 
 [[bin]]
 name = "nexus-game"
@@ -15,6 +15,4 @@ test = false
 nexus-user = { path = "../nexus-user" }
 nexus-ui = { path = "../nexus-ui" }
 nexus-window = { path = "../nexus-window" }
-nexus-abi = { path = "../../shared/nexus-abi" }
 nexus-i18n = { path = "../../shared/nexus-i18n" }
-

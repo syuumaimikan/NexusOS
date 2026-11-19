@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Tests the Steamworks gaming subsystem and Spacewar game client on NexusOS.
+    Tests the local game demo and verifies unsupported Steam account features stay unavailable.
 #>
 [CmdletBinding()]
 param(
@@ -35,7 +35,8 @@ if (Test-Path $Log) { Remove-Item $Log -Force }
 $MonitorPort = Get-Random -Minimum 43000 -Maximum 43999
 $QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $Log `
-    -MonitorPort $MonitorPort -Headless
+    -MonitorPort $MonitorPort -Headless -EspReadOnly
+$QemuArgs += @('-snapshot')
 
 Write-Host "==> Booting NexusOS with a monitor on port $MonitorPort" -ForegroundColor Cyan
 $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
@@ -110,7 +111,7 @@ try {
         }
         Start-Sleep -Seconds 2
 
-        Write-Host '==> Checking Steamworks gaming subsystem status (steam info)' -ForegroundColor Cyan
+        Write-Host '==> Checking signed-out Steam status (steam info)' -ForegroundColor Cyan
         Send-Text 'steam info'
         Send-Keys @('ret')
         if (-not (Wait-For -Text 'term: ran steam' -Seconds 30)) {
@@ -118,7 +119,7 @@ try {
         }
         Start-Sleep -Seconds 1
 
-        Write-Host '==> Listing Steam games (steam list)' -ForegroundColor Cyan
+        Write-Host '==> Verifying library is unavailable while signed out (steam list)' -ForegroundColor Cyan
         Send-Text 'steam list'
         Send-Keys @('ret')
         if (-not (Wait-For -Text 'term: ran steam' -Seconds 30)) {
@@ -126,7 +127,7 @@ try {
         }
         Start-Sleep -Seconds 1
 
-        Write-Host '==> Checking Steam achievements (steam achievements)' -ForegroundColor Cyan
+        Write-Host '==> Verifying achievements are unavailable while signed out' -ForegroundColor Cyan
         Send-Text 'steam achievements'
         Send-Keys @('ret')
         if (-not (Wait-For -Text 'term: ran steam' -Seconds 30)) {
@@ -134,7 +135,15 @@ try {
         }
         Start-Sleep -Seconds 1
 
-        Write-Host '==> Running Steamworks game diagnostic simulation (game test)' -ForegroundColor Cyan
+        Write-Host '==> Verifying Steam game launch is blocked while signed out' -ForegroundColor Cyan
+        Send-Text 'steam play'
+        Send-Keys @('ret')
+        if (-not (Wait-For -Text 'term: Steam integration unavailable; signed out' -Seconds 30)) {
+            $failures += 'Steam accepted a game launch without an authenticated session'
+        }
+        Start-Sleep -Seconds 1
+
+        Write-Host '==> Running local game demo diagnostic (game test)' -ForegroundColor Cyan
         Send-Text 'game test'
         Send-Keys @('ret')
         if (-not (Wait-For -Text 'game: diagnostic complete!' -Seconds 30)) {
@@ -142,7 +151,7 @@ try {
         }
         Start-Sleep -Seconds 1
 
-        Write-Host '==> Launching Steam Spacewar from launcher (F3 -> game)' -ForegroundColor Cyan
+        Write-Host '==> Launching local game demo from launcher (F3 -> game)' -ForegroundColor Cyan
         Send-Keys @('f3')
         if (-not (Wait-For -Text 'launch: a window for starting things by name' -Seconds 30)) {
             $failures += 'launcher did not reopen'
@@ -151,8 +160,8 @@ try {
         Send-Text 'game'
         Start-Sleep -Seconds 1
         Send-Keys @('ret')
-        if (-not (Wait-For -Text 'compositor: started the interactive game client' -Seconds 30)) {
-            $failures += 'compositor did not start game client'
+        if (-not (Wait-For -Text 'game: window opened with compositor, running 60 FPS loop' -Seconds 30)) {
+            $failures += 'the local game demo did not enter its window loop'
         }
         Start-Sleep -Seconds 3
 
@@ -171,9 +180,9 @@ try {
 $output = if (Test-Path $Log) { (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", '' } else { '' }
 
 foreach ($expected in @(
-        'game: Nexus Spacewar starting (Steam AppID 480)',
+        'game: local Spacewar-style demo starting (not connected to Steam)',
         'game: diagnostic complete!',
-        'compositor: started the interactive game client'
+        'game: window opened with compositor, running 60 FPS loop'
     )) {
     if ($output.Contains($expected)) {
         Write-Host "    ok   $expected" -ForegroundColor DarkGray
@@ -187,7 +196,7 @@ if ($output.Contains('game: PANIC')) { $failures += 'the game panicked' }
 
 Write-Host ''
 if ($failures.Count -eq 0) {
-    Write-Host 'Steamworks gaming subsystem tests passed.' -ForegroundColor Green
+    Write-Host 'Local game demo and signed-out Steam tests passed.' -ForegroundColor Green
     exit 0
 } else {
     foreach ($failure in $failures) {
@@ -196,4 +205,3 @@ if ($failures.Count -eq 0) {
     Write-Host "Log: $Log"
     exit 1
 }
-

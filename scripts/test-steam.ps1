@@ -1,16 +1,18 @@
 <#
 .SYNOPSIS
-    Tests the Steam graphical client application and gaming hub on NexusOS.
+    Tests the signed-out Steam integration preview and its fail-closed controls.
 #>
 [CmdletBinding()]
 param(
-    [int]$Timeout = 240
+    [int]$Timeout = 240,
+    [string]$Shot
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'qemu.ps1')
+. (Join-Path $PSScriptRoot 'capture.ps1')
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
@@ -35,7 +37,8 @@ if (Test-Path $Log) { Remove-Item $Log -Force }
 $MonitorPort = Get-Random -Minimum 44000 -Maximum 44999
 $QemuArgs = Get-NexusQemuArgs -BuildDir $BuildDir -EspDir $EspDir `
     -FirmwareCode $FirmwareCode -FirmwareVars $FirmwareVars -SerialLog $Log `
-    -MonitorPort $MonitorPort -Headless
+    -MonitorPort $MonitorPort -Headless -EspReadOnly
+$QemuArgs += @('-snapshot')
 
 Write-Host "==> Booting NexusOS with a monitor on port $MonitorPort" -ForegroundColor Cyan
 $process = Start-Process -FilePath $QemuExe.Source -ArgumentList $QemuArgs -PassThru -NoNewWindow
@@ -89,7 +92,7 @@ try {
             }
         }
 
-        Write-Host '==> Launching Steam Client from launcher (F3 -> steam)' -ForegroundColor Cyan
+        Write-Host '==> Launching the signed-out Steam integration preview (F3 -> steam)' -ForegroundColor Cyan
         Send-Keys @('f3')
         if (-not (Wait-For -Text 'launch: a window for starting things by name' -Seconds 60)) {
             throw 'the launcher never started'
@@ -99,20 +102,35 @@ try {
         Start-Sleep -Seconds 1
         Send-Keys @('ret')
 
-        if (-not (Wait-For -Text 'compositor: started the graphical Steam client application' -Seconds 60)) {
-            $failures += 'compositor did not start Steam client'
+        if (-not (Wait-For -Text 'steam: window opened with compositor, running UI loop' -Seconds 60)) {
+            $failures += 'Steam preview did not enter its UI loop'
         }
 
-        Write-Host '==> Interacting with Steam Client' -ForegroundColor Cyan
+        if ($Shot) {
+            if (-not (Wait-For -Text 'steam: window opened with compositor, running UI loop' -Seconds 30)) {
+                $failures += 'Steam preview window never entered its UI loop for capture'
+            } else {
+                $shotDirectory = Split-Path -Parent $Shot
+                if ($shotDirectory -and -not (Test-Path $shotDirectory)) {
+                    New-Item -ItemType Directory -Force -Path $shotDirectory | Out-Null
+                }
+                $Ppm = [System.IO.Path]::ChangeExtension($Shot, '.ppm')
+                Invoke-Screendump -Writer $writer -Path $Ppm
+                Convert-PpmToPng -PpmPath $Ppm -PngPath $Shot | Out-Null
+                Write-Host "    Screenshot: $Shot" -ForegroundColor DarkGray
+            }
+        }
+
+        Write-Host '==> Verifying unauthenticated controls are denied' -ForegroundColor Cyan
         Start-Sleep -Seconds 2
-        # Switch to Library [2], Unlock Achievement [u]
+        # These inputs must not unlock achievements or launch games while signed out.
         Send-Keys @('2')
         Start-Sleep -Milliseconds 500
         Send-Keys @('u')
         Start-Sleep -Milliseconds 500
 
-        # Launch game from within Steam client [p]
-        Write-Host '==> Launching Game from inside Steam Client' -ForegroundColor Cyan
+        # The preview must not launch a game without a genuine authenticated session.
+        Write-Host '==> Attempting a blocked game launch' -ForegroundColor Cyan
         Send-Keys @('p')
         Start-Sleep -Seconds 2
 
@@ -131,9 +149,11 @@ try {
 $output = if (Test-Path $Log) { (Get-Content $Log -Raw -Encoding UTF8) -replace "`0", '' } else { '' }
 
 foreach ($expected in @(
-        'compositor: started the graphical Steam client application',
-        'steam: Steam Client starting on NexusOS',
-        'steam: window opened with compositor, running UI loop'
+        'steam: Steam integration preview starting',
+        'steam: window opened with compositor, running UI loop',
+        'steam: signed out; no authenticated Valve session',
+        'steam: blocked achievement update; no authenticated Valve session',
+        'steam: blocked game launch; no authenticated Valve session'
     )) {
     if ($output.Contains($expected)) {
         Write-Host "    ok   $expected" -ForegroundColor DarkGray
@@ -147,7 +167,7 @@ if ($output.Contains('steam: PANIC')) { $failures += 'the steam client panicked'
 
 Write-Host ''
 if ($failures.Count -eq 0) {
-    Write-Host 'Steam GUI Client tests passed.' -ForegroundColor Green
+    Write-Host 'Steam signed-out preview tests passed.' -ForegroundColor Green
     exit 0
 } else {
     foreach ($failure in $failures) {
@@ -156,4 +176,3 @@ if ($failures.Count -eq 0) {
     Write-Host "Log: $Log"
     exit 1
 }
-

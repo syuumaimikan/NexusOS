@@ -96,11 +96,11 @@ const PROCESS_TABLE: &[ProcessInfo] = &[
     },
     ProcessInfo {
         pid: 6,
-        name: "nexus-steam",
-        status: "Running",
-        proc_type: "Steam Client Hub",
-        memory_mib: 5,
-        threads: 1,
+        name: "nexus-steam-preview",
+        status: "Not Running",
+        proc_type: "Steam Integration Preview",
+        memory_mib: 0,
+        threads: 0,
     },
     ProcessInfo {
         pid: 7,
@@ -590,7 +590,7 @@ impl TaskManagerApp {
             ),
             (
                 "Gaming Subsystem",
-                "Steamworks C ABI Emulation (AppID 480 Spacewar, Achievements, Toasts)",
+                "Local game demo; Steam account integration unavailable",
             ),
             (
                 "File System Architecture",

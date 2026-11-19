@@ -411,7 +411,7 @@ pub struct WinRegistry {
 }
 
 impl WinRegistry {
-    /// Create a new Windows registry initialized with standard keys (Valve Steam, Windows).
+    /// Create a new Windows registry with basic Windows keys and a Steam language hint.
     #[must_use]
     pub const fn new() -> Self {
         let mut reg = Self {
@@ -419,24 +419,12 @@ impl WinRegistry {
             count: 0,
         };
 
-        // Preload default Valve Steam keys
-        reg = reg.const_set_str(
-            HKEY_CURRENT_USER,
-            "Software\\Valve\\Steam",
-            "SteamPath",
-            "C:\\Program Files (x86)\\Steam",
-        );
+        // Do not report an installed or running Valve client that is not present.
         reg = reg.const_set_str(
             HKEY_CURRENT_USER,
             "Software\\Valve\\Steam",
             "Language",
             "english",
-        );
-        reg = reg.const_set_dword(
-            HKEY_CURRENT_USER,
-            "Software\\Valve\\Steam",
-            "ActiveProcess",
-            1,
         );
 
         // Preload Windows CurrentVersion keys
@@ -478,35 +466,6 @@ impl WinRegistry {
         while k < v_bytes.len() && k < 63 {
             entry.val_str[k] = v_bytes[k];
             k += 1;
-        }
-
-        self.entries[self.count] = entry;
-        self.count += 1;
-        self
-    }
-
-    const fn const_set_dword(mut self, root: u64, path: &str, name: &str, val: u32) -> Self {
-        if self.count >= MAX_REG_ENTRIES {
-            return self;
-        }
-        let mut entry = RegEntry::empty();
-        entry.root = root;
-        entry.val_type = REG_DWORD;
-        entry.val_dword = val;
-        entry.active = true;
-
-        let p_bytes = path.as_bytes();
-        let mut i = 0;
-        while i < p_bytes.len() && i < 63 {
-            entry.path[i] = p_bytes[i];
-            i += 1;
-        }
-
-        let n_bytes = name.as_bytes();
-        let mut j = 0;
-        while j < n_bytes.len() && j < 31 {
-            entry.name[j] = n_bytes[j];
-            j += 1;
         }
 
         self.entries[self.count] = entry;
@@ -811,10 +770,10 @@ mod tests {
     #[test]
     fn test_win_registry() {
         let mut reg = WinRegistry::new();
-        // Check default Steam path
+        // No client path or running process is fabricated for the absent client.
         assert_eq!(
             reg.get_str(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath"),
-            Some("C:\\Program Files (x86)\\Steam")
+            None
         );
         assert_eq!(
             reg.get_str(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "Language"),
@@ -822,7 +781,7 @@ mod tests {
         );
         assert_eq!(
             reg.get_dword(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "ActiveProcess"),
-            Some(1)
+            None
         );
 
         // Set custom key and query

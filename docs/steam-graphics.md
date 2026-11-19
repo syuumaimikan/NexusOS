@@ -230,6 +230,17 @@ remain incomplete. See the current serial log at
 
 ### Thirty-two bit programs
 
+### Steam account state and sign-in boundary
+
+The bundled Steam window is an integration preview, not Valve's Steam client.
+The local ABI shim fails closed: it reports no running Steam process, no logged-in
+user, no SteamID, and no AppID/DLC ownership. The preview presents a signed-out
+notice and does not accept passwords or Steam Guard codes. `scripts/test-steam.ps1`
+checks this QEMU state. This prevents a local demo persona from being mistaken
+for a real Steam session; it does **not** implement Steam sign-in. The genuine
+Valve client still needs its full update/extraction path, runtime dependencies,
+desktop integration, and its own sign-in UI before that acceptance gate can pass.
+
 `scripts/test-linux.ps1`
 
 An i386 program is not a smaller x86-64 one. It is a different image format

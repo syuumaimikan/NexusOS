@@ -1,11 +1,8 @@
-//! Steam Client Graphical Application & Gaming Hub for NexusOS.
+//! Signed-out Steam integration preview for NexusOS.
 //!
-//! Provides the authentic Valve Steam Client desktop experience on NexusOS:
-//! - STORE, LIBRARY, COMMUNITY, PROFILE, and DOWNLOADS tabs
-//! - Interactive Game Library with Spacewar (AppID 480), Half-Life 2 (AppID 220), Portal 2 (AppID 620), etc.
-//! - Direct launch integration with `BIN/GAME.ELF` via Compositor IPC
-//! - Real-time Steamworks API achievements viewer & test unlocker
-//! - Steam Cloud sync status, play statistics, and friend status
+//! This is not Valve's client and does not implement authentication, library,
+//! ownership, achievements, purchases, or online friends. It never accepts
+//! passwords or Steam Guard codes.
 
 #![no_std]
 #![no_main]
@@ -112,9 +109,6 @@ pub struct SteamClientApp {
 
 impl SteamClientApp {
     pub fn new() -> Self {
-        // Initialize Steamworks API ABI
-        steam::steam_context().init_with_appid(APPID_SPACEWAR);
-
         Self {
             tab: Tab::Library,
             selected_game: 0,
@@ -125,6 +119,12 @@ impl SteamClientApp {
     }
 
     fn launch_selected_game(&mut self) {
+        if !steam::SteamAPI_ISteamUser_BLoggedOn() {
+            nexus_user::log("steam: blocked game launch; no authenticated Valve session").ok();
+            self.status_notice = Some(String::from("Sign in with the genuine Valve client first."));
+            self.notice_ticks = 180;
+            return;
+        }
         if self.selected_game < GAMES.len() {
             let game = &GAMES[self.selected_game];
             if game.installed {
@@ -134,7 +134,7 @@ impl SteamClientApp {
                 self.notice_ticks = 180;
             } else {
                 self.status_notice = Some(format!(
-                    "{} (AppID {}) in library. Steamworks Ready.",
+                    "{} (AppID {}) selected in the local preview.",
                     game.title, game.appid
                 ));
                 self.notice_ticks = 180;
@@ -143,6 +143,15 @@ impl SteamClientApp {
     }
 
     fn unlock_next_achievement(&mut self) {
+        if !steam::SteamAPI_ISteamUser_BLoggedOn() {
+            nexus_user::log("steam: blocked achievement update; no authenticated Valve session")
+                .ok();
+            self.status_notice = Some(String::from(
+                "Achievements require a verified Steam session.",
+            ));
+            self.notice_ticks = 180;
+            return;
+        }
         let ctx = steam::steam_context();
         let achs = [
             ("ACH_FIRST_LAUNCH", "First Flight"),
@@ -177,6 +186,11 @@ impl App for SteamClientApp {
 
         // Background
         canvas.fill(Rect::new(0, 0, w, h), COL_STEAM_DARK_BG);
+
+        if !steam::SteamAPI_ISteamUser_BLoggedOn() {
+            self.draw_signed_out(canvas, w, h);
+            return;
+        }
 
         // 1. Top Navigation Bar (height: 48)
         let nav_rect = Rect::new(0, 0, w, 48);
@@ -215,8 +229,8 @@ impl App for SteamClientApp {
 
         // Top-Right Persona Status
         let persona_x = w.saturating_sub(230);
-        canvas.text(persona_x, 10, "NexusPlayer", COL_STEAM_ONLINE);
-        canvas.text(persona_x, 26, "Online • Level 42 • ¥2,480", COL_STEAM_MUTED);
+        canvas.text(persona_x, 10, "Not signed in", COL_STEAM_MUTED);
+        canvas.text(persona_x, 26, "Valve client unavailable", COL_STEAM_MUTED);
 
         // 2. Main Content Area depending on active Tab
         let content_y = 48;
@@ -357,6 +371,43 @@ impl App for SteamClientApp {
 }
 
 impl SteamClientApp {
+    fn draw_signed_out(&self, canvas: &mut Canvas, w: u32, h: u32) {
+        let card_w = w.saturating_sub(32).min(560);
+        let card_h = 218;
+        let x = w.saturating_sub(card_w) / 2;
+        let y = h.saturating_sub(card_h) / 2;
+        let card = Rect::new(x, y, card_w, card_h);
+        canvas.fill_rounded(card, 8, COL_STEAM_SIDEBAR);
+        canvas.outline(card, 1, Colour(0x0033_4155));
+        canvas.fill(Rect::new(x + 20, y + 24, 4, 42), COL_STEAM_BLUE);
+        canvas.text(x + 38, y + 26, "STEAM ACCOUNT", COL_STEAM_BLUE);
+        canvas.text(x + 38, y + 50, "Not signed in", COL_WHITE);
+        canvas.text(
+            x + 24,
+            y + 92,
+            "This preview is not Valve's Steam client.",
+            COL_STEAM_LIGHT_BLUE,
+        );
+        canvas.text(
+            x + 24,
+            y + 118,
+            "Sign-in, Steam Guard, library and ownership checks",
+            COL_STEAM_MUTED,
+        );
+        canvas.text(
+            x + 24,
+            y + 136,
+            "require the genuine Valve client and are not available yet.",
+            COL_STEAM_MUTED,
+        );
+        canvas.text(
+            x + 24,
+            y + 176,
+            "Never enter your Steam password in this preview.",
+            COL_STEAM_GOLD,
+        );
+    }
+
     fn draw_library(&self, canvas: &mut Canvas, y: u32, h: u32, w: u32) {
         let sidebar_w = 220;
 
@@ -521,14 +572,14 @@ impl SteamClientApp {
             canvas.text(
                 detail_x,
                 friend_y + 20,
-                "● NexusPlayer - Playing Spacewar (AppID 480)",
-                COL_STEAM_ONLINE,
+                "Steam friends require a verified Valve session.",
+                COL_STEAM_MUTED,
             );
             canvas.text(
                 detail_x,
                 friend_y + 38,
-                "● GabeN - In-Game: Half-Life 3 (Private Beta)",
-                COL_STEAM_ONLINE,
+                "No friends or online activity are available.",
+                COL_STEAM_MUTED,
             );
             canvas.text(
                 detail_x,
@@ -671,17 +722,17 @@ impl SteamClientApp {
             Colour(0x00F8_FAFC),
         );
 
-        canvas.text(pad + 100, y + 40, "NexusPlayer", COL_WHITE);
+        canvas.text(pad + 100, y + 40, "Not signed in", COL_WHITE);
         canvas.text(
             pad + 100,
             y + 60,
-            "SteamID: 76561198000010001 • Universe: Public",
+            "SteamID and account details unavailable",
             COL_STEAM_LIGHT_BLUE,
         );
         canvas.text(
             pad + 100,
             y + 80,
-            "Steam Level: 42 • Years of Service: 10 Years",
+            "Account profile requires the genuine Valve client",
             COL_STEAM_GOLD,
         );
         canvas.text(
@@ -765,7 +816,13 @@ extern "C" fn main() -> ! {
         finish();
     }
 
-    nexus_user::log("steam: Steam Client starting on NexusOS").ok();
+    nexus_user::log("steam: Steam integration preview starting").ok();
+
+    if steam::SteamAPI_ISteamUser_BLoggedOn() {
+        nexus_user::log("steam: authenticated Valve session present").ok();
+    } else {
+        nexus_user::log("steam: signed out; no authenticated Valve session").ok();
+    }
 
     let mut lent = [Handle(0); 2];
     match Window::open(COMPOSITOR, SURFACE_AT, &mut lent) {

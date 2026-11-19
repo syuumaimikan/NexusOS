@@ -887,7 +887,8 @@ impl Terminal {
             "py" | "python" => self.run_python_file(words.argument(0)),
             "c" | "cc" => self.compile_and_run_c(words.argument(0), words.arguments()),
             "rust" | "rustc" => self.compile_and_run_rust(words.argument(0), words.arguments()),
-            "game" | "steam" => self.steam_command(words.argument(0)),
+            "game" => self.game_command(words.argument(0)),
+            "steam" => self.steam_command(words.argument(0)),
             "gpu" => self.gpu_command(words.argument(0)),
             "vulkan" | "vk" => self.vulkan_command(words.argument(0)),
             "mesa" | "gl" => self.mesa_command(words.argument(0)),
@@ -1067,7 +1068,8 @@ impl Terminal {
         self.plain("py / python     -- interactive Python REPL or script runner");
         self.plain("cc / c          -- C/C++ compiler and runner");
         self.plain("rust / rustc    -- Rust compiler and runner");
-        self.plain("game / steam    -- Steamworks gaming subsystem and games (Spacewar AppID 480)");
+        self.plain("game [play|test]-- local game demo, not a Steam title");
+        self.plain("steam [gui|info]-- signed-out Steam integration preview and status");
         self.plain("gpu             -- graphics subsystem diagnostics and controller status");
         self.plain("vulkan / vk     -- query Vulkan 1.2 ICD & test SPIR-V pipeline");
         self.plain("mesa / gl       -- query Mesa OpenGL 2.1 & test software rasterizer");
@@ -1360,66 +1362,53 @@ impl Terminal {
                 self.plain("  edit [file]             GUI code editor");
                 self.plain("  run [binary.lx]         Run Linux x86-64 ELF binaries");
                 self.plain("  win [binary.exe]        Run Windows PE32+ binaries");
-                self.plain("  game / steam            Launch Steam game (Spacewar)");
+                self.plain("  game [play|test]        Run the local game demo (not a Steam title)");
+                self.plain(
+                    "  steam [gui|info]        Open the signed-out Steam integration preview",
+                );
                 self.plain("Type 'dev init' to generate hello starter templates!");
             }
         }
     }
 
-    /// `steam` / `game`: Steamworks gaming subsystem and games.
-    fn steam_command(&mut self, sub: Option<&str>) {
+    /// Local sample game; this is not a Valve-published or Steam-owned title.
+    fn game_command(&mut self, sub: Option<&str>) {
         match sub {
-            Some("info") => {
-                self.note("=== Steamworks Gaming Subsystem (NexusOS) ===");
-                self.plain("Status: ONLINE (Integrated Compatibility Layer)");
-                self.plain("Player: NexusPlayer (SteamID: 76561198000010001, Japan)");
-                self.plain("APIs Supported:");
-                self.plain("  - ISteamClient, ISteamUser, ISteamFriends, ISteamUtils");
-                self.plain("  - ISteamApps, ISteamUserStats, ISteamController");
-                self.plain("Calling Convention: Dual ABI (System V AMD64 + Microsoft x64)");
-                self.plain("Installed Games:");
-                self.plain("  [AppID 480]    Spacewar (Space Vanguard)");
-                self.plain("  [AppID 220]    Half-Life 2 (Engine Ready)");
-                self.plain("  [AppID 413150] Stardew Valley (Runtime Ready)");
-                self.plain("Type 'game play' or 'steam play' to start Spacewar!");
-            }
-            Some("list") => {
-                self.note("Installed / Registered Steam Games:");
-                self.plain("  480    Spacewar (60 FPS Vector Space Action)  [PLAYABLE]");
-                self.plain("  220    Half-Life 2 (Source Engine)             [COMPAT]");
-                self.plain("  413150 Stardew Valley                          [COMPAT]");
-            }
-            Some("achievements") | Some("stats") => {
-                self.note("Steamworks Achievements for Spacewar (AppID 480):");
-                self.plain(
-                    "  [ACH_FIRST_LAUNCH] First Flight     - Launched the game successfully",
-                );
-                self.plain(
-                    "  [ACH_SHARPSHOOTER] Sharpshooter      - Destroyed an asteroid with laser",
-                );
-                self.plain("  [ACH_SURVIVOR]     Space Survivor   - Survived 3 waves of asteroids");
-                self.plain(
-                    "  [ACH_SPACE_ACE]    Space Ace        - Attained 1,000 points in one sortie",
-                );
-            }
-            Some("gui") | Some("client") | Some("app") => {
-                self.note("Launching Steam Graphical Client (BIN/STEAM.ELF)...");
-                self.run_program("BIN/STEAM.ELF", "");
+            None | Some("play") | Some("run") => {
+                self.note("Starting the local game demo; no Steam account is involved.");
+                self.run_program("BIN/GAME.ELF", "");
             }
             Some("test") | Some("diagnose") => {
-                self.note("Running Steamworks Spacewar diagnostic simulation...");
+                self.note("Running the local game demo diagnostic.");
                 self.run_program("BIN/GAME.ELF", "");
             }
-            Some("play") | Some("run") => {
-                self.note("Launching Steam Game: Spacewar (AppID 480)...");
-                self.run_program("BIN/GAME.ELF", "");
-            }
-            None => {
-                self.note("Launching Steam Graphical Client (BIN/STEAM.ELF)...");
+            Some(other) => self.trouble(&alloc::format!(
+                "game: unknown option '{other}'. Try 'play' or 'test'."
+            )),
+        }
+    }
+
+    /// Steam integration status and preview. Real account services are unavailable.
+    fn steam_command(&mut self, sub: Option<&str>) {
+        match sub {
+            None | Some("gui") | Some("client") | Some("app") => {
+                self.note("Opening the signed-out Steam integration preview (not Valve's client).");
                 self.run_program("BIN/STEAM.ELF", "");
             }
+            Some("info") | Some("list") | Some("achievements") | Some("stats") | Some("play")
+            | Some("run") | Some("test") | Some("diagnose") => {
+                nexus_user::log("term: Steam integration unavailable; signed out").ok();
+                self.note("Steam account services are unavailable in this build.");
+                self.plain("Status: signed out; the genuine Valve Steam client is not integrated.");
+                self.plain(
+                    "No account, library, ownership, achievements, or game launch is available.",
+                );
+                self.plain("Enter credentials only in Valve's official client when supported.");
+            }
             Some(other) => {
-                self.trouble(&alloc::format!("steam: unknown option '{other}'. Try 'gui', 'play', 'info', 'list', or 'achievements'."));
+                self.trouble(&alloc::format!(
+                    "steam: unknown option '{other}'. Try 'gui' or 'info'."
+                ));
             }
         }
     }
@@ -2110,7 +2099,7 @@ impl Terminal {
             }
             "steam" => {
                 self.plain("STEAM(6)                    Nexus Gaming Suite                        STEAM(6)");
-                self.plain("NAME: steam - client launcher for Steam games and Vulkan runtimes");
+                self.plain("NAME: steam - signed-out Steam integration preview and status");
             }
             cmd => {
                 self.plain(&alloc::format!("{cmd}(1)                     Nexus Command Reference                   {cmd}(1)"));

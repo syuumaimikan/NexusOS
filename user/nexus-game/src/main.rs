@@ -1,9 +1,7 @@
-//! Steamworks-compatible interactive Spacewar game for NexusOS.
+//! Local Spacewar-style arcade demo for NexusOS; it is not a Steam title.
 //!
-//! Demonstrates:
-//! - Full Steamworks API emulation (AppID 480 `Spacewar`, Persona Name, Stats, Achievements, Overlay Toast)
-//! - 60 FPS real-time vector graphics with anti-aliasing via `nexus-ui` and `nexus-window`
-//! - Fixed-point 256-step physics simulation without floating-point instructions
+//! Demonstrates a 60 FPS fixed-point vector-graphics game without account or
+//! network services.
 //! - Interactive keyboard controls, particle system, collision detection, and wave progression.
 
 #![no_std]
@@ -22,7 +20,6 @@ mod turn;
 use alloc::format;
 use core::panic::PanicInfo;
 
-use nexus_abi::steam::{self, ToastNotification, APPID_SPACEWAR};
 use nexus_ui::{Canvas, Colour, Rect};
 use nexus_user::Handle;
 use nexus_window::{App, Key, Movement, Window};
@@ -52,9 +49,7 @@ const COL_ASTEROID: Colour = Colour(0x0094_A3B8);
 const COL_ASTEROID_EDGE: Colour = Colour(0x0064_748B);
 const COL_HUD_TEXT: Colour = Colour(0x00F1_F5F9);
 const COL_HUD_ACCENT: Colour = Colour(0x0038_BDF8);
-const COL_STEAM_GOLD: Colour = Colour(0x00F5_9E0B);
-const COL_STEAM_BG: Colour = Colour(0x000F_172A);
-const COL_STEAM_BORDER: Colour = Colour(0x003B_82F6);
+const COL_WAVE: Colour = Colour(0x00F5_9E0B);
 
 #[derive(Clone, Copy)]
 struct Star {
@@ -126,8 +121,6 @@ pub struct SpacewarGame {
     game_over: bool,
     paused: bool,
     tick_count: u32,
-    active_toast: Option<ToastNotification>,
-    toast_anim_y: i32,
     sound: Option<Handle>,
 }
 
@@ -204,19 +197,8 @@ impl SpacewarGame {
             game_over: false,
             paused: false,
             tick_count: 0,
-            active_toast: None,
-            toast_anim_y: -80,
             sound,
         };
-
-        // Initialize Steamworks
-        steam::SteamAPI_Init();
-        steam::SteamAPI_RestartAppIfNecessary(APPID_SPACEWAR);
-        let ctx = steam::steam_context();
-        ctx.init_with_appid(APPID_SPACEWAR);
-
-        // Unlock first flight achievement on launch!
-        ctx.unlock_achievement("ACH_FIRST_LAUNCH");
 
         game.spawn_wave(1);
         game
@@ -354,23 +336,6 @@ impl SpacewarGame {
 
         self.tick_count = self.tick_count.wrapping_add(1);
 
-        // Poll Steam achievements / toasts
-        let ctx = steam::steam_context();
-        if let Some(toast) = ctx.poll_toast() {
-            self.active_toast = Some(toast);
-        } else {
-            self.active_toast = None;
-        }
-
-        // Animate toast banner
-        if self.active_toast.is_some() {
-            if self.toast_anim_y < 16 {
-                self.toast_anim_y += 4;
-            }
-        } else if self.toast_anim_y > -80 {
-            self.toast_anim_y -= 4;
-        }
-
         let w_fp = (self.width as i32) << FP_SHIFT;
         let h_fp = (self.height as i32) << FP_SHIFT;
 
@@ -503,8 +468,6 @@ impl SpacewarGame {
         // Next wave if all asteroids cleared
         if active_count == 0 && !self.game_over {
             self.spawn_wave(self.wave + 1);
-            let ctx = steam::steam_context();
-            ctx.unlock_achievement("ACH_SURVIVOR");
         }
 
         // Particles
@@ -537,20 +500,6 @@ impl SpacewarGame {
         self.score += points;
         if self.score > self.high_score {
             self.high_score = self.score;
-        }
-
-        // Steam stats and achievements
-        let ctx = steam::steam_context();
-        let cur_hit = ctx.get_stat("AsteroidsDestroyed").unwrap_or(0);
-        ctx.set_stat("AsteroidsDestroyed", cur_hit + 1);
-        ctx.set_stat("HighScore", self.high_score as i32);
-
-        // Sharpshooter unlock
-        ctx.unlock_achievement("ACH_SHARPSHOOTER");
-
-        // Space Ace unlock (1,000 points)
-        if self.score >= 1000 {
-            ctx.unlock_achievement("ACH_SPACE_ACE");
         }
 
         // Split into 2 smaller asteroids if stage > 1
@@ -744,13 +693,13 @@ impl App for SpacewarGame {
         canvas.text(150, 6, &high_txt, COL_HUD_TEXT);
 
         let wave_txt = format!("WAVE: {}", self.wave);
-        canvas.text(280, 6, &wave_txt, COL_STEAM_GOLD);
+        canvas.text(280, 6, &wave_txt, COL_WAVE);
 
         let lives_txt = format!("SHIPS: {}", self.lives);
         canvas.text(370, 6, &lives_txt, COL_HUD_TEXT);
 
-        let steam_txt = "STEAM: ONLINE [AppID 480]";
-        canvas.text(w.saturating_sub(230), 6, steam_txt, Colour(0x0010_B981));
+        let mode_txt = "LOCAL DEMO - OFFLINE";
+        canvas.text(w.saturating_sub(230), 6, mode_txt, Colour(0x0064_748B));
 
         // Bottom Controls Hint
         let footer_bg = Rect::new(0, h.saturating_sub(22), w, 22);
@@ -798,25 +747,6 @@ impl App for SpacewarGame {
                 "Press [P] to Resume",
                 Colour(0x0094_A3B8),
             );
-        }
-
-        // Draw Steam Toast Notification Overlay Banner
-        if let Some(toast) = self.active_toast {
-            let tw = 270u32;
-            let th = 56u32;
-            let tx = w.saturating_sub(tw + 16);
-            let ty = (h as i32 - 40 - th as i32 + self.toast_anim_y).max(10) as u32;
-
-            let toast_rect = Rect::new(tx, ty, tw, th);
-            canvas.panel(toast_rect, 6, COL_STEAM_BG, COL_STEAM_BORDER);
-
-            // Steam Icon Badge
-            canvas.fill_rounded(Rect::new(tx + 8, ty + 10, 36, 36), 4, Colour(0x001E_3A8A));
-            canvas.text(tx + 16, ty + 18, "*", COL_STEAM_GOLD);
-
-            canvas.text(tx + 52, ty + 8, "ACHIEVEMENT UNLOCKED!", COL_STEAM_GOLD);
-            canvas.text(tx + 52, ty + 24, toast.name_str(), COL_HUD_TEXT);
-            canvas.text(tx + 52, ty + 38, toast.desc_str(), Colour(0x0094_A3B8));
         }
     }
 
@@ -943,7 +873,7 @@ extern "C" fn main() -> ! {
         finish();
     }
 
-    nexus_user::log("game: Nexus Spacewar starting (Steam AppID 480)").ok();
+    nexus_user::log("game: local Spacewar-style demo starting (not connected to Steam)").ok();
 
     // Check if started under compositor window
     let mut lent = [Handle(0); 1];
@@ -975,15 +905,11 @@ extern "C" fn main() -> ! {
             // Simulate destroying an asteroid
             game.hit_asteroid(0);
 
-            let ctx = steam::steam_context();
-            let destroyed = ctx.get_stat("AsteroidsDestroyed").unwrap_or(0);
-            let first_flight = ctx.is_achievement_unlocked("ACH_FIRST_LAUNCH");
-            let sharpshooter = ctx.is_achievement_unlocked("ACH_SHARPSHOOTER");
-
             nexus_user::log(&format!(
-                "game: diagnostic complete! Score: {}, Destroyed: {}, FirstFlight: {}, Sharpshooter: {}",
-                game.score, destroyed, first_flight, sharpshooter
-            )).ok();
+                "game: diagnostic complete! Local score: {}, Wave: {}",
+                game.score, game.wave
+            ))
+            .ok();
         }
     }
 

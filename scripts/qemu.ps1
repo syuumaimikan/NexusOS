@@ -259,7 +259,8 @@ function Get-NexusQemuArgs {
         [string]$Resolution = '1920x1200',
         [switch]$Headless,
         [switch]$StopOnFault,
-        [switch]$BootFromImage
+        [switch]$BootFromImage,
+        [switch]$EspReadOnly
     )
 
     foreach ($path in @($BuildDir, $EspDir, $FirmwareCode, $FirmwareVars, $SerialLog)) {
@@ -298,9 +299,11 @@ function Get-NexusQemuArgs {
             '-device', 'virtio-blk-pci,drive=nexusboot,disable-modern=on'
         )
     } else {
-        # Present build/esp as a FAT filesystem. QEMU's virtual FAT layer means
-        # there is no image to rebuild between runs: edit, build, boot.
-        $arguments += @('-drive', "format=raw,file=fat:rw:$EspDir")
+        # Present build/esp as a FAT filesystem. Tests can mount it read-only so
+        # QEMU's global snapshot mode can safely protect the writable data disks.
+        $espAccess = if ($EspReadOnly) { 'ro' } else { 'rw' }
+        $espFile = 'fat:{0}:{1}' -f $espAccess, $EspDir
+        $arguments += @('-drive', "format=raw,file=$espFile")
 
         # And the disk the kernel drives itself, over virtio. Legacy virtio on
         # purpose: the driver reaches it through an I/O port window rather than
