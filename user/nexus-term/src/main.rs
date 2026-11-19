@@ -1364,7 +1364,7 @@ impl Terminal {
                 self.plain("  win [binary.exe]        Run Windows PE32+ binaries");
                 self.plain("  game [play|test]        Run the local game demo (not a Steam title)");
                 self.plain(
-                    "  steam [gui|info]        Open the signed-out Steam integration preview",
+                    "  steam [gui|info|launch] Steam preview, status, or official bootstrap",
                 );
                 self.plain("Type 'dev init' to generate hello starter templates!");
             }
@@ -1391,23 +1391,38 @@ impl Terminal {
     /// Steam integration status and preview. Real account services are unavailable.
     fn steam_command(&mut self, sub: Option<&str>) {
         match sub {
-            None | Some("gui") | Some("client") | Some("app") => {
+            None | Some("gui") | Some("app") => {
                 self.note("Opening the signed-out Steam integration preview (not Valve's client).");
                 self.run_program("BIN/STEAM.ELF", "");
+            }
+            Some("launch") | Some("client") => {
+                self.note("Starting Valve's Linux32 Steam bootstrap; sign-in remains with Valve.");
+                nexus_user::log("term: official Steam bootstrap launch requested").ok();
+                match self.run_program("linux32:/usr/lib/steam/ubuntu12_32/steam", "") {
+                    Some(status) => nexus_user::log(&format!(
+                        "term: official Steam bootstrap exited with status {status}; sign-in not verified"
+                    ))
+                    .ok(),
+                    None => nexus_user::log(
+                        "term: official Steam launch request refused; no client was started",
+                    )
+                    .ok(),
+                };
             }
             Some("info") | Some("list") | Some("achievements") | Some("stats") | Some("play")
             | Some("run") | Some("test") | Some("diagnose") => {
                 nexus_user::log("term: Steam integration unavailable; signed out").ok();
                 self.note("Steam account services are unavailable in this build.");
-                self.plain("Status: signed out; the genuine Valve Steam client is not integrated.");
+                self.plain("Status: signed out; this preview has no authenticated Valve session.");
                 self.plain(
                     "No account, library, ownership, achievements, or game launch is available.",
                 );
-                self.plain("Enter credentials only in Valve's official client when supported.");
+                self.plain("Use 'steam launch' for the installed official bootstrap; sign-in is not verified here.");
+                self.plain("Enter credentials only in Valve's official client, never this preview.");
             }
             Some(other) => {
                 self.trouble(&alloc::format!(
-                    "steam: unknown option '{other}'. Try 'gui' or 'info'."
+                    "steam: unknown option '{other}'. Try 'gui', 'info', or 'launch'."
                 ));
             }
         }

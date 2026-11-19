@@ -402,6 +402,12 @@ impl SteamClientApp {
         );
         canvas.text(
             x + 24,
+            y + 158,
+            "Terminal: steam launch (if installed).",
+            COL_STEAM_BLUE,
+        );
+        canvas.text(
+            x + 24,
             y + 176,
             "Never enter your Steam password in this preview.",
             COL_STEAM_GOLD,

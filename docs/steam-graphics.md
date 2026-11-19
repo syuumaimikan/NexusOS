@@ -238,8 +238,14 @@ user, no SteamID, and no AppID/DLC ownership. The preview presents a signed-out
 notice and does not accept passwords or Steam Guard codes. `scripts/test-steam.ps1`
 checks this QEMU state. This prevents a local demo persona from being mistaken
 for a real Steam session; it does **not** implement Steam sign-in. The genuine
-Valve client still needs its full update/extraction path, runtime dependencies,
-desktop integration, and its own sign-in UI before that acceptance gate can pass.
+Valve bootstrap now has a fixed-path `steam launch` handoff from the terminal
+(`linux32:/usr/lib/steam/ubuntu12_32/steam`). It only starts when the official
+bootstrap and Linux32 runtime have been staged; it does not download or install
+files, and an exited bootstrap does not establish a signed-in session. The
+standard image currently contains no Steam mapping. The QEMU game test checks
+that absence and refuses to run if a third-party client is staged, so the test
+never executes Valve's binary. Full update extraction, desktop integration,
+client UI, and sign-in remain unverified.
 
 `scripts/test-linux.ps1`
 

@@ -21,6 +21,14 @@ if (-not (Test-Path (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI'))) {
     throw 'no staged ESP; run build.ps1 first'
 }
 
+$LinuxManifest = Join-Path $BuildDir 'programs\linux.lst'
+if (-not (Test-Path $LinuxManifest)) {
+    throw 'no staged Linux runtime manifest; run build.ps1 first'
+}
+if (Select-String -Path $LinuxManifest -Pattern '^\S+\s+/usr/lib/steam/ubuntu12_32/steam\s*$' -Quiet) {
+    throw 'refusing to run steam launch test while a third-party Steam bootstrap is staged'
+}
+
 $QemuExe = Get-Command qemu-system-x86_64 -ErrorAction Stop
 $QemuDir = Split-Path -Parent $QemuExe.Source
 $FirmwareCode = Join-Path $BuildDir 'edk2-x86_64-code.fd'
@@ -140,6 +148,14 @@ try {
         Send-Keys @('ret')
         if (-not (Wait-For -Text 'term: Steam integration unavailable; signed out' -Seconds 30)) {
             $failures += 'Steam accepted a game launch without an authenticated session'
+        }
+        Start-Sleep -Seconds 1
+
+        Write-Host '==> Verifying official client handoff refuses an absent bootstrap' -ForegroundColor Cyan
+        Send-Text 'steam launch'
+        Send-Keys @('ret')
+        if (-not (Wait-For -Text 'term: official Steam launch request refused; no client was started' -Seconds 30)) {
+            $failures += 'Steam launch did not fail safely when the official bootstrap was absent'
         }
         Start-Sleep -Seconds 1
 
