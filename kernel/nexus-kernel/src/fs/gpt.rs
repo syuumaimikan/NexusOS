@@ -56,6 +56,12 @@ pub enum GptError {
     BadEntryChecksum,
     /// The header describes more entries than this reader will walk.
     TooManyEntries(u32),
+    /// The header describes no entries.
+    BadEntryCount,
+    /// The entry size is outside the supported GPT geometry.
+    BadEntrySize(u32),
+    /// The complete entry array exceeds the bounded reader limit.
+    EntryArrayTooLarge,
 }
 
 impl core::fmt::Display for GptError {
@@ -67,6 +73,9 @@ impl core::fmt::Display for GptError {
             Self::BadHeaderChecksum => f.write_str("the header's checksum does not match"),
             Self::BadEntryChecksum => f.write_str("the partition entries' checksum does not match"),
             Self::TooManyEntries(count) => write!(f, "the table claims {count} entries"),
+            Self::BadEntryCount => f.write_str("the table claims no partition entries"),
+            Self::BadEntrySize(size) => write!(f, "the table claims invalid {size}-byte entries"),
+            Self::EntryArrayTooLarge => f.write_str("the partition entry array is too large"),
         }
     }
 }
@@ -76,6 +85,36 @@ impl core::fmt::Display for GptError {
 /// The specification's usual number is 128, and a header claiming vastly more
 /// is either corrupt or hostile; either way it is not something to allocate for.
 const MAX_ENTRIES: u32 = 256;
+
+/// GPT entries have a 128-byte standard prefix and sizes in 128-byte multiples.
+const MIN_ENTRY_SIZE: u32 = 128;
+const ENTRY_SIZE_MULTIPLE: u32 = 128;
+
+/// Larger entries are not needed by this reader; this bound keeps CRC buffering
+/// to at most one MiB while allowing space for future entry extensions.
+const MAX_ENTRY_SIZE: u32 = 4096;
+const MAX_ENTRY_ARRAY_BYTES: usize = MAX_ENTRIES as usize * MAX_ENTRY_SIZE as usize;
+
+fn entry_layout(entry_count: u32, entry_size: u32) -> Result<(usize, usize), GptError> {
+    if entry_count == 0 {
+        return Err(GptError::BadEntryCount);
+    }
+    if entry_count > MAX_ENTRIES {
+        return Err(GptError::TooManyEntries(entry_count));
+    }
+    if !(MIN_ENTRY_SIZE..=MAX_ENTRY_SIZE).contains(&entry_size)
+        || !entry_size.is_multiple_of(ENTRY_SIZE_MULTIPLE)
+    {
+        return Err(GptError::BadEntrySize(entry_size));
+    }
+    let total = (entry_count as usize)
+        .checked_mul(entry_size as usize)
+        .ok_or(GptError::EntryArrayTooLarge)?;
+    if total > MAX_ENTRY_ARRAY_BYTES {
+        return Err(GptError::EntryArrayTooLarge);
+    }
+    Ok((total, total.div_ceil(SECTOR_SIZE)))
+}
 
 /// One partition.
 #[derive(Debug, Clone)]
@@ -145,19 +184,17 @@ pub fn read_on(source: crate::fs::fat32::Source) -> Result<Vec<Partition>, GptEr
     let entry_size = u32::from_le_bytes(header[84..88].try_into().unwrap());
     let entries_crc = u32::from_le_bytes(header[88..92].try_into().unwrap());
 
-    if entry_count > MAX_ENTRIES {
-        return Err(GptError::TooManyEntries(entry_count));
-    }
-
     // The whole array, checksummed as one run of bytes, so a single-entry
     // change anywhere in it is caught.
-    let total = entry_count as usize * entry_size as usize;
-    let sectors = total.div_ceil(SECTOR_SIZE);
+    let (total, sectors) = entry_layout(entry_count, entry_size)?;
     let mut array = Vec::with_capacity(sectors * SECTOR_SIZE);
     let mut sector = [0u8; SECTOR_SIZE];
     for index in 0..sectors {
+        let lba = entries_lba
+            .checked_add(index as u64)
+            .ok_or(GptError::Unreadable)?;
         source
-            .read_sector(entries_lba + index as u64, &mut sector)
+            .read_sector(lba, &mut sector)
             .map_err(|_| GptError::Unreadable)?;
         array.extend_from_slice(&sector);
     }
@@ -225,4 +262,34 @@ fn crc32(data: &[u8]) -> u32 {
         }
     }
     !crc
+}
+
+/// Exercise the untrusted entry-count/size boundary without reading a disk.
+pub fn entry_geometry_self_test() -> Result<(), &'static str> {
+    if entry_layout(1, MIN_ENTRY_SIZE) != Ok((MIN_ENTRY_SIZE as usize, 1)) {
+        return Err("a standard GPT entry was refused");
+    }
+    if entry_layout(0, MIN_ENTRY_SIZE) != Err(GptError::BadEntryCount) {
+        return Err("a zero-entry table was accepted");
+    }
+    for invalid in [
+        0,
+        48,
+        MIN_ENTRY_SIZE - 1,
+        MIN_ENTRY_SIZE + 1,
+        MAX_ENTRY_SIZE + 1,
+    ] {
+        if !matches!(entry_layout(1, invalid), Err(GptError::BadEntrySize(_))) {
+            return Err("an invalid GPT entry size was accepted");
+        }
+    }
+    if entry_layout(MAX_ENTRIES, MAX_ENTRY_SIZE)
+        != Ok((
+            MAX_ENTRY_ARRAY_BYTES,
+            MAX_ENTRY_ARRAY_BYTES.div_ceil(SECTOR_SIZE),
+        ))
+    {
+        return Err("the maximum bounded GPT array was refused");
+    }
+    Ok(())
 }

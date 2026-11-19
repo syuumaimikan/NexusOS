@@ -276,13 +276,17 @@ pub fn answer(message: &[u8], id: u16, name: &str) -> Result<Answer, Error> {
     // otherwise have its address believed.
     let mut at = 12;
     let wanted = name.trim().trim_end_matches('.').to_ascii_lowercase();
-    for index in 0..questions {
-        let (asked, after) = read_name(message, at)?;
-        at = after + 4;
-        if index == 0 && asked != wanted {
-            return Err(Error::NotOurs);
-        }
+    if questions != 1 {
+        return Err(Error::NotOurs);
     }
+    let (asked, after) = read_name(message, at)?;
+    if asked != wanted
+        || be16(message, after) != Some(kind::A)
+        || be16(message, after + 2) != Some(CLASS_INTERNET)
+    {
+        return Err(Error::NotOurs);
+    }
+    at = after + 4;
 
     // Aliases are followed by name: a `CNAME` says "ask about this instead",
     // and the address records for it are in the same message. Following by
@@ -331,21 +335,11 @@ pub fn answer(message: &[u8], id: u16, name: &str) -> Result<Answer, Error> {
         .map(|(address, _)| *address)
         .collect();
 
-    // Anything at all, if nothing matched the name. A server that returns
-    // exactly one address record under a name this reader did not manage to
-    // follow to is still a server that answered the question, and refusing it
-    // would be refusing a working lookup on a technicality.
-    let found = if matching.is_empty() {
-        addresses.iter().map(|(address, _)| *address).collect()
-    } else {
-        matching
-    };
-
-    if found.is_empty() {
+    if matching.is_empty() {
         return Err(Error::NoAddress);
     }
     Ok(Answer {
-        addresses: found,
+        addresses: matching,
         name: following,
     })
 }
@@ -514,6 +508,29 @@ mod tests {
         builder.question("example.com");
         assert_eq!(
             answer(&builder.bytes, 5, "example.com"),
+            Err(Error::NotOurs)
+        );
+    }
+
+    #[test]
+    fn an_address_owned_by_an_unrelated_name_is_refused() {
+        let mut builder = Builder::new(13, 0x8180, 1, 1);
+        builder.question("example.com");
+        builder.name("unrelated.example");
+        builder.record(kind::A, &[203, 0, 113, 9]);
+        assert_eq!(
+            answer(&builder.bytes, 13, "example.com"),
+            Err(Error::NoAddress)
+        );
+    }
+
+    #[test]
+    fn a_reply_without_exactly_one_question_is_refused() {
+        let mut builder = Builder::new(14, 0x8180, 0, 1);
+        builder.name("example.com");
+        builder.record(kind::A, &[1, 2, 3, 4]);
+        assert_eq!(
+            answer(&builder.bytes, 14, "example.com"),
             Err(Error::NotOurs)
         );
     }

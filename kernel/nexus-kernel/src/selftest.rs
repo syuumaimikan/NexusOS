@@ -42,6 +42,10 @@ const CHECKS: &[Check] = &[
         "the NexusFS on-disk format",
         crate::fs::nexusfs::format_self_test,
     ),
+    (
+        "GPT entry geometry",
+        crate::fs::gpt::entry_geometry_self_test,
+    ),
 ];
 
 /// Run them all, and say so.

@@ -167,6 +167,23 @@ try {
     Command 'run linux:/usr/bin/pkghello' 'a program built for Linux, running on NexusOS'
     Command 'write .INSTALL.LOCK busy' 'term: ran write'
     Command 'npkg install PKG/LINUX.NEX' 'npkg: FAILED: cannot acquire installation lock'
+    Send-Key 'meta_l-spc'
+    Wait-Marker 'launch: a window for starting things by name'
+    Send-Text 'pkg'
+    Send-Key 'ret'
+    Wait-Marker 'store: the packages this machine has'
+    Start-Sleep -Seconds 2
+    # BAD.NEX sorts before the signed demo entry and is refused before install;
+    # move to the trusted demo row to exercise the held-lock transaction path.
+    Send-Key 'down'
+    Send-Key 'ret'
+    Wait-Marker 'store: could not install demo: cannot acquire installation lock'
+    Send-Key 'meta_l-ret'
+    Wait-Marker 'compositor: started a terminal'
+    Start-Sleep -Milliseconds 400
+    Command 'npkg install PKG/LINUX.NEX' 'npkg: FAILED: cannot acquire installation lock'
+    $Log = Read-Log
+    if ($Log.Contains('store: installed demo')) { throw 'Store stole the held installation lock' }
     Command 'rm .INSTALL.LOCK' 'term: ran rm'
     Command 'npkg list' 'linuxdemo = 1.0.0'
     $Log = Read-Log
