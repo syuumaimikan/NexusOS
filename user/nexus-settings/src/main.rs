@@ -61,9 +61,6 @@ const MAX_FILE: usize = 64 * 1024;
 /// Space around the text.
 const PAD: u32 = 10;
 
-/// How far in from the left a value is drawn.
-const VALUE_AT: u32 = 200;
-
 #[unsafe(naked)]
 #[no_mangle]
 #[link_section = ".text.entry"]
@@ -92,7 +89,7 @@ extern "C" fn main() -> ! {
     };
 
     let directory = (carried >= 1).then_some(lent[0]);
-    let mut settings = Settings::new(directory);
+    let mut settings = Settings::new(directory, window.width(), window.height());
     nexus_user::log("settings: a window for what this machine is").ok();
 
     let outcome = window.run(&mut settings);
@@ -212,10 +209,102 @@ struct Settings {
     /// file has nothing to merge a change into, and saving anyway would replace
     /// a file it never saw.
     readable: bool,
+    /// Current surface size, retained so pointer hit targets use the same layout as drawing.
+    viewport: (u32, u32),
+}
+
+/// Geometry shared by the renderer and pointer hit testing.
+struct UiLayout {
+    outer: Rect,
+    sidebar: u32,
+    area: Rect,
+    body: Rect,
+    scale: u32,
+    text_height: u32,
+    row_height: u32,
+    row_gap: u32,
+    footer_height: u32,
+    list_y: u32,
+}
+
+impl UiLayout {
+    fn new(bounds: Rect) -> Self {
+        let outer = Rect::new(
+            PAD,
+            nexus_ui::TITLE_BAR + PAD,
+            bounds.width.saturating_sub(PAD * 2),
+            bounds.height.saturating_sub(nexus_ui::TITLE_BAR + PAD * 2),
+        );
+        let scale = if bounds.width >= 700 && bounds.height >= 500 {
+            2
+        } else {
+            1
+        };
+        let sidebar = if bounds.width >= 600 {
+            196
+        } else if bounds.width >= 420 {
+            128
+        } else {
+            0
+        }
+        .min(outer.width / 3);
+        let indent = if sidebar == 0 { 0 } else { sidebar + PAD };
+        let area = Rect::new(
+            outer.x + indent,
+            outer.y,
+            outer.width.saturating_sub(indent),
+            outer.height,
+        );
+        let text_height = nexus_ui::LINE_HEIGHT * scale;
+        let row_gap = 6;
+        let header_height = text_height + 12;
+        let footer_height = nexus_ui::LINE_HEIGHT * 2 + 14;
+        let body = Rect::new(
+            area.x,
+            area.y,
+            area.width,
+            area.height.saturating_sub(footer_height),
+        );
+        let list_y = body.y + header_height + row_gap;
+        Self {
+            outer,
+            sidebar,
+            area,
+            body,
+            scale,
+            text_height,
+            row_height: text_height + 8,
+            row_gap,
+            footer_height,
+            list_y,
+        }
+    }
+
+    fn visible_rows(&self) -> usize {
+        (self.body.y + self.body.height)
+            .saturating_sub(self.list_y)
+            .checked_div(self.row_height + self.row_gap)
+            .unwrap_or(0)
+            .max(1) as usize
+    }
+
+    fn value_x(&self, row_x: u32, row_width: u32) -> u32 {
+        row_x + row_width * 48 / 100
+    }
+
+    fn apply_button(&self) -> Rect {
+        let width = 156.min(self.area.width.saturating_sub(16));
+        Rect::new(
+            self.area.x + self.area.width.saturating_sub(width + 8),
+            self.area.y + 4,
+            width,
+            40,
+        )
+    }
 }
 
 impl Settings {
-    fn new(directory: Option<Handle>) -> Self {
+    fn new(directory: Option<Handle>, width: u32, height: u32) -> Self {
         // What the file says, and separately whether it could be read at all.
         // A window that could not read the settings must not offer to write
         // them: the write would be of what it managed to parse, which is
@@ -468,6 +557,7 @@ impl Settings {
             trouble: false,
             look,
             readable: true,
+            viewport: (width, height),
         };
         window.cursor = window.next_row(0, 1).unwrap_or(0);
         if directory.is_none() {
@@ -580,7 +670,7 @@ impl Settings {
         match write_text(directory, SETTINGS_NAME, &self.values.to_text()) {
             Ok(()) => {
                 self.look = nexus_look::Look::parse(&self.values.to_text());
-                self.say("設定を正常に反映しました (Settings successfully applied)");
+                self.say(nexus_i18n::text("settings.applied"));
                 nexus_user::log("settings: all settings applied and synced to disk").ok();
                 true
             }
@@ -594,27 +684,24 @@ impl Settings {
 
 impl App for Settings {
     fn draw(&mut self, canvas: &mut Canvas) {
-        canvas.set_layer(true);
-        // Both together, and from the settings file: the face and whether its
-        // edges are blended are what a person chose, and a window that ignored
-        // them would be a window that looks like it came from somewhere else.
+        // The settings surface is a reading surface, not glass: text and values
+        // must remain legible even when other windows sit behind it.
+        canvas.set_layer(false);
         canvas.set_text_style(
             nexus_ui::font::Face::parse(Some(self.look.font.name())),
             self.look.smooth,
         );
-        let accent = Colour(self.look.accent.packed());
-        let ink = Colour(0x00333c57);
-        let quiet = Colour(0x006c7490);
-
-        canvas.fill(canvas.bounds(), Colour(0xcaf6f4ff));
-
         let bounds = canvas.bounds();
-        let outer = Rect::new(
-            PAD,
-            32 + PAD,
-            bounds.width.saturating_sub(PAD * 2),
-            bounds.height.saturating_sub(32 + PAD * 2),
-        );
+        self.viewport = (bounds.width, bounds.height);
+        let layout = UiLayout::new(bounds);
+        let accent = Colour(self.look.accent.packed());
+        let ink = Colour::rgb(36, 45, 66);
+        let quiet = Colour::rgb(91, 103, 128);
+        let panel = Colour::rgb(250, 251, 255);
+
+        canvas.fill(bounds, Colour::rgb(239, 243, 250));
+        canvas.panel(layout.outer, 16, panel, Colour::rgb(211, 220, 237));
+
         let section = self.items[..=self.cursor]
             .iter()
             .rposition(|item| matches!(item, Item::Heading(_)))
@@ -626,138 +713,162 @@ impl App for Settings {
             .skip(section + 1)
             .find(|(_, item)| matches!(item, Item::Heading(_)))
             .map_or(self.items.len(), |(index, _)| index);
-        let sidebar = if bounds.width >= 600 {
-            118
-        } else if bounds.width >= 420 {
-            88
-        } else {
-            0
-        };
-        if sidebar != 0 {
+        if layout.sidebar != 0 {
             canvas.fill_rounded(
-                Rect::new(outer.x, outer.y, sidebar, outer.height),
+                Rect::new(
+                    layout.outer.x,
+                    layout.outer.y,
+                    layout.sidebar,
+                    layout.outer.height,
+                ),
                 12,
-                Colour(0x55ffffff),
+                Colour::rgb(235, 240, 249),
             );
-            let mut y = outer.y + 10;
+            let mut y = layout.outer.y + 10;
             for (index, item) in self.items.iter().enumerate() {
                 if let Item::Heading(label) = item {
                     if index == section {
                         canvas.fill_rounded(
-                            Rect::new(outer.x + 6, y, sidebar - 12, 32),
-                            8,
-                            Colour(0x00e2ddfa),
+                            Rect::new(layout.outer.x + 6, y, layout.sidebar - 12, 40),
+                            9,
+                            accent.blend(Colour::rgb(235, 240, 249), 224),
                         );
+                        canvas.fill_rounded(Rect::new(layout.outer.x + 6, y + 7, 3, 26), 2, accent);
                     }
-                    canvas.text(outer.x + 12, y + 8, nexus_i18n::text(label), ink);
-                    y += 40;
+                    let label = nexus_i18n::text(label);
+                    let label_scale = 1;
+                    let text_height = nexus_ui::LINE_HEIGHT * label_scale;
+                    canvas.text_scaled(
+                        layout.outer.x + 18,
+                        y + (40 - text_height) / 2,
+                        label,
+                        if index == section { accent } else { ink },
+                        label_scale,
+                    );
+                    y += 48;
                 }
             }
         }
-        let indent = if sidebar == 0 { 0 } else { sidebar + PAD };
-        let area = Rect::new(
-            outer.x + indent,
-            outer.y,
-            outer.width.saturating_sub(indent),
-            outer.height,
-        );
-        let body = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(44));
-        let mut column = nexus_ui::Column::new(body, 4);
-
-        let title = column.row(nexus_ui::LINE_HEIGHT + 6);
-        canvas.text(
-            title.x,
-            title.y + 3,
-            match &self.items[section] {
-                Item::Heading(label) => nexus_i18n::text(label),
-                _ => nexus_i18n::text("settings.title"),
-            },
-            ink,
+        let title = match &self.items[section] {
+            Item::Heading(label) => nexus_i18n::text(label),
+            _ => nexus_i18n::text("settings.title"),
+        };
+        canvas.text_scaled(
+            layout.area.x,
+            layout.area.y + 4,
+            title,
+            accent,
+            layout.scale,
         );
 
-        let btn_w = 126;
-        let btn_h = 24;
-        let btn_x = area.x + area.width.saturating_sub(btn_w + 8);
-        let btn_y = area.y + 2;
-        let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
-        canvas.fill_rounded(btn_rect, 6, accent);
-        canvas.text_centred(btn_rect, "✓ 設定を反映", Colour::rgb(255, 255, 255));
+        let btn_rect = layout.apply_button();
+        canvas.fill_rounded(btn_rect, 9, accent);
+        canvas.text_centred(
+            btn_rect,
+            nexus_i18n::text("settings.apply"),
+            Colour::rgb(255, 255, 255),
+        );
 
-        let visible = (column.remaining() / (nexus_ui::LINE_HEIGHT + 4)).max(1) as usize;
+        let visible = layout.visible_rows();
         let start = (section + 1).max(self.cursor.saturating_sub(visible - 1));
         for index in start..end {
-            let line = column.line();
-            if line.width == 0 {
+            let offset = index - start;
+            let line = Rect::new(
+                layout.area.x,
+                layout.list_y + offset as u32 * (layout.row_height + layout.row_gap),
+                layout.area.width,
+                layout.row_height,
+            );
+            if line.y + line.height > layout.body.y + layout.body.height {
                 break;
             }
             match &self.items[index] {
                 Item::Heading(label) => {
-                    canvas.text(line.x, line.y, nexus_i18n::text(label), accent);
+                    canvas.text_scaled(
+                        line.x,
+                        line.y,
+                        nexus_i18n::text(label),
+                        accent,
+                        layout.scale,
+                    );
                 }
                 Item::Row(row) => {
                     let chosen = index == self.cursor;
                     if chosen {
-                        // A band behind the row rather than a different ink, so
-                        // that the row the keys act on is obvious from across a
-                        // desk and not only from a foot away.
+                        canvas.fill_rounded(line, 8, accent.blend(panel, 224));
                         canvas.fill_rounded(
-                            Rect::new(line.x, line.y, line.width, line.height),
-                            4,
-                            Colour(0x00e2ddfa),
+                            Rect::new(line.x + 2, line.y + 7, 3, line.height - 14),
+                            2,
+                            accent,
+                        );
+                    } else {
+                        canvas.fill(
+                            Rect::new(line.x + 8, line.y + line.height - 1, line.width - 16, 1),
+                            Colour::rgb(231, 235, 244),
                         );
                     }
-                    canvas.text(line.x + 8, line.y, nexus_i18n::text(row.label), ink);
+                    let text_y = line.y + (line.height - layout.text_height) / 2;
+                    canvas.text_scaled(
+                        line.x + 14,
+                        text_y,
+                        nexus_i18n::text(row.label),
+                        ink,
+                        layout.scale,
+                    );
 
                     let value = match (&self.editing, chosen) {
                         (Some(typed), true) => format!("{typed}\u{2588}"),
                         _ => self.shown(row),
                     };
-                    // `text` returns how far it advanced, not where it
-                    // stopped, so anything drawn after it has to add the two.
-                    let value_at = line.x + VALUE_AT.min(line.width / 2);
-                    let after = value_at + canvas.text(value_at, line.y, &value, ink);
+                    let value_at = layout.value_x(line.x, line.width);
+                    let after =
+                        value_at + canvas.text_scaled(value_at, text_y, &value, ink, layout.scale);
 
                     if row.colour {
-                        // The colour itself, beside what it is written as. A
-                        // hex value nobody can picture is a hex value people
-                        // change by trying.
                         if let Some(swatch) = nexus_look::Colour::parse(&value) {
-                            canvas.fill(
-                                Rect::new(after + 8, line.y + 2, 28, line.height.saturating_sub(4)),
+                            canvas.panel(
+                                Rect::new(after + 12, line.y + 6, 34, line.height - 12),
+                                6,
                                 Colour(swatch.packed()),
+                                Colour::rgb(205, 213, 228),
                             );
                         }
                     } else if !row.choices.is_empty() && chosen {
-                        canvas.text(value_at - 16, line.y, "<", quiet);
-                        canvas.text(after + 8, line.y, ">", quiet);
+                        canvas.text_scaled(value_at - 22, text_y, "<", quiet, layout.scale);
+                        canvas.text_scaled(after + 12, text_y, ">", quiet, layout.scale);
                     }
                 }
             }
         }
 
-        // The message, and then the keys, at the bottom of whatever room is
-        // left. Drawn last so that a long list pushes them off rather than
-        // drawing over them -- everything here clips.
         let footer = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(nexus_ui::LINE_HEIGHT * 2 + 4),
-            area.width,
-            nexus_ui::LINE_HEIGHT * 2 + 4,
+            layout.area.x,
+            layout.area.y + layout.area.height.saturating_sub(layout.footer_height),
+            layout.area.width,
+            layout.footer_height,
+        );
+        canvas.fill(
+            Rect::new(footer.x, footer.y, footer.width, 1),
+            Colour::rgb(220, 227, 239),
         );
         if !self.said.is_empty() {
             let colour = if self.trouble {
-                Colour::rgb(0xE0, 0x80, 0x70)
+                Colour::rgb(176, 54, 61)
             } else {
                 accent
             };
-            canvas.text(footer.x, footer.y, &self.said, colour);
+            canvas.text(footer.x, footer.y + 4, &self.said, colour);
         }
         canvas.text(
             footer.x,
-            footer.y + nexus_ui::LINE_HEIGHT + 4,
+            footer.y + nexus_ui::LINE_HEIGHT + 8,
             nexus_i18n::text("settings.keys"),
             quiet,
         );
+    }
+
+    fn resized(&mut self, width: u32, height: u32) {
+        self.viewport = (width, height);
     }
 
     fn key(&mut self, key: Key) -> bool {
@@ -792,17 +903,11 @@ impl App for Settings {
                 let Some(row) = self.row() else {
                     return false;
                 };
-                if !row.choices.is_empty() {
+                if !row.choices.is_empty() || row.fixed.is_some() {
                     return false;
                 }
-                if row.fixed.is_some() {
-                    return false;
-                }
-                // Editing starts from what is there, so that changing one digit
-                // of a colour does not mean typing all six.
                 let current = self.shown(row);
-                let typed = self.editing.get_or_insert(current);
-                typed.push(character);
+                self.editing.get_or_insert(current).push(character);
                 true
             }
             Key::Backspace => match &mut self.editing {
@@ -814,10 +919,7 @@ impl App for Settings {
                     let Some(row) = self.row() else {
                         return false;
                     };
-                    if !row.choices.is_empty() {
-                        return false;
-                    }
-                    if row.fixed.is_some() {
+                    if !row.choices.is_empty() || row.fixed.is_some() {
                         return false;
                     }
                     let mut current = self.shown(row);
@@ -838,10 +940,6 @@ impl App for Settings {
                 }
                 let (key, colour) = (row.key, row.colour);
                 if colour && nexus_look::Colour::parse(&typed).is_none() {
-                    // Kept, not thrown away. Somebody who mistyped one digit of
-                    // a colour wants to fix that digit, and a field that
-                    // emptied itself on a refusal would make them type the
-                    // other five again.
                     self.editing = Some(typed);
                     self.complain(nexus_i18n::text("settings.notacolour"));
                     return true;
@@ -849,48 +947,35 @@ impl App for Settings {
                 self.save(key, &typed);
                 true
             }
-            Key::Escape => {
-                if self.editing.take().is_some() {
-                    return true;
-                }
-                false
-            }
-            // The interface language changed under this window, so every label
-            // in it is now the wrong words.
+            Key::Escape => self.editing.take().is_some(),
             Key::Language => true,
             _ => false,
         }
     }
 
     fn click(&mut self, x: u32, y: u32) -> bool {
-        let outer_x = PAD;
-        let outer_y = 32 + PAD;
-        let sidebar = 118;
-
-        // 0. Apply button click
-        if y >= outer_y && y <= outer_y + 32 && x >= 340 {
+        let layout = UiLayout::new(Rect::new(0, 0, self.viewport.0, self.viewport.1));
+        if layout.apply_button().contains(x, y) {
             return self.apply_all();
         }
 
-        // 1. Sidebar click: jump to category
-        if x >= outer_x && x < outer_x + sidebar {
-            let mut cur_y = outer_y + 10;
-            for (idx, item) in self.items.iter().enumerate() {
+        if x >= layout.outer.x && x < layout.outer.x + layout.sidebar {
+            let mut item_y = layout.outer.y + 10;
+            for (index, item) in self.items.iter().enumerate() {
                 if let Item::Heading(_) = item {
-                    if y >= cur_y && y < cur_y + 36 {
-                        if let Some(target) = self.next_row(idx + 1, 1) {
+                    if y >= item_y && y < item_y + 40 {
+                        if let Some(target) = self.next_row(index + 1, 1) {
                             self.cursor = target;
                             self.editing = None;
                             return true;
                         }
                     }
-                    cur_y += 40;
+                    item_y += 48;
                 }
             }
             return false;
         }
 
-        // 2. Content area click
         let section = self.items[..=self.cursor]
             .iter()
             .rposition(|item| matches!(item, Item::Heading(_)))
@@ -902,35 +987,35 @@ impl App for Settings {
             .skip(section + 1)
             .find(|(_, item)| matches!(item, Item::Heading(_)))
             .map_or(self.items.len(), |(index, _)| index);
-
-        let content_start_y = outer_y + nexus_ui::LINE_HEIGHT + 6 + 4;
-        let line_height = nexus_ui::LINE_HEIGHT + 4;
-        let visible = 12;
+        if y < layout.list_y {
+            return false;
+        }
+        let stride = layout.row_height + layout.row_gap;
+        let offset = ((y - layout.list_y) / stride) as usize;
+        let row_y = layout.list_y + offset as u32 * stride;
+        if y >= row_y + layout.row_height {
+            return false;
+        }
+        let visible = layout.visible_rows();
         let start = (section + 1).max(self.cursor.saturating_sub(visible - 1));
-
-        if y >= content_start_y {
-            let line_offset = ((y - content_start_y) / line_height) as usize;
-            let target_idx = start + line_offset;
-            if target_idx < end {
-                if let Some(Item::Row(row)) = self.items.get(target_idx) {
-                    let value_at = outer_x + sidebar + PAD + VALUE_AT.min(200);
-                    if self.cursor == target_idx {
-                        if !row.choices.is_empty() {
-                            if x < value_at {
-                                return self.step(-1);
-                            } else {
-                                return self.step(1);
-                            }
-                        }
-                    } else {
-                        self.cursor = target_idx;
-                        self.editing = None;
-                        if !row.choices.is_empty() && x >= value_at {
-                            return self.step(1);
-                        }
-                        return true;
-                    }
+        let target_idx = start + offset;
+        if target_idx >= end {
+            return false;
+        }
+        if let Some(Item::Row(row)) = self.items.get(target_idx) {
+            let line_x = layout.area.x;
+            let value_at = layout.value_x(line_x, layout.area.width);
+            if self.cursor == target_idx {
+                if !row.choices.is_empty() {
+                    return self.step(if x < value_at { -1 } else { 1 });
                 }
+            } else {
+                self.cursor = target_idx;
+                self.editing = None;
+                if !row.choices.is_empty() && x >= value_at {
+                    return self.step(1);
+                }
+                return true;
             }
         }
         false

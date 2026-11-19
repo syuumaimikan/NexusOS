@@ -1527,7 +1527,10 @@ fn read_configured_user() -> alloc::string::String {
     buf.truncate(read);
     if let Ok(text) = core::str::from_utf8(&buf) {
         let settings = nexus_config::Settings::parse(text);
-        if let Some(user) = settings.get("account.user").or_else(|| settings.get("owner")) {
+        if let Some(user) = settings
+            .get("account.user")
+            .or_else(|| settings.get("owner"))
+        {
             return alloc::string::String::from(user);
         }
     }
@@ -1536,7 +1539,14 @@ fn read_configured_user() -> alloc::string::String {
 
 fn draw_login_screen(screen: &Screen, username: &str, entered_len: usize) {
     let bg_color = 0x000f172a; // Deep slate
-    fill(screen, screen.x, screen.y, screen.width, screen.height, bg_color);
+    fill(
+        screen,
+        screen.x,
+        screen.y,
+        screen.width,
+        screen.height,
+        bg_color,
+    );
 
     let card_w = 380.min(screen.width.saturating_sub(40));
     let card_h = 320.min(screen.usable_height().saturating_sub(40));
@@ -1574,7 +1584,11 @@ fn draw_login_screen(screen: &Screen, username: &str, entered_len: usize) {
     }
 
     // Username label
-    let user_text = if username.is_empty() { "nexus" } else { username };
+    let user_text = if username.is_empty() {
+        "nexus"
+    } else {
+        username
+    };
     let u_w = nexus_ui::measure(user_text);
     if u_w <= card_w {
         let tx = card_x + (card_w - u_w) / 2;
@@ -1672,7 +1686,10 @@ fn draw_login_screen(screen: &Screen, username: &str, entered_len: usize) {
 
 fn run_login(screen: &Screen) {
     let username = read_configured_user();
-    nexus_user::log(&alloc::format!("compositor: second boot; showing user login screen for {username}")).ok();
+    nexus_user::log(&alloc::format!(
+        "compositor: second boot; showing user login screen for {username}"
+    ))
+    .ok();
 
     draw_login_screen(screen, &username, 6);
     flush(screen, everything(screen));
@@ -3562,9 +3579,24 @@ fn open_window(
     // Offset from the ones before it, so a new window is visibly a new window
     // and not one exactly covering another.
     let step = slot as u32 * 12;
-    let width = (screen.width / 2).min(screen.width.saturating_sub(step + GAP * 2));
-    let height =
+    let mut x = screen.x + GAP + step;
+    let mut y = screen.y + GAP + step;
+    let mut width = (screen.width / 2).min(screen.width.saturating_sub(step + GAP * 2));
+    let mut height =
         (screen.usable_height() / 2).min(screen.usable_height().saturating_sub(step + GAP * 2));
+    if matches!(&what, What::Settings) {
+        // Settings is a dense, frequently used control surface. Give it room
+        // for readable type and a real navigation rail instead of the generic
+        // half-screen utility-window size.
+        width = (screen.width.saturating_mul(3) / 5).min(screen.width.saturating_sub(GAP * 2));
+        height = (screen.usable_height().saturating_mul(3) / 5)
+            .min(screen.usable_height().saturating_sub(GAP * 2));
+        x = screen.x + screen.width.saturating_sub(width) / 2;
+        y = screen.y + screen.usable_height().saturating_sub(height) / 2;
+    }
+    if width < MIN_SIZE || height < MIN_SIZE {
+        return Some(Asked::Nothing);
+    }
     if width < MIN_SIZE || height < MIN_SIZE {
         return Some(Asked::Nothing);
     }
@@ -3934,8 +3966,8 @@ fn open_window(
                 SETTINGS_WINDOW,
                 Placement {
                     index: slot,
-                    x: screen.x + GAP + step,
-                    y: screen.y + GAP + step,
+                    x,
+                    y,
                     width,
                     height,
                 },
@@ -5193,7 +5225,16 @@ fn title_bar(screen: &Screen, tile: &Tile, focused: bool) {
         let mut canvas =
             unsafe { nexus_ui::Canvas::packed(pixels.as_mut_ptr() as usize, width, 16) };
         canvas.set_text_style(nexus_ui::font::Face::Smooth, true);
-        canvas.text(0, 0, tile.title, if focused { nexus_ui::Colour(0x001e293b) } else { nexus_ui::Colour(0x0064748b) });
+        canvas.text(
+            0,
+            0,
+            tile.title,
+            if focused {
+                nexus_ui::Colour(0x001e293b)
+            } else {
+                nexus_ui::Colour(0x0064748b)
+            },
+        );
         for y in 0..16 {
             for x in 0..width {
                 fill(
